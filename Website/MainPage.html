@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bruno Carbone — Portafolio</title>
+    <title>Bruno Carbone — Portfolio</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -114,34 +114,6 @@
         .menu-btn.open span:nth-child(2) { opacity: 0; }
         .menu-btn.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
-        /* ===== LANGUAGE DROPDOWN ===== */
-        .lang-dropdown { position: relative; }
-        .lang-trigger {
-            display: inline-flex; align-items: center; gap: 7px;
-            background: var(--grad); color: #0a0a12; border: none; cursor: pointer;
-            font-family: var(--font-body); font-weight: 600; font-size: 0.85rem;
-            padding: 8px 15px; border-radius: 100px; transition: all 0.25s ease;
-            box-shadow: 0 6px 18px var(--accent-glow);
-        }
-        .lang-trigger:hover { transform: translateY(-1px); box-shadow: 0 9px 22px var(--accent-glow); }
-        .lang-trigger svg { width: 13px; height: 13px; transition: transform 0.25s ease; }
-        .lang-dropdown.open .lang-trigger svg { transform: rotate(180deg); }
-        .lang-menu {
-            position: absolute; top: calc(100% + 10px); right: 0;
-            background: var(--grad); border-radius: 14px; padding: 6px; width: max-content;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.45); z-index: 200; overflow: hidden;
-            opacity: 0; visibility: hidden; transform: translateY(-8px);
-            transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
-        }
-        .lang-dropdown.open .lang-menu { opacity: 1; visibility: visible; transform: translateY(0); }
-        .lang-menu button {
-            display: block; width: 100%; text-align: left; background: transparent; border: none;
-            cursor: pointer; color: #0a0a12; font-family: var(--font-body); font-weight: 600;
-            font-size: 0.88rem; padding: 9px 14px; border-radius: 9px; transition: background 0.18s ease;
-        }
-        .lang-menu button:hover { background: rgba(10, 10, 18, 0.12); }
-        .lang-menu button.active { background: rgba(10, 10, 18, 0.2); }
-
         /* ===== HERO ===== */
         .hero {
             display: flex; flex-direction: column;
@@ -151,6 +123,7 @@
             font-family: var(--font-mono);
             color: var(--accent); font-weight: 500; font-size: 0.9rem;
             letter-spacing: 0.5px; margin-bottom: 18px;
+            position: relative; top: -56px; /* lo sube, sin mover el título */
         }
         .hero h1 {
             font-family: var(--font-display);
@@ -169,6 +142,15 @@
             from { background-position: 300% center; }
             to { background-position: 0% center; }
         }
+
+        /* Saludo rotatorio en 9 idiomas: sube y desaparece; el siguiente entra y ocupa su lugar */
+        .hero h1 .greeting {
+            display: inline-block;
+            transition: transform 0.5s ease, opacity 0.5s ease;
+            will-change: transform, opacity;
+        }
+        .hero h1 .greeting.greet-out { transform: translateY(-70%); opacity: 0; }
+        .hero h1 .greeting.greet-enter { transition: none; transform: translateY(70%); opacity: 0; }
 
         .hero .role {
             font-family: 'Space Mono', monospace;
@@ -304,27 +286,6 @@
         }
         .projects-cta { margin-top: 44px; text-align: center; }
 
-        /* ===== BLOG ===== */
-        .blog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 28px; }
-        .post {
-            background: var(--surface); border: 1px solid var(--border);
-            border-radius: var(--radius); padding: 28px; transition: all 0.3s;
-            cursor: pointer; display: flex; flex-direction: column;
-        }
-        .post:hover { transform: translateY(-6px); border-color: var(--accent-2); box-shadow: 0 20px 40px rgba(0,0,0,0.3); }
-        .post .meta { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
-        .post .cat {
-            font-family: var(--font-mono);
-            font-size: 0.72rem; font-weight: 500; text-transform: uppercase;
-            letter-spacing: 0.5px; color: var(--accent);
-            background: var(--accent-glow); padding: 4px 12px; border-radius: 100px;
-        }
-        .post .date { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-faint); }
-        .post h3 { font-family: var(--font-display); font-weight: 600; font-size: 1.25rem; margin-bottom: 12px; line-height: 1.3; }
-        .post p { color: var(--text-dim); font-size: 0.95rem; flex-grow: 1; margin-bottom: 18px; }
-        .post .read { color: var(--accent-2); font-weight: 600; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 6px; transition: gap 0.2s; }
-        .post:hover .read { gap: 12px; }
-
         /* ===== CONTACT ===== */
         .contact { text-align: center; }
         .contact .section-head { margin-bottom: 30px; }
@@ -379,30 +340,12 @@
         <a data-scroll="hero" class="logo">BC</a>
         <div class="nav-right">
             <ul class="nav-links" id="navLinks">
-                <li><a data-scroll="about" data-i18n="navAbout">Sobre mí</a></li>
-                <li><a data-scroll="skills" data-i18n="navSkills">Habilidades</a></li>
-                <li><a data-scroll="projects" data-i18n="navProjects">Proyectos</a></li>
-                <li><a data-scroll="blog" data-i18n="navBlog">Blog</a></li>
-                <li><a data-scroll="contact" data-i18n="navContact">Contacto</a></li>
+                <li><a data-scroll="about">About me</a></li>
+                <li><a data-scroll="skills">Skills</a></li>
+                <li><a data-scroll="projects">Projects</a></li>
+                <li><a data-scroll="contact">Contact</a></li>
             </ul>
-            <div class="lang-dropdown" id="langDropdown">
-                <button class="lang-trigger" id="langTrigger" aria-label="Seleccionar idioma">
-                    <span id="langCurrent">Español</span>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
-                </button>
-                <div class="lang-menu" id="langMenu">
-                    <button class="active" data-lang="es" data-name="Español">Español</button>
-                    <button data-lang="en" data-name="English">English</button>
-                    <button data-lang="it" data-name="Italiano">Italiano</button>
-                    <button data-lang="de" data-name="Deutsch">Deutsch</button>
-                    <button data-lang="pt" data-name="Português">Português</button>
-                    <button data-lang="fr" data-name="Français">Français</button>
-                    <button data-lang="nl" data-name="Nederlands">Nederlands</button>
-                    <button data-lang="sv" data-name="Svenska">Svenska</button>
-                    <button data-lang="hu" data-name="Magyar">Magyar</button>
-                </div>
-            </div>
-            <button class="menu-btn" id="menuBtn" aria-label="Menú">
+            <button class="menu-btn" id="menuBtn" aria-label="Menu">
                 <span></span><span></span><span></span>
             </button>
         </div>
@@ -412,15 +355,15 @@
 <!-- HERO -->
 <header class="hero" id="hero">
     <div class="container">
-        <div class="eyebrow reveal" data-i18n="eyebrow">👋 ¡Hola, bienvenido a mi portafolio! :)</div>
-        <h1 class="reveal" data-i18n-html="heroTitle">Soy <span class="grad">Bruno Carbone</span></h1>
+        <div class="eyebrow reveal">👋 Welcome to my portfolio! :)</div>
+        <h1 class="reveal"><span class="greeting" id="greeting">Hello! I am</span> <span class="grad">Bruno Carbone</span></h1>
         <div class="role reveal">
             <span class="typed" id="typed"></span><span class="cursor">|</span>
         </div>
-        <p class="tagline reveal" data-i18n="tagline">
-            Curioso por naturaleza, construyo software robusto y lo pongo a prueba hasta el límite
-            para hacerlo más seguro. Disfruto crear cosas confiables y bien hechas, que funcionen
-            tan bien por dentro como por fuera.
+        <p class="tagline reveal">
+            Curious by nature, I build robust software and push it to the limit to make it
+            more secure. I enjoy creating reliable, well-crafted things that work as well
+            on the inside as they do on the outside.
         </p>
     </div>
 </header>
@@ -430,36 +373,36 @@
     <div class="container">
         <div class="section-head reveal">
             <span class="num">01.</span>
-            <h2 data-i18n="aboutTitle">🧑‍💻 Sobre mí</h2>
+            <h2>🧑‍💻 About me</h2>
         </div>
         <div class="about-intro reveal">
-            <p data-i18n="aboutP1">
-                ¡Hola! Soy Bruno, desarrollador y QA Automation Engineer con base en Panamá.
-                Mi camino en la tecnología empezó por la ciberseguridad: al estudiarla,
-                desarrollé una conciencia mucho mayor sobre su importancia y empecé a aplicar esos
-                principios en mi vida diaria. Más adelante, en mi primer trabajo como
-                QA Engineer, tuve mi primera exposición real a la programación, y desde
-                entonces no he parado.
+            <p>
+                Hi! I'm Bruno, a developer and QA Automation Engineer based in Panama.
+                My journey in technology began with cybersecurity: studying it gave me
+                a much deeper awareness of its importance, and I started applying those
+                principles in my daily life. Later, in my first job as a QA Engineer,
+                I had my first real exposure to programming, and I haven't stopped since.
             </p>
-            <p data-i18n="aboutP2">
-                Me muevo entre el desarrollo full-stack y la automatización de pruebas,
-                y siento una verdadera pasión por la ciberseguridad. Me gusta construir cosas,
-                pero también romperlas para entender cómo hacerlas más seguras y robustas.
+            <p>
+                I move between full-stack development and test automation, and I feel a
+                true passion for cybersecurity. I like building things, but also breaking
+                them to understand how to make them more secure and robust.
             </p>
-            <p data-i18n="aboutP3">
-                Fuera del código, me apasionan los paseos al aire libre, aprender idiomas y sumergirme
-                en la geografía, las culturas y la historia. Me fascina la aviación y la idea de
-                viajar por el mundo: conectar con personas de otros países y conocer en persona los
-                lugares donde ocurrieron los eventos que marcaron el rumbo de las naciones. Me considero
-                alguien muy abierto y dispuesto a darlo todo, siempre buscando crecer en un equipo donde
-                pueda aportar valor y seguir aprendiendo. Soy súper amigable y tranquilo. Busco siempre
-                crear puentes con la gente a mi alrededor y tratar a todos con respeto y dignidad.
+            <p>
+                Outside of code, I love outdoor walks, learning languages, and diving into
+                geography, cultures, and history. I'm fascinated by aviation and the idea of
+                traveling the world: connecting with people from other countries and visiting
+                in person the places where the events that shaped the course of nations took
+                place. I consider myself very open and willing to give my all, always looking
+                to grow in a team where I can add value and keep learning. I'm super friendly
+                and easygoing. I always seek to build bridges with the people around me and
+                treat everyone with respect and dignity.
             </p>
         </div>
 
         <div class="highlights">
             <div class="hl-card reveal">
-                <h3><span class="emoji">🎓</span> <span data-i18n="degreesTitle">Titulaciones universitarias</span></h3>
+                <h3><span class="emoji">🎓</span> <span>University degrees</span></h3>
                 <ul>
                     <li><strong>Bachelor of Science in Management Information Systems</strong>Maryville University</li>
                     <li><strong>Associate of Applied Science in Cybersecurity</strong>St. Charles Community College</li>
@@ -467,7 +410,7 @@
             </div>
 
             <div class="hl-card reveal">
-                <h3><span class="emoji">🏅</span> <span data-i18n="certsTitle">Certificaciones</span></h3>
+                <h3><span class="emoji">🏅</span> <span>Certifications</span></h3>
                 <ul>
                     <li>IBM Cybersecurity Analyst</li>
                     <li>Google Cybersecurity</li>
@@ -477,41 +420,42 @@
             </div>
 
             <div class="hl-card reveal">
-                <h3><span class="emoji">🗣️</span> <span data-i18n="langsTitle">Idiomas</span></h3>
-                <div class="label-min" data-i18n="speakLabel">Hablo</div>
+                <h3><span class="emoji">🗣️</span> <span>Languages</span></h3>
+                <div class="label-min">I speak</div>
                 <ul>
-                    <li data-i18n="lang1">🇪🇸 Español — Nativo</li>
-                    <li data-i18n="lang2">🇬🇧 Inglés — C2</li>
-                    <li data-i18n="lang3">🇮🇹 Italiano — C2</li>
-                    <li data-i18n="lang4">🇩🇪 Alemán — C1</li>
+                    <li>🇪🇸 Spanish — Native</li>
+                    <li>🇬🇧 English — C2</li>
+                    <li>🇮🇹 Italian — C2</li>
+                    <li>🇩🇪 German — C1</li>
                 </ul>
-                <div class="label-min" data-i18n="learnLabel">Quiero aprender</div>
-                <p class="learn" data-i18n="learnList">🇵🇹 Portugués · 🇫🇷 Francés · 🇸🇪 Sueco · 🇳🇱 Holandés · 🇭🇺 Húngaro</p>
+                <div class="label-min">I want to learn</div>
+                <p class="learn">🇵🇹 Portuguese · 🇫🇷 French · 🇸🇪 Swedish · 🇳🇱 Dutch · 🇭🇺 Hungarian</p>
             </div>
         </div>
 
-        <h3 class="exp-heading reveal"><span class="emoji">💼</span> <span data-i18n="expTitle">Experiencia laboral</span></h3>
+        <h3 class="exp-heading reveal"><span class="emoji">💼</span> <span>Work experience</span></h3>
         <div class="exp-grid">
             <div class="hl-card exp-card reveal">
-                <div class="exp-date" data-i18n="exp1Date">Sep 2025 — Presente</div>
-                <h4 data-i18n="exp1Role">Especialista en Soporte Técnico</h4>
+                <div class="exp-date">Sep 2025 — Present</div>
+                <h4>Technical Support Specialist</h4>
                 <div class="exp-company">Alorica</div>
-                <p data-i18n="exp1Desc">
-                    Diagnostico y resuelvo incidentes técnicos complejos mediante análisis de causa raíz y
-                    auditorías de datos en tiempo real. Manejo situaciones críticas de alta presión, detecto
-                    y reporto actividad sospechosa y fraudes bajo estrictos protocolos de seguridad, y priorizo
-                    el triaje y escalado de tickets superando los KPIs y SLAs del servicio.
+                <p>
+                    I diagnose and resolve complex technical incidents through root cause analysis
+                    and real-time data audits. I handle high-pressure critical situations, detect
+                    and report suspicious activity and fraud under strict security protocols, and
+                    prioritize ticket triage and escalation, exceeding the service's KPIs and SLAs.
                 </p>
             </div>
             <div class="hl-card exp-card reveal">
-                <div class="exp-date" data-i18n="exp2Date">Ene 2020 — Dic 2023</div>
-                <h4 data-i18n="exp2Role">QA Automation Engineer</h4>
+                <div class="exp-date">Jan 2020 — Dec 2023</div>
+                <h4>QA Automation Engineer</h4>
                 <div class="exp-company">Equifax</div>
-                <p data-i18n="exp2Desc">
-                    Diseñé y mantuve suites de pruebas automatizadas E2E con Selenium (Java) bajo el patrón
-                    Page Object Model, reduciendo el tiempo de regresión en un 40%. Validé APIs con Postman y
-                    REST Assured, apliqué BDD con Cucumber e integré pruebas y análisis de seguridad (SAST con
-                    SonarQube) en pipelines de CI/CD, gestionando el ciclo de defectos en Jira bajo Agile/Scrum.
+                <p>
+                    I designed and maintained E2E automated test suites with Selenium (Java) under
+                    the Page Object Model pattern, reducing regression time by 40%. I validated APIs
+                    with Postman and REST Assured, applied BDD with Cucumber, and integrated testing
+                    and security analysis (SAST with SonarQube) into CI/CD pipelines, managing the
+                    defect lifecycle in Jira under Agile/Scrum.
                 </p>
             </div>
         </div>
@@ -523,8 +467,8 @@
     <div class="container">
         <div class="section-head reveal">
             <span class="num">02.</span>
-            <h2 data-i18n="skillsTitle">🛠️ Habilidades & Stack</h2>
-            <p class="sub" data-i18n="skillsSub">Las herramientas con las que construyo, pruebo y aseguro mis proyectos.</p>
+            <h2>🛠️ Skills & Stack</h2>
+            <p class="sub">The tools I use to build, test, and secure my projects.</p>
         </div>
         <div class="skills-grid">
             <div class="skill-cat reveal">
@@ -581,19 +525,19 @@
     <div class="container">
         <div class="section-head reveal">
             <span class="num">03.</span>
-            <h2 data-i18n="projTitle">🚀 Mis Proyectos</h2>
-            <p class="sub" data-i18n="projSub">Portafolio completo de mis proyectos actuales donde combino desarrollo, automatización y seguridad.</p>
+            <h2>🚀 My Projects</h2>
+            <p class="sub">A complete portfolio of my current projects, where I combine development, automation, and security.</p>
         </div>
         <div class="projects-grid">
 
             <article class="project reveal">
                 <div class="icon">🛡️</div>
                 <h3>CyberShield</h3>
-                <p data-i18n="proj1Desc">
-                    Sistema de monitoreo de seguridad y DevSecOps. Backend de microservicios con un pipeline
-                    de CI/CD para análisis estático de código (SonarQube) y pruebas de API (REST Assured).
-                    Infraestructura escalable y basada en contenedores, con detección de intrusiones en tiempo
-                    real mediante alertas y registros centralizados en Splunk.
+                <p>
+                    Security monitoring and DevSecOps system. Microservices backend with a CI/CD
+                    pipeline for static code analysis (SonarQube) and API testing (REST Assured).
+                    Scalable, container-based infrastructure with real-time intrusion detection
+                    through alerts and centralized logging in Splunk.
                 </p>
                 <div class="tech-tags">
                     <span>Java (Spring Boot)</span>
@@ -607,11 +551,12 @@
 
             <article class="project reveal">
                 <div class="icon">🌐</div>
-                <h3 data-i18n="proj2Name">Hub Full-Stack Multilingüe</h3>
-                <p data-i18n="proj2Desc">
-                    Portafolio digital y hub full-stack con interfaz reactiva optimizada para SEO. Arquitectura
-                    distribuida compuesta por una API transaccional en Node.js conectada a PostgreSQL y
-                    microservicios en Python, con el desarrollo potenciado mediante el uso avanzado de IA.
+                <h3>Multilingual Full-Stack Hub</h3>
+                <p>
+                    Digital portfolio and full-stack hub with a reactive, SEO-optimized interface.
+                    Distributed architecture composed of a transactional Node.js API connected to
+                    PostgreSQL and Python microservices, with development boosted through advanced
+                    use of AI.
                 </p>
                 <div class="tech-tags">
                     <span>Next.js</span>
@@ -625,51 +570,7 @@
 
         </div>
         <div class="projects-cta reveal">
-            <a class="btn btn-primary" data-i18n="seeMore" href="Portfolio.html" id="seeMoreBtn">Ver más →</a>
-        </div>
-    </div>
-</section>
-
-<!-- BLOG -->
-<section id="blog">
-    <div class="container">
-        <div class="section-head reveal">
-            <span class="num">04.</span>
-            <h2 data-i18n="blogTitle">✍️ Blog</h2>
-            <p class="sub" data-i18n="blogSub">Escribo sobre desarrollo, automatización, seguridad y otros temas que me apasionan.</p>
-        </div>
-        <div class="blog-grid">
-
-            <article class="post reveal">
-                <div class="meta">
-                    <span class="cat" data-i18n="post1Cat">Desarrollo</span>
-                    <span class="date" data-i18n="post1Date">15 May 2026</span>
-                </div>
-                <h3 data-i18n="post1Title">Cómo aprendí a escribir código limpio</h3>
-                <p data-i18n="post1Desc">Reflexiones sobre los principios que cambiaron mi forma de programar y por qué el código legible vale más que el código "ingenioso".</p>
-                <span class="read" data-i18n="readMore">Leer más →</span>
-            </article>
-
-            <article class="post reveal">
-                <div class="meta">
-                    <span class="cat" data-i18n="post2Cat">Automatización</span>
-                    <span class="date" data-i18n="post2Date">28 Abr 2026</span>
-                </div>
-                <h3 data-i18n="post2Title">Automatización de pruebas: por dónde empezar</h3>
-                <p data-i18n="post2Desc">Una guía práctica para dar tus primeros pasos en QA automation, las herramientas que vale la pena aprender y los errores que debes evitar.</p>
-                <span class="read" data-i18n="readMore2">Leer más →</span>
-            </article>
-
-            <article class="post reveal">
-                <div class="meta">
-                    <span class="cat" data-i18n="post3Cat">Ciberseguridad</span>
-                    <span class="date" data-i18n="post3Date">10 Abr 2026</span>
-                </div>
-                <h3 data-i18n="post3Title">Errores de seguridad que todo dev comete</h3>
-                <p data-i18n="post3Desc">Repaso de las vulnerabilidades más comunes en aplicaciones web y cómo prevenirlas desde la primera línea de código.</p>
-                <span class="read" data-i18n="readMore3">Leer más →</span>
-            </article>
-
+            <a class="btn btn-primary" href="Portfolio.html">See more →</a>
         </div>
     </div>
 </section>
@@ -678,13 +579,13 @@
 <section id="contact" class="contact">
     <div class="container">
         <div class="section-head reveal">
-            <span class="num">05.</span>
+            <span class="num">04.</span>
         </div>
-        <h2 class="reveal" data-i18n="contactTitle">🤝 ¿Trabajamos juntos?</h2>
-        <p class="lead reveal" data-i18n="contactLead">
-            Estoy buscando activamente nuevas oportunidades laborales estables y de largo plazo, aunque
-            estoy abierto a trabajos freelance en proyectos y colaboraciones. Si crees que encajo en tu
-            equipo o simplemente quieres saludar, escríbeme. Responderé tan pronto como pueda.
+        <h2 class="reveal">🤝 Shall we work together?</h2>
+        <p class="lead reveal">
+            I'm actively looking for stable, long-term job opportunities, though I'm also open
+            to freelance project work and collaborations. If you think I'd be a good fit for
+            your team or just want to say hi, write to me. I'll reply as soon as I can.
         </p>
         <div class="contact-cta reveal">
             <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=brunocr1050@gmail.com" target="_blank" rel="noopener" class="btn btn-primary">
@@ -705,409 +606,43 @@
 
 <footer>
     <div class="container">
-        <p data-i18n="footerText">Diseñado y construido con pasión, dedicación y creatividad.</p>
+        <p>Designed and built with passion, dedication, and creativity.</p>
     </div>
 </footer>
 
 <script>
-    // ====== TRADUCCIONES ======
-    const translations = {
-        es: {
-            navAbout: 'Sobre mí', navSkills: 'Habilidades', navProjects: 'Proyectos', navBlog: 'Blog', navContact: 'Contacto',
-            eyebrow: '👋 ¡Hola, bienvenido a mi portafolio! :)',
-            heroTitle: 'Soy <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Apasionado por la ciberseguridad', 'Solucionador de problemas', 'Siempre aprendiendo'],
-            tagline: 'Curioso por naturaleza, construyo software robusto y lo pongo a prueba hasta el límite para hacerlo más seguro. Disfruto crear cosas confiables y bien hechas, que funcionen tan bien por dentro como por fuera.',
-            aboutTitle: '🧑‍💻 Sobre mí',
-            aboutP1: '¡Hola! Soy Bruno, desarrollador y QA Automation Engineer con base en Panamá. Mi camino en la tecnología empezó por la ciberseguridad: al estudiarla, desarrollé una conciencia mucho mayor sobre su importancia y empecé a aplicar esos principios en mi vida diaria. Más adelante, en mi primer trabajo como QA Engineer, tuve mi primera exposición real a la programación, y desde entonces no he parado.',
-            aboutP2: 'Me muevo entre el desarrollo full-stack y la automatización de pruebas, y siento una verdadera pasión por la ciberseguridad. Me gusta construir cosas, pero también romperlas para entender cómo hacerlas más seguras y robustas.',
-            aboutP3: 'Fuera del código, me apasionan los paseos al aire libre, aprender idiomas y sumergirme en la geografía, las culturas y la historia. Me fascina la aviación y la idea de viajar por el mundo: conectar con personas de otros países y conocer en persona los lugares donde ocurrieron los eventos que marcaron el rumbo de las naciones. Me considero alguien muy abierto y dispuesto a darlo todo, siempre buscando crecer en un equipo donde pueda aportar valor y seguir aprendiendo. Soy súper amigable y tranquilo. Busco siempre crear puentes con la gente a mi alrededor y tratar a todos con respeto y dignidad.',
-            degreesTitle: 'Titulaciones universitarias', certsTitle: 'Certificaciones', langsTitle: 'Idiomas',
-            speakLabel: 'Hablo', learnLabel: 'Quiero aprender',
-            lang1: '🇪🇸 Español — Nativo', lang2: '🇬🇧 Inglés — C2', lang3: '🇮🇹 Italiano — C2', lang4: '🇩🇪 Alemán — C1',
-            learnList: '🇵🇹 Portugués · 🇫🇷 Francés · 🇸🇪 Sueco · 🇳🇱 Holandés · 🇭🇺 Húngaro',
-            expTitle: 'Experiencia laboral',
-            exp1Date: 'Sep 2025 — Presente', exp1Role: 'Especialista en Soporte Técnico',
-            exp1Desc: 'Diagnostico y resuelvo incidentes técnicos complejos mediante análisis de causa raíz y auditorías de datos en tiempo real. Manejo situaciones críticas de alta presión, detecto y reporto actividad sospechosa y fraudes bajo estrictos protocolos de seguridad, y priorizo el triaje y escalado de tickets superando los KPIs y SLAs del servicio.',
-            exp2Date: 'Ene 2020 — Dic 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'Diseñé y mantuve suites de pruebas automatizadas E2E con Selenium (Java) bajo el patrón Page Object Model, reduciendo el tiempo de regresión en un 40%. Validé APIs con Postman y REST Assured, apliqué BDD con Cucumber e integré pruebas y análisis de seguridad (SAST con SonarQube) en pipelines de CI/CD, gestionando el ciclo de defectos en Jira bajo Agile/Scrum.',
-            skillsTitle: '🛠️ Habilidades & Stack',
-            skillsSub: 'Las herramientas con las que construyo, pruebo y aseguro mis proyectos.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 Mis Proyectos',
-            projSub: 'Portafolio completo de mis proyectos actuales donde combino desarrollo, automatización y seguridad.',
-            proj1Desc: 'Sistema de monitoreo de seguridad y DevSecOps. Backend de microservicios con un pipeline de CI/CD para análisis estático de código (SonarQube) y pruebas de API (REST Assured). Infraestructura escalable y basada en contenedores, con detección de intrusiones en tiempo real mediante alertas y registros centralizados en Splunk.',
-            proj2Name: 'Hub Full-Stack Multilingüe',
-            proj2Desc: 'Portafolio digital y hub full-stack con interfaz reactiva optimizada para SEO. Arquitectura distribuida compuesta por una API transaccional en Node.js conectada a PostgreSQL y microservicios en Python, con el desarrollo potenciado mediante el uso avanzado de IA.',
-            seeMore: 'Ver más →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'Escribo sobre desarrollo, automatización, seguridad y otros temas que me apasionan.',
-            post1Cat: 'Desarrollo', post1Date: '15 May 2026', post1Title: 'Cómo aprendí a escribir código limpio',
-            post1Desc: 'Reflexiones sobre los principios que cambiaron mi forma de programar y por qué el código legible vale más que el código "ingenioso".',
-            post2Cat: 'Automatización', post2Date: '28 Abr 2026', post2Title: 'Automatización de pruebas: por dónde empezar',
-            post2Desc: 'Una guía práctica para dar tus primeros pasos en QA automation, las herramientas que vale la pena aprender y los errores que debes evitar.',
-            post3Cat: 'Ciberseguridad', post3Date: '10 Abr 2026', post3Title: 'Errores de seguridad que todo dev comete',
-            post3Desc: 'Repaso de las vulnerabilidades más comunes en aplicaciones web y cómo prevenirlas desde la primera línea de código.',
-            readMore: 'Leer más →', readMore2: 'Leer más →', readMore3: 'Leer más →',
-            contactTitle: '🤝 ¿Trabajamos juntos?',
-            contactLead: 'Estoy buscando activamente nuevas oportunidades laborales estables y de largo plazo, aunque estoy abierto a trabajos freelance en proyectos y colaboraciones. Si crees que encajo en tu equipo o simplemente quieres saludar, escríbeme. Responderé tan pronto como pueda.',
-            footerText: 'Diseñado y construido con pasión, dedicación y creatividad.'
-        },
-        en: {
-            navAbout: 'About me', navSkills: 'Skills', navProjects: 'Projects', navBlog: 'Blog', navContact: 'Contact',
-            eyebrow: '👋 Hi, welcome to my portfolio! :)',
-            heroTitle: 'I\'m <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Passionate about cybersecurity', 'Problem solver', 'Always learning'],
-            tagline: 'Curious by nature, I build robust software and push it to the limit to make it more secure. I enjoy creating reliable, well-crafted things that work as well on the inside as they do on the outside.',
-            aboutTitle: '🧑‍💻 About me',
-            aboutP1: 'Hi! I\'m Bruno, a developer and QA Automation Engineer based in Panama. My journey in technology began with cybersecurity: studying it gave me a much deeper awareness of its importance, and I started applying those principles in my daily life. Later, in my first job as a QA Engineer, I had my first real exposure to programming, and I haven\'t stopped since.',
-            aboutP2: 'I move between full-stack development and test automation, and I feel a true passion for cybersecurity. I like building things, but also breaking them to understand how to make them more secure and robust.',
-            aboutP3: 'Outside of code, I love outdoor walks, learning languages, and diving into geography, cultures, and history. I\'m fascinated by aviation and the idea of traveling the world: connecting with people from other countries and visiting in person the places where the events that shaped the course of nations took place. I consider myself very open and willing to give my all, always looking to grow in a team where I can add value and keep learning. I\'m super friendly and easygoing. I always seek to build bridges with the people around me and treat everyone with respect and dignity.',
-            degreesTitle: 'University degrees', certsTitle: 'Certifications', langsTitle: 'Languages',
-            speakLabel: 'I speak', learnLabel: 'I want to learn',
-            lang1: '🇪🇸 Spanish — Native', lang2: '🇬🇧 English — C2', lang3: '🇮🇹 Italian — C2', lang4: '🇩🇪 German — C1',
-            learnList: '🇵🇹 Portuguese · 🇫🇷 French · 🇸🇪 Swedish · 🇳🇱 Dutch · 🇭🇺 Hungarian',
-            expTitle: 'Work experience',
-            exp1Date: 'Sep 2025 — Present', exp1Role: 'Technical Support Specialist',
-            exp1Desc: 'I diagnose and resolve complex technical incidents through root cause analysis and real-time data audits. I handle high-pressure critical situations, detect and report suspicious activity and fraud under strict security protocols, and prioritize ticket triage and escalation, exceeding the service\'s KPIs and SLAs.',
-            exp2Date: 'Jan 2020 — Dec 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'I designed and maintained E2E automated test suites with Selenium (Java) under the Page Object Model pattern, reducing regression time by 40%. I validated APIs with Postman and REST Assured, applied BDD with Cucumber, and integrated testing and security analysis (SAST with SonarQube) into CI/CD pipelines, managing the defect lifecycle in Jira under Agile/Scrum.',
-            skillsTitle: '🛠️ Skills & Stack',
-            skillsSub: 'The tools I use to build, test, and secure my projects.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 My Projects',
-            projSub: 'A complete portfolio of my current projects, where I combine development, automation, and security.',
-            proj1Desc: 'Security monitoring and DevSecOps system. Microservices backend with a CI/CD pipeline for static code analysis (SonarQube) and API testing (REST Assured). Scalable, container-based infrastructure with real-time intrusion detection through alerts and centralized logging in Splunk.',
-            proj2Name: 'Multilingual Full-Stack Hub',
-            proj2Desc: 'Digital portfolio and full-stack hub with a reactive, SEO-optimized interface. Distributed architecture composed of a transactional Node.js API connected to PostgreSQL and Python microservices, with development boosted through advanced use of AI.',
-            seeMore: 'See more →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'I write about development, automation, security, and other topics I\'m passionate about.',
-            post1Cat: 'Development', post1Date: 'May 15, 2026', post1Title: 'How I learned to write clean code',
-            post1Desc: 'Reflections on the principles that changed the way I program and why readable code is worth more than "clever" code.',
-            post2Cat: 'Automation', post2Date: 'Apr 28, 2026', post2Title: 'Test automation: where to start',
-            post2Desc: 'A practical guide to taking your first steps in QA automation, the tools worth learning, and the mistakes to avoid.',
-            post3Cat: 'Cybersecurity', post3Date: 'Apr 10, 2026', post3Title: 'Security mistakes every dev makes',
-            post3Desc: 'A review of the most common vulnerabilities in web applications and how to prevent them from the very first line of code.',
-            readMore: 'Read more →', readMore2: 'Read more →', readMore3: 'Read more →',
-            contactTitle: '🤝 Shall we work together?',
-            contactLead: 'I\'m actively looking for stable, long-term job opportunities, though I\'m also open to freelance project work and collaborations. If you think I\'d be a good fit for your team or just want to say hi, write to me. I\'ll reply as soon as I can.',
-            footerText: 'Designed and built with passion, dedication, and creativity.'
-        },
-        it: {
-            navAbout: 'Chi sono', navSkills: 'Competenze', navProjects: 'Progetti', navBlog: 'Blog', navContact: 'Contatti',
-            eyebrow: '👋 Ciao, benvenuto nel mio portfolio! :)',
-            heroTitle: 'Sono <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Appassionato di cybersecurity', 'Risolutore di problemi', 'Sempre in apprendimento'],
-            tagline: 'Curioso per natura, costruisco software robusto e lo metto alla prova fino al limite per renderlo più sicuro. Mi piace creare cose affidabili e ben fatte, che funzionino bene dentro quanto fuori.',
-            aboutTitle: '🧑‍💻 Chi sono',
-            aboutP1: 'Ciao! Sono Bruno, sviluppatore e QA Automation Engineer con base a Panama. Il mio percorso nella tecnologia è iniziato con la cybersecurity: studiandola, ho sviluppato una consapevolezza molto più profonda della sua importanza e ho iniziato ad applicare quei principi nella mia vita quotidiana. Più avanti, nel mio primo lavoro come QA Engineer, ho avuto la mia prima vera esposizione alla programmazione, e da allora non mi sono più fermato.',
-            aboutP2: 'Mi muovo tra lo sviluppo full-stack e l\'automazione dei test, e provo una vera passione per la cybersecurity. Mi piace costruire cose, ma anche romperle per capire come renderle più sicure e robuste.',
-            aboutP3: 'Fuori dal codice, amo le passeggiate all\'aria aperta, imparare le lingue e immergermi nella geografia, nelle culture e nella storia. Mi affascinano l\'aviazione e l\'idea di viaggiare per il mondo: entrare in contatto con persone di altri paesi e conoscere di persona i luoghi in cui sono avvenuti gli eventi che hanno segnato il corso delle nazioni. Mi considero una persona molto aperta e disposta a dare tutto, sempre alla ricerca di crescere in un team dove possa apportare valore e continuare a imparare. Sono super amichevole e tranquillo. Cerco sempre di creare ponti con le persone intorno a me e di trattare tutti con rispetto e dignità.',
-            degreesTitle: 'Titoli universitari', certsTitle: 'Certificazioni', langsTitle: 'Lingue',
-            speakLabel: 'Parlo', learnLabel: 'Voglio imparare',
-            lang1: '🇪🇸 Spagnolo — Madrelingua', lang2: '🇬🇧 Inglese — C2', lang3: '🇮🇹 Italiano — C2', lang4: '🇩🇪 Tedesco — C1',
-            learnList: '🇵🇹 Portoghese · 🇫🇷 Francese · 🇸🇪 Svedese · 🇳🇱 Olandese · 🇭🇺 Ungherese',
-            expTitle: 'Esperienza lavorativa',
-            exp1Date: 'Set 2025 — Presente', exp1Role: 'Specialista di Supporto Tecnico',
-            exp1Desc: 'Diagnostico e risolvo incidenti tecnici complessi attraverso l\'analisi delle cause profonde e audit dei dati in tempo reale. Gestisco situazioni critiche ad alta pressione, rilevo e segnalo attività sospette e frodi secondo rigorosi protocolli di sicurezza, e do priorità al triage e all\'escalation dei ticket, superando i KPI e gli SLA del servizio.',
-            exp2Date: 'Gen 2020 — Dic 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'Ho progettato e mantenuto suite di test automatizzati E2E con Selenium (Java) secondo il pattern Page Object Model, riducendo i tempi di regressione del 40%. Ho validato API con Postman e REST Assured, applicato il BDD con Cucumber e integrato test e analisi di sicurezza (SAST con SonarQube) nelle pipeline CI/CD, gestendo il ciclo dei difetti in Jira con Agile/Scrum.',
-            skillsTitle: '🛠️ Competenze & Stack',
-            skillsSub: 'Gli strumenti con cui costruisco, testo e metto in sicurezza i miei progetti.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 I miei progetti',
-            projSub: 'Portfolio completo dei miei progetti attuali, in cui combino sviluppo, automazione e sicurezza.',
-            proj1Desc: 'Sistema di monitoraggio della sicurezza e DevSecOps. Backend a microservizi con una pipeline CI/CD per l\'analisi statica del codice (SonarQube) e i test delle API (REST Assured). Infrastruttura scalabile basata su container, con rilevamento delle intrusioni in tempo reale tramite avvisi e log centralizzati in Splunk.',
-            proj2Name: 'Hub Full-Stack Multilingue',
-            proj2Desc: 'Portfolio digitale e hub full-stack con interfaccia reattiva ottimizzata per la SEO. Architettura distribuita composta da un\'API transazionale in Node.js collegata a PostgreSQL e microservizi in Python, con lo sviluppo potenziato dall\'uso avanzato dell\'IA.',
-            seeMore: 'Scopri di più →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'Scrivo di sviluppo, automazione, sicurezza e altri temi che mi appassionano.',
-            post1Cat: 'Sviluppo', post1Date: '15 Mag 2026', post1Title: 'Come ho imparato a scrivere codice pulito',
-            post1Desc: 'Riflessioni sui principi che hanno cambiato il mio modo di programmare e perché il codice leggibile vale più del codice "ingegnoso".',
-            post2Cat: 'Automazione', post2Date: '28 Apr 2026', post2Title: 'Automazione dei test: da dove iniziare',
-            post2Desc: 'Una guida pratica per muovere i primi passi nella QA automation, gli strumenti che vale la pena imparare e gli errori da evitare.',
-            post3Cat: 'Cybersecurity', post3Date: '10 Apr 2026', post3Title: 'Errori di sicurezza che ogni dev commette',
-            post3Desc: 'Una panoramica delle vulnerabilità più comuni nelle applicazioni web e come prevenirle fin dalla prima riga di codice.',
-            readMore: 'Leggi di più →', readMore2: 'Leggi di più →', readMore3: 'Leggi di più →',
-            contactTitle: '🤝 Lavoriamo insieme?',
-            contactLead: 'Sto cercando attivamente nuove opportunità lavorative stabili e a lungo termine, ma sono aperto anche a lavori freelance su progetti e collaborazioni. Se pensi che io possa essere adatto al tuo team o vuoi semplicemente salutarmi, scrivimi. Risponderò appena possibile.',
-            footerText: 'Progettato e costruito con passione, dedizione e creatività.'
-        },
-        de: {
-            navAbout: 'Über mich', navSkills: 'Fähigkeiten', navProjects: 'Projekte', navBlog: 'Blog', navContact: 'Kontakt',
-            eyebrow: '👋 Hallo, willkommen in meinem Portfolio! :)',
-            heroTitle: 'Ich bin <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Leidenschaft für Cybersecurity', 'Problemlöser', 'Immer am Lernen'],
-            tagline: 'Von Natur aus neugierig, baue ich robuste Software und bringe sie an ihre Grenzen, um sie sicherer zu machen. Ich schaffe gern zuverlässige, gut gemachte Dinge, die innen genauso gut funktionieren wie außen.',
-            aboutTitle: '🧑‍💻 Über mich',
-            aboutP1: 'Hallo! Ich bin Bruno, Entwickler und QA Automation Engineer mit Sitz in Panama. Mein Weg in die Technologie begann mit der Cybersecurity: Durch das Studium entwickelte ich ein viel größeres Bewusstsein für ihre Bedeutung und begann, diese Prinzipien in meinem Alltag anzuwenden. Später, in meinem ersten Job als QA Engineer, hatte ich meinen ersten echten Kontakt mit der Programmierung – und seitdem habe ich nicht mehr aufgehört.',
-            aboutP2: 'Ich bewege mich zwischen Full-Stack-Entwicklung und Testautomatisierung und empfinde eine echte Leidenschaft für Cybersecurity. Ich baue gern Dinge, aber ich nehme sie auch gern auseinander, um zu verstehen, wie man sie sicherer und robuster macht.',
-            aboutP3: 'Abseits des Codes liebe ich Spaziergänge an der frischen Luft, das Erlernen von Sprachen und das Eintauchen in Geographie, Kulturen und Geschichte. Mich faszinieren die Luftfahrt und die Idee, die Welt zu bereisen: Menschen aus anderen Ländern kennenzulernen und die Orte persönlich zu besuchen, an denen die Ereignisse stattfanden, die den Lauf der Nationen geprägt haben. Ich halte mich für sehr offen und bereit, alles zu geben – immer auf der Suche danach, in einem Team zu wachsen, in dem ich Mehrwert schaffen und weiter lernen kann. Ich bin super freundlich und gelassen. Ich versuche stets, Brücken zu den Menschen um mich herum zu bauen und alle mit Respekt und Würde zu behandeln.',
-            degreesTitle: 'Hochschulabschlüsse', certsTitle: 'Zertifizierungen', langsTitle: 'Sprachen',
-            speakLabel: 'Ich spreche', learnLabel: 'Ich möchte lernen',
-            lang1: '🇪🇸 Spanisch — Muttersprache', lang2: '🇬🇧 Englisch — C2', lang3: '🇮🇹 Italienisch — C2', lang4: '🇩🇪 Deutsch — C1',
-            learnList: '🇵🇹 Portugiesisch · 🇫🇷 Französisch · 🇸🇪 Schwedisch · 🇳🇱 Niederländisch · 🇭🇺 Ungarisch',
-            expTitle: 'Berufserfahrung',
-            exp1Date: 'Sep 2025 — Heute', exp1Role: 'Technischer Support-Spezialist',
-            exp1Desc: 'Ich diagnostiziere und löse komplexe technische Vorfälle durch Ursachenanalyse und Datenaudits in Echtzeit. Ich bewältige kritische Situationen unter hohem Druck, erkenne und melde verdächtige Aktivitäten und Betrug nach strengen Sicherheitsprotokollen und priorisiere Triage und Eskalation von Tickets – stets über den KPIs und SLAs des Services.',
-            exp2Date: 'Jan 2020 — Dez 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'Ich habe automatisierte E2E-Testsuiten mit Selenium (Java) nach dem Page-Object-Model-Pattern entworfen und gepflegt und die Regressionszeit um 40 % reduziert. Ich habe APIs mit Postman und REST Assured validiert, BDD mit Cucumber angewendet und Tests sowie Sicherheitsanalysen (SAST mit SonarQube) in CI/CD-Pipelines integriert, während ich den Defekt-Lebenszyklus in Jira nach Agile/Scrum verwaltete.',
-            skillsTitle: '🛠️ Fähigkeiten & Stack',
-            skillsSub: 'Die Werkzeuge, mit denen ich meine Projekte baue, teste und absichere.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 Meine Projekte',
-            projSub: 'Vollständiges Portfolio meiner aktuellen Projekte, in denen ich Entwicklung, Automatisierung und Sicherheit kombiniere.',
-            proj1Desc: 'Sicherheitsüberwachungs- und DevSecOps-System. Microservices-Backend mit einer CI/CD-Pipeline für statische Codeanalyse (SonarQube) und API-Tests (REST Assured). Skalierbare, containerbasierte Infrastruktur mit Echtzeit-Intrusionserkennung durch Alarme und zentralisierte Logs in Splunk.',
-            proj2Name: 'Mehrsprachiger Full-Stack-Hub',
-            proj2Desc: 'Digitales Portfolio und Full-Stack-Hub mit reaktiver, SEO-optimierter Oberfläche. Verteilte Architektur aus einer transaktionalen Node.js-API mit PostgreSQL-Anbindung und Python-Microservices, wobei die Entwicklung durch fortgeschrittenen KI-Einsatz beschleunigt wurde.',
-            seeMore: 'Mehr sehen →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'Ich schreibe über Entwicklung, Automatisierung, Sicherheit und andere Themen, die mich begeistern.',
-            post1Cat: 'Entwicklung', post1Date: '15. Mai 2026', post1Title: 'Wie ich gelernt habe, sauberen Code zu schreiben',
-            post1Desc: 'Gedanken zu den Prinzipien, die meine Art zu programmieren verändert haben, und warum lesbarer Code mehr wert ist als „cleverer" Code.',
-            post2Cat: 'Automatisierung', post2Date: '28. Apr. 2026', post2Title: 'Testautomatisierung: Wo anfangen?',
-            post2Desc: 'Ein praktischer Leitfaden für die ersten Schritte in der QA-Automatisierung, die Tools, die sich lohnen, und die Fehler, die man vermeiden sollte.',
-            post3Cat: 'Cybersecurity', post3Date: '10. Apr. 2026', post3Title: 'Sicherheitsfehler, die jeder Dev macht',
-            post3Desc: 'Ein Überblick über die häufigsten Schwachstellen in Webanwendungen und wie man sie von der ersten Codezeile an verhindert.',
-            readMore: 'Weiterlesen →', readMore2: 'Weiterlesen →', readMore3: 'Weiterlesen →',
-            contactTitle: '🤝 Arbeiten wir zusammen?',
-            contactLead: 'Ich suche aktiv nach neuen stabilen und langfristigen beruflichen Möglichkeiten, bin aber auch offen für Freelance-Projekte und Kooperationen. Wenn du denkst, dass ich in dein Team passe, oder einfach Hallo sagen möchtest, schreib mir. Ich antworte so schnell wie möglich.',
-            footerText: 'Mit Leidenschaft, Hingabe und Kreativität entworfen und gebaut.'
-        },
-        pt: {
-            navAbout: 'Sobre mim', navSkills: 'Competências', navProjects: 'Projetos', navBlog: 'Blog', navContact: 'Contacto',
-            eyebrow: '👋 Olá, bem-vindo ao meu portefólio! :)',
-            heroTitle: 'Sou <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Apaixonado por cibersegurança', 'Solucionador de problemas', 'Sempre a aprender'],
-            tagline: 'Curioso por natureza, construo software robusto e levo-o ao limite para o tornar mais seguro. Gosto de criar coisas fiáveis e bem feitas, que funcionem tão bem por dentro como por fora.',
-            aboutTitle: '🧑‍💻 Sobre mim',
-            aboutP1: 'Olá! Sou o Bruno, programador e QA Automation Engineer baseado no Panamá. O meu percurso na tecnologia começou pela cibersegurança: ao estudá-la, desenvolvi uma consciência muito maior da sua importância e comecei a aplicar esses princípios no meu dia a dia. Mais tarde, no meu primeiro emprego como QA Engineer, tive a minha primeira exposição real à programação e, desde então, não parei.',
-            aboutP2: 'Movo-me entre o desenvolvimento full-stack e a automatização de testes, e sinto uma verdadeira paixão pela cibersegurança. Gosto de construir coisas, mas também de as partir para perceber como torná-las mais seguras e robustas.',
-            aboutP3: 'Fora do código, adoro passeios ao ar livre, aprender línguas e mergulhar na geografia, nas culturas e na história. Fascinam-me a aviação e a ideia de viajar pelo mundo: conhecer pessoas de outros países e visitar pessoalmente os lugares onde ocorreram os acontecimentos que marcaram o rumo das nações. Considero-me alguém muito aberto e disposto a dar tudo, sempre à procura de crescer numa equipa onde possa acrescentar valor e continuar a aprender. Sou super amigável e tranquilo. Procuro sempre criar pontes com as pessoas à minha volta e tratar todos com respeito e dignidade.',
-            degreesTitle: 'Formação universitária', certsTitle: 'Certificações', langsTitle: 'Línguas',
-            speakLabel: 'Falo', learnLabel: 'Quero aprender',
-            lang1: '🇪🇸 Espanhol — Nativo', lang2: '🇬🇧 Inglês — C2', lang3: '🇮🇹 Italiano — C2', lang4: '🇩🇪 Alemão — C1',
-            learnList: '🇵🇹 Português · 🇫🇷 Francês · 🇸🇪 Sueco · 🇳🇱 Neerlandês · 🇭🇺 Húngaro',
-            expTitle: 'Experiência profissional',
-            exp1Date: 'Set 2025 — Presente', exp1Role: 'Especialista de Suporte Técnico',
-            exp1Desc: 'Diagnostico e resolvo incidentes técnicos complexos através da análise de causa raiz e de auditorias de dados em tempo real. Lido com situações críticas de alta pressão, deteto e reporto atividades suspeitas e fraudes segundo protocolos de segurança rigorosos, e priorizo a triagem e o escalonamento de tickets, superando os KPIs e SLAs do serviço.',
-            exp2Date: 'Jan 2020 — Dez 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'Concebi e mantive suites de testes automatizados E2E com Selenium (Java) segundo o padrão Page Object Model, reduzindo o tempo de regressão em 40%. Validei APIs com Postman e REST Assured, apliquei BDD com Cucumber e integrei testes e análises de segurança (SAST com SonarQube) em pipelines de CI/CD, gerindo o ciclo de vida dos defeitos no Jira com Agile/Scrum.',
-            skillsTitle: '🛠️ Competências & Stack',
-            skillsSub: 'As ferramentas com que construo, testo e protejo os meus projetos.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 Os meus projetos',
-            projSub: 'Portefólio completo dos meus projetos atuais, onde combino desenvolvimento, automatização e segurança.',
-            proj1Desc: 'Sistema de monitorização de segurança e DevSecOps. Backend de microsserviços com um pipeline de CI/CD para análise estática de código (SonarQube) e testes de API (REST Assured). Infraestrutura escalável baseada em contentores, com deteção de intrusões em tempo real através de alertas e registos centralizados no Splunk.',
-            proj2Name: 'Hub Full-Stack Multilingue',
-            proj2Desc: 'Portefólio digital e hub full-stack com interface reativa otimizada para SEO. Arquitetura distribuída composta por uma API transacional em Node.js ligada a PostgreSQL e microsserviços em Python, com o desenvolvimento potenciado pelo uso avançado de IA.',
-            seeMore: 'Ver mais →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'Escrevo sobre desenvolvimento, automatização, segurança e outros temas que me apaixonam.',
-            post1Cat: 'Desenvolvimento', post1Date: '15 Mai 2026', post1Title: 'Como aprendi a escrever código limpo',
-            post1Desc: 'Reflexões sobre os princípios que mudaram a minha forma de programar e porque é que o código legível vale mais do que o código "engenhoso".',
-            post2Cat: 'Automatização', post2Date: '28 Abr 2026', post2Title: 'Automatização de testes: por onde começar',
-            post2Desc: 'Um guia prático para dar os primeiros passos em QA automation, as ferramentas que vale a pena aprender e os erros a evitar.',
-            post3Cat: 'Cibersegurança', post3Date: '10 Abr 2026', post3Title: 'Erros de segurança que todos os devs cometem',
-            post3Desc: 'Uma revisão das vulnerabilidades mais comuns em aplicações web e como preveni-las desde a primeira linha de código.',
-            readMore: 'Ler mais →', readMore2: 'Ler mais →', readMore3: 'Ler mais →',
-            contactTitle: '🤝 Trabalhamos juntos?',
-            contactLead: 'Estou ativamente à procura de novas oportunidades profissionais estáveis e de longo prazo, mas estou aberto a trabalhos freelance em projetos e colaborações. Se achas que encaixo na tua equipa ou se queres simplesmente dizer olá, escreve-me. Responderei assim que puder.',
-            footerText: 'Desenhado e construído com paixão, dedicação e criatividade.'
-        },
-        fr: {
-            navAbout: 'À propos', navSkills: 'Compétences', navProjects: 'Projets', navBlog: 'Blog', navContact: 'Contact',
-            eyebrow: '👋 Salut, bienvenue sur mon portfolio ! :)',
-            heroTitle: 'Je suis <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Passionné de cybersécurité', 'Résolveur de problèmes', 'Toujours en apprentissage'],
-            tagline: 'Curieux de nature, je construis des logiciels robustes et je les pousse à leurs limites pour les rendre plus sûrs. J\'aime créer des choses fiables et bien faites, qui fonctionnent aussi bien à l\'intérieur qu\'à l\'extérieur.',
-            aboutTitle: '🧑‍💻 À propos de moi',
-            aboutP1: 'Salut ! Je suis Bruno, développeur et QA Automation Engineer basé au Panama. Mon parcours dans la technologie a commencé par la cybersécurité : en l\'étudiant, j\'ai pris bien plus conscience de son importance et j\'ai commencé à appliquer ces principes dans ma vie quotidienne. Plus tard, lors de mon premier emploi en tant que QA Engineer, j\'ai eu ma première véritable exposition à la programmation, et depuis, je ne me suis plus arrêté.',
-            aboutP2: 'Je navigue entre le développement full-stack et l\'automatisation des tests, et je ressens une véritable passion pour la cybersécurité. J\'aime construire des choses, mais aussi les casser pour comprendre comment les rendre plus sûres et plus robustes.',
-            aboutP3: 'En dehors du code, j\'adore les promenades en plein air, apprendre des langues et me plonger dans la géographie, les cultures et l\'histoire. Je suis fasciné par l\'aviation et l\'idée de voyager à travers le monde : rencontrer des personnes d\'autres pays et découvrir en personne les lieux où se sont déroulés les événements qui ont marqué le cours des nations. Je me considère comme quelqu\'un de très ouvert et prêt à tout donner, cherchant toujours à grandir dans une équipe où je peux apporter de la valeur et continuer à apprendre. Je suis super sympa et tranquille. Je cherche toujours à créer des ponts avec les gens autour de moi et à traiter tout le monde avec respect et dignité.',
-            degreesTitle: 'Diplômes universitaires', certsTitle: 'Certifications', langsTitle: 'Langues',
-            speakLabel: 'Je parle', learnLabel: 'Je veux apprendre',
-            lang1: '🇪🇸 Espagnol — Langue maternelle', lang2: '🇬🇧 Anglais — C2', lang3: '🇮🇹 Italien — C2', lang4: '🇩🇪 Allemand — C1',
-            learnList: '🇵🇹 Portugais · 🇫🇷 Français · 🇸🇪 Suédois · 🇳🇱 Néerlandais · 🇭🇺 Hongrois',
-            expTitle: 'Expérience professionnelle',
-            exp1Date: 'Sept 2025 — Présent', exp1Role: 'Spécialiste du support technique',
-            exp1Desc: 'Je diagnostique et résous des incidents techniques complexes grâce à l\'analyse des causes racines et à des audits de données en temps réel. Je gère des situations critiques sous haute pression, je détecte et signale les activités suspectes et les fraudes selon des protocoles de sécurité stricts, et je priorise le triage et l\'escalade des tickets en dépassant les KPI et SLA du service.',
-            exp2Date: 'Janv 2020 — Déc 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'J\'ai conçu et maintenu des suites de tests automatisés E2E avec Selenium (Java) selon le pattern Page Object Model, réduisant le temps de régression de 40 %. J\'ai validé des API avec Postman et REST Assured, appliqué le BDD avec Cucumber et intégré les tests et l\'analyse de sécurité (SAST avec SonarQube) dans des pipelines CI/CD, en gérant le cycle de vie des défauts dans Jira selon Agile/Scrum.',
-            skillsTitle: '🛠️ Compétences & Stack',
-            skillsSub: 'Les outils avec lesquels je construis, teste et sécurise mes projets.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 Mes projets',
-            projSub: 'Portfolio complet de mes projets actuels, où je combine développement, automatisation et sécurité.',
-            proj1Desc: 'Système de surveillance de sécurité et DevSecOps. Backend en microservices avec un pipeline CI/CD pour l\'analyse statique du code (SonarQube) et les tests d\'API (REST Assured). Infrastructure évolutive basée sur des conteneurs, avec détection d\'intrusion en temps réel grâce à des alertes et des journaux centralisés dans Splunk.',
-            proj2Name: 'Hub Full-Stack Multilingue',
-            proj2Desc: 'Portfolio numérique et hub full-stack avec une interface réactive optimisée pour le SEO. Architecture distribuée composée d\'une API transactionnelle en Node.js reliée à PostgreSQL et de microservices en Python, avec un développement accéléré par l\'usage avancé de l\'IA.',
-            seeMore: 'Voir plus →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'J\'écris sur le développement, l\'automatisation, la sécurité et d\'autres sujets qui me passionnent.',
-            post1Cat: 'Développement', post1Date: '15 mai 2026', post1Title: 'Comment j\'ai appris à écrire du code propre',
-            post1Desc: 'Réflexions sur les principes qui ont changé ma façon de programmer et pourquoi un code lisible vaut plus qu\'un code « ingénieux ».',
-            post2Cat: 'Automatisation', post2Date: '28 avr. 2026', post2Title: 'Automatisation des tests : par où commencer',
-            post2Desc: 'Un guide pratique pour faire ses premiers pas dans la QA automation, les outils qui valent la peine d\'être appris et les erreurs à éviter.',
-            post3Cat: 'Cybersécurité', post3Date: '10 avr. 2026', post3Title: 'Les erreurs de sécurité que tout dev commet',
-            post3Desc: 'Un tour d\'horizon des vulnérabilités les plus courantes dans les applications web et comment les prévenir dès la première ligne de code.',
-            readMore: 'Lire la suite →', readMore2: 'Lire la suite →', readMore3: 'Lire la suite →',
-            contactTitle: '🤝 On travaille ensemble ?',
-            contactLead: 'Je recherche activement de nouvelles opportunités professionnelles stables et à long terme, mais je suis aussi ouvert aux missions freelance sur des projets et aux collaborations. Si tu penses que j\'ai ma place dans ton équipe ou si tu veux simplement dire bonjour, écris-moi. Je répondrai dès que possible.',
-            footerText: 'Conçu et construit avec passion, dévouement et créativité.'
-        },
-        nl: {
-            navAbout: 'Over mij', navSkills: 'Vaardigheden', navProjects: 'Projecten', navBlog: 'Blog', navContact: 'Contact',
-            eyebrow: '👋 Hoi, welkom op mijn portfolio! :)',
-            heroTitle: 'Ik ben <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Gepassioneerd door cybersecurity', 'Probleemoplosser', 'Altijd aan het leren'],
-            tagline: 'Van nature nieuwsgierig bouw ik robuuste software en test ik die tot het uiterste om hem veiliger te maken. Ik geniet ervan betrouwbare, goed gemaakte dingen te creëren die vanbinnen net zo goed werken als vanbuiten.',
-            aboutTitle: '🧑‍💻 Over mij',
-            aboutP1: 'Hoi! Ik ben Bruno, developer en QA Automation Engineer, gevestigd in Panama. Mijn weg in de technologie begon bij cybersecurity: door het te bestuderen werd ik me veel bewuster van het belang ervan en begon ik die principes in mijn dagelijks leven toe te passen. Later, in mijn eerste baan als QA Engineer, kwam ik voor het eerst echt in aanraking met programmeren — en sindsdien ben ik niet meer gestopt.',
-            aboutP2: 'Ik beweeg me tussen full-stack development en testautomatisering, en ik voel een echte passie voor cybersecurity. Ik bouw graag dingen, maar breek ze ook graag om te begrijpen hoe ik ze veiliger en robuuster kan maken.',
-            aboutP3: 'Buiten het coderen houd ik van wandelingen in de buitenlucht, talen leren en me verdiepen in geografie, culturen en geschiedenis. Ik ben gefascineerd door de luchtvaart en het idee om de wereld rond te reizen: in contact komen met mensen uit andere landen en persoonlijk de plekken bezoeken waar de gebeurtenissen plaatsvonden die de loop van naties hebben bepaald. Ik zie mezelf als heel open en bereid om alles te geven, altijd op zoek naar groei in een team waar ik waarde kan toevoegen en kan blijven leren. Ik ben supervriendelijk en rustig. Ik probeer altijd bruggen te bouwen met de mensen om me heen en iedereen met respect en waardigheid te behandelen.',
-            degreesTitle: 'Universitaire diploma\'s', certsTitle: 'Certificeringen', langsTitle: 'Talen',
-            speakLabel: 'Ik spreek', learnLabel: 'Ik wil leren',
-            lang1: '🇪🇸 Spaans — Moedertaal', lang2: '🇬🇧 Engels — C2', lang3: '🇮🇹 Italiaans — C2', lang4: '🇩🇪 Duits — C1',
-            learnList: '🇵🇹 Portugees · 🇫🇷 Frans · 🇸🇪 Zweeds · 🇳🇱 Nederlands · 🇭🇺 Hongaars',
-            expTitle: 'Werkervaring',
-            exp1Date: 'Sep 2025 — Heden', exp1Role: 'Technisch supportspecialist',
-            exp1Desc: 'Ik diagnosticeer en los complexe technische incidenten op via oorzaakanalyse en realtime data-audits. Ik handel kritieke situaties onder hoge druk af, detecteer en rapporteer verdachte activiteiten en fraude volgens strikte beveiligingsprotocollen, en prioriteer de triage en escalatie van tickets, waarbij ik de KPI\'s en SLA\'s van de service overtref.',
-            exp2Date: 'Jan 2020 — Dec 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'Ik ontwierp en onderhield geautomatiseerde E2E-testsuites met Selenium (Java) volgens het Page Object Model-patroon, waarmee de regressietijd met 40% werd verkort. Ik valideerde API\'s met Postman en REST Assured, paste BDD toe met Cucumber en integreerde tests en beveiligingsanalyses (SAST met SonarQube) in CI/CD-pipelines, terwijl ik de defect-levenscyclus in Jira beheerde volgens Agile/Scrum.',
-            skillsTitle: '🛠️ Vaardigheden & Stack',
-            skillsSub: 'De tools waarmee ik mijn projecten bouw, test en beveilig.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 Mijn projecten',
-            projSub: 'Een volledig portfolio van mijn huidige projecten, waarin ik development, automatisering en security combineer.',
-            proj1Desc: 'Securitymonitoring- en DevSecOps-systeem. Microservices-backend met een CI/CD-pipeline voor statische code-analyse (SonarQube) en API-tests (REST Assured). Schaalbare, containergebaseerde infrastructuur met realtime intrusiedetectie via alerts en gecentraliseerde logging in Splunk.',
-            proj2Name: 'Meertalige Full-Stack Hub',
-            proj2Desc: 'Digitaal portfolio en full-stack hub met een reactieve, SEO-geoptimaliseerde interface. Gedistribueerde architectuur bestaande uit een transactionele Node.js-API gekoppeld aan PostgreSQL en microservices in Python, waarbij de ontwikkeling is versneld door geavanceerd gebruik van AI.',
-            seeMore: 'Bekijk meer →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'Ik schrijf over development, automatisering, security en andere onderwerpen waar ik gepassioneerd over ben.',
-            post1Cat: 'Development', post1Date: '15 mei 2026', post1Title: 'Hoe ik leerde schone code te schrijven',
-            post1Desc: 'Reflecties over de principes die mijn manier van programmeren veranderden en waarom leesbare code meer waard is dan "slimme" code.',
-            post2Cat: 'Automatisering', post2Date: '28 apr 2026', post2Title: 'Testautomatisering: waar te beginnen',
-            post2Desc: 'Een praktische gids voor je eerste stappen in QA automation, de tools die het leren waard zijn en de fouten die je moet vermijden.',
-            post3Cat: 'Cybersecurity', post3Date: '10 apr 2026', post3Title: 'Beveiligingsfouten die elke dev maakt',
-            post3Desc: 'Een overzicht van de meest voorkomende kwetsbaarheden in webapplicaties en hoe je ze vanaf de eerste regel code voorkomt.',
-            readMore: 'Lees meer →', readMore2: 'Lees meer →', readMore3: 'Lees meer →',
-            contactTitle: '🤝 Zullen we samenwerken?',
-            contactLead: 'Ik ben actief op zoek naar nieuwe stabiele banen voor de lange termijn, maar sta ook open voor freelance projectwerk en samenwerkingen. Denk je dat ik in jouw team pas, of wil je gewoon hallo zeggen? Schrijf me. Ik antwoord zo snel mogelijk.',
-            footerText: 'Ontworpen en gebouwd met passie, toewijding en creativiteit.'
-        },
-        sv: {
-            navAbout: 'Om mig', navSkills: 'Färdigheter', navProjects: 'Projekt', navBlog: 'Blogg', navContact: 'Kontakt',
-            eyebrow: '👋 Hej, välkommen till min portfolio! :)',
-            heroTitle: 'Jag är <span class="grad">Bruno Carbone</span>',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'Brinner för cybersäkerhet', 'Problemlösare', 'Lär mig ständigt något nytt'],
-            tagline: 'Nyfiken av naturen bygger jag robust mjukvara och pressar den till det yttersta för att göra den säkrare. Jag tycker om att skapa pålitliga och väl genomarbetade saker som fungerar lika bra på insidan som på utsidan.',
-            aboutTitle: '🧑‍💻 Om mig',
-            aboutP1: 'Hej! Jag heter Bruno och är utvecklare och QA Automation Engineer baserad i Panama. Min väg in i tekniken började med cybersäkerheten: när jag studerade ämnet blev jag mycket mer medveten om dess betydelse och började tillämpa principerna i min vardag. Senare, på mitt första jobb som QA Engineer, kom jag för första gången i riktig kontakt med programmering — och sedan dess har jag inte slutat.',
-            aboutP2: 'Jag rör mig mellan full-stack-utveckling och testautomatisering, och jag känner en äkta passion för cybersäkerhet. Jag gillar att bygga saker, men också att plocka isär dem för att förstå hur de kan göras säkrare och mer robusta.',
-            aboutP3: 'Utanför koden älskar jag promenader utomhus, att lära mig språk och att fördjupa mig i geografi, kulturer och historia. Jag fascineras av flyget och tanken på att resa världen runt: att knyta kontakter med människor från andra länder och personligen besöka platserna där händelserna som format nationernas öden ägde rum. Jag ser mig själv som väldigt öppen och beredd att ge allt, alltid på jakt efter att växa i ett team där jag kan tillföra värde och fortsätta lära mig. Jag är supervänlig och lugn. Jag försöker alltid bygga broar till människorna omkring mig och behandla alla med respekt och värdighet.',
-            degreesTitle: 'Universitetsexamina', certsTitle: 'Certifieringar', langsTitle: 'Språk',
-            speakLabel: 'Jag talar', learnLabel: 'Jag vill lära mig',
-            lang1: '🇪🇸 Spanska — Modersmål', lang2: '🇬🇧 Engelska — C2', lang3: '🇮🇹 Italienska — C2', lang4: '🇩🇪 Tyska — C1',
-            learnList: '🇵🇹 Portugisiska · 🇫🇷 Franska · 🇸🇪 Svenska · 🇳🇱 Nederländska · 🇭🇺 Ungerska',
-            expTitle: 'Arbetslivserfarenhet',
-            exp1Date: 'Sep 2025 — Nuvarande', exp1Role: 'Teknisk supportspecialist',
-            exp1Desc: 'Jag diagnostiserar och löser komplexa tekniska incidenter genom rotorsaksanalys och datagranskningar i realtid. Jag hanterar kritiska situationer under högt tryck, upptäcker och rapporterar misstänkt aktivitet och bedrägerier enligt strikta säkerhetsprotokoll, och prioriterar triage och eskalering av ärenden — och överträffar samtidigt tjänstens KPI:er och SLA:er.',
-            exp2Date: 'Jan 2020 — Dec 2023', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'Jag designade och underhöll automatiserade E2E-testsviter med Selenium (Java) enligt Page Object Model-mönstret och minskade regressionstiden med 40 %. Jag validerade API:er med Postman och REST Assured, tillämpade BDD med Cucumber och integrerade tester och säkerhetsanalyser (SAST med SonarQube) i CI/CD-pipelines, samtidigt som jag hanterade defekternas livscykel i Jira enligt Agile/Scrum.',
-            skillsTitle: '🛠️ Färdigheter & Stack',
-            skillsSub: 'Verktygen jag använder för att bygga, testa och säkra mina projekt.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 Mina projekt',
-            projSub: 'En komplett portfolio av mina nuvarande projekt, där jag kombinerar utveckling, automatisering och säkerhet.',
-            proj1Desc: 'System för säkerhetsövervakning och DevSecOps. Microservices-backend med en CI/CD-pipeline för statisk kodanalys (SonarQube) och API-tester (REST Assured). Skalbar, containerbaserad infrastruktur med intrångsdetektering i realtid via larm och centraliserad loggning i Splunk.',
-            proj2Name: 'Flerspråkig Full-Stack Hub',
-            proj2Desc: 'Digital portfolio och full-stack hub med ett reaktivt, SEO-optimerat gränssnitt. Distribuerad arkitektur bestående av ett transaktionellt Node.js-API kopplat till PostgreSQL och microservices i Python, där utvecklingen har snabbats upp genom avancerad användning av AI.',
-            seeMore: 'Se mer →',
-            blogTitle: '✍️ Blogg',
-            blogSub: 'Jag skriver om utveckling, automatisering, säkerhet och andra ämnen som jag brinner för.',
-            post1Cat: 'Utveckling', post1Date: '15 maj 2026', post1Title: 'Hur jag lärde mig skriva ren kod',
-            post1Desc: 'Reflektioner kring principerna som förändrade mitt sätt att programmera och varför läsbar kod är värd mer än "fyndig" kod.',
-            post2Cat: 'Automatisering', post2Date: '28 apr 2026', post2Title: 'Testautomatisering: var ska man börja?',
-            post2Desc: 'En praktisk guide för dina första steg inom QA automation, verktygen som är värda att lära sig och misstagen du bör undvika.',
-            post3Cat: 'Cybersäkerhet', post3Date: '10 apr 2026', post3Title: 'Säkerhetsmisstag som alla devs gör',
-            post3Desc: 'En genomgång av de vanligaste sårbarheterna i webbapplikationer och hur du förebygger dem från första kodraden.',
-            readMore: 'Läs mer →', readMore2: 'Läs mer →', readMore3: 'Läs mer →',
-            contactTitle: '🤝 Ska vi jobba ihop?',
-            contactLead: 'Jag söker aktivt nya stabila och långsiktiga jobbmöjligheter, men är även öppen för frilansuppdrag i projekt och samarbeten. Tycker du att jag skulle passa i ditt team, eller vill du bara säga hej? Skriv till mig. Jag svarar så snart jag kan.',
-            footerText: 'Designad och byggd med passion, hängivenhet och kreativitet.'
-        },
-        hu: {
-            navAbout: 'Rólam', navSkills: 'Készségek', navProjects: 'Projektek', navBlog: 'Blog', navContact: 'Kapcsolat',
-            eyebrow: '👋 Szia, üdvözöllek a portfóliómban! :)',
-            heroTitle: '<span class="grad">Bruno Carbone</span> vagyok',
-            roles: ['Full-Stack Developer', 'QA Automation Engineer', 'A kiberbiztonság szerelmese', 'Problémamegoldó', 'Mindig tanulok'],
-            tagline: 'Természetemnél fogva kíváncsi vagyok: robusztus szoftvereket építek, és a végsőkig tesztelem őket, hogy biztonságosabbá tegyem. Szeretek megbízható, igényes dolgokat alkotni, amelyek belül ugyanolyan jól működnek, mint kívül.',
-            aboutTitle: '🧑‍💻 Rólam',
-            aboutP1: 'Szia! Bruno vagyok, fejlesztő és QA Automation Engineer, Panamában élek. A technológiai utam a kiberbiztonsággal kezdődött: a tanulmányaim során sokkal tudatosabbá váltam a fontosságát illetően, és elkezdtem ezeket az elveket a mindennapi életemben is alkalmazni. Később, az első QA Engineer munkám során találkoztam először igazán a programozással, és azóta sem álltam meg.',
-            aboutP2: 'A full-stack fejlesztés és a tesztautomatizálás között mozgok, és igazi szenvedélyt érzek a kiberbiztonság iránt. Szeretek dolgokat építeni, de szétszedni is, hogy megértsem, hogyan tehetők biztonságosabbá és robusztusabbá.',
-            aboutP3: 'A kódon kívül imádom a szabadtéri sétákat, a nyelvtanulást, valamint elmerülni a földrajzban, a kultúrákban és a történelemben. Lenyűgöz a repülés és a világ körüli utazás gondolata: kapcsolatot teremteni más országok embereivel, és személyesen megismerni azokat a helyeket, ahol a nemzetek sorsát meghatározó események történtek. Nagyon nyitott embernek tartom magam, aki kész mindent beleadni, és mindig olyan csapatban szeretnék fejlődni, ahol értéket teremthetek és tovább tanulhatok. Szuper barátságos és nyugodt vagyok. Mindig hidakat igyekszem építeni a körülöttem lévő emberekkel, és mindenkivel tisztelettel és méltósággal bánok.',
-            degreesTitle: 'Egyetemi végzettségek', certsTitle: 'Tanúsítványok', langsTitle: 'Nyelvek',
-            speakLabel: 'Beszélek', learnLabel: 'Tanulni szeretnék',
-            lang1: '🇪🇸 Spanyol — Anyanyelv', lang2: '🇬🇧 Angol — C2', lang3: '🇮🇹 Olasz — C2', lang4: '🇩🇪 Német — C1',
-            learnList: '🇵🇹 Portugál · 🇫🇷 Francia · 🇸🇪 Svéd · 🇳🇱 Holland · 🇭🇺 Magyar',
-            expTitle: 'Szakmai tapasztalat',
-            exp1Date: '2025. szept. — Jelenleg', exp1Role: 'Műszaki támogatási specialista',
-            exp1Desc: 'Összetett műszaki incidenseket diagnosztizálok és oldok meg gyökérok-elemzéssel és valós idejű adatauditokkal. Nagy nyomású, kritikus helyzeteket kezelek, szigorú biztonsági protokollok szerint észlelem és jelentem a gyanús tevékenységeket és csalásokat, valamint priorizálom a jegyek osztályozását és eszkalációját, túlteljesítve a szolgáltatás KPI-jait és SLA-it.',
-            exp2Date: '2020. jan. — 2023. dec.', exp2Role: 'QA Automation Engineer',
-            exp2Desc: 'E2E automatizált tesztcsomagokat terveztem és tartottam karban Selenium (Java) használatával a Page Object Model minta szerint, 40%-kal csökkentve a regressziós időt. API-kat validáltam Postmannel és REST Assured-del, BDD-t alkalmaztam Cucumberrel, és teszteket, valamint biztonsági elemzéseket (SAST SonarQube-bal) integráltam CI/CD pipeline-okba, a hibák életciklusát Jirában kezelve Agile/Scrum keretben.',
-            skillsTitle: '🛠️ Készségek & Stack',
-            skillsSub: 'Az eszközök, amelyekkel építem, tesztelem és védem a projektjeimet.',
-            cat3: 'QA & Automation', cat4: 'DevOps, Cloud & Tools',
-            projTitle: '🚀 Projektjeim',
-            projSub: 'Jelenlegi projektjeim teljes portfóliója, amelyekben a fejlesztést, az automatizálást és a biztonságot ötvözöm.',
-            proj1Desc: 'Biztonsági megfigyelő- és DevSecOps-rendszer. Mikroszolgáltatás-alapú backend CI/CD pipeline-nal statikus kódelemzéshez (SonarQube) és API-tesztekhez (REST Assured). Skálázható, konténeralapú infrastruktúra, valós idejű behatolásészleléssel, riasztásokkal és központosított naplózással a Splunkban.',
-            proj2Name: 'Többnyelvű Full-Stack Hub',
-            proj2Desc: 'Digitális portfólió és full-stack hub reaktív, SEO-ra optimalizált felülettel. Elosztott architektúra: tranzakciós Node.js API PostgreSQL-lel összekötve és Python mikroszolgáltatások, a fejlesztést pedig a mesterséges intelligencia fejlett használata gyorsította.',
-            seeMore: 'Továbbiak →',
-            blogTitle: '✍️ Blog',
-            blogSub: 'Fejlesztésről, automatizálásról, biztonságról és más, számomra izgalmas témákról írok.',
-            post1Cat: 'Fejlesztés', post1Date: '2026. máj. 15.', post1Title: 'Hogyan tanultam meg tiszta kódot írni',
-            post1Desc: 'Gondolatok azokról az elvekről, amelyek megváltoztatták a programozási stílusomat, és arról, miért ér többet az olvasható kód a „zseniális" kódnál.',
-            post2Cat: 'Automatizálás', post2Date: '2026. ápr. 28.', post2Title: 'Tesztautomatizálás: hol kezdjem?',
-            post2Desc: 'Gyakorlati útmutató az első lépésekhez a QA automatizálásban: mely eszközöket érdemes megtanulni, és milyen hibákat érdemes elkerülni.',
-            post3Cat: 'Kiberbiztonság', post3Date: '2026. ápr. 10.', post3Title: 'Biztonsági hibák, amelyeket minden fejlesztő elkövet',
-            post3Desc: 'A webalkalmazások leggyakoribb sérülékenységeinek áttekintése, és hogyan előzhetők meg már az első kódsortól.',
-            readMore: 'Tovább →', readMore2: 'Tovább →', readMore3: 'Tovább →',
-            contactTitle: '🤝 Dolgozzunk együtt?',
-            contactLead: 'Aktívan keresek új, stabil és hosszú távú munkalehetőségeket, de nyitott vagyok szabadúszó projektmunkákra és együttműködésekre is. Ha úgy gondolod, hogy illek a csapatodba, vagy csak köszönni szeretnél, írj nekem. Amint tudok, válaszolok.',
-            footerText: 'Szenvedéllyel, odaadással és kreativitással tervezve és építve.'
-        }
-    };
+    // ====== SALUDO ROTATORIO EN 9 IDIOMAS ======
+    // Ciclo de 5 s por saludo: 3 s visible + 0.5 s de salida + 1 s de pausa + 0.5 s de entrada
+    const greetings = [
+        'Hello! I am',
+        '¡Hola! Yo soy',
+        'Ciao! Io sono',
+        'Hallo! Ich bin',
+        'Olá! Eu sou',
+        'Salut ! Je suis',
+        'Hallo! Ik ben',
+        'Hej! Jag är',
+        'Szia! Én vagyok'
+    ];
+    const greetingEl = document.getElementById('greeting');
+    let greetIndex = 0;
+    const GREET_VISIBLE = 3000, GREET_EXIT = 500, GREET_GAP = 1000, GREET_ENTER = 500;
 
-    // ====== ESTADO DEL IDIOMA + TYPING ======
-    let roles = translations.es.roles;
-    let roleIndex = 0, charIndex = 0, deleting = false;
-    const typedEl = document.getElementById('typed');
-
-    function applyLanguage(code) {
-        const t = translations[code];
-        if (!t) return;
-        document.documentElement.lang = code;
-        document.querySelectorAll('[data-i18n]').forEach(el => {
-            const key = el.dataset.i18n;
-            if (t[key] !== undefined) el.textContent = t[key];
-        });
-        document.querySelectorAll('[data-i18n-html]').forEach(el => {
-            const key = el.dataset.i18nHtml;
-            if (t[key] !== undefined) el.innerHTML = t[key];
-        });
-        // Reinicia la animación de escritura con los roles del nuevo idioma
-        roles = t.roles;
-        roleIndex = 0; charIndex = 0; deleting = false;
-        typedEl.textContent = '';
-        // Mantiene el enlace a la página de proyectos en el idioma seleccionado
-        const seeMoreBtn = document.getElementById('seeMoreBtn');
-        if (seeMoreBtn) seeMoreBtn.href = 'Portfolio.html?lang=' + code;
+    function rotateGreeting() {
+        // El saludo actual se desplaza hacia arriba y desaparece
+        greetingEl.classList.add('greet-out');
+        setTimeout(() => {
+            // Un segundo después de irse, el siguiente entra y ocupa su lugar
+            greetIndex = (greetIndex + 1) % greetings.length;
+            greetingEl.textContent = greetings[greetIndex];
+            greetingEl.classList.remove('greet-out');
+            greetingEl.classList.add('greet-enter');
+            void greetingEl.offsetWidth; // fuerza reflow para que la entrada se anime
+            greetingEl.classList.remove('greet-enter');
+            setTimeout(rotateGreeting, GREET_ENTER + GREET_VISIBLE);
+        }, GREET_EXIT + GREET_GAP);
     }
+    setTimeout(rotateGreeting, GREET_ENTER + GREET_VISIBLE);
 
     // Scroll progress bar + nav background
     const progress = document.getElementById('progress');
@@ -1132,35 +667,6 @@
             navLinks.classList.remove('open');
         });
     });
-
-    // Language dropdown
-    const langDropdown = document.getElementById('langDropdown');
-    const langTrigger = document.getElementById('langTrigger');
-    const langMenu = document.getElementById('langMenu');
-    const langCurrent = document.getElementById('langCurrent');
-    langTrigger.addEventListener('click', (e) => {
-        e.stopPropagation();
-        langDropdown.classList.toggle('open');
-    });
-    langMenu.querySelectorAll('button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            langCurrent.textContent = btn.dataset.name;
-            langMenu.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            langDropdown.classList.remove('open');
-            applyLanguage(btn.dataset.lang);
-        });
-    });
-    document.addEventListener('click', (e) => {
-        if (!langDropdown.contains(e.target)) langDropdown.classList.remove('open');
-    });
-
-    // Si la URL trae ?lang= (p. ej. al volver desde la página de proyectos), aplica ese idioma
-    const urlLang = new URLSearchParams(location.search).get('lang');
-    if (urlLang && urlLang !== 'es' && translations[urlLang]) {
-        const urlBtn = langMenu.querySelector('button[data-lang="' + urlLang + '"]');
-        if (urlBtn) urlBtn.click();
-    }
 
     // Smooth scroll para los enlaces internos (sin href, así no se tratan como enlaces externos)
     document.querySelectorAll('[data-scroll]').forEach(el => {
@@ -1202,6 +708,9 @@
     sections.forEach(s => navObserver.observe(s));
 
     // Typing animation in hero
+    const roles = ['Full-Stack Developer', 'QA Automation Engineer', 'Passionate about cybersecurity', 'Problem solver', 'Always learning'];
+    let roleIndex = 0, charIndex = 0, deleting = false;
+    const typedEl = document.getElementById('typed');
     function type() {
         const current = roles[roleIndex];
         if (deleting) {

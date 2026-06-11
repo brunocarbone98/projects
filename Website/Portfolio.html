@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bruno Carbone — Proyectos</title>
+    <title>Bruno Carbone — Projects</title>
     <style>
         :root{
             --bg:#0a0a0c;
@@ -55,18 +55,6 @@
         .nav-links a{color:var(--muted);text-decoration:none;font-size:14px;transition:color .2s}
         .nav-links a:hover{color:var(--accent)}
         @media(max-width:680px){.nav-links{gap:12px}.nav-links a{font-size:12.5px}}
-
-        /* LANGUAGE DROPDOWN */
-        .lang-dropdown{position:relative}
-        .lang-trigger{display:inline-flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 13px;border-radius:8px;cursor:pointer;transition:all .2s}
-        .lang-trigger:hover{border-color:var(--accent);color:var(--accent)}
-        .lang-trigger svg{width:11px;height:11px;transition:transform .2s}
-        .lang-dropdown.open .lang-trigger svg{transform:rotate(180deg)}
-        .lang-menu{position:absolute;top:calc(100% + 8px);right:0;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:5px;width:max-content;box-shadow:0 16px 36px rgba(0,0,0,.5);opacity:0;visibility:hidden;transform:translateY(-6px);transition:opacity .2s,transform .2s,visibility .2s;z-index:60}
-        .lang-dropdown.open .lang-menu{opacity:1;visibility:visible;transform:translateY(0)}
-        .lang-menu button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--muted);font-family:var(--mono);font-size:12px;padding:7px 12px;border-radius:7px;cursor:pointer;transition:all .15s}
-        .lang-menu button:hover{color:var(--accent);background:rgba(34,211,238,.08)}
-        .lang-menu button.active{color:var(--accent)}
 
         /* HERO */
         header{padding:110px 0 56px;animation:fadeUp .8s ease both}
@@ -125,35 +113,18 @@
         <div class="nav-links">
             <a onclick="document.getElementById('cybershield').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">CyberShield</a>
             <a onclick="document.getElementById('fullstack-hub').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">Full-Stack Hub</a>
-            <a onclick="document.getElementById('portfolio-web').scrollIntoView({behavior:'smooth'})" style="cursor:pointer" data-i18n="navP3">Portafolio Web</a>
-            <a id="homeLink" href="MainPage.html" data-i18n="navHome">← Inicio</a>
-            <div class="lang-dropdown" id="langDropdown">
-                <button class="lang-trigger" id="langTrigger" aria-label="Seleccionar idioma">
-                    <span id="langCurrent">Español</span>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
-                </button>
-                <div class="lang-menu" id="langMenu">
-                    <button class="active" data-lang="es" data-name="Español">Español</button>
-                    <button data-lang="en" data-name="English">English</button>
-                    <button data-lang="it" data-name="Italiano">Italiano</button>
-                    <button data-lang="de" data-name="Deutsch">Deutsch</button>
-                    <button data-lang="pt" data-name="Português">Português</button>
-                    <button data-lang="fr" data-name="Français">Français</button>
-                    <button data-lang="nl" data-name="Nederlands">Nederlands</button>
-                    <button data-lang="sv" data-name="Svenska">Svenska</button>
-                    <button data-lang="hu" data-name="Magyar">Magyar</button>
-                </div>
-            </div>
+            <a onclick="document.getElementById('portfolio-web').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">Web Portfolio</a>
+            <a href="MainPage.html">← Home</a>
         </div>
     </div>
 </nav>
 
 <header>
     <div class="wrap">
-        <div class="eyebrow" data-i18n="eyebrow">carta de presentación</div>
-        <h1 data-i18n-html="pageTitle">Lo que he <span class="grad">construido</span></h1>
-        <p class="lead" data-i18n="lead">Una presentación en detalle de los proyectos que conforman mi portafolio: en qué consisten, el propósito de cada uno y el stack que los hace funcionar.</p>
-        <a onclick="document.getElementById('cybershield').scrollIntoView({behavior:'smooth'})" class="btn" style="cursor:pointer" data-i18n="viewBtn">Ver proyectos ↓</a>
+        <div class="eyebrow">calling card</div>
+        <h1>What I've <span class="grad">built</span></h1>
+        <p class="lead">A detailed look at the projects that make up my portfolio: what they are, the purpose behind each one, and the stack that makes them work.</p>
+        <a onclick="document.getElementById('cybershield').scrollIntoView({behavior:'smooth'})" class="btn" style="cursor:pointer">View projects ↓</a>
     </div>
 </header>
 
@@ -161,31 +132,31 @@
 <section class="project" id="cybershield">
     <div class="wrap">
         <div class="pnum">01</div>
-        <div class="ptag" data-i18n="p1Tag">DEVSECOPS · MONITOREO DE SEGURIDAD</div>
+        <div class="ptag">DEVSECOPS · SECURITY MONITORING</div>
         <h2>CyberShield</h2>
-        <p class="psummary" data-i18n="p1Summary">Un backend de microservicios con la seguridad integrada en cada etapa del ciclo de desarrollo, desde el código hasta la infraestructura en producción.</p>
+        <p class="psummary">A microservices backend with security built into every stage of the development cycle, from the code to the production infrastructure.</p>
 
         <div class="pgrid">
             <div>
                 <div class="block">
-                    <div class="block-label" data-i18n="whatLabel">En qué consiste</div>
-                    <p data-i18n="p1What">Un backend de microservicios automatizado, construido sobre un pipeline de CI/CD que ejecuta análisis estático de código y pruebas de API en cada cambio. La infraestructura está containerizada y es escalable, con detección de intrusiones en tiempo real mediante alertas y registro centralizado de toda la actividad del sistema.</p>
+                    <div class="block-label">What it is</div>
+                    <p>An automated microservices backend built on a CI/CD pipeline that runs static code analysis and API tests on every change. The infrastructure is containerized and scalable, with real-time intrusion detection through alerts and centralized logging of all system activity.</p>
                 </div>
                 <div class="block">
-                    <div class="block-label" data-i18n="purposeLabel">Propósito</div>
-                    <p data-i18n="p1Purpose">Demostrar prácticas DevSecOps: integrar la seguridad y la calidad del código dentro del propio flujo de desarrollo, en lugar de tratarlas como un paso final. El sistema valida automáticamente cada cambio antes de desplegarlo y vigila la infraestructura en producción, reflejando la capacidad de construir software seguro, observable y listo para escalar.</p>
+                    <div class="block-label">Purpose</div>
+                    <p>To demonstrate DevSecOps practices: integrating security and code quality into the development flow itself, rather than treating them as a final step. The system automatically validates every change before deploying it and monitors the production infrastructure, reflecting the ability to build software that is secure, observable, and ready to scale.</p>
                 </div>
             </div>
 
             <div class="spec">
-                <div class="spec-head" data-i18n="stackHead">Stack utilizado</div>
-                <div class="spec-row"><div class="tech">Java · Spring Boot</div><div class="role" data-i18n="p1r1">Backend de microservicios</div></div>
-                <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role" data-i18n="p1r2">Pipeline CI/CD que orquesta build, análisis y pruebas</div></div>
-                <div class="spec-row"><div class="tech">SonarQube</div><div class="role" data-i18n="p1r3">Análisis estático de código: calidad y vulnerabilidades</div></div>
-                <div class="spec-row"><div class="tech">REST Assured</div><div class="role" data-i18n="p1r4">Pruebas automatizadas de la API</div></div>
-                <div class="spec-row"><div class="tech">Docker</div><div class="role" data-i18n="p1r5">Containerización de los servicios</div></div>
-                <div class="spec-row"><div class="tech">AWS</div><div class="role" data-i18n="p1r6">Infraestructura escalable</div></div>
-                <div class="spec-row"><div class="tech">Splunk</div><div class="role" data-i18n="p1r7">Registro centralizado y detección de intrusiones en tiempo real</div></div>
+                <div class="spec-head">Stack used</div>
+                <div class="spec-row"><div class="tech">Java · Spring Boot</div><div class="role">Microservices backend</div></div>
+                <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI/CD pipeline orchestrating build, analysis, and tests</div></div>
+                <div class="spec-row"><div class="tech">SonarQube</div><div class="role">Static code analysis: quality and vulnerabilities</div></div>
+                <div class="spec-row"><div class="tech">REST Assured</div><div class="role">Automated API testing</div></div>
+                <div class="spec-row"><div class="tech">Docker</div><div class="role">Containerization of the services</div></div>
+                <div class="spec-row"><div class="tech">AWS</div><div class="role">Scalable infrastructure</div></div>
+                <div class="spec-row"><div class="tech">Splunk</div><div class="role">Centralized logging and real-time intrusion detection</div></div>
             </div>
         </div>
     </div>
@@ -195,30 +166,30 @@
 <section class="project" id="fullstack-hub">
     <div class="wrap">
         <div class="pnum">02</div>
-        <div class="ptag" data-i18n="p2Tag">FULL-STACK · ARQUITECTURA DISTRIBUIDA</div>
+        <div class="ptag">FULL-STACK · DISTRIBUTED ARCHITECTURE</div>
         <h2>Full-Stack Hub</h2>
-        <p class="psummary" data-i18n="p2Summary">Una interfaz reactiva y multilingüe sobre una arquitectura distribuida que conecta varios lenguajes y servicios en un solo sistema.</p>
+        <p class="psummary">A reactive, multilingual interface on top of a distributed architecture that connects multiple languages and services into a single system.</p>
 
         <div class="pgrid">
             <div>
                 <div class="block">
-                    <div class="block-label" data-i18n="whatLabel2">En qué consiste</div>
-                    <p data-i18n="p2What">Una interfaz web reactiva y optimizada para SEO, respaldada por una arquitectura distribuida: una API transaccional en Node.js conectada a una base de datos PostgreSQL, junto a microservicios escritos en Python. El frontend y el backend trabajan en conjunto como un único hub con soporte multilingüe.</p>
+                    <div class="block-label">What it is</div>
+                    <p>A reactive, SEO-optimized web interface backed by a distributed architecture: a transactional Node.js API connected to a PostgreSQL database, alongside microservices written in Python. The frontend and backend work together as a single hub with multilingual support.</p>
                 </div>
                 <div class="block">
-                    <div class="block-label" data-i18n="purposeLabel2">Propósito</div>
-                    <p data-i18n="p2Purpose">Demostrar capacidad full-stack de punta a punta: diseñar un frontend moderno y rápido y, a la vez, orquestar un backend distribuido donde distintos lenguajes y servicios (Node.js y Python) se comunican y comparten persistencia. Refleja el manejo de arquitecturas reales de producción, no de un sitio estático.</p>
+                    <div class="block-label">Purpose</div>
+                    <p>To demonstrate end-to-end full-stack capability: designing a modern, fast frontend while orchestrating a distributed backend where different languages and services (Node.js and Python) communicate and share persistence. It reflects experience with real production architectures, not just a static site.</p>
                 </div>
             </div>
 
             <div class="spec">
-                <div class="spec-head" data-i18n="stackHead2">Stack utilizado</div>
-                <div class="spec-row"><div class="tech">Next.js · React</div><div class="role" data-i18n="p2r1">Interfaz reactiva con renderizado optimizado para SEO</div></div>
-                <div class="spec-row"><div class="tech">TypeScript</div><div class="role" data-i18n="p2r2">Tipado estático en todo el frontend</div></div>
-                <div class="spec-row"><div class="tech">Tailwind CSS</div><div class="role" data-i18n="p2r3">Sistema de estilos</div></div>
-                <div class="spec-row"><div class="tech">Node.js · Express</div><div class="role" data-i18n="p2r4">API transaccional</div></div>
-                <div class="spec-row"><div class="tech">PostgreSQL</div><div class="role" data-i18n="p2r5">Persistencia de datos</div></div>
-                <div class="spec-row"><div class="tech">Python</div><div class="role" data-i18n="p2r6">Microservicios de procesamiento</div></div>
+                <div class="spec-head">Stack used</div>
+                <div class="spec-row"><div class="tech">Next.js · React</div><div class="role">Reactive interface with SEO-optimized rendering</div></div>
+                <div class="spec-row"><div class="tech">TypeScript</div><div class="role">Static typing across the entire frontend</div></div>
+                <div class="spec-row"><div class="tech">Tailwind CSS</div><div class="role">Styling system</div></div>
+                <div class="spec-row"><div class="tech">Node.js · Express</div><div class="role">Transactional API</div></div>
+                <div class="spec-row"><div class="tech">PostgreSQL</div><div class="role">Data persistence</div></div>
+                <div class="spec-row"><div class="tech">Python</div><div class="role">Processing microservices</div></div>
             </div>
         </div>
     </div>
@@ -228,480 +199,36 @@
 <section class="project" id="portfolio-web">
     <div class="wrap">
         <div class="pnum">03</div>
-        <div class="ptag" data-i18n="p3Tag">FRONTEND · WEB MULTILINGÜE</div>
-        <h2 data-i18n="p3Name">Portafolio Web Personal</h2>
-        <p class="psummary" data-i18n="p3Summary">Este mismo sitio: un portafolio de dos páginas, traducido a nueve idiomas y construido desde cero sin frameworks, solo con tecnologías web puras.</p>
+        <div class="ptag">FRONTEND · VANILLA WEB</div>
+        <h2>Personal Web Portfolio</h2>
+        <p class="psummary">This very site: a two-page portfolio built from scratch without frameworks — pure web technologies only.</p>
 
         <div class="pgrid">
             <div>
                 <div class="block">
-                    <div class="block-label" data-i18n="whatLabel3">En qué consiste</div>
-                    <p data-i18n="p3What">Un portafolio personal compuesto por dos páginas conectadas: la página principal —con mi presentación, experiencia, habilidades y blog— y esta página de proyectos. Todo está construido desde cero con HTML, CSS y JavaScript puro, e incluye un sistema de internacionalización propio con nueve idiomas sincronizado entre ambas páginas, animaciones de aparición y de escritura, un fondo que cambia sutilmente de color y un diseño totalmente responsivo.</p>
+                    <div class="block-label">What it is</div>
+                    <p>A personal portfolio made up of two connected pages: the main page — with my introduction, experience, and skills — and this projects page. Everything is built from scratch with plain HTML, CSS, and JavaScript, and includes a hero greeting that rotates through nine languages, reveal and typing animations, a background that subtly shifts colors, and a fully responsive design.</p>
                 </div>
                 <div class="block">
-                    <div class="block-label" data-i18n="purposeLabel3">Propósito</div>
-                    <p data-i18n="p3Purpose">Demostrar dominio de los fundamentos del frontend sin depender de frameworks: construir una experiencia interactiva, multilingüe y pulida usando solo tecnologías web nativas. Además, es mi carta de presentación en acción: el proyecto que estás evaluando es la misma página en la que lo estás leyendo.</p>
+                    <div class="block-label">Purpose</div>
+                    <p>To demonstrate command of frontend fundamentals without relying on frameworks: building an interactive, polished experience using only native web technologies. It is also my calling card in action: the project you are evaluating is the very page you are reading it on.</p>
                 </div>
             </div>
 
             <div class="spec">
-                <div class="spec-head" data-i18n="stackHead3">Stack utilizado</div>
-                <div class="spec-row"><div class="tech">HTML5</div><div class="role" data-i18n="p3r1">Estructura semántica de ambas páginas</div></div>
-                <div class="spec-row"><div class="tech">CSS3</div><div class="role" data-i18n="p3r2">Animaciones, gradientes dinámicos y diseño responsivo</div></div>
-                <div class="spec-row"><div class="tech">JavaScript</div><div class="role" data-i18n="p3r3">Toda la interactividad, sin frameworks ni librerías</div></div>
-                <div class="spec-row"><div class="tech">i18n</div><div class="role" data-i18n="p3r4">Sistema propio de nueve idiomas, sincronizado entre páginas vía URL</div></div>
-                <div class="spec-row"><div class="tech">Google Fonts</div><div class="role" data-i18n="p3r5">Tipografía: Space Grotesk, Inter y JetBrains Mono</div></div>
+                <div class="spec-head">Stack used</div>
+                <div class="spec-row"><div class="tech">HTML5</div><div class="role">Semantic structure of both pages</div></div>
+                <div class="spec-row"><div class="tech">CSS3</div><div class="role">Animations, dynamic gradients, and responsive design</div></div>
+                <div class="spec-row"><div class="tech">JavaScript</div><div class="role">All the interactivity — including the nine-language rotating greeting — with no frameworks or libraries</div></div>
+                <div class="spec-row"><div class="tech">Google Fonts</div><div class="role">Typography: Space Grotesk, Inter, and JetBrains Mono</div></div>
             </div>
         </div>
     </div>
 </section>
 
 <footer>
-    <div class="wrap" data-i18n="footerText">Diseñado y construido con pasión, dedicación y creatividad.</div>
+    <div class="wrap">Designed and built with passion, dedication, and creativity.</div>
 </footer>
-
-<script>
-    // ====== TRADUCCIONES ======
-    const translations = {
-        es: {
-            docTitle: 'Bruno Carbone — Proyectos',
-            navHome: '← Inicio', navP3: 'Portafolio Web',
-            eyebrow: 'carta de presentación',
-            pageTitle: 'Lo que he <span class="grad">construido</span>',
-            lead: 'Una presentación en detalle de los proyectos que conforman mi portafolio: en qué consisten, el propósito de cada uno y el stack que los hace funcionar.',
-            viewBtn: 'Ver proyectos ↓',
-            p1Tag: 'DEVSECOPS · MONITOREO DE SEGURIDAD',
-            p1Summary: 'Un backend de microservicios con la seguridad integrada en cada etapa del ciclo de desarrollo, desde el código hasta la infraestructura en producción.',
-            whatLabel: 'En qué consiste', whatLabel2: 'En qué consiste', whatLabel3: 'En qué consiste',
-            purposeLabel: 'Propósito', purposeLabel2: 'Propósito', purposeLabel3: 'Propósito',
-            stackHead: 'Stack utilizado', stackHead2: 'Stack utilizado', stackHead3: 'Stack utilizado',
-            p1What: 'Un backend de microservicios automatizado, construido sobre un pipeline de CI/CD que ejecuta análisis estático de código y pruebas de API en cada cambio. La infraestructura está containerizada y es escalable, con detección de intrusiones en tiempo real mediante alertas y registro centralizado de toda la actividad del sistema.',
-            p1Purpose: 'Demostrar prácticas DevSecOps: integrar la seguridad y la calidad del código dentro del propio flujo de desarrollo, en lugar de tratarlas como un paso final. El sistema valida automáticamente cada cambio antes de desplegarlo y vigila la infraestructura en producción, reflejando la capacidad de construir software seguro, observable y listo para escalar.',
-            p1r1: 'Backend de microservicios',
-            p1r2: 'Pipeline CI/CD que orquesta build, análisis y pruebas',
-            p1r3: 'Análisis estático de código: calidad y vulnerabilidades',
-            p1r4: 'Pruebas automatizadas de la API',
-            p1r5: 'Containerización de los servicios',
-            p1r6: 'Infraestructura escalable',
-            p1r7: 'Registro centralizado y detección de intrusiones en tiempo real',
-            p2Tag: 'FULL-STACK · ARQUITECTURA DISTRIBUIDA',
-            p2Summary: 'Una interfaz reactiva y multilingüe sobre una arquitectura distribuida que conecta varios lenguajes y servicios en un solo sistema.',
-            p2What: 'Una interfaz web reactiva y optimizada para SEO, respaldada por una arquitectura distribuida: una API transaccional en Node.js conectada a una base de datos PostgreSQL, junto a microservicios escritos en Python. El frontend y el backend trabajan en conjunto como un único hub con soporte multilingüe.',
-            p2Purpose: 'Demostrar capacidad full-stack de punta a punta: diseñar un frontend moderno y rápido y, a la vez, orquestar un backend distribuido donde distintos lenguajes y servicios (Node.js y Python) se comunican y comparten persistencia. Refleja el manejo de arquitecturas reales de producción, no de un sitio estático.',
-            p2r1: 'Interfaz reactiva con renderizado optimizado para SEO',
-            p2r2: 'Tipado estático en todo el frontend',
-            p2r3: 'Sistema de estilos',
-            p2r4: 'API transaccional',
-            p2r5: 'Persistencia de datos',
-            p2r6: 'Microservicios de procesamiento',
-            p3Tag: 'FRONTEND · WEB MULTILINGÜE',
-            p3Name: 'Portafolio Web Personal',
-            p3Summary: 'Este mismo sitio: un portafolio de dos páginas, traducido a nueve idiomas y construido desde cero sin frameworks, solo con tecnologías web puras.',
-            p3What: 'Un portafolio personal compuesto por dos páginas conectadas: la página principal —con mi presentación, experiencia, habilidades y blog— y esta página de proyectos. Todo está construido desde cero con HTML, CSS y JavaScript puro, e incluye un sistema de internacionalización propio con nueve idiomas sincronizado entre ambas páginas, animaciones de aparición y de escritura, un fondo que cambia sutilmente de color y un diseño totalmente responsivo.',
-            p3Purpose: 'Demostrar dominio de los fundamentos del frontend sin depender de frameworks: construir una experiencia interactiva, multilingüe y pulida usando solo tecnologías web nativas. Además, es mi carta de presentación en acción: el proyecto que estás evaluando es la misma página en la que lo estás leyendo.',
-            p3r1: 'Estructura semántica de ambas páginas',
-            p3r2: 'Animaciones, gradientes dinámicos y diseño responsivo',
-            p3r3: 'Toda la interactividad, sin frameworks ni librerías',
-            p3r4: 'Sistema propio de nueve idiomas, sincronizado entre páginas vía URL',
-            p3r5: 'Tipografía: Space Grotesk, Inter y JetBrains Mono',
-            footerText: 'Diseñado y construido con pasión, dedicación y creatividad.'
-        },
-        en: {
-            docTitle: 'Bruno Carbone — Projects',
-            navHome: '← Home', navP3: 'Web Portfolio',
-            eyebrow: 'calling card',
-            pageTitle: 'What I\'ve <span class="grad">built</span>',
-            lead: 'A detailed look at the projects that make up my portfolio: what they are, the purpose behind each one, and the stack that makes them work.',
-            viewBtn: 'View projects ↓',
-            p1Tag: 'DEVSECOPS · SECURITY MONITORING',
-            p1Summary: 'A microservices backend with security built into every stage of the development cycle, from the code to the production infrastructure.',
-            whatLabel: 'What it is', whatLabel2: 'What it is', whatLabel3: 'What it is',
-            purposeLabel: 'Purpose', purposeLabel2: 'Purpose', purposeLabel3: 'Purpose',
-            stackHead: 'Stack used', stackHead2: 'Stack used', stackHead3: 'Stack used',
-            p1What: 'An automated microservices backend built on a CI/CD pipeline that runs static code analysis and API tests on every change. The infrastructure is containerized and scalable, with real-time intrusion detection through alerts and centralized logging of all system activity.',
-            p1Purpose: 'To demonstrate DevSecOps practices: integrating security and code quality into the development flow itself, rather than treating them as a final step. The system automatically validates every change before deploying it and monitors the production infrastructure, reflecting the ability to build software that is secure, observable, and ready to scale.',
-            p1r1: 'Microservices backend',
-            p1r2: 'CI/CD pipeline orchestrating build, analysis, and tests',
-            p1r3: 'Static code analysis: quality and vulnerabilities',
-            p1r4: 'Automated API testing',
-            p1r5: 'Containerization of the services',
-            p1r6: 'Scalable infrastructure',
-            p1r7: 'Centralized logging and real-time intrusion detection',
-            p2Tag: 'FULL-STACK · DISTRIBUTED ARCHITECTURE',
-            p2Summary: 'A reactive, multilingual interface on top of a distributed architecture that connects multiple languages and services into a single system.',
-            p2What: 'A reactive, SEO-optimized web interface backed by a distributed architecture: a transactional Node.js API connected to a PostgreSQL database, alongside microservices written in Python. The frontend and backend work together as a single hub with multilingual support.',
-            p2Purpose: 'To demonstrate end-to-end full-stack capability: designing a modern, fast frontend while orchestrating a distributed backend where different languages and services (Node.js and Python) communicate and share persistence. It reflects experience with real production architectures, not just a static site.',
-            p2r1: 'Reactive interface with SEO-optimized rendering',
-            p2r2: 'Static typing across the entire frontend',
-            p2r3: 'Styling system',
-            p2r4: 'Transactional API',
-            p2r5: 'Data persistence',
-            p2r6: 'Processing microservices',
-            p3Tag: 'FRONTEND · MULTILINGUAL WEB',
-            p3Name: 'Personal Web Portfolio',
-            p3Summary: 'This very site: a two-page portfolio, translated into nine languages and built from scratch without frameworks — pure web technologies only.',
-            p3What: 'A personal portfolio made up of two connected pages: the main page — with my introduction, experience, skills, and blog — and this projects page. Everything is built from scratch with plain HTML, CSS, and JavaScript, and includes a custom internationalization system with nine languages synchronized between both pages, reveal and typing animations, a background that subtly shifts colors, and a fully responsive design.',
-            p3Purpose: 'To demonstrate command of frontend fundamentals without relying on frameworks: building an interactive, multilingual, polished experience using only native web technologies. It is also my calling card in action: the project you are evaluating is the very page you are reading it on.',
-            p3r1: 'Semantic structure of both pages',
-            p3r2: 'Animations, dynamic gradients, and responsive design',
-            p3r3: 'All the interactivity, with no frameworks or libraries',
-            p3r4: 'Custom nine-language system, synchronized between pages via the URL',
-            p3r5: 'Typography: Space Grotesk, Inter, and JetBrains Mono',
-            footerText: 'Designed and built with passion, dedication, and creativity.'
-        },
-        it: {
-            docTitle: 'Bruno Carbone — Progetti',
-            navHome: '← Home', navP3: 'Portfolio Web',
-            eyebrow: 'biglietto da visita',
-            pageTitle: 'Quello che ho <span class="grad">costruito</span>',
-            lead: 'Una presentazione dettagliata dei progetti che compongono il mio portfolio: in cosa consistono, lo scopo di ciascuno e lo stack che li fa funzionare.',
-            viewBtn: 'Vedi i progetti ↓',
-            p1Tag: 'DEVSECOPS · MONITORAGGIO DELLA SICUREZZA',
-            p1Summary: 'Un backend a microservizi con la sicurezza integrata in ogni fase del ciclo di sviluppo, dal codice all\'infrastruttura in produzione.',
-            whatLabel: 'In cosa consiste', whatLabel2: 'In cosa consiste', whatLabel3: 'In cosa consiste',
-            purposeLabel: 'Scopo', purposeLabel2: 'Scopo', purposeLabel3: 'Scopo',
-            stackHead: 'Stack utilizzato', stackHead2: 'Stack utilizzato', stackHead3: 'Stack utilizzato',
-            p1What: 'Un backend a microservizi automatizzato, costruito su una pipeline CI/CD che esegue analisi statica del codice e test delle API a ogni modifica. L\'infrastruttura è containerizzata e scalabile, con rilevamento delle intrusioni in tempo reale tramite avvisi e registrazione centralizzata di tutta l\'attività del sistema.',
-            p1Purpose: 'Dimostrare pratiche DevSecOps: integrare la sicurezza e la qualità del codice nel flusso di sviluppo stesso, invece di trattarle come un passaggio finale. Il sistema valida automaticamente ogni modifica prima del deploy e sorveglia l\'infrastruttura in produzione, riflettendo la capacità di costruire software sicuro, osservabile e pronto a scalare.',
-            p1r1: 'Backend a microservizi',
-            p1r2: 'Pipeline CI/CD che orchestra build, analisi e test',
-            p1r3: 'Analisi statica del codice: qualità e vulnerabilità',
-            p1r4: 'Test automatizzati delle API',
-            p1r5: 'Containerizzazione dei servizi',
-            p1r6: 'Infrastruttura scalabile',
-            p1r7: 'Log centralizzati e rilevamento delle intrusioni in tempo reale',
-            p2Tag: 'FULL-STACK · ARCHITETTURA DISTRIBUITA',
-            p2Summary: 'Un\'interfaccia reattiva e multilingue su un\'architettura distribuita che collega diversi linguaggi e servizi in un unico sistema.',
-            p2What: 'Un\'interfaccia web reattiva e ottimizzata per la SEO, sostenuta da un\'architettura distribuita: un\'API transazionale in Node.js collegata a un database PostgreSQL, insieme a microservizi scritti in Python. Frontend e backend lavorano insieme come un unico hub con supporto multilingue.',
-            p2Purpose: 'Dimostrare una capacità full-stack completa: progettare un frontend moderno e veloce e, allo stesso tempo, orchestrare un backend distribuito in cui linguaggi e servizi diversi (Node.js e Python) comunicano e condividono la persistenza. Riflette la gestione di architetture reali di produzione, non di un sito statico.',
-            p2r1: 'Interfaccia reattiva con rendering ottimizzato per la SEO',
-            p2r2: 'Tipizzazione statica su tutto il frontend',
-            p2r3: 'Sistema di stili',
-            p2r4: 'API transazionale',
-            p2r5: 'Persistenza dei dati',
-            p2r6: 'Microservizi di elaborazione',
-            p3Tag: 'FRONTEND · WEB MULTILINGUE',
-            p3Name: 'Portfolio Web Personale',
-            p3Summary: 'Proprio questo sito: un portfolio di due pagine, tradotto in nove lingue e costruito da zero senza framework, solo con tecnologie web pure.',
-            p3What: 'Un portfolio personale composto da due pagine collegate: la pagina principale — con la mia presentazione, esperienza, competenze e blog — e questa pagina dei progetti. Tutto è costruito da zero con HTML, CSS e JavaScript puro, e include un sistema di internazionalizzazione proprio con nove lingue sincronizzato tra le due pagine, animazioni di comparsa e di scrittura, uno sfondo che cambia colore in modo sottile e un design completamente responsive.',
-            p3Purpose: 'Dimostrare la padronanza dei fondamenti del frontend senza dipendere da framework: costruire un\'esperienza interattiva, multilingue e curata usando solo tecnologie web native. È inoltre il mio biglietto da visita in azione: il progetto che stai valutando è la stessa pagina su cui lo stai leggendo.',
-            p3r1: 'Struttura semantica di entrambe le pagine',
-            p3r2: 'Animazioni, gradienti dinamici e design responsive',
-            p3r3: 'Tutta l\'interattività, senza framework né librerie',
-            p3r4: 'Sistema proprio a nove lingue, sincronizzato tra le pagine tramite URL',
-            p3r5: 'Tipografia: Space Grotesk, Inter e JetBrains Mono',
-            footerText: 'Progettato e costruito con passione, dedizione e creatività.'
-        },
-        de: {
-            docTitle: 'Bruno Carbone — Projekte',
-            navHome: '← Startseite', navP3: 'Web-Portfolio',
-            eyebrow: 'Visitenkarte',
-            pageTitle: 'Was ich <span class="grad">gebaut</span> habe',
-            lead: 'Ein detaillierter Einblick in die Projekte meines Portfolios: worum es sich handelt, welchen Zweck jedes einzelne verfolgt und welcher Stack sie zum Laufen bringt.',
-            viewBtn: 'Projekte ansehen ↓',
-            p1Tag: 'DEVSECOPS · SICHERHEITSÜBERWACHUNG',
-            p1Summary: 'Ein Microservices-Backend mit Sicherheit, die in jede Phase des Entwicklungszyklus integriert ist – vom Code bis zur Produktionsinfrastruktur.',
-            whatLabel: 'Worum es geht', whatLabel2: 'Worum es geht', whatLabel3: 'Worum es geht',
-            purposeLabel: 'Zweck', purposeLabel2: 'Zweck', purposeLabel3: 'Zweck',
-            stackHead: 'Verwendeter Stack', stackHead2: 'Verwendeter Stack', stackHead3: 'Verwendeter Stack',
-            p1What: 'Ein automatisiertes Microservices-Backend, aufgebaut auf einer CI/CD-Pipeline, die bei jeder Änderung statische Codeanalysen und API-Tests ausführt. Die Infrastruktur ist containerisiert und skalierbar, mit Echtzeit-Intrusionserkennung durch Alarme und zentralisierter Protokollierung aller Systemaktivitäten.',
-            p1Purpose: 'DevSecOps-Praktiken demonstrieren: Sicherheit und Codequalität in den Entwicklungsfluss selbst integrieren, statt sie als letzten Schritt zu behandeln. Das System validiert jede Änderung automatisch vor dem Deployment und überwacht die Produktionsinfrastruktur – ein Beleg für die Fähigkeit, sichere, beobachtbare und skalierbare Software zu bauen.',
-            p1r1: 'Microservices-Backend',
-            p1r2: 'CI/CD-Pipeline, die Build, Analyse und Tests orchestriert',
-            p1r3: 'Statische Codeanalyse: Qualität und Schwachstellen',
-            p1r4: 'Automatisierte API-Tests',
-            p1r5: 'Containerisierung der Services',
-            p1r6: 'Skalierbare Infrastruktur',
-            p1r7: 'Zentralisierte Logs und Echtzeit-Intrusionserkennung',
-            p2Tag: 'FULL-STACK · VERTEILTE ARCHITEKTUR',
-            p2Summary: 'Eine reaktive, mehrsprachige Oberfläche auf einer verteilten Architektur, die mehrere Sprachen und Services in einem einzigen System verbindet.',
-            p2What: 'Eine reaktive, SEO-optimierte Weboberfläche, getragen von einer verteilten Architektur: eine transaktionale Node.js-API, verbunden mit einer PostgreSQL-Datenbank, sowie in Python geschriebene Microservices. Frontend und Backend arbeiten als ein einziger Hub mit mehrsprachiger Unterstützung zusammen.',
-            p2Purpose: 'End-to-End-Full-Stack-Kompetenz demonstrieren: ein modernes, schnelles Frontend entwerfen und zugleich ein verteiltes Backend orchestrieren, in dem verschiedene Sprachen und Services (Node.js und Python) kommunizieren und sich die Persistenz teilen. Das spiegelt den Umgang mit echten Produktionsarchitekturen wider – nicht mit einer statischen Website.',
-            p2r1: 'Reaktive Oberfläche mit SEO-optimiertem Rendering',
-            p2r2: 'Statische Typisierung im gesamten Frontend',
-            p2r3: 'Styling-System',
-            p2r4: 'Transaktionale API',
-            p2r5: 'Datenpersistenz',
-            p2r6: 'Verarbeitungs-Microservices',
-            p3Tag: 'FRONTEND · MEHRSPRACHIGE WEBSITE',
-            p3Name: 'Persönliches Web-Portfolio',
-            p3Summary: 'Genau diese Website: ein zweiseitiges Portfolio, in neun Sprachen übersetzt und von Grund auf ohne Frameworks gebaut – nur mit puren Webtechnologien.',
-            p3What: 'Ein persönliches Portfolio aus zwei verbundenen Seiten: der Hauptseite – mit meiner Vorstellung, Erfahrung, meinen Fähigkeiten und dem Blog – und dieser Projektseite. Alles ist von Grund auf mit reinem HTML, CSS und JavaScript gebaut und umfasst ein eigenes Internationalisierungssystem mit neun Sprachen, das zwischen beiden Seiten synchronisiert wird, Einblend- und Schreibanimationen, einen Hintergrund, der sanft die Farben wechselt, und ein vollständig responsives Design.',
-            p3Purpose: 'Die Beherrschung der Frontend-Grundlagen ohne Frameworks demonstrieren: eine interaktive, mehrsprachige und ausgefeilte Erfahrung nur mit nativen Webtechnologien bauen. Außerdem ist es meine Visitenkarte in Aktion: Das Projekt, das du gerade bewertest, ist genau die Seite, auf der du es liest.',
-            p3r1: 'Semantische Struktur beider Seiten',
-            p3r2: 'Animationen, dynamische Verläufe und responsives Design',
-            p3r3: 'Die gesamte Interaktivität, ohne Frameworks oder Bibliotheken',
-            p3r4: 'Eigenes Neun-Sprachen-System, über die URL zwischen den Seiten synchronisiert',
-            p3r5: 'Typografie: Space Grotesk, Inter und JetBrains Mono',
-            footerText: 'Mit Leidenschaft, Hingabe und Kreativität entworfen und gebaut.'
-        },
-        pt: {
-            docTitle: 'Bruno Carbone — Projetos',
-            navHome: '← Início', navP3: 'Portefólio Web',
-            eyebrow: 'cartão de visita',
-            pageTitle: 'O que <span class="grad">construí</span>',
-            lead: 'Uma apresentação detalhada dos projetos que compõem o meu portefólio: em que consistem, o propósito de cada um e o stack que os faz funcionar.',
-            viewBtn: 'Ver projetos ↓',
-            p1Tag: 'DEVSECOPS · MONITORIZAÇÃO DE SEGURANÇA',
-            p1Summary: 'Um backend de microsserviços com a segurança integrada em cada etapa do ciclo de desenvolvimento, do código até à infraestrutura em produção.',
-            whatLabel: 'Em que consiste', whatLabel2: 'Em que consiste', whatLabel3: 'Em que consiste',
-            purposeLabel: 'Propósito', purposeLabel2: 'Propósito', purposeLabel3: 'Propósito',
-            stackHead: 'Stack utilizado', stackHead2: 'Stack utilizado', stackHead3: 'Stack utilizado',
-            p1What: 'Um backend de microsserviços automatizado, construído sobre um pipeline de CI/CD que executa análise estática de código e testes de API a cada alteração. A infraestrutura é containerizada e escalável, com deteção de intrusões em tempo real através de alertas e registo centralizado de toda a atividade do sistema.',
-            p1Purpose: 'Demonstrar práticas DevSecOps: integrar a segurança e a qualidade do código no próprio fluxo de desenvolvimento, em vez de as tratar como um passo final. O sistema valida automaticamente cada alteração antes de a implementar e vigia a infraestrutura em produção, refletindo a capacidade de construir software seguro, observável e pronto a escalar.',
-            p1r1: 'Backend de microsserviços',
-            p1r2: 'Pipeline de CI/CD que orquestra build, análises e testes',
-            p1r3: 'Análise estática de código: qualidade e vulnerabilidades',
-            p1r4: 'Testes automatizados da API',
-            p1r5: 'Containerização dos serviços',
-            p1r6: 'Infraestrutura escalável',
-            p1r7: 'Registo centralizado e deteção de intrusões em tempo real',
-            p2Tag: 'FULL-STACK · ARQUITETURA DISTRIBUÍDA',
-            p2Summary: 'Uma interface reativa e multilingue sobre uma arquitetura distribuída que liga várias linguagens e serviços num único sistema.',
-            p2What: 'Uma interface web reativa e otimizada para SEO, sustentada por uma arquitetura distribuída: uma API transacional em Node.js ligada a uma base de dados PostgreSQL, juntamente com microsserviços escritos em Python. O frontend e o backend trabalham em conjunto como um único hub com suporte multilingue.',
-            p2Purpose: 'Demonstrar capacidade full-stack de ponta a ponta: desenhar um frontend moderno e rápido e, ao mesmo tempo, orquestrar um backend distribuído onde diferentes linguagens e serviços (Node.js e Python) comunicam e partilham persistência. Reflete o domínio de arquiteturas reais de produção, e não de um site estático.',
-            p2r1: 'Interface reativa com renderização otimizada para SEO',
-            p2r2: 'Tipagem estática em todo o frontend',
-            p2r3: 'Sistema de estilos',
-            p2r4: 'API transacional',
-            p2r5: 'Persistência de dados',
-            p2r6: 'Microsserviços de processamento',
-            p3Tag: 'FRONTEND · WEB MULTILINGUE',
-            p3Name: 'Portefólio Web Pessoal',
-            p3Summary: 'Este mesmo site: um portefólio de duas páginas, traduzido para nove línguas e construído de raiz sem frameworks, apenas com tecnologias web puras.',
-            p3What: 'Um portefólio pessoal composto por duas páginas ligadas: a página principal — com a minha apresentação, experiência, competências e blog — e esta página de projetos. Tudo está construído de raiz com HTML, CSS e JavaScript puro, e inclui um sistema de internacionalização próprio com nove línguas sincronizado entre as duas páginas, animações de aparecimento e de escrita, um fundo que muda subtilmente de cor e um design totalmente responsivo.',
-            p3Purpose: 'Demonstrar domínio dos fundamentos do frontend sem depender de frameworks: construir uma experiência interativa, multilingue e cuidada usando apenas tecnologias web nativas. É também o meu cartão de visita em ação: o projeto que estás a avaliar é a própria página em que o estás a ler.',
-            p3r1: 'Estrutura semântica de ambas as páginas',
-            p3r2: 'Animações, gradientes dinâmicos e design responsivo',
-            p3r3: 'Toda a interatividade, sem frameworks nem bibliotecas',
-            p3r4: 'Sistema próprio de nove línguas, sincronizado entre páginas via URL',
-            p3r5: 'Tipografia: Space Grotesk, Inter e JetBrains Mono',
-            footerText: 'Desenhado e construído com paixão, dedicação e criatividade.'
-        },
-        fr: {
-            docTitle: 'Bruno Carbone — Projets',
-            navHome: '← Accueil', navP3: 'Portfolio Web',
-            eyebrow: 'carte de visite',
-            pageTitle: 'Ce que j\'ai <span class="grad">construit</span>',
-            lead: 'Une présentation détaillée des projets qui composent mon portfolio : en quoi ils consistent, l\'objectif de chacun et le stack qui les fait fonctionner.',
-            viewBtn: 'Voir les projets ↓',
-            p1Tag: 'DEVSECOPS · SUPERVISION DE SÉCURITÉ',
-            p1Summary: 'Un backend en microservices avec la sécurité intégrée à chaque étape du cycle de développement, du code jusqu\'à l\'infrastructure en production.',
-            whatLabel: 'En quoi ça consiste', whatLabel2: 'En quoi ça consiste', whatLabel3: 'En quoi ça consiste',
-            purposeLabel: 'Objectif', purposeLabel2: 'Objectif', purposeLabel3: 'Objectif',
-            stackHead: 'Stack utilisé', stackHead2: 'Stack utilisé', stackHead3: 'Stack utilisé',
-            p1What: 'Un backend en microservices automatisé, construit sur un pipeline CI/CD qui exécute l\'analyse statique du code et les tests d\'API à chaque modification. L\'infrastructure est conteneurisée et évolutive, avec une détection d\'intrusion en temps réel grâce à des alertes et une journalisation centralisée de toute l\'activité du système.',
-            p1Purpose: 'Démontrer des pratiques DevSecOps : intégrer la sécurité et la qualité du code au cœur même du flux de développement, plutôt que de les traiter comme une étape finale. Le système valide automatiquement chaque modification avant de la déployer et surveille l\'infrastructure en production, reflétant la capacité à construire des logiciels sûrs, observables et prêts à évoluer.',
-            p1r1: 'Backend en microservices',
-            p1r2: 'Pipeline CI/CD orchestrant build, analyses et tests',
-            p1r3: 'Analyse statique du code : qualité et vulnérabilités',
-            p1r4: 'Tests automatisés de l\'API',
-            p1r5: 'Conteneurisation des services',
-            p1r6: 'Infrastructure évolutive',
-            p1r7: 'Journalisation centralisée et détection d\'intrusion en temps réel',
-            p2Tag: 'FULL-STACK · ARCHITECTURE DISTRIBUÉE',
-            p2Summary: 'Une interface réactive et multilingue reposant sur une architecture distribuée qui relie plusieurs langages et services en un seul système.',
-            p2What: 'Une interface web réactive et optimisée pour le SEO, soutenue par une architecture distribuée : une API transactionnelle en Node.js reliée à une base de données PostgreSQL, accompagnée de microservices écrits en Python. Le frontend et le backend fonctionnent ensemble comme un seul hub avec prise en charge multilingue.',
-            p2Purpose: 'Démontrer une capacité full-stack de bout en bout : concevoir un frontend moderne et rapide tout en orchestrant un backend distribué où différents langages et services (Node.js et Python) communiquent et partagent la persistance. Cela reflète la maîtrise d\'architectures réelles de production, et non d\'un simple site statique.',
-            p2r1: 'Interface réactive avec rendu optimisé pour le SEO',
-            p2r2: 'Typage statique sur tout le frontend',
-            p2r3: 'Système de styles',
-            p2r4: 'API transactionnelle',
-            p2r5: 'Persistance des données',
-            p2r6: 'Microservices de traitement',
-            p3Tag: 'FRONTEND · WEB MULTILINGUE',
-            p3Name: 'Portfolio Web Personnel',
-            p3Summary: 'Ce site même : un portfolio de deux pages, traduit en neuf langues et construit de zéro sans framework, uniquement avec des technologies web pures.',
-            p3What: 'Un portfolio personnel composé de deux pages reliées : la page principale — avec ma présentation, mon expérience, mes compétences et mon blog — et cette page de projets. Tout est construit de zéro en HTML, CSS et JavaScript pur, avec un système d\'internationalisation maison en neuf langues synchronisé entre les deux pages, des animations d\'apparition et d\'écriture, un fond qui change subtilement de couleur et un design entièrement responsive.',
-            p3Purpose: 'Démontrer la maîtrise des fondamentaux du frontend sans dépendre de frameworks : construire une expérience interactive, multilingue et soignée avec uniquement des technologies web natives. C\'est aussi ma carte de visite en action : le projet que tu évalues est la page même sur laquelle tu le lis.',
-            p3r1: 'Structure sémantique des deux pages',
-            p3r2: 'Animations, dégradés dynamiques et design responsive',
-            p3r3: 'Toute l\'interactivité, sans framework ni bibliothèque',
-            p3r4: 'Système maison à neuf langues, synchronisé entre les pages via l\'URL',
-            p3r5: 'Typographie : Space Grotesk, Inter et JetBrains Mono',
-            footerText: 'Conçu et construit avec passion, dévouement et créativité.'
-        },
-        nl: {
-            docTitle: 'Bruno Carbone — Projecten',
-            navHome: '← Home', navP3: 'Webportfolio',
-            eyebrow: 'visitekaartje',
-            pageTitle: 'Wat ik heb <span class="grad">gebouwd</span>',
-            lead: 'Een gedetailleerde presentatie van de projecten die mijn portfolio vormen: wat ze inhouden, het doel van elk project en de stack die ze laat draaien.',
-            viewBtn: 'Bekijk projecten ↓',
-            p1Tag: 'DEVSECOPS · SECURITYMONITORING',
-            p1Summary: 'Een microservices-backend met security ingebouwd in elke fase van de ontwikkelcyclus, van de code tot de productie-infrastructuur.',
-            whatLabel: 'Wat het is', whatLabel2: 'Wat het is', whatLabel3: 'Wat het is',
-            purposeLabel: 'Doel', purposeLabel2: 'Doel', purposeLabel3: 'Doel',
-            stackHead: 'Gebruikte stack', stackHead2: 'Gebruikte stack', stackHead3: 'Gebruikte stack',
-            p1What: 'Een geautomatiseerde microservices-backend, gebouwd op een CI/CD-pipeline die bij elke wijziging statische code-analyse en API-tests uitvoert. De infrastructuur is gecontaineriseerd en schaalbaar, met realtime intrusiedetectie via alerts en gecentraliseerde logging van alle systeemactiviteit.',
-            p1Purpose: 'DevSecOps-praktijken demonstreren: security en codekwaliteit integreren in de ontwikkelflow zelf, in plaats van ze als laatste stap te behandelen. Het systeem valideert elke wijziging automatisch vóór de deployment en bewaakt de productie-infrastructuur — een weerspiegeling van het vermogen om veilige, observeerbare en schaalbare software te bouwen.',
-            p1r1: 'Microservices-backend',
-            p1r2: 'CI/CD-pipeline die build, analyse en tests orkestreert',
-            p1r3: 'Statische code-analyse: kwaliteit en kwetsbaarheden',
-            p1r4: 'Geautomatiseerde API-tests',
-            p1r5: 'Containerisatie van de services',
-            p1r6: 'Schaalbare infrastructuur',
-            p1r7: 'Gecentraliseerde logging en realtime intrusiedetectie',
-            p2Tag: 'FULL-STACK · GEDISTRIBUEERDE ARCHITECTUUR',
-            p2Summary: 'Een reactieve, meertalige interface bovenop een gedistribueerde architectuur die meerdere talen en services verbindt in één systeem.',
-            p2What: 'Een reactieve, SEO-geoptimaliseerde webinterface, ondersteund door een gedistribueerde architectuur: een transactionele Node.js-API gekoppeld aan een PostgreSQL-database, naast microservices geschreven in Python. De frontend en backend werken samen als één hub met meertalige ondersteuning.',
-            p2Purpose: 'End-to-end full-stack-vermogen demonstreren: een moderne, snelle frontend ontwerpen en tegelijkertijd een gedistribueerde backend orkestreren waarin verschillende talen en services (Node.js en Python) communiceren en persistentie delen. Het weerspiegelt ervaring met echte productiearchitecturen, niet met een statische site.',
-            p2r1: 'Reactieve interface met SEO-geoptimaliseerde rendering',
-            p2r2: 'Statische typering in de hele frontend',
-            p2r3: 'Stylingsysteem',
-            p2r4: 'Transactionele API',
-            p2r5: 'Datapersistentie',
-            p2r6: 'Verwerkings-microservices',
-            p3Tag: 'FRONTEND · MEERTALIGE WEBSITE',
-            p3Name: 'Persoonlijk Webportfolio',
-            p3Summary: 'Precies deze site: een portfolio van twee pagina\'s, vertaald in negen talen en vanaf nul gebouwd zonder frameworks — alleen met pure webtechnologieën.',
-            p3What: 'Een persoonlijk portfolio dat bestaat uit twee gekoppelde pagina\'s: de hoofdpagina — met mijn introductie, ervaring, vaardigheden en blog — en deze projectenpagina. Alles is vanaf nul gebouwd met puur HTML, CSS en JavaScript, en bevat een eigen internationalisatiesysteem met negen talen dat tussen beide pagina\'s wordt gesynchroniseerd, verschijn- en typanimaties, een achtergrond die subtiel van kleur verandert en een volledig responsief ontwerp.',
-            p3Purpose: 'Beheersing van de frontend-fundamenten aantonen zonder afhankelijk te zijn van frameworks: een interactieve, meertalige en verzorgde ervaring bouwen met alleen native webtechnologieën. Het is bovendien mijn visitekaartje in actie: het project dat je beoordeelt, is precies de pagina waarop je het leest.',
-            p3r1: 'Semantische structuur van beide pagina\'s',
-            p3r2: 'Animaties, dynamische gradiënten en responsief ontwerp',
-            p3r3: 'Alle interactiviteit, zonder frameworks of libraries',
-            p3r4: 'Eigen systeem met negen talen, via de URL gesynchroniseerd tussen pagina\'s',
-            p3r5: 'Typografie: Space Grotesk, Inter en JetBrains Mono',
-            footerText: 'Ontworpen en gebouwd met passie, toewijding en creativiteit.'
-        },
-        sv: {
-            docTitle: 'Bruno Carbone — Projekt',
-            navHome: '← Startsida', navP3: 'Webbportfolio',
-            eyebrow: 'visitkort',
-            pageTitle: 'Det jag har <span class="grad">byggt</span>',
-            lead: 'En detaljerad presentation av projekten som utgör min portfolio: vad de består av, syftet med vart och ett och stacken som får dem att fungera.',
-            viewBtn: 'Se projekten ↓',
-            p1Tag: 'DEVSECOPS · SÄKERHETSÖVERVAKNING',
-            p1Summary: 'En microservices-backend med säkerheten inbyggd i varje steg av utvecklingscykeln, från koden till produktionsinfrastrukturen.',
-            whatLabel: 'Vad det är', whatLabel2: 'Vad det är', whatLabel3: 'Vad det är',
-            purposeLabel: 'Syfte', purposeLabel2: 'Syfte', purposeLabel3: 'Syfte',
-            stackHead: 'Använd stack', stackHead2: 'Använd stack', stackHead3: 'Använd stack',
-            p1What: 'En automatiserad microservices-backend, byggd på en CI/CD-pipeline som kör statisk kodanalys och API-tester vid varje ändring. Infrastrukturen är containerbaserad och skalbar, med intrångsdetektering i realtid via larm och centraliserad loggning av all systemaktivitet.',
-            p1Purpose: 'Att demonstrera DevSecOps-praxis: att integrera säkerhet och kodkvalitet i själva utvecklingsflödet, i stället för att behandla dem som ett sista steg. Systemet validerar automatiskt varje ändring innan den driftsätts och övervakar produktionsinfrastrukturen — ett bevis på förmågan att bygga säker, observerbar och skalbar mjukvara.',
-            p1r1: 'Microservices-backend',
-            p1r2: 'CI/CD-pipeline som orkestrerar build, analys och tester',
-            p1r3: 'Statisk kodanalys: kvalitet och sårbarheter',
-            p1r4: 'Automatiserade API-tester',
-            p1r5: 'Containerisering av tjänsterna',
-            p1r6: 'Skalbar infrastruktur',
-            p1r7: 'Centraliserad loggning och intrångsdetektering i realtid',
-            p2Tag: 'FULL-STACK · DISTRIBUERAD ARKITEKTUR',
-            p2Summary: 'Ett reaktivt, flerspråkigt gränssnitt ovanpå en distribuerad arkitektur som kopplar samman flera språk och tjänster i ett enda system.',
-            p2What: 'Ett reaktivt, SEO-optimerat webbgränssnitt, uppbackat av en distribuerad arkitektur: ett transaktionellt Node.js-API kopplat till en PostgreSQL-databas, tillsammans med microservices skrivna i Python. Frontend och backend arbetar tillsammans som en enda hub med flerspråkigt stöd.',
-            p2Purpose: 'Att demonstrera full-stack-förmåga från början till slut: att designa en modern och snabb frontend och samtidigt orkestrera en distribuerad backend där olika språk och tjänster (Node.js och Python) kommunicerar och delar persistens. Det speglar hantering av verkliga produktionsarkitekturer, inte en statisk webbplats.',
-            p2r1: 'Reaktivt gränssnitt med SEO-optimerad rendering',
-            p2r2: 'Statisk typning i hela frontenden',
-            p2r3: 'Stilsystem',
-            p2r4: 'Transaktionellt API',
-            p2r5: 'Datapersistens',
-            p2r6: 'Microservices för bearbetning',
-            p3Tag: 'FRONTEND · FLERSPRÅKIG WEBB',
-            p3Name: 'Personlig Webbportfolio',
-            p3Summary: 'Just den här webbplatsen: en portfolio i två sidor, översatt till nio språk och byggd från grunden utan ramverk — enbart med rena webbteknologier.',
-            p3What: 'En personlig portfolio som består av två sammanlänkade sidor: huvudsidan — med min presentation, erfarenhet, mina färdigheter och bloggen — och den här projektsidan. Allt är byggt från grunden med ren HTML, CSS och JavaScript, och innehåller ett eget internationaliseringssystem med nio språk som synkroniseras mellan båda sidorna, framtonings- och skrivanimationer, en bakgrund som subtilt skiftar färg och en helt responsiv design.',
-            p3Purpose: 'Att visa behärskning av frontendens grunder utan att förlita sig på ramverk: att bygga en interaktiv, flerspråkig och genomarbetad upplevelse enbart med inbyggda webbteknologier. Det är dessutom mitt visitkort i praktiken: projektet du utvärderar är själva sidan du läser det på.',
-            p3r1: 'Semantisk struktur för båda sidorna',
-            p3r2: 'Animationer, dynamiska gradienter och responsiv design',
-            p3r3: 'All interaktivitet, utan ramverk eller bibliotek',
-            p3r4: 'Eget system med nio språk, synkroniserat mellan sidorna via URL:en',
-            p3r5: 'Typografi: Space Grotesk, Inter och JetBrains Mono',
-            footerText: 'Designad och byggd med passion, hängivenhet och kreativitet.'
-        },
-        hu: {
-            docTitle: 'Bruno Carbone — Projektek',
-            navHome: '← Kezdőlap', navP3: 'Webportfólió',
-            eyebrow: 'névjegykártya',
-            pageTitle: 'Amit <span class="grad">építettem</span>',
-            lead: 'Részletes bemutató a portfóliómat alkotó projektekről: miből állnak, mi az egyes projektek célja, és milyen stack működteti őket.',
-            viewBtn: 'Projektek megtekintése ↓',
-            p1Tag: 'DEVSECOPS · BIZTONSÁGI MONITOROZÁS',
-            p1Summary: 'Mikroszolgáltatás-alapú backend, amelyben a biztonság a fejlesztési ciklus minden szakaszába be van építve – a kódtól a produkciós infrastruktúráig.',
-            whatLabel: 'Miről szól', whatLabel2: 'Miről szól', whatLabel3: 'Miről szól',
-            purposeLabel: 'Cél', purposeLabel2: 'Cél', purposeLabel3: 'Cél',
-            stackHead: 'Használt stack', stackHead2: 'Használt stack', stackHead3: 'Használt stack',
-            p1What: 'Automatizált, mikroszolgáltatás-alapú backend, amely egy CI/CD pipeline-ra épül: minden változtatásnál statikus kódelemzést és API-teszteket futtat. Az infrastruktúra konténerizált és skálázható, valós idejű behatolásészleléssel, riasztásokkal és a teljes rendszertevékenység központosított naplózásával.',
-            p1Purpose: 'A DevSecOps-gyakorlatok bemutatása: a biztonság és a kódminőség beépítése magába a fejlesztési folyamatba, ahelyett, hogy utolsó lépésként kezelnénk őket. A rendszer minden változtatást automatikusan validál a telepítés előtt, és felügyeli a produkciós infrastruktúrát – ez tükrözi a biztonságos, megfigyelhető és skálázható szoftverek építésének képességét.',
-            p1r1: 'Mikroszolgáltatás-alapú backend',
-            p1r2: 'CI/CD pipeline, amely a buildet, az elemzést és a teszteket vezérli',
-            p1r3: 'Statikus kódelemzés: minőség és sérülékenységek',
-            p1r4: 'Automatizált API-tesztek',
-            p1r5: 'A szolgáltatások konténerizálása',
-            p1r6: 'Skálázható infrastruktúra',
-            p1r7: 'Központosított naplózás és valós idejű behatolásészlelés',
-            p2Tag: 'FULL-STACK · ELOSZTOTT ARCHITEKTÚRA',
-            p2Summary: 'Reaktív, többnyelvű felület egy elosztott architektúrán, amely több nyelvet és szolgáltatást kapcsol össze egyetlen rendszerben.',
-            p2What: 'Reaktív, SEO-ra optimalizált webes felület, amelyet elosztott architektúra támogat: egy tranzakciós Node.js API PostgreSQL adatbázishoz kapcsolva, Pythonban írt mikroszolgáltatásokkal együtt. A frontend és a backend egyetlen, többnyelvű hubként működik együtt.',
-            p2Purpose: 'A teljes körű full-stack képesség bemutatása: modern és gyors frontend tervezése, miközben egy elosztott backend hangolja össze a különböző nyelveket és szolgáltatásokat (Node.js és Python), amelyek kommunikálnak és közös perzisztencián osztoznak. Ez valós produkciós architektúrák kezelését tükrözi, nem egy statikus oldalét.',
-            p2r1: 'Reaktív felület SEO-ra optimalizált rendereléssel',
-            p2r2: 'Statikus típusosság a teljes frontenden',
-            p2r3: 'Stílusrendszer',
-            p2r4: 'Tranzakciós API',
-            p2r5: 'Adatperzisztencia',
-            p2r6: 'Feldolgozó mikroszolgáltatások',
-            p3Tag: 'FRONTEND · TÖBBNYELVŰ WEB',
-            p3Name: 'Személyes Webportfólió',
-            p3Summary: 'Pontosan ez az oldal: egy kétoldalas portfólió, kilenc nyelvre lefordítva, keretrendszerek nélkül, a nulláról felépítve — kizárólag tiszta webes technológiákkal.',
-            p3What: 'Két összekapcsolt oldalból álló személyes portfólió: a főoldal — a bemutatkozásommal, tapasztalatommal, készségeimmel és a bloggal — és ez a projektoldal. Minden a nulláról épült, tiszta HTML, CSS és JavaScript használatával, és tartalmaz egy saját, kilencnyelvű nemzetköziesítési rendszert, amely a két oldal között szinkronizálódik, megjelenési és gépelési animációkat, finoman színt váltó hátteret és teljesen reszponzív dizájnt.',
-            p3Purpose: 'A frontend-alapok magabiztos ismeretének bemutatása keretrendszerek nélkül: interaktív, többnyelvű és igényes élmény építése kizárólag natív webes technológiákkal. Ráadásul ez a névjegykártyám működés közben: a projekt, amelyet épp értékelsz, maga az oldal, amelyen olvasod.',
-            p3r1: 'Mindkét oldal szemantikus szerkezete',
-            p3r2: 'Animációk, dinamikus színátmenetek és reszponzív dizájn',
-            p3r3: 'A teljes interaktivitás, keretrendszerek és könyvtárak nélkül',
-            p3r4: 'Saját kilencnyelvű rendszer, az URL-en keresztül szinkronizálva az oldalak között',
-            p3r5: 'Tipográfia: Space Grotesk, Inter és JetBrains Mono',
-            footerText: 'Szenvedéllyel, odaadással és kreativitással tervezve és építve.'
-        }
-    };
-
-    // ====== APLICAR IDIOMA ======
-    const homeLink = document.getElementById('homeLink');
-
-    function applyLanguage(code) {
-        const t = translations[code];
-        if (!t) return;
-        document.documentElement.lang = code;
-        document.title = t.docTitle;
-        document.querySelectorAll('[data-i18n]').forEach(el => {
-            const key = el.dataset.i18n;
-            if (t[key] !== undefined) el.textContent = t[key];
-        });
-        document.querySelectorAll('[data-i18n-html]').forEach(el => {
-            const key = el.dataset.i18nHtml;
-            if (t[key] !== undefined) el.innerHTML = t[key];
-        });
-        // Mantiene el idioma al volver a la página principal
-        homeLink.href = 'MainPage.html?lang=' + code;
-    }
-
-    // ====== DROPDOWN DE IDIOMAS ======
-    const langDropdown = document.getElementById('langDropdown');
-    const langTrigger = document.getElementById('langTrigger');
-    const langMenu = document.getElementById('langMenu');
-    const langCurrent = document.getElementById('langCurrent');
-    langTrigger.addEventListener('click', (e) => {
-        e.stopPropagation();
-        langDropdown.classList.toggle('open');
-    });
-    langMenu.querySelectorAll('button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            langCurrent.textContent = btn.dataset.name;
-            langMenu.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            langDropdown.classList.remove('open');
-            applyLanguage(btn.dataset.lang);
-        });
-    });
-    document.addEventListener('click', (e) => {
-        if (!langDropdown.contains(e.target)) langDropdown.classList.remove('open');
-    });
-
-    // ====== IDIOMA DESDE LA URL (?lang=) ======
-    // Lee el idioma seleccionado en la página principal y lo aplica al cargar
-    const urlLang = new URLSearchParams(location.search).get('lang');
-    if (urlLang && urlLang !== 'es' && translations[urlLang]) {
-        const urlBtn = langMenu.querySelector('button[data-lang="' + urlLang + '"]');
-        if (urlBtn) urlBtn.click();
-    }
-</script>
 
 </body>
 </html>
