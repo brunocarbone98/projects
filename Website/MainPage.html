@@ -119,12 +119,6 @@
             display: flex; flex-direction: column;
             padding: 170px 0 64px;
         }
-        .hero .eyebrow {
-            font-family: var(--font-mono);
-            color: var(--accent); font-weight: 500; font-size: 0.9rem;
-            letter-spacing: 0.5px; margin-bottom: 18px;
-            position: relative; top: -56px; /* lo sube, sin mover el título */
-        }
         .hero h1 {
             font-family: var(--font-display);
             font-size: clamp(2.8rem, 8.5vw, 5.4rem); font-weight: 700;
@@ -132,11 +126,12 @@
         }
         /* Nombre con color que fluye, de izquierda a derecha */
         .hero h1 .grad {
+            font-weight: 700;
             background: linear-gradient(90deg, #a78bfa, #22d3ee, #f59e0b, #fb7185, #0891b2, #a78bfa);
             background-size: 300% auto;
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
             background-clip: text; color: transparent;
-            animation: nameFlow 15s linear infinite;
+            animation: nameFlow 10s linear infinite;
         }
         @keyframes nameFlow {
             from { background-position: 300% center; }
@@ -145,7 +140,10 @@
 
         /* Saludo rotatorio en 9 idiomas: sube y desaparece; el siguiente entra y ocupa su lugar */
         .hero h1 .greeting {
-            display: inline-block;
+            display: block;
+            font-size: 0.6em;
+            font-weight: 600;
+            letter-spacing: -1px;
             transition: transform 0.5s ease, opacity 0.5s ease;
             will-change: transform, opacity;
         }
@@ -355,8 +353,7 @@
 <!-- HERO -->
 <header class="hero" id="hero">
     <div class="container">
-        <div class="eyebrow reveal">👋 Welcome to my portfolio! :)</div>
-        <h1 class="reveal"><span class="greeting" id="greeting">Hello! I am</span> <span class="grad">Bruno Carbone</span></h1>
+        <h1 class="reveal"><span class="greeting" id="greeting">Hello, welcome! My name is <span class="grad">Bruno Carbone</span>.</span></h1>
         <div class="role reveal">
             <span class="typed" id="typed"></span><span class="cursor">|</span>
         </div>
@@ -612,29 +609,51 @@
 
 <script>
     // ====== SALUDO ROTATORIO EN 9 IDIOMAS ======
-    // Ciclo de 5 s por saludo: 3 s visible + 0.5 s de salida + 1 s de pausa + 0.5 s de entrada
+    // Ciclo de 10 s por saludo: 8 s visible + 0.5 s de salida + 1 s de pausa + 0.5 s de entrada
+    const NAME = '<span class="grad">Bruno Carbone</span>';
     const greetings = [
-        'Hello! I am',
-        '¡Hola! Yo soy',
-        'Ciao! Io sono',
-        'Hallo! Ich bin',
-        'Olá! Eu sou',
-        'Salut ! Je suis',
-        'Hallo! Ik ben',
-        'Hej! Jag är',
-        'Szia! Én vagyok'
+        'Hello, welcome! My name is ' + NAME + '.',
+        '¡Hola, bienvenido! Me llamo ' + NAME + '.',
+        'Ciao, benvenuto! Mi chiamo ' + NAME + '.',
+        'Olá, bem-vindo! O meu nome é ' + NAME + '.',
+        'Bonjour, bienvenue ! Je m\'appelle ' + NAME + '.',
+        'Hallo, willkommen! Mein Name ist ' + NAME + '.',
+        'Hallo, welkom! Mijn naam is ' + NAME + '.',
+        'Hej, välkommen! Mitt namn är ' + NAME + '.',
+        'Szia, üdvözöllek! ' + NAME + ' vagyok.'
     ];
     const greetingEl = document.getElementById('greeting');
     let greetIndex = 0;
-    const GREET_VISIBLE = 3000, GREET_EXIT = 500, GREET_GAP = 1000, GREET_ENTER = 500;
+    const GREET_VISIBLE = 8000, GREET_EXIT = 500, GREET_GAP = 1000, GREET_ENTER = 500;
+
+    // Reserva la altura de la frase más larga para que el contenido de abajo no salte entre idiomas
+    function reserveGreetingHeight() {
+        const probe = greetingEl.cloneNode(false);
+        probe.removeAttribute('id');
+        probe.style.position = 'absolute';
+        probe.style.visibility = 'hidden';
+        probe.style.minHeight = '0';
+        probe.style.width = greetingEl.offsetWidth + 'px';
+        greetingEl.parentNode.appendChild(probe);
+        let max = 0;
+        greetings.forEach(g => {
+            probe.innerHTML = g;
+            max = Math.max(max, probe.offsetHeight);
+        });
+        probe.remove();
+        greetingEl.style.minHeight = max + 'px';
+    }
+    reserveGreetingHeight();
+    window.addEventListener('load', reserveGreetingHeight);
+    window.addEventListener('resize', reserveGreetingHeight);
 
     function rotateGreeting() {
-        // El saludo actual se desplaza hacia arriba y desaparece
+        // La frase actual se desplaza hacia arriba y desaparece
         greetingEl.classList.add('greet-out');
         setTimeout(() => {
-            // Un segundo después de irse, el siguiente entra y ocupa su lugar
+            // Un segundo después de irse, la siguiente entra y ocupa su lugar
             greetIndex = (greetIndex + 1) % greetings.length;
-            greetingEl.textContent = greetings[greetIndex];
+            greetingEl.innerHTML = greetings[greetIndex];
             greetingEl.classList.remove('greet-out');
             greetingEl.classList.add('greet-enter');
             void greetingEl.offsetWidth; // fuerza reflow para que la entrada se anime
