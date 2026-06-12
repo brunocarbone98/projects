@@ -1,0 +1,22 @@
+# Local infrastructure for development.
+# The FastAPI services (services/pricing, services/labels) join this file in Phase 4 (see ROADMAP.md).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: shipping-hub-postgres
+    environment:
+      POSTGRES_USER: shipping
+      POSTGRES_PASSWORD: shipping
+      POSTGRES_DB: shipping_hub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shipping -d shipping_hub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
