@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+.next/
+dist/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Turborepo
+.turbo/
+
+# Environment files (commit only .env.example)
+.env
+.env.*
+!.env.example
+
+# Tests
+coverage/
+
+# Python (services/)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Logs and OS noise
+*.log
+.DS_Store
