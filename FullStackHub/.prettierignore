@@ -8,6 +8,3 @@ next-env.d.ts
 
 # Keep the roadmap exactly as authored
 ROADMAP.md
-
-# Pre-existing content outside the monorepo
-Website/

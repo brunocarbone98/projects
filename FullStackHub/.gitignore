@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+.next/
+dist/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Turborepo
+.turbo/
+
+# Environment files: ignore real secrets, keep example + test config
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Tests
+coverage/
+
+# Python (services/)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Logs and OS noise
+*.log
+.DS_Store
