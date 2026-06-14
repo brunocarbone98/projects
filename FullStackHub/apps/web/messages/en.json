@@ -227,7 +227,8 @@
     "nav": {
       "overview": "Overview",
       "shipments": "Shipments",
-      "newShipment": "New shipment"
+      "newShipment": "New shipment",
+      "wallet": "Wallet"
     },
     "roles": { "CUSTOMER": "Customer", "COURIER": "Courier", "ADMIN": "Admin" },
     "overview": {
@@ -261,9 +262,25 @@
     "view": "View",
     "resultCount": "{count, plural, one {# shipment} other {# shipments}}"
   },
+  "Wallet": {
+    "title": "Wallet",
+    "balance": "Balance",
+    "amount": "Amount (USD)",
+    "addFunds": "Add funds",
+    "adding": "Adding…",
+    "invalidAmount": "Enter a valid amount.",
+    "error": "Something went wrong.",
+    "history": "Transaction history",
+    "empty": "No transactions yet.",
+    "kinds": { "TOPUP": "Top-up", "PAYMENT": "Payment", "REVERSAL": "Reversal" }
+  },
   "ShipmentDetail": {
     "back": "Back to shipments",
     "downloadLabel": "Download label",
+    "pay": "Pay {amount}",
+    "paying": "Paying…",
+    "payInsufficient": "Insufficient wallet balance — top up your wallet first.",
+    "payError": "Payment failed. Please try again.",
     "service": "Service",
     "estimated": "Estimated delivery",
     "noEstimate": "To be confirmed",

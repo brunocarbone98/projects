@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { SERVICE_LEVELS, SHIPMENT_STATUSES } from "./enums";
-import type { ServiceLevel, ShipmentStatus, UserRole } from "./enums";
+import type { LedgerKind, PaymentStatus, ServiceLevel, ShipmentStatus, UserRole } from "./enums";
 
 // ---------------------------------------------------------------------------
 // Input schemas (request validation)
@@ -201,4 +201,48 @@ export interface ApiErrorDto {
     message: string;
     details?: unknown;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: wallet + payments
+// ---------------------------------------------------------------------------
+
+export const TopUpSchema = z.object({
+  amountCents: z.int().positive().max(1_000_000),
+  idempotencyKey: z.string().min(1).max(200),
+});
+export type TopUpInput = z.infer<typeof TopUpSchema>;
+
+export const PaySchema = z.object({
+  idempotencyKey: z.string().min(1).max(200),
+});
+export type PayInput = z.infer<typeof PaySchema>;
+
+export interface LedgerEntryDto {
+  id: string;
+  amountCents: number; // signed from the user's perspective
+  kind: LedgerKind;
+  description: string | null;
+  createdAt: string;
+}
+
+export interface WalletDto {
+  balanceCents: number;
+  currency: string;
+  entries: LedgerEntryDto[];
+}
+
+export interface PaymentDto {
+  id: string;
+  amountCents: number;
+  currency: string;
+  status: PaymentStatus;
+  shipmentId: string | null;
+  createdAt: string;
+}
+
+export interface PayResultDto {
+  payment: PaymentDto;
+  wallet: WalletDto;
+  shipment: ShipmentDto;
 }

@@ -227,7 +227,8 @@
     "nav": {
       "overview": "Resumen",
       "shipments": "Envíos",
-      "newShipment": "Nuevo envío"
+      "newShipment": "Nuevo envío",
+      "wallet": "Billetera"
     },
     "roles": { "CUSTOMER": "Cliente", "COURIER": "Mensajero", "ADMIN": "Admin" },
     "overview": {
@@ -261,9 +262,25 @@
     "view": "Ver",
     "resultCount": "{count, plural, one {# envío} other {# envíos}}"
   },
+  "Wallet": {
+    "title": "Billetera",
+    "balance": "Saldo",
+    "amount": "Monto (USD)",
+    "addFunds": "Agregar fondos",
+    "adding": "Agregando…",
+    "invalidAmount": "Ingresa un monto válido.",
+    "error": "Algo salió mal.",
+    "history": "Historial de transacciones",
+    "empty": "Aún no hay transacciones.",
+    "kinds": { "TOPUP": "Recarga", "PAYMENT": "Pago", "REVERSAL": "Reverso" }
+  },
   "ShipmentDetail": {
     "back": "Volver a envíos",
     "downloadLabel": "Descargar etiqueta",
+    "pay": "Pagar {amount}",
+    "paying": "Pagando…",
+    "payInsufficient": "Saldo insuficiente — recarga tu billetera primero.",
+    "payError": "El pago falló. Inténtalo de nuevo.",
     "service": "Servicio",
     "estimated": "Entrega estimada",
     "noEstimate": "Por confirmar",

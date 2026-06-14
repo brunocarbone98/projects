@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@shipping-hub/shared": "workspace:*",
+    "leaflet": "^1.9.4",
     "next": "^15.5.0",
     "next-intl": "^4.3.0",
     "react": "^19.1.0",
@@ -17,6 +18,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.0",
+    "@types/leaflet": "^1.9.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",

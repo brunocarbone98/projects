@@ -7,6 +7,7 @@ import { authRouter } from "./routes/auth.routes.js";
 import { createQuoteRouter } from "./routes/quote.routes.js";
 import { createTrackingRouter } from "./routes/tracking.routes.js";
 import { shipmentsRouter } from "./routes/shipments.routes.js";
+import { walletRouter } from "./routes/wallet.routes.js";
 import { env } from "./env.js";
 
 export interface AppOptions {
@@ -30,6 +31,7 @@ export function buildApp(options: AppOptions = {}): Express {
 
   app.use("/api/v1/auth", authRouter);
   app.use("/api/v1/shipments", shipmentsRouter);
+  app.use("/api/v1/wallet", walletRouter);
   app.use(
     "/api/v1/tracking",
     createTrackingRouter({

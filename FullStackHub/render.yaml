@@ -1,0 +1,50 @@
+# Render blueprint for the Shipping Hub stack. Adjust regions/plans as needed.
+# Web -> Vercel is also a great fit; this blueprint keeps everything on Render.
+databases:
+  - name: shipping-hub-db
+    databaseName: shipping_hub
+    user: shipping
+
+services:
+  - type: web
+    name: shipping-hub-api
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: { name: shipping-hub-db, property: connectionString }
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: PRICING_SERVICE_URL
+        fromService: { type: pserv, name: shipping-hub-pricing, property: hostport }
+      - key: LABELS_SERVICE_URL
+        fromService: { type: pserv, name: shipping-hub-labels, property: hostport }
+      - { key: CORS_ORIGINS, sync: false }
+      - { key: PUBLIC_WEB_URL, sync: false }
+
+  - type: web
+    name: shipping-hub-web
+    runtime: docker
+    dockerfilePath: ./apps/web/Dockerfile
+    dockerContext: .
+    envVars:
+      - key: API_INTERNAL_URL
+        fromService: { type: web, name: shipping-hub-api, property: host }
+      - { key: NEXT_PUBLIC_SITE_URL, sync: false }
+      - { key: NEXT_PUBLIC_API_URL, sync: false }
+
+  - type: pserv
+    name: shipping-hub-pricing
+    runtime: docker
+    dockerfilePath: ./services/pricing/Dockerfile
+    dockerContext: ./services/pricing
+
+  - type: pserv
+    name: shipping-hub-labels
+    runtime: docker
+    dockerfilePath: ./services/labels/Dockerfile
+    dockerContext: ./services/labels

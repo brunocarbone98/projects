@@ -10,6 +10,9 @@ export type ErrorCode =
   | "INVALID_TRANSITION"
   | "INVALID_TOKEN"
   | "RATE_LIMITED"
+  | "INSUFFICIENT_FUNDS"
+  | "ALREADY_PAID"
+  | "LABEL_FAILED"
   | "INTERNAL";
 
 export class AppError extends Error {
