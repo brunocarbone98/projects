@@ -13,7 +13,8 @@
     "quote": "Cotizar",
     "coverage": "Cobertura",
     "faq": "Preguntas",
-    "trackCta": "Rastrear un paquete"
+    "trackCta": "Rastrear un paquete",
+    "signIn": "Iniciar sesión"
   },
   "Home": {
     "hero": {
@@ -188,6 +189,143 @@
     "eyebrow": "Rastreo de paquetes internacionales",
     "title": "Rastrea cualquier paquete",
     "tagline": "Panamá · Estados Unidos · Latinoamérica"
+  },
+  "Auth": {
+    "login": {
+      "title": "Iniciar sesión",
+      "subtitle": "Accede a tu panel de envíos.",
+      "email": "Correo",
+      "password": "Contraseña",
+      "submit": "Iniciar sesión",
+      "submitting": "Iniciando…",
+      "noAccount": "¿No tienes cuenta?",
+      "registerLink": "Crea una"
+    },
+    "register": {
+      "title": "Crea tu cuenta",
+      "subtitle": "Empieza a crear y rastrear envíos.",
+      "name": "Nombre completo",
+      "email": "Correo",
+      "password": "Contraseña",
+      "passwordHint": "Mínimo 8 caracteres",
+      "submit": "Crear cuenta",
+      "submitting": "Creando…",
+      "hasAccount": "¿Ya tienes cuenta?",
+      "loginLink": "Inicia sesión"
+    },
+    "errors": {
+      "required": "Completa todos los campos.",
+      "invalid_credentials": "Correo o contraseña inválidos.",
+      "weak_password": "La contraseña debe tener al menos 8 caracteres.",
+      "email_taken": "Ese correo ya está registrado.",
+      "unknown": "Algo salió mal. Inténtalo de nuevo."
+    }
+  },
+  "Dashboard": {
+    "signedInAs": "Sesión de",
+    "signOut": "Cerrar sesión",
+    "nav": {
+      "overview": "Resumen",
+      "shipments": "Envíos",
+      "newShipment": "Nuevo envío"
+    },
+    "roles": { "CUSTOMER": "Cliente", "COURIER": "Mensajero", "ADMIN": "Admin" },
+    "overview": {
+      "title": "Resumen",
+      "welcome": "Bienvenido de nuevo, {name}.",
+      "customerLead": "Crea un envío o revisa tu historial de envíos.",
+      "staffLead": "Busca envíos y registra eventos de rastreo.",
+      "totalShipments": "Tus envíos",
+      "createCta": "Crear un envío",
+      "viewAll": "Ver todos los envíos"
+    }
+  },
+  "Shipments": {
+    "mineTitle": "Mis envíos",
+    "allTitle": "Todos los envíos",
+    "empty": "Aún no hay envíos.",
+    "newShipment": "Nuevo envío",
+    "search": {
+      "statusLabel": "Filtrar por estado",
+      "all": "Todos los estados",
+      "apply": "Filtrar"
+    },
+    "table": {
+      "code": "Guía",
+      "status": "Estado",
+      "route": "Ruta",
+      "service": "Servicio",
+      "created": "Creado",
+      "price": "Precio"
+    },
+    "view": "Ver",
+    "resultCount": "{count, plural, one {# envío} other {# envíos}}"
+  },
+  "ShipmentDetail": {
+    "back": "Volver a envíos",
+    "service": "Servicio",
+    "estimated": "Entrega estimada",
+    "noEstimate": "Por confirmar",
+    "from": "Desde",
+    "to": "Hasta",
+    "price": "Precio",
+    "weight": "Peso",
+    "dimensions": "Dimensiones",
+    "timeline": "Historial de rastreo",
+    "registerEvent": {
+      "title": "Registrar evento de rastreo",
+      "status": "Nuevo estado",
+      "location": "Ubicación",
+      "locationPlaceholder": "ej. Miami, US",
+      "description": "Descripción",
+      "descriptionPlaceholder": "ej. Llegó a bodega destino",
+      "submit": "Registrar evento",
+      "submitting": "Registrando…",
+      "noTransitions": "Este envío llegó a un estado final y no puede avanzar.",
+      "errorInvalid": "Esa transición no está permitida.",
+      "errorUnknown": "No se pudo registrar el evento."
+    }
+  },
+  "Wizard": {
+    "title": "Nuevo envío",
+    "steps": {
+      "addresses": "Direcciones",
+      "parcel": "Paquete",
+      "service": "Servicio",
+      "review": "Revisar"
+    },
+    "origin": "Origen",
+    "destination": "Destino",
+    "fields": {
+      "contactName": "Nombre de contacto",
+      "line1": "Dirección línea 1",
+      "line2": "Dirección línea 2 (opcional)",
+      "city": "Ciudad",
+      "state": "Estado / Provincia (opcional)",
+      "postalCode": "Código postal",
+      "country": "País",
+      "phone": "Teléfono (opcional)",
+      "weight": "Peso (kg)",
+      "length": "Largo (cm)",
+      "width": "Ancho (cm)",
+      "height": "Alto (cm)",
+      "serviceLevel": "Nivel de servicio"
+    },
+    "estimate": {
+      "title": "Precio estimado",
+      "eta": "Tránsito estimado",
+      "etaDays": "{min}–{max} días hábiles",
+      "note": "El precio final se confirma al crear el envío."
+    },
+    "review": {
+      "title": "Revisar y confirmar",
+      "parcelSummary": "{weight} kg · {l}×{w}×{h} cm"
+    },
+    "back": "Atrás",
+    "next": "Siguiente",
+    "submit": "Crear envío",
+    "submitting": "Creando…",
+    "error": "No se pudo crear el envío. Revisa los campos e inténtalo de nuevo."
   },
   "NotFound": {
     "title": "Página no encontrada",

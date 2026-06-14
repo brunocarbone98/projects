@@ -13,7 +13,8 @@
     "quote": "Get a quote",
     "coverage": "Coverage",
     "faq": "FAQ",
-    "trackCta": "Track a package"
+    "trackCta": "Track a package",
+    "signIn": "Sign in"
   },
   "Home": {
     "hero": {
@@ -188,6 +189,143 @@
     "eyebrow": "International parcel tracking",
     "title": "Track any package",
     "tagline": "Panama · United States · Latin America"
+  },
+  "Auth": {
+    "login": {
+      "title": "Sign in",
+      "subtitle": "Access your shipments dashboard.",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "submitting": "Signing in…",
+      "noAccount": "Don't have an account?",
+      "registerLink": "Create one"
+    },
+    "register": {
+      "title": "Create your account",
+      "subtitle": "Start creating and tracking shipments.",
+      "name": "Full name",
+      "email": "Email",
+      "password": "Password",
+      "passwordHint": "At least 8 characters",
+      "submit": "Create account",
+      "submitting": "Creating…",
+      "hasAccount": "Already have an account?",
+      "loginLink": "Sign in"
+    },
+    "errors": {
+      "required": "Please fill in all fields.",
+      "invalid_credentials": "Invalid email or password.",
+      "weak_password": "Password must be at least 8 characters.",
+      "email_taken": "That email is already registered.",
+      "unknown": "Something went wrong. Please try again."
+    }
+  },
+  "Dashboard": {
+    "signedInAs": "Signed in as",
+    "signOut": "Sign out",
+    "nav": {
+      "overview": "Overview",
+      "shipments": "Shipments",
+      "newShipment": "New shipment"
+    },
+    "roles": { "CUSTOMER": "Customer", "COURIER": "Courier", "ADMIN": "Admin" },
+    "overview": {
+      "title": "Overview",
+      "welcome": "Welcome back, {name}.",
+      "customerLead": "Create a shipment or review your shipment history.",
+      "staffLead": "Search shipments and register tracking events.",
+      "totalShipments": "Your shipments",
+      "createCta": "Create a shipment",
+      "viewAll": "View all shipments"
+    }
+  },
+  "Shipments": {
+    "mineTitle": "My shipments",
+    "allTitle": "All shipments",
+    "empty": "No shipments yet.",
+    "newShipment": "New shipment",
+    "search": {
+      "statusLabel": "Filter by status",
+      "all": "All statuses",
+      "apply": "Filter"
+    },
+    "table": {
+      "code": "Tracking",
+      "status": "Status",
+      "route": "Route",
+      "service": "Service",
+      "created": "Created",
+      "price": "Price"
+    },
+    "view": "View",
+    "resultCount": "{count, plural, one {# shipment} other {# shipments}}"
+  },
+  "ShipmentDetail": {
+    "back": "Back to shipments",
+    "service": "Service",
+    "estimated": "Estimated delivery",
+    "noEstimate": "To be confirmed",
+    "from": "From",
+    "to": "To",
+    "price": "Price",
+    "weight": "Weight",
+    "dimensions": "Dimensions",
+    "timeline": "Tracking history",
+    "registerEvent": {
+      "title": "Register tracking event",
+      "status": "New status",
+      "location": "Location",
+      "locationPlaceholder": "e.g. Miami, US",
+      "description": "Description",
+      "descriptionPlaceholder": "e.g. Arrived at destination hub",
+      "submit": "Register event",
+      "submitting": "Registering…",
+      "noTransitions": "This shipment has reached a final state and cannot be advanced.",
+      "errorInvalid": "That transition is not allowed.",
+      "errorUnknown": "Could not register the event."
+    }
+  },
+  "Wizard": {
+    "title": "New shipment",
+    "steps": {
+      "addresses": "Addresses",
+      "parcel": "Parcel",
+      "service": "Service",
+      "review": "Review"
+    },
+    "origin": "Origin",
+    "destination": "Destination",
+    "fields": {
+      "contactName": "Contact name",
+      "line1": "Address line 1",
+      "line2": "Address line 2 (optional)",
+      "city": "City",
+      "state": "State / Province (optional)",
+      "postalCode": "Postal code",
+      "country": "Country",
+      "phone": "Phone (optional)",
+      "weight": "Weight (kg)",
+      "length": "Length (cm)",
+      "width": "Width (cm)",
+      "height": "Height (cm)",
+      "serviceLevel": "Service level"
+    },
+    "estimate": {
+      "title": "Estimated price",
+      "eta": "Estimated transit",
+      "etaDays": "{min}–{max} business days",
+      "note": "Final price is confirmed when the shipment is created."
+    },
+    "review": {
+      "title": "Review & confirm",
+      "parcelSummary": "{weight} kg · {l}×{w}×{h} cm"
+    },
+    "back": "Back",
+    "next": "Next",
+    "submit": "Create shipment",
+    "submitting": "Creating…",
+    "error": "Could not create the shipment. Please check the fields and try again."
   },
   "NotFound": {
     "title": "Page not found",
