@@ -42,8 +42,11 @@ export default async function middleware(req: NextRequest) {
     if (!valid) {
       const refreshToken = req.cookies.get(REFRESH_COOKIE)?.value;
       const refreshed = refreshToken ? await refreshTokens(refreshToken) : null;
+      const refreshedClaims = refreshed ? decodeAccessToken(refreshed.accessToken) : null;
 
-      if (!refreshed) {
+      // Only redirect-to-refresh when the new token is actually usable; otherwise
+      // go to login. This prevents an infinite refresh→redirect loop.
+      if (!refreshed || !refreshedClaims || isTokenExpired(refreshedClaims)) {
         const loginUrl = req.nextUrl.clone();
         loginUrl.pathname = `/${locale}/login`;
         loginUrl.search = `?next=${encodeURIComponent(pathname)}`;

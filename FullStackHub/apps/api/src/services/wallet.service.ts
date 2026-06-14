@@ -23,6 +23,16 @@ function isUniqueViolation(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
+function isSerializationFailure(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034";
+}
+
+// Idempotency keys are scoped per user so one user's key can never collide with
+// — or expose — another user's transaction.
+function scopedKey(userId: string, key: string): string {
+  return `${userId}:${key}`;
+}
+
 function dollars(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
@@ -85,8 +95,9 @@ export async function getWallet(userId: string): Promise<WalletDto> {
 
 /** Idempotent wallet top-up (credit user wallet, debit the system CASH account). */
 export async function topUp(userId: string, input: TopUpInput): Promise<WalletDto> {
+  const key = scopedKey(userId, input.idempotencyKey);
   const existing = await prisma.ledgerTransaction.findUnique({
-    where: { idempotencyKey: input.idempotencyKey },
+    where: { idempotencyKey: key },
   });
   if (existing) return getWallet(userId);
 
@@ -97,7 +108,7 @@ export async function topUp(userId: string, input: TopUpInput): Promise<WalletDt
     await prisma.$transaction(async (tx) => {
       const ledgerTx = await tx.ledgerTransaction.create({
         data: {
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: key,
           kind: "TOPUP",
           description: `Wallet top-up ${dollars(input.amountCents)}`,
         },
@@ -131,8 +142,9 @@ async function paymentDto(db: Db, paymentId: string): Promise<PaymentDto> {
 
 async function buildPayResult(paymentId: string, userId: string): Promise<PayResultDto> {
   const payment = await prisma.payment.findUniqueOrThrow({ where: { id: paymentId } });
+  if (!payment.shipmentId) throw notFound("Shipment not found");
   const shipment = await prisma.shipment.findUniqueOrThrow({
-    where: { id: payment.shipmentId ?? "" },
+    where: { id: payment.shipmentId },
     include: SHIPMENT_INCLUDE,
   });
   return {
@@ -153,82 +165,94 @@ export async function payForShipment(
   input: PayInput,
   generateLabel?: () => Promise<void>,
 ): Promise<PayResultDto> {
+  const userId = actor.sub;
+  const key = scopedKey(userId, input.idempotencyKey);
+
   const existingTx = await prisma.ledgerTransaction.findUnique({
-    where: { idempotencyKey: input.idempotencyKey },
+    where: { idempotencyKey: key },
     include: { payment: true },
   });
   if (existingTx?.payment) {
-    return buildPayResult(existingTx.payment.id, existingTx.payment.userId);
+    return buildPayResult(existingTx.payment.id, userId);
   }
 
   const shipment = await prisma.shipment.findUnique({ where: { id: shipmentId } });
   if (!shipment) throw notFound("Shipment not found");
-  if (actor.role === "CUSTOMER" && shipment.userId !== actor.sub) throw notFound("Shipment not found");
+  // Only the shipment's owner can pay for its label.
+  if (shipment.userId !== userId) throw notFound("Shipment not found");
   if (shipment.status !== "CREATED") {
     throw conflict("ALREADY_PAID", "This shipment is not awaiting payment");
   }
 
-  const userId = shipment.userId ?? actor.sub;
   const amount = shipment.priceCents;
   const wallet = await ensureUserWallet(prisma, userId);
   const revenue = await ensureSystemAccount(prisma, "REVENUE");
 
-  let paymentId: string;
-  try {
-    paymentId = await prisma.$transaction(
-      async (tx) => {
-        const balance = await accountBalance(tx, wallet.id);
-        if (balance < amount) {
-          throw new AppError(402, "INSUFFICIENT_FUNDS", "Insufficient wallet balance");
+  // SERIALIZABLE prevents concurrent overdraw. Under contention Postgres may
+  // abort with a serialization failure (P2034) or a unique-key race (P2002);
+  // resolve to the winning payment, or retry the transaction a few times.
+  const commitPayment = async (): Promise<string> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await prisma.$transaction(
+          async (tx) => {
+            const balance = await accountBalance(tx, wallet.id);
+            if (balance < amount) {
+              throw new AppError(402, "INSUFFICIENT_FUNDS", "Insufficient wallet balance");
+            }
+            const ledgerTx = await tx.ledgerTransaction.create({
+              data: {
+                idempotencyKey: key,
+                kind: "PAYMENT",
+                description: `Label payment for ${shipment.trackingCode}`,
+              },
+            });
+            await tx.ledgerEntry.createMany({
+              data: [
+                { transactionId: ledgerTx.id, accountId: wallet.id, amountCents: -amount },
+                { transactionId: ledgerTx.id, accountId: revenue.id, amountCents: amount },
+              ],
+            });
+            const payment = await tx.payment.create({
+              data: {
+                userId,
+                shipmentId,
+                transactionId: ledgerTx.id,
+                amountCents: amount,
+                currency: shipment.currency,
+                status: "COMPLETED",
+              },
+            });
+            await tx.trackingEvent.create({
+              data: {
+                shipmentId,
+                status: "LABEL_PAID",
+                description: "Label paid",
+                actorId: actor.sub,
+                occurredAt: new Date(),
+                recordedAt: new Date(),
+              },
+            });
+            await tx.shipment.update({ where: { id: shipmentId }, data: { status: "LABEL_PAID" } });
+            return payment.id;
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        );
+      } catch (error) {
+        if (isUniqueViolation(error) || isSerializationFailure(error)) {
+          const won = await prisma.ledgerTransaction.findUnique({
+            where: { idempotencyKey: key },
+            include: { payment: true },
+          });
+          if (won?.payment) return won.payment.id;
+          if (isSerializationFailure(error) && attempt < 3) continue;
         }
-        const ledgerTx = await tx.ledgerTransaction.create({
-          data: {
-            idempotencyKey: input.idempotencyKey,
-            kind: "PAYMENT",
-            description: `Label payment for ${shipment.trackingCode}`,
-          },
-        });
-        await tx.ledgerEntry.createMany({
-          data: [
-            { transactionId: ledgerTx.id, accountId: wallet.id, amountCents: -amount },
-            { transactionId: ledgerTx.id, accountId: revenue.id, amountCents: amount },
-          ],
-        });
-        const payment = await tx.payment.create({
-          data: {
-            userId,
-            shipmentId,
-            transactionId: ledgerTx.id,
-            amountCents: amount,
-            currency: shipment.currency,
-            status: "COMPLETED",
-          },
-        });
-        await tx.trackingEvent.create({
-          data: {
-            shipmentId,
-            status: "LABEL_PAID",
-            description: "Label paid",
-            actorId: actor.sub,
-            occurredAt: new Date(),
-            recordedAt: new Date(),
-          },
-        });
-        await tx.shipment.update({ where: { id: shipmentId }, data: { status: "LABEL_PAID" } });
-        return payment.id;
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      const won = await prisma.ledgerTransaction.findUnique({
-        where: { idempotencyKey: input.idempotencyKey },
-        include: { payment: true },
-      });
-      if (won?.payment) return buildPayResult(won.payment.id, won.payment.userId);
+        throw error;
+      }
     }
-    throw error;
-  }
+  };
+
+  const paymentId = await commitPayment();
 
   if (generateLabel) {
     try {
@@ -268,16 +292,21 @@ export async function reversePayment(paymentId: string): Promise<void> {
     await tx.payment.update({ where: { id: payment.id }, data: { status: "REVERSED" } });
 
     if (payment.shipmentId) {
-      await tx.trackingEvent.create({
-        data: {
-          shipmentId: payment.shipmentId,
-          status: "CREATED",
-          description: "Payment reversed",
-          occurredAt: new Date(),
-          recordedAt: new Date(),
-        },
-      });
-      await tx.shipment.update({ where: { id: payment.shipmentId }, data: { status: "CREATED" } });
+      // Only rewind a shipment still at LABEL_PAID — never one that already
+      // advanced, which would break the state-machine invariant.
+      const shipment = await tx.shipment.findUnique({ where: { id: payment.shipmentId } });
+      if (shipment?.status === "LABEL_PAID") {
+        await tx.trackingEvent.create({
+          data: {
+            shipmentId: payment.shipmentId,
+            status: "CREATED",
+            description: "Payment reversed",
+            occurredAt: new Date(),
+            recordedAt: new Date(),
+          },
+        });
+        await tx.shipment.update({ where: { id: payment.shipmentId }, data: { status: "CREATED" } });
+      }
     }
   });
 }
