@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+reportlab
+python-barcode
+qrcode[pil]
+pillow
+pytest
+httpx

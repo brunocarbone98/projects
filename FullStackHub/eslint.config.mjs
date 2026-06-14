@@ -10,6 +10,8 @@ export default tseslint.config(
       "**/.turbo/**",
       "**/coverage/**",
       "**/next-env.d.ts",
+      "**/.venv/**",
+      "**/__pycache__/**",
     ],
   },
   js.configs.recommended,
