@@ -1,5 +1,5 @@
 # services/pricing
 
-Microservicio FastAPI de cotización: `POST /quote` recibe origen/destino/peso/servicio y devuelve precio + ETA (reglas por zona, días hábiles, festivos). Se implementa en la **Fase 4** — ver `ROADMAP.md`.
+FastAPI quoting microservice: `POST /quote` receives origin/destination/weight/service and returns price + ETA (rules by zone, business days, holidays). Implemented in **Phase 4** — see `ROADMAP.md`.
 
-**Regla de oro:** este servicio es sin estado y **nunca toca la base de datos**. Solo `apps/api` escribe en PostgreSQL.
+**Golden rule:** this service is stateless and **never touches the database**. Only `apps/api` writes to PostgreSQL.

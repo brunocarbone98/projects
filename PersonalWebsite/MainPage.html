@@ -59,9 +59,9 @@
         .glow-2 { top: 42%; right: -220px; animation: warmCool 20s ease-in-out infinite; animation-delay: -10s; }
 
         @keyframes warmCool {
-            0%   { background: #a78bfa; }  /* violeta */
-            20%  { background: #22d3ee; }  /* cian */
-            40%  { background: #f59e0b; }  /* ámbar */
+            0%   { background: #a78bfa; }  /* violet */
+            20%  { background: #22d3ee; }  /* cyan */
+            40%  { background: #f59e0b; }  /* amber */
             60%  { background: #fb7185; }  /* coral */
             80%  { background: #0891b2; }  /* teal */
             100% { background: #a78bfa; }
@@ -124,7 +124,7 @@
             font-size: clamp(2.8rem, 8.5vw, 5.4rem); font-weight: 700;
             line-height: 1.02; letter-spacing: -2.5px; margin-bottom: 22px;
         }
-        /* Nombre con color que fluye, de izquierda a derecha */
+        /* Name with a flowing color, left to right */
         .hero h1 .grad {
             font-weight: 700;
             background: linear-gradient(90deg, #a78bfa, #22d3ee, #f59e0b, #fb7185, #0891b2, #a78bfa);
@@ -138,7 +138,7 @@
             to { background-position: 0% center; }
         }
 
-        /* Saludo rotatorio en 9 idiomas: sube y desaparece; el siguiente entra y ocupa su lugar */
+        /* Rotating greeting in 9 languages: it slides up and fades out; the next one enters and takes its place */
         .hero h1 .greeting {
             display: block;
             font-size: 0.6em;
@@ -316,7 +316,7 @@
             .nav-links a { font-size: 1.2rem; }
         }
 
-        /* Respeta a quien prefiere menos movimiento */
+        /* Respect users who prefer reduced motion */
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
                 animation-duration: 0.01ms !important;
@@ -608,8 +608,8 @@
 </footer>
 
 <script>
-    // ====== SALUDO ROTATORIO EN 9 IDIOMAS ======
-    // Ciclo de 10 s por saludo: 8 s visible + 0.5 s de salida + 1 s de pausa + 0.5 s de entrada
+    // ====== ROTATING GREETING IN 9 LANGUAGES ======
+    // 10 s cycle per greeting: 8 s visible + 0.5 s exit + 1 s pause + 0.5 s enter
     const NAME = '<span class="grad">Bruno Carbone</span>';
     const greetings = [
         '🇬🇧 Hello, welcome! My name is ' + NAME + '.',
@@ -629,7 +629,7 @@
     let greetIndex = 0;
     const GREET_VISIBLE = 8000, GREET_EXIT = 500, GREET_GAP = 1000, GREET_ENTER = 500;
 
-    // Reserva la altura de la frase más larga para que el contenido de abajo no salte entre idiomas
+    // Reserve the height of the longest phrase so the content below doesn't jump between languages
     function reserveGreetingHeight() {
         const probe = greetingEl.cloneNode(false);
         probe.removeAttribute('id');
@@ -651,15 +651,15 @@
     window.addEventListener('resize', reserveGreetingHeight);
 
     function rotateGreeting() {
-        // La frase actual se desplaza hacia arriba y desaparece
+        // The current phrase slides up and fades out
         greetingEl.classList.add('greet-out');
         setTimeout(() => {
-            // Un segundo después de irse, la siguiente entra y ocupa su lugar
+            // One second after it leaves, the next one enters and takes its place
             greetIndex = (greetIndex + 1) % greetings.length;
             greetingEl.innerHTML = greetings[greetIndex];
             greetingEl.classList.remove('greet-out');
             greetingEl.classList.add('greet-enter');
-            void greetingEl.offsetWidth; // fuerza reflow para que la entrada se anime
+            void greetingEl.offsetWidth; // force reflow so the entrance animates
             greetingEl.classList.remove('greet-enter');
             setTimeout(rotateGreeting, GREET_ENTER + GREET_VISIBLE);
         }, GREET_EXIT + GREET_GAP);
@@ -690,7 +690,7 @@
         });
     });
 
-    // Smooth scroll para los enlaces internos (sin href, así no se tratan como enlaces externos)
+    // Smooth scroll for internal links (no href, so they aren't treated as external links)
     document.querySelectorAll('[data-scroll]').forEach(el => {
         el.addEventListener('click', () => {
             const target = document.getElementById(el.dataset.scroll);

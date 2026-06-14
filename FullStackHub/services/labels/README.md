@@ -1,5 +1,5 @@
 # services/labels
 
-Microservicio FastAPI de etiquetas: `POST /label` recibe los datos del envío y devuelve un PDF 4×6 con código de barras Code-128 (`reportlab` + `python-barcode`) y QR a la URL pública de rastreo. Se implementa en la **Fase 4** — ver `ROADMAP.md`.
+FastAPI label microservice: `POST /label` receives the shipment data and returns a 4×6 PDF with a Code-128 barcode (`reportlab` + `python-barcode`) and a QR pointing to the public tracking URL. Implemented in **Phase 4** — see `ROADMAP.md`.
 
-**Regla de oro:** este servicio es sin estado y **nunca toca la base de datos**. Solo `apps/api` escribe en PostgreSQL.
+**Golden rule:** this service is stateless and **never touches the database**. Only `apps/api` writes to PostgreSQL.
