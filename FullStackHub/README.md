@@ -48,6 +48,16 @@ flowchart LR
 **Golden rule:** only `apps/api` touches PostgreSQL. The Python microservices are
 stateless — they receive data, compute/generate, and return a result.
 
+## Screenshots
+
+| Public tracking (SSR + route map) | Wallet — double-entry ledger |
+|---|---|
+| ![Public tracking](screenshots/02-tracking.png) | ![Wallet](screenshots/05-wallet.png) |
+| **Landing** | **Customer dashboard** |
+| ![Landing](screenshots/01-landing.png) | ![Dashboard](screenshots/04-dashboard.png) |
+| **Quote calculator** | **Shipments** |
+| ![Quote calculator](screenshots/03-quote.png) | ![Shipments](screenshots/06-shipments.png) |
+
 ## Stack
 
 | Area | Tech |
