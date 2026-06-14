@@ -89,4 +89,32 @@ describe("wallet + double-entry ledger", () => {
       expect(txn.entries.reduce((sum, e) => sum + e.amountCents, 0)).toBe(0);
     }
   });
+
+  it("scopes idempotency keys per user (no cross-user collision)", async () => {
+    const a = await registerCustomer("scope-a@example.com");
+    const b = await registerCustomer("scope-b@example.com");
+    // Both submit the SAME client idempotency key.
+    expect((await topup(a.tokens.accessToken, 5000, "shared-key")).status).toBe(200);
+    expect((await topup(b.tokens.accessToken, 7000, "shared-key")).status).toBe(200);
+    // Each wallet is credited independently — B's key did not collide with A's.
+    expect((await getWallet(a.tokens.accessToken)).body.balanceCents).toBe(5000);
+    expect((await getWallet(b.tokens.accessToken)).body.balanceCents).toBe(7000);
+  });
+
+  it("does not leak another user's payment when an idempotency key is replayed", async () => {
+    const a = await registerCustomer("idor-a@example.com");
+    const b = await registerCustomer("idor-b@example.com");
+    await topup(a.tokens.accessToken, 10000, "fund-a");
+    const shipA = await createShipment(a.tokens.accessToken);
+    expect((await pay(a.tokens.accessToken, shipA.id, "shared-pay-key")).status).toBe(201);
+
+    // B replays A's idempotency key against B's own shipment.
+    await topup(b.tokens.accessToken, 10000, "fund-b");
+    const shipB = await createShipment(b.tokens.accessToken);
+    const resB = await pay(b.tokens.accessToken, shipB.id, "shared-pay-key");
+
+    expect(resB.status).toBe(201);
+    expect(resB.body.shipment.id).toBe(shipB.id); // B's own shipment, not A's
+    expect(resB.body.payment.shipmentId).toBe(shipB.id);
+  });
 });
