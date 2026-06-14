@@ -2,7 +2,7 @@
 
 International parcel shipping & tracking platform (UPS/FedEx style) with a bilingual es/en web app. The full phased plan lives in `ROADMAP.md`: when starting a phase, read its corresponding section.
 
-**Current phase:** Phases 0–4 are complete. The transactional API (`apps/api`) runs on Prisma + PostgreSQL (JWT auth, state machine, rate-limited public tracking + quote endpoints). The web app (`apps/web`) has the bilingual es/en public site (SSR, SEO) plus authenticated customer/staff dashboards (httpOnly-cookie auth). The Python microservices (`services/pricing`, `services/labels`) are live and consumed by the API over HTTP. Next up is Phase 5 (wallet + ledger payments).
+**Current phase:** Phases 0–6 are complete. The transactional API (`apps/api`) runs on Prisma + PostgreSQL (JWT auth, state machine, rate-limited public tracking + quote endpoints, and a wallet backed by a double-entry ledger with idempotent payments). The web app (`apps/web`) has the bilingual es/en public site (SSR, SEO, Leaflet route map) plus authenticated customer/staff dashboards and a wallet (httpOnly-cookie auth). The Python microservices (`services/pricing`, `services/labels`) are consumed by the API over HTTP. Notifications (email + webhooks) fire on status changes; container/Render deploy configs are in place.
 
 ## Monorepo structure
 

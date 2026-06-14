@@ -2,12 +2,14 @@ import {
   CreateShipmentSchema,
   CreateTrackingEventSchema,
   ListShipmentsQuerySchema,
+  PaySchema,
 } from "@shipping-hub/shared";
 import { Router } from "express";
 import { requireAuth, requireRole } from "../auth/middleware.js";
 import { unauthenticated } from "../http/errors.js";
 import { parseOrThrow } from "../http/validate.js";
 import * as shipmentService from "../services/shipment.service.js";
+import * as walletService from "../services/wallet.service.js";
 
 export const shipmentsRouter: Router = Router();
 
@@ -39,6 +41,12 @@ shipmentsRouter.get("/:id/label", async (req, res) => {
   res.setHeader("content-type", "application/pdf");
   res.setHeader("content-disposition", `attachment; filename="${filename}"`);
   res.send(pdf);
+});
+
+shipmentsRouter.post("/:id/pay", async (req, res) => {
+  if (!req.auth) throw unauthenticated();
+  const input = parseOrThrow(PaySchema, req.body ?? {});
+  res.status(201).json(await walletService.payForShipment(req.auth, String(req.params.id), input));
 });
 
 shipmentsRouter.post("/:id/events", requireRole("ADMIN", "COURIER"), async (req, res) => {

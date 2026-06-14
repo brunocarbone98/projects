@@ -6,7 +6,7 @@ const SHIPMENT_COUNTER_START = 1000;
 /** Wipes transactional tables and resets the tracking counter for isolation. */
 export async function resetDatabase(): Promise<void> {
   await prisma.$executeRawUnsafe(
-    `TRUNCATE TABLE "tracking_events", "shipments", "addresses", "refresh_tokens", "users" RESTART IDENTITY CASCADE;`,
+    `TRUNCATE TABLE "ledger_entries", "ledger_transactions", "payments", "wallet_accounts", "tracking_events", "shipments", "addresses", "refresh_tokens", "users" RESTART IDENTITY CASCADE;`,
   );
   await prisma.counter.upsert({
     where: { id: "shipment" },

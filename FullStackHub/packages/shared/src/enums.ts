@@ -39,3 +39,9 @@ export function isServiceLevel(value: string): value is ServiceLevel {
 export function isUserRole(value: string): value is UserRole {
   return (USER_ROLES as readonly string[]).includes(value);
 }
+
+export const LEDGER_KINDS = ["TOPUP", "PAYMENT", "REVERSAL"] as const;
+export type LedgerKind = (typeof LEDGER_KINDS)[number];
+
+export const PAYMENT_STATUSES = ["COMPLETED", "REVERSED"] as const;
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];

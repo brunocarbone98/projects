@@ -8,9 +8,11 @@ import { Container } from "@/components/Container";
 import { ShareLink } from "@/components/ShareLink";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Timeline } from "@/components/Timeline";
+import { TrackingMap } from "@/components/TrackingMap";
 import { Link } from "@/i18n/navigation";
 import { fetchTracking } from "@/lib/api";
 import { siteUrl } from "@/lib/config";
+import { cityCoords } from "@/lib/geo";
 import { formatDate } from "@/lib/format";
 import { jsonLdString } from "@/lib/jsonld";
 
@@ -175,6 +177,12 @@ export default async function TrackingResultPage({ params }: { params: Promise<P
             </div>
           </dl>
         </Card>
+
+        {cityCoords(data.origin.city) && cityCoords(data.destination.city) && (
+          <Card className="mt-6 overflow-hidden p-2">
+            <TrackingMap origin={data.origin} destination={data.destination} />
+          </Card>
+        )}
 
         <Card className="mt-6 p-6">
           <h2 className="mb-6 text-lg font-semibold text-slate-900">{t("timelineTitle")}</h2>

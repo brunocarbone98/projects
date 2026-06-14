@@ -36,6 +36,23 @@ enum ShipmentStatus {
   CANCELLED
 }
 
+enum WalletKind {
+  USER
+  CASH
+  REVENUE
+}
+
+enum LedgerKind {
+  TOPUP
+  PAYMENT
+  REVERSAL
+}
+
+enum PaymentStatus {
+  COMPLETED
+  REVERSED
+}
+
 model User {
   id           String         @id @default(uuid())
   email        String         @unique
@@ -46,6 +63,8 @@ model User {
   updatedAt    DateTime       @updatedAt
   shipments    Shipment[]
   refreshTokens RefreshToken[]
+  wallet       WalletAccount?
+  payments     Payment[]
 
   @@map("users")
 }
@@ -126,6 +145,7 @@ model Shipment {
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
   events               TrackingEvent[]
+  payments             Payment[]
 
   @@index([status])
   @@index([userId])
@@ -154,4 +174,66 @@ model Counter {
   value Int    @default(0)
 
   @@map("counters")
+}
+
+// --- Phase 5: wallet + double-entry ledger ---------------------------------
+// Per-user wallet plus singleton system accounts (CASH funding source, REVENUE).
+// A balance is never stored — it is the sum of an account's ledger_entries.
+model WalletAccount {
+  id        String        @id @default(uuid())
+  kind      WalletKind
+  userId    String?       @unique
+  user      User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  systemKey String?       @unique // "CASH" | "REVENUE" for system accounts
+  currency  String        @default("USD")
+  createdAt DateTime      @default(now())
+  entries   LedgerEntry[]
+
+  @@map("wallet_accounts")
+}
+
+// One double-entry transaction. idempotencyKey makes every money movement safe
+// to retry; the entries of a transaction always sum to zero.
+model LedgerTransaction {
+  id             String        @id @default(uuid())
+  idempotencyKey String        @unique
+  kind           LedgerKind
+  description    String?
+  createdAt      DateTime      @default(now())
+  entries        LedgerEntry[]
+  payment        Payment?
+
+  @@map("ledger_transactions")
+}
+
+// Append-only signed postings. Never UPDATE or DELETE rows in this table.
+model LedgerEntry {
+  id            String            @id @default(uuid())
+  transactionId String
+  transaction   LedgerTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  accountId     String
+  account       WalletAccount     @relation(fields: [accountId], references: [id])
+  amountCents   Int
+  createdAt     DateTime          @default(now())
+
+  @@index([accountId])
+  @@index([transactionId])
+  @@map("ledger_entries")
+}
+
+model Payment {
+  id            String            @id @default(uuid())
+  userId        String
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shipmentId    String?
+  shipment      Shipment?         @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+  transactionId String            @unique
+  transaction   LedgerTransaction @relation(fields: [transactionId], references: [id])
+  amountCents   Int
+  currency      String            @default("USD")
+  status        PaymentStatus     @default(COMPLETED)
+  createdAt     DateTime          @default(now())
+
+  @@index([userId])
+  @@map("payments")
 }

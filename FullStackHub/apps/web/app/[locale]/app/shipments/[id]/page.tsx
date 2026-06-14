@@ -3,6 +3,7 @@ import { getTranslations, setRequestLocale } from "next-intl/server";
 import { notFound } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Container } from "@/components/Container";
+import { PayButton } from "@/components/app/PayButton";
 import { RegisterEventForm } from "@/components/app/RegisterEventForm";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Timeline } from "@/components/Timeline";
@@ -48,6 +49,14 @@ export default async function ShipmentDetailPage({
         </h1>
         <div className="flex items-center gap-3">
           <StatusBadge status={shipment.status} />
+          {shipment.status === "CREATED" && !staff && (
+            <PayButton
+              locale={locale}
+              shipmentId={shipment.id}
+              idempotencyKey={crypto.randomUUID()}
+              amountLabel={formatMoney(shipment.priceCents, shipment.currency, locale)}
+            />
+          )}
           <a href={`/api/shipments/${shipment.id}/label`} className={cn(secondaryButton, "py-2")}>
             {t("downloadLabel")}
           </a>

@@ -19,6 +19,7 @@ import {
 } from "../domain/serializers.js";
 import { env } from "../env.js";
 import { AppError, conflict, forbidden, notFound } from "../http/errors.js";
+import { notifyStatusChange } from "../notifications/index.js";
 import { prisma } from "../prisma.js";
 import { getQuote } from "./quote.service.js";
 
@@ -197,6 +198,18 @@ export async function addTrackingEvent(
     where: { id: shipmentId },
     include: SHIPMENT_INCLUDE,
   });
+
+  const recipient = updated.userId
+    ? ((await prisma.user.findUnique({ where: { id: updated.userId }, select: { email: true } }))
+        ?.email ?? null)
+    : null;
+  notifyStatusChange({
+    trackingCode: updated.trackingCode,
+    status: to,
+    recipientEmail: recipient,
+    trackingUrl: `${env.PUBLIC_WEB_URL}/en/tracking/${updated.trackingCode}`,
+  });
+
   return toShipmentDto(updated);
 }
 

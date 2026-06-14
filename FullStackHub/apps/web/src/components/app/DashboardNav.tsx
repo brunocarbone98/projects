@@ -38,6 +38,11 @@ export function DashboardNav({
               {t("nav.newShipment")}
             </Link>
           )}
+          {isCustomer && (
+            <Link href="/app/wallet" className="rounded-lg px-3 py-1.5 text-slate-600 hover:bg-slate-100">
+              {t("nav.wallet")}
+            </Link>
+          )}
         </nav>
 
         <div className="flex items-center gap-3 text-sm">
