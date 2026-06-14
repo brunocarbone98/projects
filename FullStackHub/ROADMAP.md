@@ -1,41 +1,41 @@
-# ROADMAP — Plataforma de Envíos y Rastreo de Paquetes (estilo UPS/FedEx)
+# ROADMAP — Parcel Shipping & Tracking Platform (UPS/FedEx style)
 
-> **Proyecto:** Digital Portfolio & Multilanguage Full-Stack Hub
+> **Project:** Digital Portfolio & Multilanguage Full-Stack Hub
 > **Stack:** Next.js, React, TypeScript, Node.js (Express), Python, PostgreSQL, Tailwind CSS
-> **Cómo usar este archivo:** guárdalo en la raíz del repo. Al iniciar cada fase con Claude Code, abre el modo plan y pídele que lea la sección correspondiente de este roadmap.
+> **How to use this file:** keep it at the repo root. When starting each phase with Claude Code, open plan mode and ask it to read the corresponding section of this roadmap.
 
 ---
 
-## 1. Visión del producto
+## 1. Product vision
 
-Plataforma de mensajería y paquetería internacional (ejemplo: Panamá ↔ EE.UU. ↔ LatAm) con interfaz bilingüe español/inglés. Cualquier visitante puede rastrear un paquete con su número de guía sin registrarse (clave para demos a reclutadores). Los usuarios registrados crean envíos, pagan etiquetas con un wallet interno, y el personal de operaciones actualiza los estados que alimentan la línea de tiempo pública.
+International courier and parcel platform (example: Panama ↔ USA ↔ LatAm) with a bilingual Spanish/English interface. Any visitor can track a package with its tracking number without signing up (key for recruiter demos). Registered users create shipments, pay for labels with an internal wallet, and operations staff update the statuses that feed the public timeline.
 
-**Criterio de éxito del MVP:** un visitante entra al sitio, pega `PTY-2026-000123-4` y ve en menos de 2 segundos una línea de tiempo del envío renderizada con SSR, en su idioma, con metadata SEO correcta.
+**MVP success criterion:** a visitor lands on the site, pastes `PTY-2026-000123-4` and, in under 2 seconds, sees a shipment timeline rendered with SSR, in their language, with correct SEO metadata.
 
 ---
 
-## 2. Dónde encaja cada pieza del stack
+## 2. Where each piece of the stack fits
 
-| Tecnología | Ubicación en el repo | Responsabilidad |
+| Technology | Location in the repo | Responsibility |
 |---|---|---|
-| **Next.js + React + TypeScript + Tailwind** | `apps/web` | Sitio público SEO (rastreo, cotizador, cobertura, FAQ) + dashboards de cliente y admin. SSR/SSG, i18n, metadata dinámica, sitemap. |
-| **Node.js (Express) + TypeScript** | `apps/api` | API transaccional REST: autenticación, usuarios, envíos, eventos de tracking, wallet/ledger, facturas. Única capa que escribe en la base de datos. |
-| **PostgreSQL** | Docker local → Neon/Supabase en prod | Fuente única de verdad: usuarios, envíos, eventos, tarifas, ledger contable. |
-| **Python (FastAPI)** | `services/pricing` y `services/labels` | Microservicios sin estado: (1) cotización de tarifas + cálculo de ETA; (2) generación de etiquetas PDF con código de barras y QR. La API Node los consume por HTTP interno. |
-| **Tipos compartidos** | `packages/shared` | Esquemas Zod + tipos TypeScript compartidos entre `web` y `api` (contratos de la API, enums de estados). |
+| **Next.js + React + TypeScript + Tailwind** | `apps/web` | Public SEO site (tracking, quoter, coverage, FAQ) + customer and admin dashboards. SSR/SSG, i18n, dynamic metadata, sitemap. |
+| **Node.js (Express) + TypeScript** | `apps/api` | Transactional REST API: authentication, users, shipments, tracking events, wallet/ledger, invoices. The only layer that writes to the database. |
+| **PostgreSQL** | Local Docker → Neon/Supabase in prod | Single source of truth: users, shipments, events, rates, accounting ledger. |
+| **Python (FastAPI)** | `services/pricing` and `services/labels` | Stateless microservices: (1) rate quoting + ETA calculation; (2) PDF label generation with barcode and QR. The Node API consumes them over internal HTTP. |
+| **Shared types** | `packages/shared` | Zod schemas + TypeScript types shared between `web` and `api` (API contracts, status enums). |
 
-**Regla de oro arquitectónica:** los microservicios Python nunca tocan la base de datos; reciben datos, calculan/generan, y devuelven el resultado. Solo `apps/api` escribe en PostgreSQL. Esto mantiene la "arquitectura distribuida" limpia y fácil de explicar en entrevistas.
+**Architectural golden rule:** the Python microservices never touch the database; they receive data, compute/generate, and return the result. Only `apps/api` writes to PostgreSQL. This keeps the "distributed architecture" clean and easy to explain in interviews.
 
 ---
 
-## 3. Estructura del monorepo
+## 3. Monorepo structure
 
 ```
 shipping-hub/
-├── CLAUDE.md                  # Convenciones del proyecto para Claude Code
-├── ROADMAP.md                 # Este archivo
+├── CLAUDE.md                  # Project conventions for Claude Code
+├── ROADMAP.md                 # This file
 ├── .claude/
-│   └── agents/                # Subagentes de Claude Code (ver sección 7)
+│   └── agents/                # Claude Code subagents (see section 7)
 │       ├── frontend-dev.md
 │       ├── backend-dev.md
 │       ├── python-services.md
@@ -45,178 +45,178 @@ shipping-hub/
 │   ├── web/                   # Next.js 15 (App Router)
 │   └── api/                   # Express + TypeScript + Prisma
 ├── services/
-│   ├── pricing/               # FastAPI: cotización + ETA
-│   └── labels/                # FastAPI: etiquetas PDF + barcode/QR
+│   ├── pricing/               # FastAPI: quoting + ETA
+│   └── labels/                # FastAPI: PDF labels + barcode/QR
 ├── packages/
-│   └── shared/                # Zod schemas + tipos TS
-├── docker-compose.yml         # PostgreSQL + servicios Python
-├── turbo.json                 # Orquestación del monorepo
+│   └── shared/                # Zod schemas + TS types
+├── docker-compose.yml         # PostgreSQL + Python services
+├── turbo.json                 # Monorepo orchestration
 └── pnpm-workspace.yaml
 ```
 
-**Herramientas base:** pnpm workspaces + Turborepo, Prisma como ORM, `next-intl` para i18n, GitHub Actions para CI.
+**Base tooling:** pnpm workspaces + Turborepo, Prisma as the ORM, `next-intl` for i18n, GitHub Actions for CI.
 
 ---
 
-## 4. Modelo de dominio
+## 4. Domain model
 
-### Máquina de estados del envío (el corazón del sistema)
+### Shipment state machine (the heart of the system)
 
 ```
 CREATED → LABEL_PAID → PICKED_UP → IN_TRANSIT → AT_DESTINATION_HUB → OUT_FOR_DELIVERY → DELIVERED
 ```
 
-Estados laterales: `EXCEPTION` (aduana, dirección incorrecta), `RETURNED_TO_SENDER`, `CANCELLED`.
-Reglas: las transiciones válidas se definen en un mapa en `packages/shared`; cada transición genera un `tracking_event` inmutable con timestamp, ubicación y actor. La API rechaza transiciones inválidas (p. ej. `DELIVERED → IN_TRANSIT`).
+Side states: `EXCEPTION` (customs, wrong address), `RETURNED_TO_SENDER`, `CANCELLED`.
+Rules: valid transitions are defined in a map in `packages/shared`; each transition generates an immutable `tracking_event` with a timestamp, location and actor. The API rejects invalid transitions (e.g. `DELIVERED → IN_TRANSIT`).
 
-### Entidades principales
+### Main entities
 
 - `users` (roles: `customer`, `courier`, `admin`)
-- `addresses` (libreta de direcciones, origen/destino)
-- `shipments` (guía, servicio, estado actual, peso/dimensiones, costo)
-- `tracking_events` (histórico inmutable, append-only)
-- `service_levels` (express, estándar, económico) y `zones` / `rates` (tarifas por zona-peso)
-- `wallet_accounts` y `ledger_entries` (doble partida, inmutable) — Fase 5
-- `payments` con `idempotency_key` — Fase 5
-- `webhook_subscriptions` — Fase 6
-### Formato del número de guía
+- `addresses` (address book, origin/destination)
+- `shipments` (tracking number, service, current status, weight/dimensions, cost)
+- `tracking_events` (immutable history, append-only)
+- `service_levels` (express, standard, economy) and `zones` / `rates` (rates by zone-weight)
+- `wallet_accounts` and `ledger_entries` (double-entry, immutable) — Phase 5
+- `payments` with `idempotency_key` — Phase 5
+- `webhook_subscriptions` — Phase 6
+### Tracking number format
 
-`PTY-YYYY-NNNNNN-C` donde `C` es un dígito verificador (algoritmo tipo Luhn). Detalle pequeño que da realismo y es buena historia técnica.
+`PTY-YYYY-NNNNNN-C` where `C` is a check digit (Luhn-style algorithm). A small detail that adds realism and makes a good technical story.
 
 ---
 
-## 5. Fases del proyecto
+## 5. Project phases
 
-> Duraciones estimadas trabajando a tiempo parcial con ayuda de Claude. Cada fase termina con algo demostrable y un commit/tag.
+> Estimated durations working part-time with Claude's help. Each phase ends with something demonstrable and a commit/tag.
 
-### Fase 0 — Cimientos (2–4 días)
-**Stack:** tooling general.
-- Monorepo con pnpm + Turborepo; ESLint + Prettier; Docker Compose con PostgreSQL.
-- `CLAUDE.md` raíz con convenciones (idioma de código en inglés, commits convencionales, cómo correr cada app).
-- Crear los subagentes en `.claude/agents/` (sección 7).
-- CI mínimo en GitHub Actions: lint + typecheck.
-**Entregable:** `pnpm dev` levanta web y api vacías; `docker compose up` levanta Postgres.
-**Con Claude Code:** usa el modo plan y pídele: *"Lee ROADMAP.md sección Fase 0 y crea la estructura del monorepo"*.
+### Phase 0 — Foundations (2–4 days)
+**Stack:** general tooling.
+- Monorepo with pnpm + Turborepo; ESLint + Prettier; Docker Compose with PostgreSQL.
+- Root `CLAUDE.md` with conventions (code language in English, conventional commits, how to run each app).
+- Create the subagents in `.claude/agents/` (section 7).
+- Minimal CI in GitHub Actions: lint + typecheck.
+**Deliverable:** `pnpm dev` brings up empty web and api; `docker compose up` brings up Postgres.
+**With Claude Code:** use plan mode and ask it: *"Read ROADMAP.md, Phase 0 section, and create the monorepo structure"*.
 
-### Fase 1 — API transaccional (1–2 semanas)
+### Phase 1 — Transactional API (1–2 weeks)
 **Stack:** Node.js (Express) + TypeScript + Prisma + PostgreSQL.
-- Esquema Prisma de las entidades core + migraciones + seeds (10 envíos demo en distintos estados).
-- Auth con JWT (access + refresh) y middleware de roles.
-- Endpoints: CRUD de envíos, registro de eventos de tracking (solo courier/admin), y el endpoint público `GET /api/v1/tracking/:code` (sin auth, con rate limit).
-- Máquina de estados validada en la capa de servicio + tests de integración (Vitest + Supertest).
-- Documentación OpenAPI generada.
-**Entregable:** API corriendo con datos seed; puedes rastrear un envío con `curl`.
+- Prisma schema of the core entities + migrations + seeds (10 demo shipments in different states).
+- Auth with JWT (access + refresh) and role middleware.
+- Endpoints: shipment CRUD, tracking-event registration (courier/admin only), and the public endpoint `GET /api/v1/tracking/:code` (no auth, with rate limiting).
+- State machine validated in the service layer + integration tests (Vitest + Supertest).
+- Generated OpenAPI documentation.
+**Deliverable:** API running with seed data; you can track a shipment with `curl`.
 
-### Fase 2 — Web pública con SEO + i18n (1–2 semanas)
+### Phase 2 — Public web with SEO + i18n (1–2 weeks)
 **Stack:** Next.js + React + TypeScript + Tailwind.
-- App Router con rutas localizadas `/{es|en}/...` usando `next-intl`.
-- Páginas: landing, `/tracking/[code]` (SSR contra la API, línea de tiempo del envío), cotizador, cobertura, FAQ.
-- SEO: `generateMetadata` dinámico por envío, OpenGraph, `sitemap.xml`, `robots.txt`, JSON-LD con schema `ParcelDelivery`.
-- Design system con Tailwind: paleta de marca, componentes Timeline, StatusBadge, Card.
-**Entregable:** Lighthouse SEO ≥ 95; URL de rastreo compartible que se ve bien en WhatsApp/Twitter.
+- App Router with localized routes `/{es|en}/...` using `next-intl`.
+- Pages: landing, `/tracking/[code]` (SSR against the API, shipment timeline), quoter, coverage, FAQ.
+- SEO: dynamic `generateMetadata` per shipment, OpenGraph, `sitemap.xml`, `robots.txt`, JSON-LD with the `ParcelDelivery` schema.
+- Design system with Tailwind: brand palette, Timeline, StatusBadge, Card components.
+**Deliverable:** Lighthouse SEO ≥ 95; a shareable tracking URL that looks good on WhatsApp/Twitter.
 
-### Fase 3 — Dashboards (1–2 semanas)
-**Stack:** Next.js (rutas protegidas) + API.
-- Login/registro contra la API (cookies httpOnly).
-- Cliente: wizard de crear envío (direcciones → paquete → servicio/cotización → confirmar), historial, libreta de direcciones.
-- Admin/courier: buscador de envíos, botón "registrar evento" que simula escaneos de bodega.
-**Entregable:** flujo completo: crear envío → admin lo avanza de estado → la página pública refleja cada cambio.
+### Phase 3 — Dashboards (1–2 weeks)
+**Stack:** Next.js (protected routes) + API.
+- Login/registration against the API (httpOnly cookies).
+- Customer: create-shipment wizard (addresses → parcel → service/quote → confirm), history, address book.
+- Admin/courier: shipment search, a "register event" button that simulates warehouse scans.
+**Deliverable:** full flow: create a shipment → admin advances its status → the public page reflects every change.
 
-### Fase 4 — Microservicios Python (1 semana)
+### Phase 4 — Python microservices (1 week)
 **Stack:** Python + FastAPI + Docker.
-- `services/pricing`: `POST /quote` recibe origen/destino/peso/servicio y devuelve precio + ETA (reglas por zona, días hábiles, festivos de Panamá y destino; opcional: modelo scikit-learn entrenado con datos sintéticos para el ETA).
-- `services/labels`: `POST /label` recibe datos del envío y devuelve PDF 4×6 con código de barras Code-128 (`reportlab` + `python-barcode`) y QR a la URL de rastreo.
-- La API Node los consume vía HTTP interno; ambos en Docker Compose; healthchecks.
-**Entregable:** al pagar un envío se descarga la etiqueta PDF; el cotizador público usa `pricing` en vivo.
+- `services/pricing`: `POST /quote` receives origin/destination/weight/service and returns price + ETA (rules by zone, business days, holidays in Panama and the destination; optional: a scikit-learn model trained on synthetic data for the ETA).
+- `services/labels`: `POST /label` receives the shipment data and returns a 4×6 PDF with a Code-128 barcode (`reportlab` + `python-barcode`) and a QR pointing to the tracking URL.
+- The Node API consumes them over internal HTTP; both in Docker Compose; healthchecks.
+**Deliverable:** paying for a shipment downloads the PDF label; the public quoter uses `pricing` live.
 
-### Fase 5 — Pagos: wallet + ledger (1 semana)
-**Stack:** Node.js + PostgreSQL (transacciones serializables).
-- Wallet por usuario con ledger de doble partida: tabla `ledger_entries` append-only; el balance es la suma, nunca un campo editable.
-- `idempotency_key` en cada operación de pago (reintentos seguros).
-- Flujo: recargar saldo (simulado o Stripe test mode) → pagar etiqueta → si falla la generación, reverso automático.
-**Entregable:** historial de transacciones consistente; test que demuestra que un doble-click no cobra dos veces.
+### Phase 5 — Payments: wallet + ledger (1 week)
+**Stack:** Node.js + PostgreSQL (serializable transactions).
+- Per-user wallet with a double-entry ledger: append-only `ledger_entries` table; the balance is the sum, never an editable field.
+- `idempotency_key` on every payment operation (safe retries).
+- Flow: top up balance (simulated or Stripe test mode) → pay for a label → if generation fails, automatic reversal.
+**Deliverable:** consistent transaction history; a test proving that a double-click does not charge twice.
 
-### Fase 6 — Pulido y deploy (1–2 semanas)
-- Notificaciones email en cambios de estado (Resend) + webhooks salientes para e-commerce.
-- Mapa del recorrido en la página de tracking (Leaflet + OpenStreetMap).
-- E2E con Playwright (rastrear, crear envío, pagar); README con capturas y diagrama de arquitectura.
-- Deploy: **Vercel** (web) · **Railway o Render** (api + servicios Python) · **Neon** (PostgreSQL).
-**Entregable:** URL pública en tu portafolio + repo documentado.
-
----
-
-## 6. Orden de dependencias
-
-```
-Fase 0 → Fase 1 → Fase 2 → Fase 3 → Fase 5
-              ↘ Fase 4 (paralela desde Fase 2) ↗ → Fase 6
-```
-
-La Fase 4 (Python) solo depende de la 1; puedes adelantarla en paralelo si quieres variar de tecnología.
+### Phase 6 — Polish and deploy (1–2 weeks)
+- Email notifications on status changes (Resend) + outbound webhooks for e-commerce.
+- Route map on the tracking page (Leaflet + OpenStreetMap).
+- E2E with Playwright (track, create shipment, pay); README with screenshots and an architecture diagram.
+- Deploy: **Vercel** (web) · **Railway or Render** (api + Python services) · **Neon** (PostgreSQL).
+**Deliverable:** a public URL in your portfolio + a documented repo.
 
 ---
 
-## 7. Subagentes de Claude Code para este proyecto
+## 6. Dependency order
 
-Los subagentes viven en `.claude/agents/` (proyecto, versionados en git) o `~/.claude/agents/` (personales, todos tus proyectos). Son archivos Markdown con frontmatter YAML; se crean y gestionan con el comando `/agents` dentro de Claude Code. Docs: https://code.claude.com/docs/en/sub-agents
+```
+Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 5
+              ↘ Phase 4 (parallel from Phase 2) ↗ → Phase 6
+```
 
-### Agentes recomendados
+Phase 4 (Python) only depends on Phase 1; you can pull it forward in parallel if you want a change of technology.
 
-| Agente | Modelo | Herramientas | Rol |
+---
+
+## 7. Claude Code subagents for this project
+
+Subagents live in `.claude/agents/` (project-level, versioned in git) or `~/.claude/agents/` (personal, across all your projects). They are Markdown files with YAML frontmatter; create and manage them with the `/agents` command inside Claude Code. Docs: https://code.claude.com/docs/en/sub-agents
+
+### Recommended agents
+
+| Agent | Model | Tools | Role |
 |---|---|---|---|
-| `frontend-dev` | sonnet | todas | Next.js, Tailwind, next-intl, SEO. Conoce el design system. |
-| `backend-dev` | sonnet | todas | Express, Prisma, máquina de estados, ledger. |
-| `python-services` | sonnet | todas | FastAPI, reportlab, barcode. Recuerda: nunca tocar la DB. |
-| `code-reviewer` | sonnet | Read, Grep, Glob | Revisión de diffs: seguridad, tipos, convenciones. Solo lectura. |
-| `test-runner` | haiku | Bash, Read | Corre suites de tests y reporta solo los fallos (ahorra contexto). |
+| `frontend-dev` | sonnet | all | Next.js, Tailwind, next-intl, SEO. Knows the design system. |
+| `backend-dev` | sonnet | all | Express, Prisma, state machine, ledger. |
+| `python-services` | sonnet | all | FastAPI, reportlab, barcode. Remember: never touch the DB. |
+| `code-reviewer` | sonnet | Read, Grep, Glob | Diff review: security, types, conventions. Read-only. |
+| `test-runner` | haiku | Bash, Read | Runs test suites and reports only the failures (saves context). |
 
-### Ejemplo: `.claude/agents/backend-dev.md`
+### Example: `.claude/agents/backend-dev.md`
 
 ```markdown
 ---
 name: backend-dev
-description: Implementa y modifica la API Express, esquema Prisma y lógica de dominio (envíos, tracking, ledger). Usar para cualquier tarea de apps/api.
+description: Implements and modifies the Express API, Prisma schema and domain logic (shipments, tracking, ledger). Use for any task in apps/api.
 model: sonnet
 ---
 
-Eres el desarrollador backend de una plataforma de envíos.
+You are the backend developer of a shipping platform.
 
-Reglas del dominio:
-- Las transiciones de estado de un envío se validan contra el mapa en packages/shared/src/shipment-states.ts. Nunca permitas transiciones inválidas.
-- tracking_events y ledger_entries son append-only: jamás generes UPDATE o DELETE sobre ellas.
-- Toda operación de dinero exige idempotency_key y transacción de Prisma.
-- Endpoints públicos (tracking) llevan rate limiting.
+Domain rules:
+- Shipment state transitions are validated against the map in packages/shared/src/shipment-states.ts. Never allow invalid transitions.
+- tracking_events and ledger_entries are append-only: never generate UPDATE or DELETE on them.
+- Every money operation requires an idempotency_key and a Prisma transaction.
+- Public endpoints (tracking) have rate limiting.
 
-Convenciones: TypeScript estricto, Zod para validar entrada, errores con códigos consistentes, tests de integración con Vitest + Supertest para cada endpoint nuevo.
+Conventions: strict TypeScript, Zod to validate input, errors with consistent codes, integration tests with Vitest + Supertest for every new endpoint.
 ```
 
-### Ejemplo: `.claude/agents/code-reviewer.md`
+### Example: `.claude/agents/code-reviewer.md`
 
 ```markdown
 ---
 name: code-reviewer
-description: Revisa cambios recientes en busca de bugs, problemas de seguridad y violaciones de las convenciones del proyecto. Usar proactivamente después de implementar features.
+description: Reviews recent changes for bugs, security issues and project convention violations. Use proactively after implementing features.
 model: sonnet
 tools: Read, Grep, Glob
 ---
 
-Eres un revisor de código senior. Revisa el diff más reciente y reporta
-hallazgos ordenados por severidad (crítico/medio/menor). Verifica:
-secretos hardcodeados, validación de entrada, transiciones de estado
-inválidas, mutaciones a tablas append-only, y tipos `any`.
-No modificas archivos: solo reportas.
+You are a senior code reviewer. Review the most recent diff and report
+findings ordered by severity (critical/medium/minor). Check for:
+hardcoded secrets, input validation, invalid state transitions,
+mutations to append-only tables, and `any` types.
+You do not modify files: you only report.
 ```
 
-### Flujo de trabajo sugerido por fase
+### Suggested per-phase workflow
 
-1. `claude` en la raíz del repo → modo plan (Shift+Tab) → *"Lee la Fase N del ROADMAP.md y proponme un plan"*.
-2. Aprueba el plan y deja que delegue: las tareas de backend irán a `backend-dev`, etc. (delega solo según la `description` de cada agente; también puedes pedirlo explícito: *"Usa el agente python-services para..."*).
-3. Al terminar cada bloque: *"Usa code-reviewer sobre los cambios"* → corrige → commit.
-4. `test-runner` para correr suites largas sin llenar el contexto principal.
+1. `claude` at the repo root → plan mode (Shift+Tab) → *"Read Phase N of ROADMAP.md and propose a plan"*.
+2. Approve the plan and let it delegate: backend tasks go to `backend-dev`, etc. (it delegates based on each agent's `description`; you can also ask explicitly: *"Use the python-services agent to..."*).
+3. After finishing each block: *"Use code-reviewer on the changes"* → fix → commit.
+4. `test-runner` to run long suites without filling the main context.
 ---
 
-## 8. Extras para el portafolio (si sobra tiempo)
+## 8. Portfolio extras (if there's time left)
 
-- Modo oscuro y micro-animaciones en la línea de tiempo.
-- Página `/developers` con docs del API público de tracking (te posiciona como alguien que piensa en DX).
-- Blog técnico de 2–3 posts ("Cómo modelé la máquina de estados", "Ledger de doble partida en PostgreSQL") — más SEO real para el dominio.
+- Dark mode and micro-animations in the timeline.
+- A `/developers` page with docs for the public tracking API (positions you as someone who thinks about DX).
+- A technical blog with 2–3 posts ("How I modeled the state machine", "Double-entry ledger in PostgreSQL") — more real SEO for the domain.

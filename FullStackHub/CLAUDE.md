@@ -1,49 +1,49 @@
 # CLAUDE.md — Shipping Hub
 
-Plataforma de envíos y rastreo de paquetes (estilo UPS/FedEx) con web bilingüe es/en. El plan completo por fases vive en `ROADMAP.md`: al iniciar una fase, lee su sección correspondiente.
+International parcel shipping & tracking platform (UPS/FedEx style) with a bilingual es/en web app. The full phased plan lives in `ROADMAP.md`: when starting a phase, read its corresponding section.
 
-**Fase actual:** Fases 0, 1 y 2 completadas. La API transaccional (`apps/api`) corre con Prisma + PostgreSQL, auth JWT, máquina de estados y endpoint público de tracking con rate limiting. La web (`apps/web`) tiene el sitio público bilingüe es/en con SSR, SEO y design system. Lo siguiente es la Fase 3 (dashboards) o la Fase 4 (microservicios Python, paralelizable).
+**Current phase:** Phases 0, 1 and 2 are complete. The transactional API (`apps/api`) runs on Prisma + PostgreSQL, with JWT auth, the state machine and a rate-limited public tracking endpoint. The web app (`apps/web`) has the bilingual es/en public site with SSR, SEO and a design system. Next up is Phase 3 (dashboards) or Phase 4 (Python microservices, parallelizable).
 
-## Estructura del monorepo
+## Monorepo structure
 
-- `apps/web` — Next.js 15 (App Router) + Tailwind: sitio público SEO + dashboards.
-- `apps/api` — Express + TypeScript: API REST transaccional. **Única capa que toca PostgreSQL** (Prisma a partir de la Fase 1).
-- `services/pricing` y `services/labels` — microservicios FastAPI sin estado (se implementan en la Fase 4).
-- `packages/shared` — esquemas Zod + tipos TS compartidos entre web y api (contratos de API, enums y máquina de estados a partir de la Fase 1).
-- Orquestación: pnpm workspaces + Turborepo. PostgreSQL local vía Docker Compose.
+- `apps/web` — Next.js 15 (App Router) + Tailwind: public SEO site + dashboards.
+- `apps/api` — Express + TypeScript: transactional REST API. **The only layer that touches PostgreSQL** (Prisma from Phase 1 onwards).
+- `services/pricing` and `services/labels` — stateless FastAPI microservices (implemented in Phase 4).
+- `packages/shared` — Zod schemas + TS types shared between web and api (API contracts, enums and the state machine from Phase 1 onwards).
+- Orchestration: pnpm workspaces + Turborepo. Local PostgreSQL via Docker Compose.
 
-## Comandos
+## Commands
 
-| Comando | Qué hace |
+| Command | What it does |
 |---|---|
-| `pnpm install` | Instala todas las dependencias del workspace |
-| `pnpm dev` | Levanta web (http://localhost:3000) y api (http://localhost:4000) vía Turborepo |
-| `pnpm --filter @shipping-hub/web dev` | Solo la web |
-| `pnpm --filter @shipping-hub/api dev` | Solo la API |
-| `pnpm lint` | ESLint (flat config en la raíz) sobre todo el repo |
-| `pnpm typecheck` | `tsc --noEmit` en cada workspace, vía Turborepo |
+| `pnpm install` | Install all workspace dependencies |
+| `pnpm dev` | Start web (http://localhost:3000) and api (http://localhost:4000) via Turborepo |
+| `pnpm --filter @shipping-hub/web dev` | Web only |
+| `pnpm --filter @shipping-hub/api dev` | API only |
+| `pnpm lint` | ESLint (flat config at the root) over the whole repo |
+| `pnpm typecheck` | `tsc --noEmit` in each workspace, via Turborepo |
 | `pnpm format` / `pnpm format:check` | Prettier |
-| `docker compose up -d` | PostgreSQL local (puerto 5432; user/pass/db: `shipping` / `shipping` / `shipping_hub`) |
+| `docker compose up -d` | Local PostgreSQL (port 5432; user/pass/db: `shipping` / `shipping` / `shipping_hub`) |
 
-## Convenciones
+## Conventions
 
-- **Idioma del código: inglés.** Identificadores, comentarios, mensajes de commit, rutas de API y mensajes de error, todo en inglés. El copy visible de la UI nunca se hardcodea: vive en los archivos de mensajes de `next-intl` (es/en) a partir de la Fase 2.
-- **Commits convencionales** en inglés e imperativo: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`.
-- **TypeScript estricto** en todos los paquetes; prohibido `any`. Validar toda entrada externa con Zod en el borde (route handlers / controladores).
-- Los contratos compartidos entre web y api viven en `packages/shared`; no dupliques tipos ni enums.
+- **Code language: English.** Identifiers, comments, commit messages, API routes and error messages are all in English. Visible UI copy is never hardcoded: it lives in the `next-intl` message files (es/en) from Phase 2 onwards.
+- **Conventional commits** in English, imperative mood: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`.
+- **Strict TypeScript** in every package; `any` is forbidden. Validate all external input with Zod at the edge (route handlers / controllers).
+- Contracts shared between web and api live in `packages/shared`; never duplicate types or enums.
 
-## Reglas arquitectónicas (no negociables)
+## Architectural rules (non-negotiable)
 
-1. Solo `apps/api` lee y escribe en PostgreSQL. Los microservicios Python reciben datos, calculan/generan y devuelven el resultado: **nunca tocan la base de datos**.
-2. `tracking_events` y `ledger_entries` son append-only: jamás UPDATE ni DELETE sobre ellas.
-3. Las transiciones de estado de un envío se validan contra el mapa de `packages/shared`; la API rechaza transiciones inválidas (p. ej. `DELIVERED → IN_TRANSIT`).
-4. Toda operación de dinero exige `idempotency_key` y transacción.
-5. Los endpoints públicos (tracking) llevan rate limiting y no requieren auth.
+1. Only `apps/api` reads and writes PostgreSQL. The Python microservices receive data, compute/generate and return the result: they **never touch the database**.
+2. `tracking_events` and `ledger_entries` are append-only: never UPDATE or DELETE them.
+3. Shipment state transitions are validated against the map in `packages/shared`; the API rejects invalid transitions (e.g. `DELIVERED → IN_TRANSIT`).
+4. Every money operation requires an `idempotency_key` and a transaction.
+5. Public endpoints (tracking) have rate limiting and require no auth.
 
-## Subagentes (`.claude/agents/`)
+## Subagents (`.claude/agents/`)
 
-- `frontend-dev` — tareas de `apps/web` (Next.js, Tailwind, next-intl, SEO).
-- `backend-dev` — tareas de `apps/api` (Express, Prisma, máquina de estados, ledger).
-- `python-services` — tareas de `services/` (FastAPI, pricing, labels).
-- `code-reviewer` — revisar el diff después de implementar features (solo lectura).
-- `test-runner` — correr suites de tests y reportar solo los fallos.
+- `frontend-dev` — tasks in `apps/web` (Next.js, Tailwind, next-intl, SEO).
+- `backend-dev` — tasks in `apps/api` (Express, Prisma, state machine, ledger).
+- `python-services` — tasks in `services/` (FastAPI, pricing, labels).
+- `code-reviewer` — review the diff after implementing features (read-only).
+- `test-runner` — run test suites and report only the failures.
