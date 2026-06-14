@@ -1,0 +1,157 @@
+// Shipping Hub — transactional data model (Phase 1).
+// apps/api is the only layer that reads/writes PostgreSQL.
+// tracking_events are append-only: never UPDATE or DELETE them.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  COURIER
+  ADMIN
+}
+
+enum ServiceLevel {
+  EXPRESS
+  STANDARD
+  ECONOMY
+}
+
+enum ShipmentStatus {
+  CREATED
+  LABEL_PAID
+  PICKED_UP
+  IN_TRANSIT
+  AT_DESTINATION_HUB
+  OUT_FOR_DELIVERY
+  DELIVERED
+  EXCEPTION
+  RETURNED_TO_SENDER
+  CANCELLED
+}
+
+model User {
+  id           String         @id @default(uuid())
+  email        String         @unique
+  passwordHash String
+  name         String
+  role         UserRole       @default(CUSTOMER)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  shipments    Shipment[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+// Hashed, rotating refresh tokens. We store only a SHA-256 hash of the token.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Address {
+  id          String     @id @default(uuid())
+  contactName String
+  line1       String
+  line2       String?
+  city        String
+  state       String?
+  postalCode  String
+  country     String     // ISO 3166-1 alpha-2
+  phone       String?
+  createdAt   DateTime   @default(now())
+  originOf      Shipment[] @relation("OriginAddress")
+  destinationOf Shipment[] @relation("DestinationAddress")
+
+  @@map("addresses")
+}
+
+model Zone {
+  id    String @id @default(uuid())
+  code  String @unique // e.g. PA, US, LATAM
+  name  String
+  rates Rate[]
+
+  @@map("zones")
+}
+
+model Rate {
+  id           String       @id @default(uuid())
+  zoneId       String
+  zone         Zone         @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  serviceLevel ServiceLevel
+  baseCents    Int
+  perKgCents   Int
+  etaMinDays   Int
+  etaMaxDays   Int
+
+  @@unique([zoneId, serviceLevel])
+  @@map("rates")
+}
+
+model Shipment {
+  id                   String          @id @default(uuid())
+  trackingCode         String          @unique
+  userId               String?
+  user                 User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  originAddressId      String
+  originAddress        Address         @relation("OriginAddress", fields: [originAddressId], references: [id])
+  destinationAddressId String
+  destinationAddress   Address         @relation("DestinationAddress", fields: [destinationAddressId], references: [id])
+  serviceLevel         ServiceLevel
+  status               ShipmentStatus  @default(CREATED)
+  weightGrams          Int
+  lengthCm             Int
+  widthCm              Int
+  heightCm             Int
+  priceCents           Int
+  currency             String          @default("USD")
+  zoneCode             String
+  estimatedDeliveryAt  DateTime?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  events               TrackingEvent[]
+
+  @@index([status])
+  @@index([userId])
+  @@map("shipments")
+}
+
+// Append-only history. Never UPDATE or DELETE rows in this table.
+model TrackingEvent {
+  id          String         @id @default(uuid())
+  shipmentId  String
+  shipment    Shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  status      ShipmentStatus
+  location    String?
+  description String?
+  actorId     String?
+  occurredAt  DateTime       @default(now())
+  recordedAt  DateTime       @default(now())
+
+  @@index([shipmentId])
+  @@map("tracking_events")
+}
+
+// Single-row counters used to allocate monotonic tracking sequences race-free.
+model Counter {
+  id    String @id
+  value Int    @default(0)
+
+  @@map("counters")
+}

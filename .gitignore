@@ -11,10 +11,11 @@ next-env.d.ts
 # Turborepo
 .turbo/
 
-# Environment files (commit only .env.example)
+# Environment files: ignore real secrets, keep example + test config
 .env
 .env.*
 !.env.example
+!.env.test
 
 # Tests
 coverage/

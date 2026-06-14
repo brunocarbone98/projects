@@ -1,14 +1,20 @@
-import express from "express";
+import { buildApp } from "./app.js";
+import { env } from "./env.js";
+import { prisma } from "./prisma.js";
 
-const app = express();
-const port = Number(process.env.PORT ?? 4000);
+const app = buildApp();
 
-app.use(express.json());
-
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "api" });
+const server = app.listen(env.PORT, () => {
+  console.log(`[api] listening on http://localhost:${env.PORT}`);
+  console.log(`[api] docs at http://localhost:${env.PORT}/api/v1/docs`);
 });
 
-app.listen(port, () => {
-  console.log(`[api] listening on http://localhost:${port}`);
-});
+async function shutdown(signal: string): Promise<void> {
+  console.log(`[api] received ${signal}, shutting down`);
+  server.close();
+  await prisma.$disconnect();
+  process.exit(0);
+}
+
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
