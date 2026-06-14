@@ -11,19 +11,16 @@ import {
 } from "@shipping-hub/shared";
 import type { Prisma, ShipmentStatus } from "@prisma/client";
 import type { AccessClaims } from "../auth/tokens.js";
-import {
-  addBusinessDays,
-  billableWeightGrams,
-  computePriceCents,
-  resolveZoneCode,
-} from "../domain/pricing.js";
+import { fetchLabelPdf } from "../clients/labels.js";
 import {
   toPublicTrackingDto,
   toShipmentDto,
   type ShipmentWithRelations,
 } from "../domain/serializers.js";
-import { AppError, badRequest, conflict, forbidden, notFound } from "../http/errors.js";
+import { env } from "../env.js";
+import { AppError, conflict, forbidden, notFound } from "../http/errors.js";
 import { prisma } from "../prisma.js";
+import { getQuote } from "./quote.service.js";
 
 const SHIPMENT_INCLUDE = {
   originAddress: true,
@@ -52,25 +49,17 @@ export async function createShipment(
   input: CreateShipmentInput,
   userId: string | null,
 ): Promise<ShipmentDto> {
-  const zoneCode = resolveZoneCode(input.destination.country);
-  const zone = await prisma.zone.findUnique({
-    where: { code: zoneCode },
-    include: { rates: { where: { serviceLevel: input.serviceLevel } } },
-  });
-  const rate = zone?.rates[0];
-  if (!zone || !rate) {
-    throw badRequest(`No rate configured for ${zoneCode}/${input.serviceLevel}`);
-  }
-
-  const billableGrams = billableWeightGrams(
-    input.parcel.weightGrams,
-    input.parcel.lengthCm,
-    input.parcel.widthCm,
-    input.parcel.heightCm,
-  );
-  const priceCents = computePriceCents(rate, billableGrams);
   const now = new Date();
-  const estimatedDeliveryAt = addBusinessDays(now, rate.etaMaxDays);
+  // Quote via the pricing microservice (falls back to the local rate table).
+  const quote = await getQuote({
+    originCountry: input.origin.country,
+    destinationCountry: input.destination.country,
+    weightGrams: input.parcel.weightGrams,
+    lengthCm: input.parcel.lengthCm,
+    widthCm: input.parcel.widthCm,
+    heightCm: input.parcel.heightCm,
+    serviceLevel: input.serviceLevel,
+  });
 
   const { id } = await prisma.$transaction(async (tx) => {
     const counter = await tx.counter.upsert({
@@ -90,10 +79,10 @@ export async function createShipment(
         lengthCm: input.parcel.lengthCm,
         widthCm: input.parcel.widthCm,
         heightCm: input.parcel.heightCm,
-        priceCents,
-        currency: "USD",
-        zoneCode,
-        estimatedDeliveryAt,
+        priceCents: quote.priceCents,
+        currency: quote.currency,
+        zoneCode: quote.zoneCode,
+        estimatedDeliveryAt: new Date(quote.estimatedDeliveryAt),
         originAddress: { create: addressCreate(input.origin) },
         destinationAddress: { create: addressCreate(input.destination) },
         events: {
@@ -209,6 +198,26 @@ export async function addTrackingEvent(
     include: SHIPMENT_INCLUDE,
   });
   return toShipmentDto(updated);
+}
+
+/** Generates the shipping-label PDF for an owned shipment via the labels service. */
+export async function getShipmentLabel(
+  actor: AccessClaims,
+  shipmentId: string,
+): Promise<{ filename: string; pdf: Buffer }> {
+  const shipment = await loadOwnedShipment(actor, shipmentId);
+  const pdf = await fetchLabelPdf({
+    trackingCode: shipment.trackingCode,
+    serviceLevel: shipment.serviceLevel,
+    origin: { city: shipment.originAddress.city, country: shipment.originAddress.country },
+    destination: {
+      city: shipment.destinationAddress.city,
+      country: shipment.destinationAddress.country,
+    },
+    weightGrams: shipment.weightGrams,
+    trackingUrl: `${env.PUBLIC_WEB_URL}/en/tracking/${shipment.trackingCode}`,
+  });
+  return { filename: `label-${shipment.trackingCode}.pdf`, pdf };
 }
 
 export async function getPublicTracking(trackingCode: string): Promise<PublicTrackingDto> {

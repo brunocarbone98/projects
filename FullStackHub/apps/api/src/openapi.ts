@@ -255,6 +255,21 @@ export const openapiDocument = {
         responses: { "200": { description: "OK" }, "404": { description: "Not found" } },
       },
     },
+    "/shipments/{id}/label": {
+      get: {
+        tags: ["Shipments"],
+        summary: "Download the 4x6 PDF shipping label (owner or staff) via the labels service",
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "PDF label",
+            content: { "application/pdf": { schema: { type: "string", format: "binary" } } },
+          },
+          "404": { description: "Not found" },
+        },
+      },
+    },
     "/shipments/{id}/events": {
       post: {
         tags: ["Shipments"],
@@ -277,6 +292,40 @@ export const openapiDocument = {
             content: { "application/json": { schema: { $ref: "#/components/schemas/ApiError" } } },
           },
         },
+      },
+    },
+    "/quote": {
+      post: {
+        tags: ["Tracking"],
+        summary: "Public quote via the pricing microservice (no auth, rate-limited)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: [
+                  "destinationCountry",
+                  "weightGrams",
+                  "lengthCm",
+                  "widthCm",
+                  "heightCm",
+                  "serviceLevel",
+                ],
+                properties: {
+                  originCountry: { type: "string", default: "PA" },
+                  destinationCountry: { type: "string" },
+                  weightGrams: { type: "integer" },
+                  lengthCm: { type: "integer" },
+                  widthCm: { type: "integer" },
+                  heightCm: { type: "integer" },
+                  serviceLevel: { $ref: "#/components/schemas/ServiceLevel" },
+                },
+              },
+            },
+          },
+        },
+        responses: { "200": { description: "Quote" }, "429": { description: "Rate limited" } },
       },
     },
     "/tracking/{code}": {

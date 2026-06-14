@@ -263,6 +263,7 @@
   },
   "ShipmentDetail": {
     "back": "Back to shipments",
+    "downloadLabel": "Download label",
     "service": "Service",
     "estimated": "Estimated delivery",
     "noEstimate": "To be confirmed",

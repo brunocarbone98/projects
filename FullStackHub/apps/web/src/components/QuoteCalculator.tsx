@@ -2,8 +2,9 @@
 
 import { isServiceLevel, SERVICE_LEVELS, type ServiceLevel } from "@shipping-hub/shared";
 import { useLocale, useTranslations } from "next-intl";
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import { Card } from "@/components/Card";
+import { getQuoteAction } from "@/lib/actions/quote";
 import { cn } from "@/lib/cn";
 import { formatMoney } from "@/lib/format";
 import { estimateQuote, type QuoteEstimate } from "@/lib/quote-estimate";
@@ -27,18 +28,32 @@ export function QuoteCalculator() {
   const [height, setHeight] = useState("15");
   const [service, setService] = useState<ServiceLevel>("EXPRESS");
   const [result, setResult] = useState<QuoteEstimate | null>(null);
+  const [pending, startTransition] = useTransition();
 
   function calculate() {
-    setResult(
-      estimateQuote({
-        destinationCountry: country,
-        weightGrams: Math.round((Number(weight) || 0) * 1000),
-        lengthCm: Number(length) || 0,
-        widthCm: Number(width) || 0,
-        heightCm: Number(height) || 0,
-        serviceLevel: service,
-      }),
-    );
+    const params = {
+      destinationCountry: country,
+      weightGrams: Math.round((Number(weight) || 0) * 1000),
+      lengthCm: Number(length) || 0,
+      widthCm: Number(width) || 0,
+      heightCm: Number(height) || 0,
+      serviceLevel: service,
+    };
+    startTransition(async () => {
+      // Live quote via the pricing service; fall back to a local estimate.
+      const dto = await getQuoteAction({ originCountry: "PA", ...params });
+      setResult(
+        dto
+          ? {
+              zone: dto.zoneCode,
+              priceCents: dto.priceCents,
+              billableKg: Math.max(1, Math.ceil(dto.billableWeightGrams / 1000)),
+              etaMinDays: dto.etaMinDays,
+              etaMaxDays: dto.etaMaxDays,
+            }
+          : estimateQuote(params),
+      );
+    });
   }
 
   return (
@@ -137,7 +152,7 @@ export function QuoteCalculator() {
             </div>
           </fieldset>
 
-          <button type="submit" className={cn(primaryButton, "w-full")}>
+          <button type="submit" disabled={pending} className={cn(primaryButton, "w-full")}>
             {t("form.calculate")}
           </button>
         </form>

@@ -8,7 +8,9 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Timeline } from "@/components/Timeline";
 import { Link } from "@/i18n/navigation";
 import { getSession, isStaff } from "@/lib/auth/session";
+import { cn } from "@/lib/cn";
 import { formatDate, formatMoney } from "@/lib/format";
+import { secondaryButton } from "@/lib/ui";
 import { ApiError } from "@/lib/server-api";
 import { getShipment } from "@/lib/shipments";
 
@@ -44,7 +46,12 @@ export default async function ShipmentDetailPage({
         <h1 className="font-mono text-2xl font-bold tracking-tight text-slate-900">
           {shipment.trackingCode}
         </h1>
-        <StatusBadge status={shipment.status} />
+        <div className="flex items-center gap-3">
+          <StatusBadge status={shipment.status} />
+          <a href={`/api/shipments/${shipment.id}/label`} className={cn(secondaryButton, "py-2")}>
+            {t("downloadLabel")}
+          </a>
+        </div>
       </div>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-3">

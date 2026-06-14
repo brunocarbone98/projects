@@ -263,6 +263,7 @@
   },
   "ShipmentDetail": {
     "back": "Volver a envíos",
+    "downloadLabel": "Descargar etiqueta",
     "service": "Servicio",
     "estimated": "Entrega estimada",
     "noEstimate": "Por confirmar",
