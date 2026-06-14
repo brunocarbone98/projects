@@ -13,6 +13,8 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   CORS_ORIGINS: z.string().default("http://localhost:3000"),
   PUBLIC_WEB_URL: z.string().default("http://localhost:3000"),
+  PRICING_SERVICE_URL: z.string().default("http://localhost:8001"),
+  LABELS_SERVICE_URL: z.string().default("http://localhost:8002"),
 });
 
 const parsed = EnvSchema.safeParse(process.env);

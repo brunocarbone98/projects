@@ -2,13 +2,13 @@
 
 International parcel shipping & tracking platform (UPS/FedEx style) with a bilingual es/en web app. The full phased plan lives in `ROADMAP.md`: when starting a phase, read its corresponding section.
 
-**Current phase:** Phases 0, 1 and 2 are complete. The transactional API (`apps/api`) runs on Prisma + PostgreSQL, with JWT auth, the state machine and a rate-limited public tracking endpoint. The web app (`apps/web`) has the bilingual es/en public site with SSR, SEO and a design system. Next up is Phase 3 (dashboards) or Phase 4 (Python microservices, parallelizable).
+**Current phase:** Phases 0–4 are complete. The transactional API (`apps/api`) runs on Prisma + PostgreSQL (JWT auth, state machine, rate-limited public tracking + quote endpoints). The web app (`apps/web`) has the bilingual es/en public site (SSR, SEO) plus authenticated customer/staff dashboards (httpOnly-cookie auth). The Python microservices (`services/pricing`, `services/labels`) are live and consumed by the API over HTTP. Next up is Phase 5 (wallet + ledger payments).
 
 ## Monorepo structure
 
 - `apps/web` — Next.js 15 (App Router) + Tailwind: public SEO site + dashboards.
 - `apps/api` — Express + TypeScript: transactional REST API. **The only layer that touches PostgreSQL** (Prisma from Phase 1 onwards).
-- `services/pricing` and `services/labels` — stateless FastAPI microservices (implemented in Phase 4).
+- `services/pricing` and `services/labels` — stateless FastAPI microservices (pricing/ETA quotes and PDF labels); the API consumes them over internal HTTP.
 - `packages/shared` — Zod schemas + TS types shared between web and api (API contracts, enums and the state machine from Phase 1 onwards).
 - Orchestration: pnpm workspaces + Turborepo. Local PostgreSQL via Docker Compose.
 

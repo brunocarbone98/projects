@@ -30,6 +30,17 @@ shipmentsRouter.get("/:id", async (req, res) => {
   res.json(await shipmentService.getShipment(req.auth, String(req.params.id)));
 });
 
+shipmentsRouter.get("/:id/label", async (req, res) => {
+  if (!req.auth) throw unauthenticated();
+  const { filename, pdf } = await shipmentService.getShipmentLabel(
+    req.auth,
+    String(req.params.id),
+  );
+  res.setHeader("content-type", "application/pdf");
+  res.setHeader("content-disposition", `attachment; filename="${filename}"`);
+  res.send(pdf);
+});
+
 shipmentsRouter.post("/:id/events", requireRole("ADMIN", "COURIER"), async (req, res) => {
   if (!req.auth) throw unauthenticated();
   const input = parseOrThrow(CreateTrackingEventSchema, req.body ?? {});

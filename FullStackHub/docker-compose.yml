@@ -1,5 +1,6 @@
-# Local infrastructure for development.
-# The FastAPI services (services/pricing, services/labels) join this file in Phase 4 (see ROADMAP.md).
+# Local infrastructure for development: PostgreSQL + the stateless Python
+# microservices. The Node API and Next.js web run via `pnpm dev` and reach the
+# services on localhost:8001 / 8002.
 services:
   postgres:
     image: postgres:16-alpine
@@ -17,6 +18,28 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  pricing:
+    build: ./services/pricing
+    container_name: shipping-hub-pricing
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  labels:
+    build: ./services/labels
+    container_name: shipping-hub-labels
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:

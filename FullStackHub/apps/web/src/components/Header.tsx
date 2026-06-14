@@ -37,6 +37,12 @@ export function Header() {
 
         <div className="flex items-center gap-2">
           <LocaleSwitcher />
+          <Link
+            href="/login"
+            className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+          >
+            {t("signIn")}
+          </Link>
           <Link href="/tracking" className={cn(secondaryButton, "hidden py-2 sm:inline-flex")}>
             {t("trackCta")}
           </Link>

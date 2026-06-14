@@ -2,35 +2,15 @@
 
 import { isServiceLevel, SERVICE_LEVELS, type ServiceLevel } from "@shipping-hub/shared";
 import { useLocale, useTranslations } from "next-intl";
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import { Card } from "@/components/Card";
+import { getQuoteAction } from "@/lib/actions/quote";
 import { cn } from "@/lib/cn";
 import { formatMoney } from "@/lib/format";
+import { estimateQuote, type QuoteEstimate } from "@/lib/quote-estimate";
 import { primaryButton } from "@/lib/ui";
 
-// Mirrors the seeded rate table in apps/api. In Phase 4 this is replaced by a
-// live call to the pricing microservice.
-const RATES: Record<string, Record<ServiceLevel, [number, number, number, number]>> = {
-  PA: { EXPRESS: [800, 150, 1, 1], STANDARD: [500, 100, 1, 2], ECONOMY: [350, 70, 2, 3] },
-  US: { EXPRESS: [2500, 600, 1, 3], STANDARD: [1500, 400, 3, 6], ECONOMY: [1000, 250, 6, 10] },
-  LATAM: { EXPRESS: [3000, 800, 2, 4], STANDARD: [1800, 500, 4, 8], ECONOMY: [1200, 300, 8, 14] },
-};
-
 const DESTINATIONS = ["PA", "US", "CO", "MX", "PE", "CL", "CR", "AR", "EC"] as const;
-
-function resolveZone(country: string): string {
-  if (country === "PA") return "PA";
-  if (country === "US") return "US";
-  return "LATAM";
-}
-
-interface QuoteResult {
-  zone: string;
-  priceCents: number;
-  billableKg: number;
-  etaMin: number;
-  etaMax: number;
-}
 
 const inputClasses =
   "w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-slate-900 shadow-sm outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-200";
@@ -47,22 +27,32 @@ export function QuoteCalculator() {
   const [width, setWidth] = useState("20");
   const [height, setHeight] = useState("15");
   const [service, setService] = useState<ServiceLevel>("EXPRESS");
-  const [result, setResult] = useState<QuoteResult | null>(null);
+  const [result, setResult] = useState<QuoteEstimate | null>(null);
+  const [pending, startTransition] = useTransition();
 
   function calculate() {
-    const zone = resolveZone(country);
-    const [baseCents, perKgCents, etaMin, etaMax] = RATES[zone][service];
-    const actualGrams = Math.max(0, Number(weight) || 0) * 1000;
-    const volumetricGrams =
-      ((Number(length) || 0) * (Number(width) || 0) * (Number(height) || 0)) / 5000 * 1000;
-    const billableGrams = Math.max(actualGrams, volumetricGrams);
-    const chargeableKg = Math.max(1, Math.ceil(billableGrams / 1000));
-    setResult({
-      zone,
-      priceCents: baseCents + chargeableKg * perKgCents,
-      billableKg: chargeableKg,
-      etaMin,
-      etaMax,
+    const params = {
+      destinationCountry: country,
+      weightGrams: Math.round((Number(weight) || 0) * 1000),
+      lengthCm: Number(length) || 0,
+      widthCm: Number(width) || 0,
+      heightCm: Number(height) || 0,
+      serviceLevel: service,
+    };
+    startTransition(async () => {
+      // Live quote via the pricing service; fall back to a local estimate.
+      const dto = await getQuoteAction({ originCountry: "PA", ...params });
+      setResult(
+        dto
+          ? {
+              zone: dto.zoneCode,
+              priceCents: dto.priceCents,
+              billableKg: Math.max(1, Math.ceil(dto.billableWeightGrams / 1000)),
+              etaMinDays: dto.etaMinDays,
+              etaMaxDays: dto.etaMaxDays,
+            }
+          : estimateQuote(params),
+      );
     });
   }
 
@@ -162,7 +152,7 @@ export function QuoteCalculator() {
             </div>
           </fieldset>
 
-          <button type="submit" className={cn(primaryButton, "w-full")}>
+          <button type="submit" disabled={pending} className={cn(primaryButton, "w-full")}>
             {t("form.calculate")}
           </button>
         </form>
@@ -179,7 +169,7 @@ export function QuoteCalculator() {
               <div className="flex justify-between border-t border-slate-100 pt-3">
                 <dt className="text-slate-500">{t("result.eta")}</dt>
                 <dd className="font-medium text-slate-900">
-                  {t("result.etaDays", { min: result.etaMin, max: result.etaMax })}
+                  {t("result.etaDays", { min: result.etaMinDays, max: result.etaMaxDays })}
                 </dd>
               </div>
               <div className="flex justify-between border-t border-slate-100 pt-3">

@@ -4,6 +4,7 @@ import helmet from "helmet";
 import { errorHandler, notFoundHandler } from "./http/error-handler.js";
 import { docsHtml, openapiDocument } from "./openapi.js";
 import { authRouter } from "./routes/auth.routes.js";
+import { createQuoteRouter } from "./routes/quote.routes.js";
 import { createTrackingRouter } from "./routes/tracking.routes.js";
 import { shipmentsRouter } from "./routes/shipments.routes.js";
 import { env } from "./env.js";
@@ -32,6 +33,13 @@ export function buildApp(options: AppOptions = {}): Express {
   app.use(
     "/api/v1/tracking",
     createTrackingRouter({
+      rateLimitMax: options.publicRateLimitMax ?? 60,
+      rateLimitWindowMs: options.publicRateLimitWindowMs ?? 60_000,
+    }),
+  );
+  app.use(
+    "/api/v1/quote",
+    createQuoteRouter({
       rateLimitMax: options.publicRateLimitMax ?? 60,
       rateLimitWindowMs: options.publicRateLimitWindowMs ?? 60_000,
     }),

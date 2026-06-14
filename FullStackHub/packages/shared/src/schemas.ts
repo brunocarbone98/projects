@@ -73,6 +73,24 @@ export const ListShipmentsQuerySchema = z.object({
 });
 export type ListShipmentsQuery = z.infer<typeof ListShipmentsQuerySchema>;
 
+export const QuoteRequestSchema = z.object({
+  originCountry: z
+    .string()
+    .length(2)
+    .default("PA")
+    .transform((value) => value.toUpperCase()),
+  destinationCountry: z
+    .string()
+    .length(2)
+    .transform((value) => value.toUpperCase()),
+  weightGrams: z.int().positive().max(70_000),
+  lengthCm: z.int().positive().max(300),
+  widthCm: z.int().positive().max(300),
+  heightCm: z.int().positive().max(300),
+  serviceLevel: z.enum(SERVICE_LEVELS),
+});
+export type QuoteRequestInput = z.infer<typeof QuoteRequestSchema>;
+
 // ---------------------------------------------------------------------------
 // Output DTOs (response shapes)
 // ---------------------------------------------------------------------------
@@ -157,6 +175,17 @@ export interface PublicTrackingDto {
   estimatedDeliveryAt: string | null;
   createdAt: string;
   events: PublicTrackingEventDto[];
+}
+
+export interface QuoteDto {
+  zoneCode: string;
+  serviceLevel: ServiceLevel;
+  billableWeightGrams: number;
+  priceCents: number;
+  currency: string;
+  etaMinDays: number;
+  etaMaxDays: number;
+  estimatedDeliveryAt: string;
 }
 
 export interface PaginatedDto<T> {
