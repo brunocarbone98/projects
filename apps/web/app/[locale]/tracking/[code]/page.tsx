@@ -1,3 +1,5 @@
+import type { PublicTrackingDto } from "@shipping-hub/shared";
+import { hasTrackingCodeShape } from "@shipping-hub/shared";
 import type { Metadata } from "next";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import { cache } from "react";
@@ -10,15 +12,26 @@ import { Link } from "@/i18n/navigation";
 import { fetchTracking } from "@/lib/api";
 import { siteUrl } from "@/lib/config";
 import { formatDate } from "@/lib/format";
+import { jsonLdString } from "@/lib/jsonld";
 
 type Params = { locale: string; code: string };
 
+type LoadResult =
+  | { kind: "ok"; data: PublicTrackingDto }
+  | { kind: "not_found" }
+  | { kind: "invalid" }
+  | { kind: "error" };
+
 // Deduped per request so generateMetadata and the page share a single API call.
-const loadTracking = cache(async (code: string) => {
+const loadTracking = cache(async (code: string): Promise<LoadResult> => {
+  // Reject malformed codes before hitting the API.
+  if (!hasTrackingCodeShape(code)) return { kind: "invalid" };
   try {
-    return await fetchTracking(code);
+    const data = await fetchTracking(code);
+    return data ? { kind: "ok", data } : { kind: "not_found" };
   } catch {
-    return null;
+    // Network error or 5xx — distinct from a genuinely missing shipment.
+    return { kind: "error" };
   }
 });
 
@@ -29,12 +42,13 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { locale, code } = await params;
   const t = await getTranslations({ locale, namespace: "Metadata" });
-  const data = await loadTracking(code);
+  const result = await loadTracking(code);
 
-  if (!data) {
+  if (result.kind !== "ok") {
     return { title: t("trackingTitle", { code }), robots: { index: false, follow: true } };
   }
 
+  const { data } = result;
   const tStatus = await getTranslations({ locale, namespace: "Status" });
   const title = t("trackingTitle", { code: data.trackingCode });
   const description = t("trackingDescription", {
@@ -43,13 +57,13 @@ export async function generateMetadata({
     origin: data.origin.city,
     destination: data.destination.city,
   });
-  const url = `/${locale}/tracking/${data.trackingCode}`;
+  const path = `/${locale}/tracking/${data.trackingCode}`;
 
   return {
     title,
     description,
-    alternates: { canonical: url },
-    openGraph: { type: "website", title, description, url },
+    alternates: { canonical: path },
+    openGraph: { type: "website", title, description, url: `${siteUrl}${path}` },
     twitter: { card: "summary_large_image", title, description },
   };
 }
@@ -58,9 +72,21 @@ export default async function TrackingResultPage({ params }: { params: Promise<P
   const { locale, code } = await params;
   setRequestLocale(locale);
   const t = await getTranslations("Tracking.result");
-  const data = await loadTracking(code);
+  const result = await loadTracking(code);
 
-  if (!data) {
+  if (result.kind === "error") {
+    const tError = await getTranslations("Tracking.error");
+    return (
+      <Container className="py-16 sm:py-24">
+        <Card className="mx-auto max-w-xl p-8 text-center">
+          <h1 className="text-2xl font-bold text-slate-900">{tError("title")}</h1>
+          <p className="mt-3 text-slate-600">{tError("body")}</p>
+        </Card>
+      </Container>
+    );
+  }
+
+  if (result.kind !== "ok") {
     const tNotFound = await getTranslations("Tracking.notFound");
     return (
       <Container className="py-16 sm:py-24">
@@ -78,6 +104,7 @@ export default async function TrackingResultPage({ params }: { params: Promise<P
     );
   }
 
+  const { data } = result;
   const tStatus = await getTranslations("Status");
   const tService = await getTranslations("ServiceLevel");
   const trackingUrl = `${siteUrl}/${locale}/tracking/${data.trackingCode}`;
@@ -104,10 +131,7 @@ export default async function TrackingResultPage({ params }: { params: Promise<P
 
   return (
     <Container className="py-12">
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
-      />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdString(jsonLd) }} />
 
       <div className="mx-auto max-w-3xl">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -158,10 +182,7 @@ export default async function TrackingResultPage({ params }: { params: Promise<P
         </Card>
 
         <div className="mt-8 text-center">
-          <Link
-            href="/tracking"
-            className="text-sm font-semibold text-brand-700 hover:underline"
-          >
+          <Link href="/tracking" className="text-sm font-semibold text-brand-700 hover:underline">
             ← {t("searchAnother")}
           </Link>
         </div>

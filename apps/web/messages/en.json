@@ -85,6 +85,10 @@
       "title": "We couldn't find that shipment",
       "body": "No shipment matches “{code}”. Double-check the number and try again.",
       "cta": "Try another number"
+    },
+    "error": {
+      "title": "Tracking is temporarily unavailable",
+      "body": "We couldn't reach the tracking service right now. Please try again in a moment."
     }
   },
   "Status": {
@@ -143,7 +147,6 @@
     "subtitle": "Service levels and indicative transit times by destination zone. Origin is Panama.",
     "table": {
       "zone": "Zone",
-      "countries": "Countries",
       "express": "Express",
       "standard": "Standard",
       "economy": "Economy",
@@ -180,6 +183,11 @@
     "label": "Language",
     "es": "Español",
     "en": "English"
+  },
+  "OgImage": {
+    "eyebrow": "International parcel tracking",
+    "title": "Track any package",
+    "tagline": "Panama · United States · Latin America"
   },
   "NotFound": {
     "title": "Page not found",

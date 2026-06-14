@@ -1,6 +1,6 @@
 "use client";
 
-import type { ServiceLevel } from "@shipping-hub/shared";
+import { isServiceLevel, SERVICE_LEVELS, type ServiceLevel } from "@shipping-hub/shared";
 import { useLocale, useTranslations } from "next-intl";
 import { useState } from "react";
 import { Card } from "@/components/Card";
@@ -17,7 +17,6 @@ const RATES: Record<string, Record<ServiceLevel, [number, number, number, number
 };
 
 const DESTINATIONS = ["PA", "US", "CO", "MX", "PE", "CL", "CR", "AR", "EC"] as const;
-const SERVICE_LEVELS: ServiceLevel[] = ["EXPRESS", "STANDARD", "ECONOMY"];
 
 function resolveZone(country: string): string {
   if (country === "PA") return "PA";
@@ -117,7 +116,9 @@ export function QuoteCalculator() {
               <select
                 id="service"
                 value={service}
-                onChange={(event) => setService(event.target.value as ServiceLevel)}
+                onChange={(event) => {
+                  if (isServiceLevel(event.target.value)) setService(event.target.value);
+                }}
                 className={inputClasses}
               >
                 {SERVICE_LEVELS.map((level) => (

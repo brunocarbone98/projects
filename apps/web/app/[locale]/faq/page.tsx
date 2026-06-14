@@ -3,6 +3,7 @@ import { getTranslations, setRequestLocale } from "next-intl/server";
 import { Card } from "@/components/Card";
 import { Container } from "@/components/Container";
 import { siteUrl } from "@/lib/config";
+import { jsonLdString } from "@/lib/jsonld";
 
 interface FaqItem {
   question: string;
@@ -27,7 +28,16 @@ export default async function FaqPage({ params }: { params: Promise<{ locale: st
   const { locale } = await params;
   setRequestLocale(locale);
   const t = await getTranslations("Faq");
-  const items = t.raw("items") as FaqItem[];
+  const raw = t.raw("items");
+  const items: FaqItem[] = Array.isArray(raw)
+    ? raw.filter(
+        (item): item is FaqItem =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as Record<string, unknown>).question === "string" &&
+          typeof (item as Record<string, unknown>).answer === "string",
+      )
+    : [];
 
   // FAQPage structured data for rich results.
   const jsonLd = {
@@ -45,7 +55,7 @@ export default async function FaqPage({ params }: { params: Promise<{ locale: st
     <Container className="py-16">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{ __html: jsonLdString(jsonLd) }}
       />
       <div className="mx-auto max-w-3xl">
         <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">

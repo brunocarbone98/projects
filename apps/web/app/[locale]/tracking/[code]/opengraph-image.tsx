@@ -25,8 +25,10 @@ export default async function Image({
   } catch {
     data = null;
   }
-  const t = await getTranslations({ locale, namespace: "Status" });
-  const statusLabel = data ? t(data.status) : "Shipping Hub";
+  const tStatus = await getTranslations({ locale, namespace: "Status" });
+  const tOg = await getTranslations({ locale, namespace: "OgImage" });
+  const eyebrow = data ? code : tOg("eyebrow");
+  const headline = data ? tStatus(data.status) : tOg("title");
   const accent = data ? (TONE_COLOR[data.status] ?? "#a5b4fc") : "#a5b4fc";
 
   return new ImageResponse(
@@ -63,12 +65,8 @@ export default async function Image({
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <div style={{ fontSize: "30px", color: "#c7d2fe" }}>
-            {data ? code : "International parcel tracking"}
-          </div>
-          <div style={{ fontSize: "76px", fontWeight: 800, letterSpacing: "-2px" }}>
-            {data ? statusLabel : "Track any package"}
-          </div>
+          <div style={{ fontSize: "30px", color: "#c7d2fe" }}>{eyebrow}</div>
+          <div style={{ fontSize: "76px", fontWeight: 800, letterSpacing: "-2px" }}>{headline}</div>
           {data && (
             <div style={{ display: "flex", alignItems: "center", gap: "16px", fontSize: "30px" }}>
               <span
@@ -88,9 +86,7 @@ export default async function Image({
           )}
         </div>
 
-        <div style={{ display: "flex", fontSize: "26px", color: "#c7d2fe" }}>
-          Panama · United States · Latin America
-        </div>
+        <div style={{ display: "flex", fontSize: "26px", color: "#c7d2fe" }}>{tOg("tagline")}</div>
       </div>
     ),
     { ...size },

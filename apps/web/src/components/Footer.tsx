@@ -1,6 +1,6 @@
 import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/navigation";
-import { apiUrl } from "@/lib/config";
+import { publicApiUrl } from "@/lib/config";
 import { Container } from "./Container";
 import { Logo } from "./Logo";
 
@@ -46,7 +46,7 @@ export function Footer() {
           <ul className="mt-3 space-y-2 text-sm">
             <li>
               <a
-                href={`${apiUrl}/api/v1/docs`}
+                href={`${publicApiUrl}/api/v1/docs`}
                 className="text-slate-500 transition hover:text-slate-900"
                 rel="noreferrer"
               >

@@ -85,6 +85,10 @@
       "title": "No encontramos ese envío",
       "body": "Ningún envío coincide con «{code}». Verifica el número e inténtalo de nuevo.",
       "cta": "Probar otro número"
+    },
+    "error": {
+      "title": "El rastreo no está disponible temporalmente",
+      "body": "No pudimos conectar con el servicio de rastreo en este momento. Inténtalo de nuevo en un momento."
     }
   },
   "Status": {
@@ -143,7 +147,6 @@
     "subtitle": "Niveles de servicio y tiempos de tránsito indicativos por zona de destino. El origen es Panamá.",
     "table": {
       "zone": "Zona",
-      "countries": "Países",
       "express": "Express",
       "standard": "Estándar",
       "economy": "Económico",
@@ -180,6 +183,11 @@
     "label": "Idioma",
     "es": "Español",
     "en": "English"
+  },
+  "OgImage": {
+    "eyebrow": "Rastreo de paquetes internacionales",
+    "title": "Rastrea cualquier paquete",
+    "tagline": "Panamá · Estados Unidos · Latinoamérica"
   },
   "NotFound": {
     "title": "Página no encontrada",
