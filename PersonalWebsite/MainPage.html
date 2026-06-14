@@ -353,7 +353,7 @@
 <!-- HERO -->
 <header class="hero" id="hero">
     <div class="container">
-        <h1 class="reveal"><span class="greeting" id="greeting">Hello, welcome! My name is <span class="grad">Bruno Carbone</span>.</span></h1>
+        <h1 class="reveal"><span class="greeting" id="greeting">🇪🇸 ¡Hola, bienvenido! Me llamo <span class="grad">Bruno Carbone</span>.</span></h1>
         <div class="role reveal">
             <span class="typed" id="typed"></span><span class="cursor">|</span>
         </div>
@@ -627,6 +627,8 @@
     ];
     const greetingEl = document.getElementById('greeting');
     let greetIndex = 0;
+    // Render the first greeting from the array so the static markup can never drift from it.
+    greetingEl.innerHTML = greetings[greetIndex];
     const GREET_VISIBLE = 8000, GREET_EXIT = 500, GREET_GAP = 1000, GREET_ENTER = 500;
 
     // Reserve the height of the longest phrase so the content below doesn't jump between languages
