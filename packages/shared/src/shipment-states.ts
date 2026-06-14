@@ -2,7 +2,7 @@
 // The API validates every status change against this map and rejects invalid
 // transitions (e.g. DELIVERED -> IN_TRANSIT). See ROADMAP.md section 4.
 
-import type { ShipmentStatus } from "./enums.js";
+import type { ShipmentStatus } from "./enums";
 
 /**
  * Happy path:

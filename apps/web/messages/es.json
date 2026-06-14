@@ -1,0 +1,189 @@
+{
+  "Metadata": {
+    "siteName": "Shipping Hub",
+    "title": "Shipping Hub — Envío y rastreo de paquetes internacionales",
+    "description": "Envía y rastrea paquetes entre Panamá, Estados Unidos y Latinoamérica. Rastrea cualquier paquete con su número de guía, sin necesidad de cuenta.",
+    "ogAlt": "Shipping Hub — envío y rastreo de paquetes",
+    "trackingTitle": "Rastreo {code}",
+    "trackingDescription": "Estado en vivo del envío {code}: {status}, de {origin} a {destination}."
+  },
+  "Nav": {
+    "home": "Inicio",
+    "track": "Rastrear",
+    "quote": "Cotizar",
+    "coverage": "Cobertura",
+    "faq": "Preguntas",
+    "trackCta": "Rastrear un paquete"
+  },
+  "Home": {
+    "hero": {
+      "badge": "Panamá · Estados Unidos · Latinoamérica",
+      "title": "Envía a cualquier lugar. Rastrea todo.",
+      "subtitle": "Rastreo de paquetes en tiempo real y cotizaciones instantáneas en toda América. Pega tu número de guía, sin registrarte.",
+      "trackLabel": "Número de guía",
+      "trackPlaceholder": "PTY-2026-001001-0",
+      "trackButton": "Rastrear",
+      "quoteButton": "Cotizar",
+      "example": "Prueba un código demo:"
+    },
+    "features": {
+      "title": "Hecho para quienes envían y reciben",
+      "tracking": {
+        "title": "Rastreo público",
+        "description": "Cualquiera puede seguir el recorrido de un envío solo con el número de guía: renderizado en el servidor, rápido y fácil de compartir."
+      },
+      "coverage": {
+        "title": "Cobertura regional",
+        "description": "Panamá nacional más rutas express y económicas a Estados Unidos y por toda Latinoamérica."
+      },
+      "pricing": {
+        "title": "Precios transparentes",
+        "description": "Cotizaciones que consideran el peso volumétrico, con estimaciones de entrega claras antes de enviar."
+      },
+      "api": {
+        "title": "Pensado para developers",
+        "description": "Una API REST limpia con documentación OpenAPI alimenta cada página de rastreo de este sitio."
+      }
+    },
+    "steps": {
+      "title": "Cómo funciona",
+      "one": { "title": "Crea un envío", "description": "Ingresa origen, destino y datos del paquete para generar la etiqueta y el número de guía." },
+      "two": { "title": "Lo movemos", "description": "Operaciones escanea el paquete en cada bodega y registra eventos de rastreo inmutables." },
+      "three": { "title": "Rastrea en tiempo real", "description": "Comparte el enlace de rastreo: el destinatario ve cada actualización en su idioma." }
+    },
+    "cta": {
+      "title": "¿Tienes un número de guía?",
+      "subtitle": "Consulta el estado de cualquier envío en segundos.",
+      "button": "Rastrear un paquete"
+    }
+  },
+  "Tracking": {
+    "search": {
+      "title": "Rastrea tu envío",
+      "subtitle": "Ingresa tu número de guía para ver el estado más reciente y el historial completo.",
+      "placeholder": "PTY-2026-001001-0",
+      "button": "Rastrear",
+      "invalid": "Eso no parece un número de guía válido. Formato esperado: PTY-AAAA-NNNNNN-C.",
+      "example": "Código demo:"
+    },
+    "result": {
+      "eyebrow": "Envío",
+      "estimated": "Entrega estimada",
+      "noEstimate": "Por confirmar",
+      "service": "Servicio",
+      "route": "Ruta",
+      "from": "Desde",
+      "to": "Hasta",
+      "timelineTitle": "Historial de rastreo",
+      "latest": "Última actualización",
+      "searchAnother": "Rastrear otro paquete",
+      "share": "Copiar enlace",
+      "shared": "Enlace copiado",
+      "createdAt": "Creado"
+    },
+    "notFound": {
+      "title": "No encontramos ese envío",
+      "body": "Ningún envío coincide con «{code}». Verifica el número e inténtalo de nuevo.",
+      "cta": "Probar otro número"
+    }
+  },
+  "Status": {
+    "CREATED": "Creado",
+    "LABEL_PAID": "Etiqueta pagada",
+    "PICKED_UP": "Recolectado",
+    "IN_TRANSIT": "En tránsito",
+    "AT_DESTINATION_HUB": "En bodega destino",
+    "OUT_FOR_DELIVERY": "En reparto",
+    "DELIVERED": "Entregado",
+    "EXCEPTION": "Excepción",
+    "RETURNED_TO_SENDER": "Devuelto al remitente",
+    "CANCELLED": "Cancelado"
+  },
+  "ServiceLevel": {
+    "EXPRESS": "Express",
+    "STANDARD": "Estándar",
+    "ECONOMY": "Económico"
+  },
+  "Countries": {
+    "PA": "Panamá",
+    "US": "Estados Unidos",
+    "CO": "Colombia",
+    "MX": "México",
+    "PE": "Perú",
+    "CL": "Chile",
+    "CR": "Costa Rica",
+    "AR": "Argentina",
+    "EC": "Ecuador"
+  },
+  "Quote": {
+    "title": "Cotiza al instante",
+    "subtitle": "Estima el precio y el tiempo de entrega de tu paquete. El origen es Ciudad de Panamá.",
+    "form": {
+      "destination": "País de destino",
+      "weight": "Peso (kg)",
+      "dimensions": "Dimensiones (cm)",
+      "length": "Largo",
+      "width": "Ancho",
+      "height": "Alto",
+      "service": "Nivel de servicio",
+      "calculate": "Calcular"
+    },
+    "result": {
+      "title": "Cotización estimada",
+      "price": "Precio estimado",
+      "eta": "Tiempo de tránsito estimado",
+      "etaDays": "{min}–{max} días hábiles",
+      "zone": "Zona",
+      "billable": "Peso facturable",
+      "disclaimer": "Solo una estimación. El precio final se confirma al pagar y será calculado por el microservicio de pricing en una fase posterior."
+    }
+  },
+  "Coverage": {
+    "title": "A dónde enviamos",
+    "subtitle": "Niveles de servicio y tiempos de tránsito indicativos por zona de destino. El origen es Panamá.",
+    "table": {
+      "zone": "Zona",
+      "countries": "Países",
+      "express": "Express",
+      "standard": "Estándar",
+      "economy": "Económico",
+      "days": "{min}–{max} días"
+    },
+    "zones": {
+      "PA": { "name": "Panamá (nacional)", "countries": "Todo Panamá" },
+      "US": { "name": "Estados Unidos", "countries": "Los 50 estados" },
+      "LATAM": { "name": "Latinoamérica", "countries": "Colombia, México, Perú, Chile, Costa Rica, Argentina, Ecuador y más" }
+    },
+    "note": "Los tiempos de tránsito son días hábiles y no incluyen demoras de aduana ni feriados locales."
+  },
+  "Faq": {
+    "title": "Preguntas frecuentes",
+    "subtitle": "Todo lo que necesitas saber sobre rastreo y envíos.",
+    "items": [
+      { "question": "¿Necesito una cuenta para rastrear un paquete?", "answer": "No. El rastreo es público: solo ingresa tu número de guía en la página de rastreo y verás el historial completo." },
+      { "question": "¿Cómo es un número de guía?", "answer": "Los números de guía siguen el formato PTY-AAAA-NNNNNN-C, donde el último dígito es un dígito verificador que protege contra errores de tipeo." },
+      { "question": "¿Con qué frecuencia se actualiza el rastreo?", "answer": "Cada vez que operaciones escanea tu paquete en una bodega se registra un evento de rastreo inmutable que aparece al instante en la página pública." },
+      { "question": "¿A qué países llegan?", "answer": "Enviamos dentro de Panamá e internacionalmente a Estados Unidos y por toda Latinoamérica. Consulta la página de cobertura para más detalles." },
+      { "question": "¿Cómo se calcula el precio del envío?", "answer": "El precio se basa en la zona de destino, el nivel de servicio y el peso facturable (el mayor entre el peso real y el volumétrico)." },
+      { "question": "¿Puedo ver una estimación de entrega?", "answer": "Sí. Cada envío muestra una fecha estimada de entrega según el nivel de servicio y el destino." }
+    ]
+  },
+  "Footer": {
+    "tagline": "Envío y rastreo de paquetes internacionales en toda América.",
+    "product": "Producto",
+    "resources": "Recursos",
+    "developers": "Docs del API",
+    "rights": "© {year} Shipping Hub. Proyecto de portafolio.",
+    "builtWith": "Hecho con Next.js, Express y PostgreSQL."
+  },
+  "Locale": {
+    "label": "Idioma",
+    "es": "Español",
+    "en": "English"
+  },
+  "NotFound": {
+    "title": "Página no encontrada",
+    "body": "La página que buscas no existe.",
+    "home": "Volver al inicio"
+  }
+}

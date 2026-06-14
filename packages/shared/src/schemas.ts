@@ -2,8 +2,8 @@
 // the JSON the API returns. Both web and api import from here — never duplicate.
 
 import { z } from "zod";
-import { SERVICE_LEVELS, SHIPMENT_STATUSES } from "./enums.js";
-import type { ServiceLevel, ShipmentStatus, UserRole } from "./enums.js";
+import { SERVICE_LEVELS, SHIPMENT_STATUSES } from "./enums";
+import type { ServiceLevel, ShipmentStatus, UserRole } from "./enums";
 
 // ---------------------------------------------------------------------------
 // Input schemas (request validation)

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { SHIPMENT_STATUSES } from "./enums.js";
+import { SHIPMENT_STATUSES } from "./enums";
 import {
   SHIPMENT_TRANSITIONS,
   canTransition,
   isTerminalStatus,
   nextStatuses,
-} from "./shipment-states.js";
+} from "./shipment-states";
 
 describe("shipment state machine", () => {
   it("defines transitions for every status", () => {

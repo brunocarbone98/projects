@@ -2,7 +2,7 @@
 
 Plataforma de envíos y rastreo de paquetes (estilo UPS/FedEx) con web bilingüe es/en. El plan completo por fases vive en `ROADMAP.md`: al iniciar una fase, lee su sección correspondiente.
 
-**Fase actual:** Fase 0 completada (estructura + tooling). Lo siguiente es la Fase 1 (API transaccional con Prisma). Todavía no hay base de datos conectada ni lógica de dominio.
+**Fase actual:** Fases 0, 1 y 2 completadas. La API transaccional (`apps/api`) corre con Prisma + PostgreSQL, auth JWT, máquina de estados y endpoint público de tracking con rate limiting. La web (`apps/web`) tiene el sitio público bilingüe es/en con SSR, SEO y design system. Lo siguiente es la Fase 3 (dashboards) o la Fase 4 (microservicios Python, paralelizable).
 
 ## Estructura del monorepo
 

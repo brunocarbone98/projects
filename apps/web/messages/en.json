@@ -1,0 +1,189 @@
+{
+  "Metadata": {
+    "siteName": "Shipping Hub",
+    "title": "Shipping Hub — International parcel shipping & tracking",
+    "description": "Ship and track parcels between Panama, the United States and Latin America. Track any package with its tracking number — no account required.",
+    "ogAlt": "Shipping Hub — parcel shipping and tracking",
+    "trackingTitle": "Track {code}",
+    "trackingDescription": "Live status for shipment {code}: {status}, from {origin} to {destination}."
+  },
+  "Nav": {
+    "home": "Home",
+    "track": "Track",
+    "quote": "Get a quote",
+    "coverage": "Coverage",
+    "faq": "FAQ",
+    "trackCta": "Track a package"
+  },
+  "Home": {
+    "hero": {
+      "badge": "Panama · United States · Latin America",
+      "title": "Ship anywhere. Track everything.",
+      "subtitle": "Real-time parcel tracking and instant quotes across the Americas. Paste your tracking number — no sign-up needed.",
+      "trackLabel": "Tracking number",
+      "trackPlaceholder": "PTY-2026-001001-0",
+      "trackButton": "Track",
+      "quoteButton": "Get a quote",
+      "example": "Try a demo code:"
+    },
+    "features": {
+      "title": "Built for shippers and recipients",
+      "tracking": {
+        "title": "Public tracking",
+        "description": "Anyone can follow a shipment's journey with just the tracking number — rendered server-side, fast, and shareable."
+      },
+      "coverage": {
+        "title": "Regional coverage",
+        "description": "Domestic Panama plus express and economy lanes to the US and across Latin America."
+      },
+      "pricing": {
+        "title": "Transparent pricing",
+        "description": "Volumetric-weight aware quotes with clear delivery estimates before you ship."
+      },
+      "api": {
+        "title": "Developer friendly",
+        "description": "A clean REST API with OpenAPI docs powers every tracking page on this site."
+      }
+    },
+    "steps": {
+      "title": "How it works",
+      "one": { "title": "Create a shipment", "description": "Enter origin, destination and parcel details to generate a label and tracking number." },
+      "two": { "title": "We move it", "description": "Operations scan the parcel at each hub, writing immutable tracking events." },
+      "three": { "title": "Track in real time", "description": "Share the tracking link — recipients see every update in their language." }
+    },
+    "cta": {
+      "title": "Have a tracking number?",
+      "subtitle": "Check the status of any shipment in seconds.",
+      "button": "Track a package"
+    }
+  },
+  "Tracking": {
+    "search": {
+      "title": "Track your shipment",
+      "subtitle": "Enter your tracking number to see the latest status and full history.",
+      "placeholder": "PTY-2026-001001-0",
+      "button": "Track",
+      "invalid": "That doesn't look like a valid tracking number. Expected format: PTY-YYYY-NNNNNN-C.",
+      "example": "Demo code:"
+    },
+    "result": {
+      "eyebrow": "Shipment",
+      "estimated": "Estimated delivery",
+      "noEstimate": "To be confirmed",
+      "service": "Service",
+      "route": "Route",
+      "from": "From",
+      "to": "To",
+      "timelineTitle": "Tracking history",
+      "latest": "Latest update",
+      "searchAnother": "Track another package",
+      "share": "Copy link",
+      "shared": "Link copied",
+      "createdAt": "Created"
+    },
+    "notFound": {
+      "title": "We couldn't find that shipment",
+      "body": "No shipment matches “{code}”. Double-check the number and try again.",
+      "cta": "Try another number"
+    }
+  },
+  "Status": {
+    "CREATED": "Created",
+    "LABEL_PAID": "Label paid",
+    "PICKED_UP": "Picked up",
+    "IN_TRANSIT": "In transit",
+    "AT_DESTINATION_HUB": "At destination hub",
+    "OUT_FOR_DELIVERY": "Out for delivery",
+    "DELIVERED": "Delivered",
+    "EXCEPTION": "Exception",
+    "RETURNED_TO_SENDER": "Returned to sender",
+    "CANCELLED": "Cancelled"
+  },
+  "ServiceLevel": {
+    "EXPRESS": "Express",
+    "STANDARD": "Standard",
+    "ECONOMY": "Economy"
+  },
+  "Countries": {
+    "PA": "Panama",
+    "US": "United States",
+    "CO": "Colombia",
+    "MX": "Mexico",
+    "PE": "Peru",
+    "CL": "Chile",
+    "CR": "Costa Rica",
+    "AR": "Argentina",
+    "EC": "Ecuador"
+  },
+  "Quote": {
+    "title": "Get an instant quote",
+    "subtitle": "Estimate the price and delivery time for your parcel. Origin is Panama City.",
+    "form": {
+      "destination": "Destination country",
+      "weight": "Weight (kg)",
+      "dimensions": "Dimensions (cm)",
+      "length": "Length",
+      "width": "Width",
+      "height": "Height",
+      "service": "Service level",
+      "calculate": "Calculate"
+    },
+    "result": {
+      "title": "Estimated quote",
+      "price": "Estimated price",
+      "eta": "Estimated transit time",
+      "etaDays": "{min}–{max} business days",
+      "zone": "Zone",
+      "billable": "Billable weight",
+      "disclaimer": "Estimate only. Final pricing is confirmed at checkout and will be powered by the pricing microservice in a later phase."
+    }
+  },
+  "Coverage": {
+    "title": "Where we ship",
+    "subtitle": "Service levels and indicative transit times by destination zone. Origin is Panama.",
+    "table": {
+      "zone": "Zone",
+      "countries": "Countries",
+      "express": "Express",
+      "standard": "Standard",
+      "economy": "Economy",
+      "days": "{min}–{max} days"
+    },
+    "zones": {
+      "PA": { "name": "Panama (domestic)", "countries": "Nationwide Panama" },
+      "US": { "name": "United States", "countries": "All 50 states" },
+      "LATAM": { "name": "Latin America", "countries": "Colombia, Mexico, Peru, Chile, Costa Rica, Argentina, Ecuador and more" }
+    },
+    "note": "Transit times are business days and exclude customs delays and local holidays."
+  },
+  "Faq": {
+    "title": "Frequently asked questions",
+    "subtitle": "Everything you need to know about tracking and shipping.",
+    "items": [
+      { "question": "Do I need an account to track a package?", "answer": "No. Tracking is public — just enter your tracking number on the tracking page and you'll see the full history." },
+      { "question": "What does a tracking number look like?", "answer": "Tracking numbers follow the format PTY-YYYY-NNNNNN-C, where the last digit is a check digit that guards against typos." },
+      { "question": "How often is tracking updated?", "answer": "Every time operations scan your parcel at a facility, an immutable tracking event is recorded and appears instantly on the public page." },
+      { "question": "Which countries do you serve?", "answer": "We ship domestically within Panama and internationally to the United States and across Latin America. See the coverage page for details." },
+      { "question": "How is shipping priced?", "answer": "Pricing is based on destination zone, service level and billable weight (the greater of actual and volumetric weight)." },
+      { "question": "Can I see a delivery estimate?", "answer": "Yes. Each shipment shows an estimated delivery date based on the selected service level and destination." }
+    ]
+  },
+  "Footer": {
+    "tagline": "International parcel shipping & tracking across the Americas.",
+    "product": "Product",
+    "resources": "Resources",
+    "developers": "API docs",
+    "rights": "© {year} Shipping Hub. Demo portfolio project.",
+    "builtWith": "Built with Next.js, Express and PostgreSQL."
+  },
+  "Locale": {
+    "label": "Language",
+    "es": "Español",
+    "en": "English"
+  },
+  "NotFound": {
+    "title": "Page not found",
+    "body": "The page you're looking for doesn't exist.",
+    "home": "Back to home"
+  }
+}

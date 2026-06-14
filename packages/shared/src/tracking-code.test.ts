@@ -4,7 +4,7 @@ import {
   hasTrackingCodeShape,
   isValidTrackingCode,
   luhnCheckDigit,
-} from "./tracking-code.js";
+} from "./tracking-code";
 
 describe("luhnCheckDigit", () => {
   it("computes a single check digit in [0,9]", () => {
