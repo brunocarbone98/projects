@@ -139,7 +139,7 @@
             to { background-position: 0% center; }
         }
 
-        /* Rotating greeting in 12 languages: it slides up and fades out; the next one enters and takes its place */
+        /* Rotating greeting in 8 languages: it slides up and fades out; the next one enters and takes its place */
         .hero h1 .greeting {
             display: block;
             font-size: 0.6em;
@@ -427,7 +427,7 @@
                     <li>🇩🇪 German — C1</li>
                 </ul>
                 <div class="label-min">I want to learn</div>
-                <p class="learn">🇵🇹 Portuguese · 🇫🇷 French · 🇸🇪 Swedish · 🇳🇱 Dutch · 🇭🇺 Hungarian · 🇨🇿 Czech · 🇸🇰 Slovak · 🇵🇱 Polish</p>
+                <p class="learn">🇵🇹 Portuguese · 🇫🇷 French · 🇸🇪 Swedish · 🇳🇱 Dutch</p>
             </div>
         </div>
 
@@ -617,7 +617,7 @@
 </footer>
 
 <script>
-    // ====== ROTATING GREETING IN 12 LANGUAGES ======
+    // ====== ROTATING GREETING IN 8 LANGUAGES ======
     // 10 s cycle per greeting: 8 s visible + 0.5 s exit + 1 s pause + 0.5 s enter
     const NAME = '<span class="grad">Bruno Carbone</span>';
     const greetings = [
@@ -628,11 +628,7 @@
         '🇵🇹 Olá, bem-vindo! O meu nome é ' + NAME + '.',
         '🇫🇷 Bonjour, bienvenue ! Je m\'appelle ' + NAME + '.',
         '🇳🇱 Hallo, welkom! Mijn naam is ' + NAME + '.',
-        '🇸🇪 Hej, välkommen! Mitt namn är ' + NAME + '.',
-        '🇭🇺 Szia, üdvözöllek! ' + NAME + ' vagyok.',
-        '🇨🇿 Ahoj, vítej! Jmenuju se ' + NAME + '.',
-        '🇸🇰 Ahoj, vitaj! Volám sa ' + NAME + '.',
-        '🇵🇱 Cześć, witaj! Nazywam się ' + NAME + '.'
+        '🇸🇪 Hej, välkommen! Mitt namn är ' + NAME + '.'
     ];
     const greetingEl = document.getElementById('greeting');
     let greetIndex = 0;
