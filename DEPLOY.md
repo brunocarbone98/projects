@@ -30,19 +30,24 @@ web app is exposed publicly.
    exposes a `DATABASE_URL` you can reference as `${{Postgres.DATABASE_URL}}`.
 
 ## 2. Add the four services
-For each one: **New → GitHub Repo → this repo**, then open the service's
-**Settings** and set:
+Each service's **build (Dockerfile) and deploy settings are codified in a
+`railway.json`** (Dockerfile builder, no-sleep, IPv6 egress, restart-on-failure,
+SFO region), so you mostly just point Railway at the right folder.
 
-| Service name | Root Directory | Build → Dockerfile Path |
+For each: **New → GitHub Repo → this repo**, then in **Settings** set the **Root
+Directory** and the **Config-as-code** path:
+
+| Service name | Root Directory | Config file |
 |---|---|---|
-| `api` | `FullStackHub` | `apps/api/Dockerfile` |
-| `web` | `FullStackHub` | `apps/web/Dockerfile` |
-| `pricing` | `FullStackHub/services/pricing` | `Dockerfile` (auto-detected) |
-| `labels` | `FullStackHub/services/labels` | `Dockerfile` (auto-detected) |
+| `api` | `FullStackHub` | `apps/api/railway.json` |
+| `web` | `FullStackHub` | `apps/web/railway.json` |
+| `pricing` | `FullStackHub/services/pricing` | `railway.json` (auto) |
+| `labels` | `FullStackHub/services/labels` | `railway.json` (auto) |
 
 The `api`/`web` Dockerfiles need the whole `FullStackHub` folder as their build
-context, so their Root Directory is `FullStackHub` and the Dockerfile path is set
-explicitly. `pricing`/`labels` build from their own folder.
+context, so their Root Directory is `FullStackHub` and you set the Config-as-code
+path to their `railway.json` under `apps/`. `pricing`/`labels` build from their own
+folder and read `railway.json` automatically.
 
 > **Name the services exactly `api`, `web`, `pricing`, `labels`** — the reference
 > variables below use those names.
