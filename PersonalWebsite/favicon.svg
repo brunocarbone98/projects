@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bc" x1="10" y1="12" x2="54" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#0a0a12"/>
+  <text x="32" y="42" text-anchor="middle"
+        font-family="'Space Grotesk','Segoe UI',Roboto,system-ui,-apple-system,sans-serif"
+        font-size="30" font-weight="700" letter-spacing="-1.5" fill="url(#bc)">BC</text>
+</svg>
