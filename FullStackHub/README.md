@@ -129,9 +129,8 @@ API reference: <http://localhost:4000/api/v1/docs>.
 
 ## Deploy
 
-Container images: `apps/api/Dockerfile`, `apps/web/Dockerfile`, and `services/*/Dockerfile`
-(build the Node images from the monorepo root, e.g. `docker build -f apps/api/Dockerfile .`).
-[`render.yaml`](./render.yaml) is a one-click Render blueprint for the whole stack
-(API + web + both Python services + PostgreSQL). Web also deploys cleanly to **Vercel**;
-PostgreSQL to **Neon/Supabase**. Notification env vars (`RESEND_API_KEY`, `WEBHOOK_URL`, …)
-are optional — see `apps/api/.env.example`.
+Recommended split: **Vercel** (web) · **Render** (API + Python services) · **Neon** (PostgreSQL).
+Step-by-step walkthrough in [`../DEPLOY.md`](../DEPLOY.md). The Render blueprint lives at the repo
+root ([`../render.yaml`](../render.yaml)); container images are in `apps/api/Dockerfile`,
+`apps/web/Dockerfile` and `services/*/Dockerfile`. Notification env vars (`RESEND_API_KEY`,
+`WEBHOOK_URL`, …) are optional — see `apps/api/.env.example`.
