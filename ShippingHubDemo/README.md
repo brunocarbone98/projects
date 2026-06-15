@@ -13,8 +13,10 @@ entirely in the browser, so it can be hosted as plain static files on **GitHub P
 > | What | The real distributed system | A browser-only simulation of it |
 > | Stack | Next.js · Express · PostgreSQL · FastAPI | Vanilla ES modules + localStorage |
 > | Data | PostgreSQL (shared, server-side) | `localStorage` (per browser, on your device) |
-> | Hosting | Railway (needs a runtime) | GitHub Pages (static files) |
+> | Hosting | [Railway](https://shipping-hub.up.railway.app/) (needs a runtime) | GitHub Pages (static files) |
 > | Use it for | Showing the architecture | Letting anyone try the UX instantly |
+
+The full-stack version is live at **<https://shipping-hub.up.railway.app/>**.
 
 ## What you can do
 
@@ -77,4 +79,5 @@ python3 -m http.server 8099   # then open http://localhost:8099
   wipe site data or hit **Reset demo data**).
 - The map tiles and the CSS load from public CDNs, so the live demo needs internet.
 - For the production-grade architecture (real DB, services, JWT auth, double-entry ledger
-  enforced server-side), see [`../FullStackHub`](../FullStackHub) and `../DEPLOY.md`.
+  enforced server-side), see the live app at <https://shipping-hub.up.railway.app/>,
+  [`../FullStackHub`](../FullStackHub) and `../DEPLOY.md`.

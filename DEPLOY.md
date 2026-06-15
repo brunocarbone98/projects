@@ -69,6 +69,8 @@ The container exposes the web on port **8080**. Service → Settings →
   ```
 
 ## Verify
+This project is deployed live at **<https://shipping-hub.up.railway.app/>**. On your own
+domain:
 - `https://<your-domain>/en/tracking/PTY-2026-001001-0` → the SSR tracking page
 - Sign in with a demo account (`ana@example.com` / `Password123!`) and open the wallet.
 
