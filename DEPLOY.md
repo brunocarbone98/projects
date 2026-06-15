@@ -58,6 +58,7 @@ Railway **reference variables** wire the services together. In each service →
 
 **`api`**
 ```
+PORT                = 4000
 DATABASE_URL        = ${{Postgres.DATABASE_URL}}
 JWT_ACCESS_SECRET   = <a long random string>
 JWT_REFRESH_SECRET  = <a different long random string>
@@ -69,10 +70,15 @@ PUBLIC_WEB_URL      = https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 
 **`web`**
 ```
+PORT                = 3000
 API_INTERNAL_URL    = http://${{api.RAILWAY_PRIVATE_DOMAIN}}:${{api.PORT}}
 ```
 
-**`pricing` / `labels`** — nothing; they bind Railway's `$PORT` automatically.
+**`pricing`**: `PORT = 8001`  ·  **`labels`**: `PORT = 8002`
+
+Setting an explicit `PORT` on every service matters: the service binds a known
+port, the `${{…PORT}}` references above resolve, and the generated domain has a
+port to route to.
 
 Generate the two secrets with e.g. `openssl rand -hex 32`. The `api` ↔ services
 and `web` → `api` traffic all stays on the private network.
@@ -83,8 +89,8 @@ and `web` → `api` traffic all stays on the private network.
 > fully functional over the private network without them.
 
 ## 4. Public domains
-- **`web`** → Settings → **Networking → Generate Domain**. **That domain is your public site URL.**
-- **`api`** → Generate a domain too (so you can curl `/health` and open `/api/v1/docs`). Recommended.
+- **`web`** → Settings → **Networking → Generate Domain** (if it asks for the port, enter **3000**). **That domain is your public site URL.**
+- **`api`** → Generate a domain too (port **4000**), so you can curl `/health` and open `/api/v1/docs`. Recommended.
 - **`pricing` / `labels`** → no public domain (private only).
 
 Private networking and `RAILWAY_PRIVATE_DOMAIN` are on by default; the Python
