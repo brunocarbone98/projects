@@ -1,7 +1,7 @@
 import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/navigation";
 import { cn } from "@/lib/cn";
-import { secondaryButton } from "@/lib/ui";
+import { primaryButton } from "@/lib/ui";
 import { Container } from "./Container";
 import { LocaleSwitcher } from "./LocaleSwitcher";
 import { Logo } from "./Logo";
@@ -9,6 +9,7 @@ import { Logo } from "./Logo";
 export function Header() {
   const t = useTranslations("Nav");
   const links = [
+    { href: "/", label: t("home") },
     { href: "/tracking", label: t("track") },
     { href: "/quote", label: t("quote") },
     { href: "/coverage", label: t("coverage") },
@@ -37,14 +38,8 @@ export function Header() {
 
         <div className="flex items-center gap-2">
           <LocaleSwitcher />
-          <Link
-            href="/login"
-            className="rounded-lg px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
-          >
+          <Link href="/login" className={cn(primaryButton, "px-3.5 py-2")}>
             {t("signIn")}
-          </Link>
-          <Link href="/tracking" className={cn(secondaryButton, "hidden py-2 sm:inline-flex")}>
-            {t("trackCta")}
           </Link>
         </div>
       </Container>

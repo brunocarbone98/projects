@@ -32,70 +32,52 @@ const sectionWrap = (inner) => `<div class="mx-auto max-w-6xl px-4 py-10">${inne
 
 export const home = {
   render({ t }) {
-    const ICONS = {
-      tracking: '<path d="M21 10c0 6-9 12-9 12s-9-6-9-12a9 9 0 1 1 18 0Z M12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke-linejoin="round"/>',
-      coverage: '<path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18" stroke-linejoin="round"/>',
-      pricing: '<path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" stroke-linecap="round"/>',
-      api: '<path d="m8 9-4 3 4 3m8-6 4 3-4 3M14 5l-4 14" stroke-linecap="round" stroke-linejoin="round"/>',
-    };
-    const feature = (key) => `
-      <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <span class="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-brand-50 text-brand-600">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5">${ICONS[key]}</svg>
-        </span>
-        <h3 class="mt-4 font-semibold text-slate-900">${escapeHtml(t(`Home.features.${key}.title`))}</h3>
-        <p class="mt-2 text-sm leading-relaxed text-slate-600">${escapeHtml(t(`Home.features.${key}.description`))}</p>
+    const feature = (key, icon) => `
+      <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="mb-3 grid h-10 w-10 place-items-center rounded-lg bg-brand-50 text-xl">${icon}</div>
+        <h3 class="font-semibold text-slate-900">${escapeHtml(t(`Home.features.${key}.title`))}</h3>
+        <p class="mt-1 text-sm text-slate-600">${escapeHtml(t(`Home.features.${key}.description`))}</p>
       </div>`;
     const step = (key, n) => `
-      <li class="relative">
-        <span class="inline-flex h-9 w-9 items-center justify-center rounded-full bg-brand-600 font-semibold text-white">${n}</span>
-        <h3 class="mt-4 font-semibold text-slate-900">${escapeHtml(t(`Home.steps.${key}.title`))}</h3>
-        <p class="mt-2 text-sm leading-relaxed text-slate-600">${escapeHtml(t(`Home.steps.${key}.description`))}</p>
-      </li>`;
+      <div class="relative rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <span class="absolute -top-3 left-5 grid h-7 w-7 place-items-center rounded-full bg-brand-600 text-sm font-bold text-white">${n}</span>
+        <h3 class="mt-2 font-semibold text-slate-900">${escapeHtml(t(`Home.steps.${key}.title`))}</h3>
+        <p class="mt-1 text-sm text-slate-600">${escapeHtml(t(`Home.steps.${key}.description`))}</p>
+      </div>`;
 
     return `
-      <section class="border-b border-slate-200 bg-gradient-to-b from-brand-50 to-slate-50">
-        <div class="mx-auto max-w-6xl px-4 py-20 sm:py-24">
-          <div class="mx-auto max-w-3xl text-center">
-            <span class="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-medium text-brand-700 ring-1 ring-inset ring-brand-200">${escapeHtml(t("Home.hero.badge"))}</span>
-            <h1 class="mt-5 text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">${escapeHtml(t("Home.hero.title"))}</h1>
-            <p class="mx-auto mt-4 max-w-2xl text-lg text-slate-600">${escapeHtml(t("Home.hero.subtitle"))}</p>
-            <div class="mx-auto mt-8 max-w-xl">
-              <form id="hero-track" class="flex flex-col gap-3 sm:flex-row">
-                <input name="code" placeholder="${escapeHtml(t("Home.hero.trackPlaceholder"))}" aria-label="${escapeHtml(t("Home.hero.trackLabel"))}"
-                  class="w-full rounded-lg border border-slate-300 px-4 py-3 shadow-sm focus:border-brand-500 focus:ring-2 focus:ring-brand-200" />
-                <button class="rounded-lg bg-brand-600 px-6 py-3 font-semibold text-white shadow-sm hover:bg-brand-700">${escapeHtml(t("Home.hero.trackButton"))}</button>
-              </form>
-              <p class="mt-3 text-sm text-slate-500">${escapeHtml(t("Home.hero.example"))}
-                <button data-demo-code="PTY-2026-001001-0" class="font-mono font-medium text-brand-700 underline-offset-2 hover:underline">PTY-2026-001001-0</button>
-              </p>
-            </div>
+      <section class="relative overflow-hidden bg-gradient-to-b from-brand-950 via-brand-900 to-brand-800 text-white">
+        <div class="mx-auto max-w-6xl px-4 py-20">
+          <span class="inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-brand-100">${escapeHtml(t("Home.hero.badge"))}</span>
+          <h1 class="mt-5 max-w-2xl text-4xl font-extrabold tracking-tight sm:text-5xl">${escapeHtml(t("Home.hero.title"))}</h1>
+          <p class="mt-4 max-w-xl text-lg text-brand-100">${escapeHtml(t("Home.hero.subtitle"))}</p>
+          <form id="hero-track" class="mt-8 flex max-w-xl flex-col gap-3 sm:flex-row">
+            <input name="code" placeholder="${escapeHtml(t("Home.hero.trackPlaceholder"))}"
+              class="w-full rounded-xl border-0 px-4 py-3 text-slate-900 shadow-sm focus:ring-2 focus:ring-accent-400" aria-label="${escapeHtml(t("Home.hero.trackLabel"))}" />
+            <button class="rounded-xl bg-accent-500 px-6 py-3 font-semibold text-slate-900 shadow-sm transition hover:bg-accent-400">${escapeHtml(t("Home.hero.trackButton"))}</button>
+          </form>
+          <div class="mt-3 flex items-center gap-3 text-sm text-brand-200">
+            <span>${escapeHtml(t("Home.hero.example"))}</span>
+            <button data-demo-code="PTY-2026-001001-0" class="rounded-md bg-white/10 px-2 py-1 font-mono text-xs text-white hover:bg-white/20">PTY-2026-001001-0</button>
+            <a href="#/quote" class="font-semibold text-accent-400 hover:underline">${escapeHtml(t("Home.hero.quoteButton"))} →</a>
           </div>
         </div>
       </section>
-      <section class="py-20">
-        <div class="mx-auto max-w-6xl px-4">
-          <h2 class="text-center text-3xl font-bold tracking-tight text-slate-900">${escapeHtml(t("Home.features.title"))}</h2>
-          <div class="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-            ${feature("tracking")}${feature("coverage")}${feature("pricing")}${feature("api")}
-          </div>
+      ${sectionWrap(`
+        <h2 class="text-2xl font-bold text-slate-900">${escapeHtml(t("Home.features.title"))}</h2>
+        <div class="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          ${feature("tracking", "📍")}${feature("coverage", "🌎")}${feature("pricing", "🏷️")}${feature("api", "🧩")}
         </div>
-      </section>
-      <section class="border-y border-slate-200 bg-white py-20">
-        <div class="mx-auto max-w-6xl px-4">
-          <h2 class="text-center text-3xl font-bold tracking-tight text-slate-900">${escapeHtml(t("Home.steps.title"))}</h2>
-          <ol class="mt-12 grid gap-8 sm:grid-cols-3">${step("one", 1)}${step("two", 2)}${step("three", 3)}</ol>
+        <h2 class="mt-14 text-2xl font-bold text-slate-900">${escapeHtml(t("Home.steps.title"))}</h2>
+        <div class="mt-8 grid gap-4 sm:grid-cols-3">
+          ${step("one", 1)}${step("two", 2)}${step("three", 3)}
         </div>
-      </section>
-      <section class="py-20">
-        <div class="mx-auto max-w-6xl px-4">
-          <div class="rounded-3xl bg-brand-600 px-8 py-14 text-center">
-            <h2 class="text-3xl font-bold tracking-tight text-white">${escapeHtml(t("Home.cta.title"))}</h2>
-            <p class="mx-auto mt-3 max-w-xl text-brand-100">${escapeHtml(t("Home.cta.subtitle"))}</p>
-            <a href="#/track" class="mt-8 inline-flex items-center justify-center rounded-lg bg-white px-5 py-2.5 text-sm font-semibold text-brand-700 hover:bg-brand-50">${escapeHtml(t("Home.cta.button"))}</a>
-          </div>
+        <div class="mt-14 rounded-2xl bg-brand-600 px-6 py-10 text-center text-white">
+          <h2 class="text-2xl font-bold">${escapeHtml(t("Home.cta.title"))}</h2>
+          <p class="mt-2 text-brand-100">${escapeHtml(t("Home.cta.subtitle"))}</p>
+          <a href="#/track" class="mt-5 inline-block rounded-xl bg-white px-6 py-3 font-semibold text-brand-700 hover:bg-brand-50">${escapeHtml(t("Home.cta.button"))}</a>
         </div>
-      </section>`;
+      `)}`;
   },
   hydrate(ctx, root) {
     root.querySelector("#hero-track")?.addEventListener("submit", (e) => {
@@ -393,25 +375,25 @@ function appShell(ctx, active, content) {
   const isStaff = store.isStaff(user);
   const link = (href, key, show = true) =>
     show
-      ? `<a href="${href}" class="text-sm ${active === key ? "font-semibold text-brand-700" : "font-medium text-slate-600 hover:text-slate-900"}">${escapeHtml(t(`Dashboard.nav.${key}`))}</a>`
+      ? `<a href="${href}" class="block rounded-lg px-3 py-2 text-sm font-medium ${active === key ? "bg-brand-50 text-brand-700" : "text-slate-600 hover:bg-slate-50"}">${escapeHtml(t(`Dashboard.nav.${key}`))}</a>`
       : "";
-  return `
-    <div class="border-b border-slate-200 bg-white">
-      <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-        <nav class="flex items-center gap-5">
+  return sectionWrap(`
+    <div class="grid gap-6 lg:grid-cols-[220px_1fr]">
+      <aside class="space-y-4">
+        <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs text-slate-500">${escapeHtml(t("Dashboard.signedInAs"))}</p>
+          <p class="font-semibold text-slate-800">${escapeHtml(user.name)}</p>
+          <span class="mt-1 inline-flex rounded-full bg-brand-100 px-2 py-0.5 text-xs font-semibold text-brand-700">${escapeHtml(t(`Dashboard.roles.${user.role}`))}</span>
+        </div>
+        <nav class="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
           ${link("#/app", "overview")}
           ${link("#/app/shipments", "shipments")}
           ${link("#/app/new", "newShipment", !isStaff)}
           ${link("#/app/wallet", "wallet", !isStaff)}
         </nav>
-        <div class="flex items-center gap-2 text-sm text-slate-500">
-          <span class="hidden sm:inline">${escapeHtml(t("Dashboard.signedInAs"))} <span class="font-medium text-slate-700">${escapeHtml(user.email)}</span></span>
-          <span class="rounded-full bg-brand-100 px-2 py-0.5 text-xs font-semibold text-brand-700">${escapeHtml(t(`Dashboard.roles.${user.role}`))}</span>
-          <button data-action="logout" class="font-semibold text-slate-700 hover:text-slate-900">${escapeHtml(t("Dashboard.signOut"))}</button>
-        </div>
-      </div>
-    </div>
-    <div class="mx-auto max-w-6xl px-4 py-10">${content}</div>`;
+      </aside>
+      <main>${content}</main>
+    </div>`);
 }
 
 /* ======================================================== dashboard ======= */
@@ -631,37 +613,31 @@ export const wallet = {
     const { t, locale, user } = ctx;
     const balance = store.balanceForUser(user.id);
     const entries = store.ledgerForUser(user.id);
-    const describe = (e) => {
-      if (e.kind === "TOPUP") return t("Wallet.topupDesc", { amount: formatMoney(Math.abs(e.amountCents), locale) });
-      if (e.kind === "PAYMENT") return t("Wallet.paymentDesc", { code: store.getById(e.shipmentId)?.trackingCode ?? "—" });
-      return "";
-    };
     const history = entries.length
       ? entries.map((e) => {
           const positive = e.amountCents >= 0;
-          return `<li class="flex items-center justify-between gap-3 border-t border-slate-100 py-3 first:border-t-0">
-            <div class="min-w-0">
+          return `<li class="flex items-center justify-between border-t border-slate-100 py-3">
+            <div>
               <p class="text-sm font-medium text-slate-800">${escapeHtml(t(`Wallet.kinds.${e.kind}`))}</p>
-              <p class="truncate text-xs text-slate-400">${escapeHtml(describe(e))}</p>
+              <p class="text-xs text-slate-400">${escapeHtml(formatDate(e.createdAt, locale, true))}</p>
             </div>
-            <span class="hidden text-xs text-slate-400 sm:block">${escapeHtml(formatDate(e.createdAt, locale, true))}</span>
-            <span class="shrink-0 font-semibold ${positive ? "text-emerald-600" : "text-red-600"}">${positive ? "+" : "−"}${escapeHtml(formatMoney(Math.abs(e.amountCents), locale))}</span>
+            <span class="font-semibold ${positive ? "text-emerald-600" : "text-slate-700"}">${positive ? "+" : "−"}${escapeHtml(formatMoney(Math.abs(e.amountCents), locale))}</span>
           </li>`;
         }).join("")
       : `<li class="py-6 text-center text-sm text-slate-500">${escapeHtml(t("Wallet.empty"))}</li>`;
 
     const content = `
       <h1 class="text-2xl font-bold text-slate-900">${escapeHtml(t("Wallet.title"))}</h1>
-      ${card(`
-        <p class="text-sm text-slate-500">${escapeHtml(t("Wallet.balance"))}</p>
-        <p class="mt-1 text-3xl font-bold text-slate-900">${escapeHtml(formatMoney(balance, locale))}</p>
-        <form id="topup-form" class="mt-5 flex flex-wrap items-end gap-3">
-          <label class="text-sm font-medium text-slate-700">${escapeHtml(t("Wallet.amount"))}
-            <input name="amount" type="number" min="1" step="1" value="50" class="mt-1 block w-40 rounded-lg border border-slate-300 px-3 py-2" /></label>
-          <button class="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">${escapeHtml(t("Wallet.addFunds"))}</button>
-        </form>
-        <div id="topup-error" class="mt-2"></div>
-      `, "mt-4")}
+      <div class="mt-4 grid gap-4 sm:grid-cols-2">
+        ${card(`<p class="text-xs text-slate-500">${escapeHtml(t("Wallet.balance"))}</p><p class="mt-1 text-3xl font-bold text-brand-700">${escapeHtml(formatMoney(balance, locale))}</p>`)}
+        ${card(`
+          <form id="topup-form" class="space-y-3">
+            <div id="topup-error"></div>
+            <label class="block text-sm font-medium text-slate-700">${escapeHtml(t("Wallet.amount"))}
+              <input name="amount" type="number" min="1" step="1" value="50" class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" /></label>
+            <button class="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">${escapeHtml(t("Wallet.addFunds"))}</button>
+          </form>`)}
+      </div>
       ${card(`<h3 class="font-semibold text-slate-900">${escapeHtml(t("Wallet.history"))}</h3><ul class="mt-2">${history}</ul>`, "mt-4")}`;
     return appShell(ctx, "wallet", content);
   },

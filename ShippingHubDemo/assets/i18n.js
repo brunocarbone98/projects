@@ -129,7 +129,7 @@ const en = {
   },
   "Wallet": {
     "title": "Wallet", "balance": "Balance", "amount": "Amount (USD)", "addFunds": "Add funds", "invalidAmount": "Enter a valid amount.",
-    "history": "Transaction history", "empty": "No transactions yet.", "topupDesc": "Wallet top-up {amount}", "paymentDesc": "Label payment for {code}", "kinds": { "TOPUP": "Top-up", "PAYMENT": "Payment", "REVERSAL": "Reversal" }
+    "history": "Transaction history", "empty": "No transactions yet.", "kinds": { "TOPUP": "Top-up", "PAYMENT": "Payment", "REVERSAL": "Reversal" }
   },
   "ShipmentDetail": {
     "back": "Back to shipments", "downloadLabel": "Download label", "pay": "Pay {amount}", "payInsufficient": "Insufficient wallet balance — top up your wallet first.", "paid": "Label paid",
@@ -261,7 +261,7 @@ const es = {
   },
   "Wallet": {
     "title": "Billetera", "balance": "Saldo", "amount": "Monto (USD)", "addFunds": "Agregar fondos", "invalidAmount": "Ingresa un monto válido.",
-    "history": "Historial de transacciones", "empty": "Aún no hay transacciones.", "topupDesc": "Recarga de {amount}", "paymentDesc": "Pago de etiqueta {code}", "kinds": { "TOPUP": "Recarga", "PAYMENT": "Pago", "REVERSAL": "Reverso" }
+    "history": "Historial de transacciones", "empty": "Aún no hay transacciones.", "kinds": { "TOPUP": "Recarga", "PAYMENT": "Pago", "REVERSAL": "Reverso" }
   },
   "ShipmentDetail": {
     "back": "Volver a envíos", "downloadLabel": "Descargar etiqueta", "pay": "Pagar {amount}", "payInsufficient": "Saldo insuficiente — recarga tu billetera primero.", "paid": "Etiqueta pagada",

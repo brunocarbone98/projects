@@ -12,6 +12,7 @@ interface TrackingFormProps {
   invalidLabel: string;
   ariaLabel: string;
   autoFocus?: boolean;
+  buttonClassName?: string;
 }
 
 export function TrackingForm({
@@ -20,6 +21,7 @@ export function TrackingForm({
   invalidLabel,
   ariaLabel,
   autoFocus,
+  buttonClassName = primaryButton,
 }: TrackingFormProps) {
   const router = useRouter();
   const [value, setValue] = useState("");
@@ -55,7 +57,7 @@ export function TrackingForm({
               : "border-slate-300 focus:border-brand-400 focus:ring-brand-200",
           )}
         />
-        <button type="submit" className={cn(primaryButton, "shrink-0")}>
+        <button type="submit" className={cn(buttonClassName, "shrink-0")}>
           {buttonLabel}
         </button>
       </div>
