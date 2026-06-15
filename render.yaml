@@ -1,0 +1,38 @@
+# Render Blueprint — Shipping Hub BACKEND (Option B).
+# Render reads render.yaml from the REPO ROOT, so it lives here (not inside
+# FullStackHub/). This deploys the Express API + the two Python microservices.
+# The web app goes to Vercel and the database to Neon — see DEPLOY.md.
+#
+# After the first deploy, set the env vars marked `sync: false` in the Render
+# dashboard (DATABASE_URL = your Neon string; the two *_SERVICE_URL = each
+# service's URL; CORS_ORIGINS / PUBLIC_WEB_URL = your Vercel URL).
+
+services:
+  - type: web
+    name: shipping-hub-api
+    runtime: docker
+    dockerfilePath: FullStackHub/apps/api/Dockerfile
+    dockerContext: FullStackHub
+    healthCheckPath: /health
+    envVars:
+      - { key: DATABASE_URL, sync: false } # your Neon connection string
+      - { key: JWT_ACCESS_SECRET, generateValue: true }
+      - { key: JWT_REFRESH_SECRET, generateValue: true }
+      - { key: PRICING_SERVICE_URL, sync: false } # https://shipping-hub-pricing.onrender.com
+      - { key: LABELS_SERVICE_URL, sync: false } # https://shipping-hub-labels.onrender.com
+      - { key: CORS_ORIGINS, sync: false } # your Vercel URL, e.g. https://shipping-hub.vercel.app
+      - { key: PUBLIC_WEB_URL, sync: false } # your Vercel URL
+
+  - type: web
+    name: shipping-hub-pricing
+    runtime: docker
+    dockerfilePath: FullStackHub/services/pricing/Dockerfile
+    dockerContext: FullStackHub/services/pricing
+    healthCheckPath: /health
+
+  - type: web
+    name: shipping-hub-labels
+    runtime: docker
+    dockerfilePath: FullStackHub/services/labels/Dockerfile
+    dockerContext: FullStackHub/services/labels
+    healthCheckPath: /health
