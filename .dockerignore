@@ -1,0 +1,10 @@
+.git
+**/node_modules
+**/.next
+**/.venv
+**/__pycache__
+**/*.pyc
+PersonalWebsite
+ShippingHubDemo
+FullStackHub/screenshots
+**/*.log

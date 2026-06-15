@@ -15,6 +15,4 @@ COPY label.py main.py ./
 
 EXPOSE 8002
 
-# Bind IPv6 (::) and the platform's $PORT so the service is reachable over
-# Railway's private network; falls back to 8002 for local `docker compose`.
-CMD ["sh", "-c", "uvicorn main:app --host :: --port ${PORT:-8002}"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
