@@ -8,8 +8,7 @@ operations staff advance shipment states that feed the public timeline.
 > Phased plan in [`ROADMAP.md`](./ROADMAP.md) · conventions in [`CLAUDE.md`](./CLAUDE.md).
 > **Phases 0–6 are implemented.**
 
-**▶ Live app:** <https://shipping-hub.up.railway.app/> · **▶ Browser-only demo:**
-<https://brunocarbone98.github.io/projects/ShippingHubDemo/> ([`../ShippingHubDemo`](../ShippingHubDemo))
+**▶ Live app:** <https://shipping-hub.up.railway.app/>
 
 ## Architecture
 
