@@ -1,38 +1,36 @@
-# ROADMAP — SecureGate (DevSecOps CI/CD Security Pipeline)
+# ROADMAP — SecureGate (Automated QA & Security Testing for Shipping Hub)
 
-> **Project:** SecureGate — a DevSecOps pipeline that gates a Java microservices backend
-> **Stack:** Java 21, Spring Boot 3, Maven, JUnit 5, REST Assured, Testcontainers, SonarQube/SonarCloud, JaCoCo, GitHub Actions, Docker, Trivy
-> **How to use this file:** keep it at the project root. When starting each phase with Claude Code, open plan mode and ask it to read the corresponding section of this roadmap.
+> **Project:** SecureGate — a professional QA automation suite that tests the **Shipping Hub** platform end to end.
+> **System under test:** [`../FullStackHub`](../FullStackHub) — Shipping Hub, live at <https://shipping-hub.up.railway.app/>.
+> **Stack:** Java 21, Maven, REST Assured, Selenium WebDriver, Cucumber (BDD), JUnit 5, Allure, SonarQube, GitHub Actions, Docker.
+> **How to use this file:** keep it at the project root. When starting each phase with Claude Code, open plan mode and ask it to read the corresponding section.
 
 ---
 
 ## 1. Product vision
 
-SecureGate is a small but realistic **Java (Spring Boot) microservices backend** wrapped in a **DevSecOps pipeline**: every change must pass automated **security and quality gates** before it can ship. It demonstrates *shift-left* security — vulnerabilities, low coverage and risky API behaviour are caught in CI, not in production.
+SecureGate is the **QA & security test suite for Shipping Hub** — the full-stack parcel platform in [`../FullStackHub`](../FullStackHub). It validates the running system the way a QA Automation Engineer would: **API contract & functional tests** (REST Assured) against the public and authenticated REST API, **end-to-end UI journeys** (Selenium + Page Object Model) against the bilingual web app, and **BDD scenarios** (Cucumber) that read like product specs — plus **security-oriented negative tests** (rate limiting, broken auth, tampered tokens). Everything runs in a **GitHub Actions pipeline** behind a **SonarQube quality gate**, producing an **Allure** report.
 
-The backend itself is a **secrets / API-key vault**: an `auth-service` issues JWTs and manages accounts, and a `vault-service` lets an authenticated account create, rotate and revoke API keys under role-based access. The domain is deliberately compact — **the star of the project is the pipeline**, not the feature set.
+It is a black-box client of Shipping Hub: it never edits Shipping Hub's code or database — it drives the system through its public API and UI, exactly as a real user does.
 
-**Success criterion:** a pull request that introduces a vulnerability, a failing API contract, or a coverage regression is **automatically blocked** by the pipeline (SonarQube quality gate + REST Assured suite + dependency/image scan), with a clear report — while a clean PR sails through to a published, hardened Docker image.
+**Success criterion:** one `mvn verify` (or a CI run) executes the full suite against a configured Shipping Hub environment (local or the live Railway URL) and produces a report covering tracking, quoting, auth, shipments and wallet — including the security negatives — with a clear pass/fail and screenshots on UI failures.
 
 ---
 
-## 2. Where each piece of the stack fits
+## 2. What's tested, and with what
 
-| Technology | Location in the repo | Responsibility |
+| Shipping Hub surface (the SUT) | What we verify | Tool |
 |---|---|---|
-| **Java 21 + Spring Boot 3** | `services/auth-service`, `services/vault-service` | The microservices backend: accounts + JWT, and the API-key vault with RBAC. |
-| **Maven (multi-module)** | root `pom.xml` + module `pom.xml`s | Build orchestration, shared dependency management, the `verify` lifecycle. |
-| **PostgreSQL + Spring Data JPA + Flyway** | each service (via Docker Compose) | Persistence + versioned schema migrations. |
-| **JUnit 5 + Testcontainers** | `src/test` per service | Unit tests + integration tests against a real Postgres in a container. |
-| **REST Assured** | `src/test` (integration) | Black-box API tests: happy paths, validation, authn/authz, security negatives. |
-| **SonarQube / SonarCloud + JaCoCo** | CI + `sonar-project` config | Static analysis (bugs, vulnerabilities, hotspots) + coverage, behind a **Quality Gate**. |
-| **GitHub Actions** | `/.github/workflows/securegate-ci.yml` (repo root) | The pipeline: build → test → scan → gate → image. |
-| **Docker** | `Dockerfile` per service + `docker-compose.yml` | Multi-stage, non-root images; local orchestration. |
-| **Trivy / OWASP Dependency-Check + gitleaks + CycloneDX** | CI | Dependency & image vulnerability scanning, secret scanning, SBOM. |
+| Public tracking — `GET /api/v1/tracking/:code` | valid Luhn code returns the timeline; bad check digit / unknown code → 4xx; **rate limiting** kicks in | REST Assured |
+| Quote — `POST /api/v1/quote` | price + ETA for valid input; validation errors (400) for bad weight/zone | REST Assured |
+| Auth — `/api/v1/auth/{register,login,refresh}` | token issuance & refresh; **invalid/expired/tampered JWT → 401** | REST Assured |
+| Shipments & wallet (authenticated) | create/list shipments; wallet top-up & label payment; **idempotency** (no double charge); **authz** (no cross-account access → 403) | REST Assured |
+| Web UI (`/{es\|en}/...`) | landing, tracking page (SSR + map), quote calculator, login, dashboard, **create-shipment wizard**, wallet | Selenium + POM |
+| User journeys | Track a parcel · Get a quote · Sign in · Create a shipment · Pay a label | Cucumber (Gherkin) |
+| The test framework itself | static analysis + a quality gate | SonarQube + JaCoCo |
+| The whole suite | orchestration + reporting | GitHub Actions + Allure |
 
-**Architectural golden rule:** the pipeline is the product. Each service stays small, conventional and well-tested so the **gates** (quality, security, coverage, supply-chain) are the interesting, demonstrable part.
-
-> **Note:** GitHub Actions only runs workflows from the **repository root** `.github/workflows/`. SecureGate's pipeline therefore lives at `/.github/workflows/securegate-ci.yml` (scoped with `paths: ["SecureGate/**"]`), while everything else lives inside `SecureGate/`.
+**Golden rule:** SecureGate is **black-box**. Test data is created and cleaned up **through Shipping Hub's API** (plus the seeded demo data: `PTY-2026-001001-0`, `ana@example.com` / `Password123!`). SecureGate never touches Shipping Hub's database or source directly.
 
 ---
 
@@ -40,122 +38,91 @@ The backend itself is a **secrets / API-key vault**: an `auth-service` issues JW
 
 ```
 SecureGate/
-├── CLAUDE.md                   # Conventions for Claude Code
-├── ROADMAP.md                  # This file
-├── README.md                   # Overview + architecture + how to run
-├── .gitignore
-├── pom.xml                     # Parent POM (multi-module, dependency mgmt)
-├── docker-compose.yml          # PostgreSQL + both services
-├── .claude/
-│   └── agents/                 # Task delegation (see section 7)
-│       ├── backend-dev.md
-│       ├── test-engineer.md
-│       ├── devsecops.md
-│       ├── code-reviewer.md
-│       └── test-runner.md
-├── common/                     # Shared module: DTOs, error model, JWT utils
-│   ├── pom.xml
-│   └── src/main/java/...
-└── services/
-    ├── auth-service/           # Accounts + JWT issuance/validation
-    │   ├── pom.xml  Dockerfile
-    │   └── src/{main,test}/java/...
-    └── vault-service/          # API-key vault + RBAC
-        ├── pom.xml  Dockerfile
-        └── src/{main,test}/java/...
+├── CLAUDE.md  ROADMAP.md  README.md  .gitignore
+├── pom.xml                          # Maven (REST Assured, Selenium, Cucumber, Allure, JUnit)
+├── docker-compose.yml               # optional: Selenium Grid (+ a local Shipping Hub)
+├── .claude/agents/                  # task delegation (see section 7)
+├── src/test/java/com/securegate/
+│   ├── api/        # REST Assured tests + typed request clients
+│   ├── ui/         # Selenium Page Objects + E2E tests
+│   ├── bdd/        # Cucumber runners + step definitions
+│   └── support/    # config, env profiles, REST/WebDriver factories, auth helper
+└── src/test/resources/
+    ├── features/   # Gherkin .feature files (living documentation)
+    ├── schemas/    # JSON schemas for contract validation
+    └── config/     # base URLs (api/web) per environment, test users
 
 # At the repo root (GitHub requirement):
 .github/workflows/securegate-ci.yml
 ```
 
-**Base tooling:** Maven Wrapper (`./mvnw`), Spring Boot 3, Flyway, JaCoCo, GitHub Actions, Docker.
+**Base tooling:** Maven Wrapper (`./mvnw`), JUnit 5, REST Assured, Selenium + WebDriverManager, Cucumber, Allure, SonarQube, GitHub Actions.
 
 ---
 
-## 4. Domain & pipeline model
+## 4. Test strategy & the system under test
 
-### The backend (kept intentionally small)
+**System under test (SUT):** Shipping Hub — Next.js web + Express API + Python services + PostgreSQL ([`../FullStackHub`](../FullStackHub)).
+- **Environments** (selected by a Maven profile / config): `live` → <https://shipping-hub.up.railway.app/>; `local` → `http://localhost:3000` (web) + `:4000` (api), brought up from `../FullStackHub` (`docker compose up` + `pnpm dev`).
+- **Test data:** the seeded demo data (public code `PTY-2026-001001-0`; users `ana@example.com` / `Password123!`, `admin@shippinghub.test`) plus data created on the fly via the API and cleaned up afterwards.
 
-- **`auth-service`** — `accounts` (id, email, BCrypt password hash, role `USER`/`ADMIN`): `POST /auth/register`, `POST /auth/login` (returns a short-lived JWT), `GET /auth/me`.
-- **`vault-service`** — `api_keys` (id, account_id, name, scope, hashed secret, status `ACTIVE`/`REVOKED`, created_at). Endpoints (all require a valid JWT): `POST /keys`, `GET /keys`, `POST /keys/{id}/rotate`, `DELETE /keys/{id}` (revoke). **RBAC:** an account only sees/acts on its own keys; `ADMIN` may list all.
+**The testing pyramid:**
+- **API tests (broad, fast)** — most of the coverage; assert status, headers, JSON body and JSON-schema contract.
+- **BDD scenarios (readable)** — the key journeys as Gherkin, reusing the API clients; living documentation for non-engineers.
+- **UI E2E (few, critical)** — real-browser happy paths for the journeys that only matter through the UI (tracking page render, the create-shipment wizard, the language switch).
 
-**Security invariants (what the gates protect):**
-- Passwords and API-key secrets are **never stored in plaintext** (BCrypt / hashed; the raw key is shown once on creation).
-- JWTs are signed and validated; tampered/expired tokens → `401`.
-- Cross-account access → `403` (authz negative tests enforce this).
-- All input is validated at the edge (Bean Validation); errors use RFC 7807 `application/problem+json`.
-
-### The pipeline (the star)
-
-```
-PR ─▶ build (mvn) ─▶ unit tests ─▶ REST Assured (Testcontainers) ─▶ JaCoCo
-        └─▶ SonarQube scan ─▶ QUALITY GATE ─▶ Trivy/OWASP + gitleaks ─▶ SBOM
-                                   │                                      │
-                              (fail = block PR)              main ─▶ Docker image ─▶ GHCR
-```
-
-Each gate has a clear, demonstrable failure mode: a vulnerable dependency, an unreviewed security hotspot, a coverage drop, a leaked secret, or a broken API contract.
+**Security-oriented checks (the "Secure" in SecureGate):** public-endpoint **rate limiting**, **authz** (cross-account access → 403), **invalid/expired/tampered JWT** (401), input **validation** (400), and confirming **secrets are never leaked** in responses.
 
 ---
 
 ## 5. Project phases
 
-> Each phase ends with something demonstrable and a commit/tag. Durations assume part-time work with Claude Code.
+> Each phase ends with something demonstrable and a commit/tag.
 
 ### Phase 0 — Foundations (2–4 days)
-**Stack:** Maven, Spring Boot, Docker, GitHub Actions (skeleton).
-- Multi-module Maven: parent `pom.xml` + `common`, `auth-service`, `vault-service`; Maven Wrapper; Java 21 + Spring Boot 3 BOM.
-- Spring Boot skeletons exposing `/actuator/health`; multi-stage Dockerfiles; `docker-compose.yml` (Postgres + both services).
-- Root `CLAUDE.md` (English code, conventional commits, how to run); `.claude/agents/`.
-- Minimal CI: `securegate-ci.yml` running `./mvnw -q verify` on PRs that touch `SecureGate/**`.
-- **Deliverable:** `docker compose up` brings up Postgres + both services (health OK); `./mvnw verify` is green; CI runs on PR.
-- **Delegate:** `backend-dev` (Maven/Spring scaffolding) · `devsecops` (Docker + CI skeleton).
-- **With Claude Code:** plan mode → *"Read ROADMAP.md, Phase 0, and create the multi-module skeleton."*
+**Stack:** Maven, JUnit 5, REST Assured, Selenium (WebDriverManager).
+- Maven project; a config layer with environment profiles (`local`/`live`) and base URLs for the Shipping Hub API + web; base test classes; REST Assured + WebDriver factories.
+- `CLAUDE.md`; `.claude/agents/`; CI skeleton (`securegate-ci.yml`) running a **smoke test** against `GET /api/v1/tracking/PTY-2026-001001-0` on the live env.
+- **Deliverable:** `./mvnw verify` runs the smoke test against the configured Shipping Hub; CI green.
+- **Delegate:** `api-test-engineer` (config + smoke) · `devsecops` (CI skeleton).
 
-### Phase 1 — Core microservices (1–2 weeks)
-**Stack:** Spring Boot, Spring Data JPA, Flyway, PostgreSQL, JWT.
-- `auth-service`: register/login, BCrypt hashing, JWT issuance (`jjwt`/Nimbus), `/auth/me`, role model; Flyway migration for `accounts`.
-- `vault-service`: API-key CRUD + rotate/revoke, owner-scoped RBAC, JWT validation (shared HMAC secret or JWKS); Flyway migration for `api_keys`; secrets hashed at rest.
-- Layered architecture (controller/service/repository), Bean Validation, RFC 7807 error model, JUnit unit tests for domain/services.
-- **Deliverable:** register → login → create/list/rotate/revoke keys via `curl`, end to end.
-- **Delegate:** `backend-dev`.
+### Phase 1 — API contract & functional tests (1–2 weeks)
+**Stack:** REST Assured + JSON-schema validation.
+- **Tracking:** valid Luhn code → timeline; bad check digit / unknown code → 4xx; rate-limit behaviour.
+- **Quote:** valid price + ETA; validation errors.
+- **Auth:** register/login/refresh; negative JWT cases.
+- **Shipments & wallet:** create/list; top-up + label payment; **idempotency**; **authz** negatives.
+- **Deliverable:** a green REST Assured suite covering the public + authenticated API, with schema contracts.
+- **Delegate:** `api-test-engineer`.
 
-### Phase 2 — Automated API testing with REST Assured (1 week)
-**Stack:** REST Assured + Testcontainers (Postgres) + Spring Boot Test.
-- Integration suites per service against the running app with a containerised Postgres.
-- Cases: happy paths; validation `400`; missing/invalid JWT `401`; cross-account access `403`; not-found `404`; security negatives (tampered JWT, oversized/odd input, injection-style payloads rejected; secrets never echoed back).
-- Bind to `mvn verify` via the Failsafe plugin (integration-test phase).
-- **Deliverable:** `./mvnw verify` runs the full REST Assured suite green; a documented case matrix in the README.
-- **Delegate:** `test-engineer`.
+### Phase 2 — BDD layer with Cucumber (1 week)
+**Stack:** Cucumber (Gherkin) + JUnit.
+- Feature files for **Track a parcel**, **Get a quote**, **Sign in**, **Create a shipment**, **Pay a label**; step definitions reusing the API clients; tags (`@smoke`, `@regression`, `@security`).
+- **Deliverable:** readable BDD scenarios run via `mvn verify`; living documentation generated.
+- **Delegate:** `bdd-engineer`.
 
-### Phase 3 — Static analysis & quality gate (1 week)
-**Stack:** SonarQube/SonarCloud + JaCoCo.
-- Aggregate JaCoCo coverage across modules; wire the Sonar scanner.
-- Configure a **Quality Gate**: fail on new bugs, new vulnerabilities, unreviewed security hotspots, coverage-on-new-code below threshold, and duplication.
-- Burn down the initial findings; capture a deliberately-introduced vulnerability being caught and fixed.
-- **Deliverable:** Sonar dashboard green; a PR that *fails* the gate plus the fix that passes it (screenshot for the portfolio).
-- **Delegate:** `devsecops` (Sonar + gate) · `backend-dev` (fix findings).
+### Phase 3 — UI end-to-end with Selenium + POM (1–2 weeks)
+**Stack:** Selenium WebDriver + Page Object Model (headless Chrome).
+- Page objects for landing, tracking, quote, login, dashboard, the **create-shipment wizard** and wallet; E2E flows for the critical journeys; an **es/en** language-switch check; screenshots on failure.
+- **Deliverable:** the E2E suite drives the real web app for the critical journeys.
+- **Delegate:** `ui-test-engineer`.
 
-### Phase 4 — CI/CD pipeline in GitHub Actions (1 week)
-**Stack:** GitHub Actions + GHCR.
-- Full pipeline: checkout → JDK + Maven cache → `verify` (unit + REST Assured) → JaCoCo → SonarCloud scan + **gate** → build multi-stage Docker images → push to GHCR on `main`.
-- Branch protection: PRs require the pipeline + Sonar gate to merge.
-- Status / quality-gate / coverage badges in the README.
-- **Deliverable:** green pipeline on PR; images published to GHCR on merge; live badges.
+### Phase 4 — CI/CD pipeline (1 week)
+**Stack:** GitHub Actions + (optionally) Selenium in Docker.
+- Pipeline: checkout → JDK + Maven cache → API + BDD + UI suites against the **live Railway** Shipping Hub (and/or spin Shipping Hub up locally from `../FullStackHub` in CI); headless browser / Selenium container; **nightly schedule** + on-demand; upload the Allure results.
+- **Deliverable:** a green pipeline that produces a test report; a nightly run against production.
 - **Delegate:** `devsecops`.
 
-### Phase 5 — Supply-chain & container hardening (1 week)
-**Stack:** Docker, Trivy / OWASP Dependency-Check, gitleaks, CycloneDX.
-- Multi-stage, non-root, minimal/distroless images with pinned base digests.
-- CI scanning: Trivy (image + filesystem) and/or OWASP Dependency-Check — fail on HIGH/CRITICAL; gitleaks secret scan; CycloneDX **SBOM** as a build artifact.
-- **Deliverable:** hardened images; CI blocks a known-vulnerable dependency; SBOM attached to releases.
-- **Delegate:** `devsecops`.
+### Phase 5 — Quality gate & reporting (1 week)
+**Stack:** SonarQube/SonarCloud + JaCoCo + Allure.
+- SonarQube static analysis of the **test framework** with a **quality gate**; an Allure report with history & trends (published to GitHub Pages); flaky-test **retries + quarantine**.
+- **Deliverable:** Sonar gate green; a published Allure report with history; status/quality badges.
+- **Delegate:** `devsecops` · `code-reviewer`.
 
 ### Phase 6 — Polish & docs (3–5 days)
-- README: architecture + pipeline diagram (Mermaid), badges, "what each gate enforces", a sample security report; a short threat-model note; tag a release.
-- Final `code-reviewer` pass; wire the portfolio entry to the repo.
-- **Deliverable:** a documented repo + the SecureGate portfolio entry.
-- **Delegate:** `backend-dev` / `devsecops` · `code-reviewer` (final review).
+- README with the **test strategy**, a **coverage matrix** (Shipping Hub feature → tests), the report link and screenshots; a short **test plan** + a sample bug report; tag a release; wire the portfolio entry.
+- **Deliverable:** a documented QA repo + the SecureGate portfolio entry linking to the live report.
+- **Delegate:** `code-reviewer` (final review) · `devsecops`.
 
 ---
 
@@ -165,62 +132,39 @@ Each gate has a clear, demonstrable failure mode: a vulnerable dependency, an un
 Phase 0 → Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6
 ```
 
-Mostly linear: Phase 3's gate needs Phase 2's tests for coverage; Phase 4 wires Phase 3's gate into CI; Phase 5 adds scanning steps to Phase 4's pipeline. The two services in Phase 1 (`auth` and `vault`) can be split across sessions if desired.
+API clients from Phase 1 are reused by the BDD steps (Phase 2); the UI suite (Phase 3) is independent and can run in parallel; Phase 4 orchestrates all three in CI; Phase 5 adds the gate + reporting.
 
 ---
 
 ## 7. Claude Code subagents (task delegation)
 
-Subagents live in `.claude/agents/` (project-level, versioned in git). They are Markdown files with YAML frontmatter; create and manage them with the `/agents` command. Docs: https://code.claude.com/docs/en/sub-agents
+Subagents live in `.claude/agents/` (project-level, versioned). Markdown files with YAML frontmatter; manage them with `/agents`. Docs: https://code.claude.com/docs/en/sub-agents
 
 | Agent | Model | Tools | Role |
 |---|---|---|---|
-| `backend-dev` | sonnet | all | Spring Boot services, JPA/Flyway, JWT, domain logic. |
-| `test-engineer` | sonnet | all | REST Assured + Testcontainers suites; JUnit; coverage. |
-| `devsecops` | sonnet | all | GitHub Actions, SonarQube gate, Docker hardening, Trivy/OWASP, SBOM. |
-| `code-reviewer` | sonnet | Read, Grep, Glob | Diff review: security (OWASP), types, conventions. Read-only. |
-| `test-runner` | haiku | Bash, Read | Runs `./mvnw verify` and reports only the failures (saves context). |
+| `api-test-engineer` | sonnet | all | REST Assured API tests, JSON-schema contracts, security negatives. |
+| `ui-test-engineer` | sonnet | all | Selenium WebDriver + Page Object Model E2E. |
+| `bdd-engineer` | sonnet | all | Cucumber feature files + step definitions. |
+| `devsecops` | sonnet | all | GitHub Actions pipeline, SonarQube gate, Allure reporting, Selenium-in-Docker. |
+| `code-reviewer` | sonnet | Read, Grep, Glob | Reviews test code for flakiness, weak assertions, conventions. Read-only. |
+| `test-runner` | haiku | Bash, Read | Runs `./mvnw verify` and reports only the failures. |
 
-### Example: `.claude/agents/devsecops.md`
-
+### Example: `.claude/agents/api-test-engineer.md`
 ```markdown
 ---
-name: devsecops
-description: Owns the CI/CD pipeline, SonarQube quality gate, Docker hardening and supply-chain scanning. Use for tasks in .github/workflows, Dockerfiles, or the security gates.
+name: api-test-engineer
+description: Writes REST Assured API tests against the Shipping Hub REST API, with JSON-schema contracts and security-negative cases. Use for tasks under src/test/java/.../api.
 model: sonnet
 ---
-
-You are the DevSecOps engineer for SecureGate.
-
-Principles:
-- Shift left: every gate fails the build on a real risk (new vulnerability, unreviewed
-  hotspot, coverage drop, HIGH/CRITICAL dependency or image CVE, leaked secret).
-- Pipelines are reproducible and cached; images are multi-stage, non-root, pinned by digest.
-- A failing gate must produce a clear, actionable report.
-
-Conventions: pin action versions, least-privilege GITHUB_TOKEN, never echo secrets in logs.
-```
-
-### Example: `.claude/agents/code-reviewer.md`
-
-```markdown
----
-name: code-reviewer
-description: Reviews recent changes for security issues, bugs and convention violations. Use proactively after implementing features.
-model: sonnet
-tools: Read, Grep, Glob
----
-
-You are a senior application-security reviewer. Review the latest diff and report
-findings by severity (critical/medium/minor). Check for: secrets in code, missing
-input validation, broken authz (cross-account access), plaintext secrets/passwords,
-SQL/JPA injection and missing tests. You do not modify files: you only report.
+You write API tests for Shipping Hub (the system under test), in Java with REST Assured.
+- Black box: drive the API only (no DB/source access). Use the seeded demo data and create/clean any extra data via the API.
+- Cover, per endpoint: happy path, validation (400), authn (401), authz (403 cross-account), not-found (404), rate limiting, and JSON-schema contract.
+- Deterministic and independent tests; assert status, headers and body; never log secrets or tokens.
 ```
 
 ### Suggested per-phase workflow
-
 1. `claude` at the project root → plan mode → *"Read Phase N of ROADMAP.md and propose a plan."*
-2. Approve and let it delegate: Spring work → `backend-dev`, tests → `test-engineer`, pipeline/security → `devsecops`.
+2. Approve and delegate: API → `api-test-engineer`, BDD → `bdd-engineer`, UI → `ui-test-engineer`, pipeline → `devsecops`.
 3. After each block: *"Use code-reviewer on the changes"* → fix → commit.
 4. `test-runner` for long Maven runs without filling the main context.
 
@@ -228,7 +172,8 @@ SQL/JPA injection and missing tests. You do not modify files: you only report.
 
 ## 8. Portfolio extras (if there's time)
 
-- A deliberately-vulnerable branch + the pipeline blocking it (a great demo GIF).
-- A `SECURITY.md` with the threat model and the gate policy.
-- Renovate/Dependabot for automated dependency PRs that re-run the gates.
-- A small badge wall summarising build, quality gate, coverage and the last scan.
+- Publish the **Allure report** to GitHub Pages + a nightly-run badge.
+- A **bug log** documenting issues found in Shipping Hub (and the fixes that closed them).
+- **Contract testing** (Pact) between the web and the API.
+- A **load test** (k6 or Gatling) of the public tracking endpoint.
+- **Accessibility** checks (axe) on the public pages.

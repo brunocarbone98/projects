@@ -1,51 +1,54 @@
 # SecureGate
 
-**DevSecOps CI/CD security pipeline** gating a small Java (Spring Boot) microservices backend. Every change must pass automated **security & quality gates** before it ships.
+**Automated QA & security test suite for [Shipping Hub](../FullStackHub)** — the full-stack parcel platform (live at <https://shipping-hub.up.railway.app/>). SecureGate tests it the way a QA Automation Engineer would: API, UI and BDD, in CI, behind a quality gate.
 
-> **Status: roadmap stage.** The system is being built phase by phase per [`ROADMAP.md`](./ROADMAP.md); the sections below describe the **target** architecture. Conventions in [`CLAUDE.md`](./CLAUDE.md). Nothing here is implemented yet.
+> **Status: roadmap stage.** Built phase by phase per [`ROADMAP.md`](./ROADMAP.md); the sections below describe the **target** suite. Conventions in [`CLAUDE.md`](./CLAUDE.md). Nothing here is implemented yet.
 
-## What it is
+## What it tests
 
-SecureGate demonstrates *shift-left* DevSecOps. A compact backend — an `auth-service` (accounts + JWT) and a `vault-service` (an API-key vault with role-based access) — sits behind a **GitHub Actions pipeline** whose gates catch vulnerabilities, broken API contracts, coverage regressions, vulnerable dependencies and leaked secrets **in CI, not in production**.
+The **Shipping Hub** platform (Next.js web + Express API + Python services + PostgreSQL) — through its public API and web UI only (**black-box**):
 
-## Architecture (target)
+- **API** (REST Assured): tracking, quote, auth, shipments, wallet — contracts, validation, idempotency, and security negatives (rate limiting, authz, tampered JWT).
+- **UI E2E** (Selenium + Page Object Model): the critical journeys in a real browser.
+- **BDD** (Cucumber): those journeys as readable Gherkin specs.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    PR[Pull request] --> B["mvn verify<br/>build + unit"]
-    B --> IT["REST Assured<br/>+ Testcontainers"]
-    IT --> COV[JaCoCo coverage]
-    COV --> SQ[SonarQube scan]
-    SQ --> GATE{Quality Gate}
-    GATE -- fail --> BLOCK[Block the PR]
-    GATE -- pass --> SCAN["Trivy / OWASP<br/>+ gitleaks + SBOM"]
-    SCAN --> IMG["Docker image → GHCR<br/>(on main)"]
+    subgraph SG["SecureGate test suite"]
+      API["REST Assured<br/>API tests"]
+      BDD["Cucumber<br/>BDD scenarios"]
+      UI["Selenium + POM<br/>UI E2E"]
+    end
+    API --> SUT
+    BDD --> SUT
+    UI --> SUT
+    SUT[("Shipping Hub<br/>web · API · services")]
+    SG --> CI["GitHub Actions"]
+    CI --> GATE{"SonarQube gate"}
+    CI --> REP["Allure report"]
 ```
 
 ## Stack
 
 | Area | Tech |
 |---|---|
-| Services | Java 21, Spring Boot 3, Spring Data JPA, Flyway |
-| Persistence | PostgreSQL (Docker Compose) |
-| Testing | JUnit 5, REST Assured, Testcontainers |
-| Quality/security gate | SonarQube / SonarCloud, JaCoCo |
-| Supply chain | Trivy / OWASP Dependency-Check, gitleaks, CycloneDX SBOM |
-| CI/CD | GitHub Actions → GHCR |
-| Packaging | Docker (multi-stage, non-root) |
-
-## Backend (target)
-
-- **auth-service:** `POST /auth/register`, `POST /auth/login` (returns a JWT), `GET /auth/me`.
-- **vault-service** (JWT-protected): `POST /keys`, `GET /keys`, `POST /keys/{id}/rotate`, `DELETE /keys/{id}`. Owner-scoped RBAC; secrets are hashed and shown only once.
+| API testing | Java 21, REST Assured, JSON-schema validation |
+| UI E2E | Selenium WebDriver, Page Object Model, WebDriverManager |
+| BDD | Cucumber (Gherkin) |
+| Runner / build | JUnit 5, Maven |
+| Quality gate | SonarQube / SonarCloud, JaCoCo |
+| Reporting | Allure |
+| CI/CD | GitHub Actions |
 
 ## Getting started (once Phase 0 lands)
 
 ```bash
-docker compose up -d        # PostgreSQL + both services
-./mvnw verify               # build + unit + REST Assured integration tests
+./mvnw verify -Denv=live    # test the live Shipping Hub
+./mvnw verify -Denv=local   # test a local Shipping Hub (bring ../FullStackHub up first)
 ```
 
 ## Roadmap
 
-Seven phases (0–6), from foundations to a hardened, badge-covered pipeline — see [`ROADMAP.md`](./ROADMAP.md). Progress is tracked there; the pipeline (a GitHub Actions workflow) will live at the repo root `/.github/workflows/securegate-ci.yml`, since GitHub only runs workflows from there.
+Seven phases (0–6), from a smoke test to a full API + BDD + UI suite in CI with a quality gate and a published report — see [`ROADMAP.md`](./ROADMAP.md). The system under test is [`../FullStackHub`](../FullStackHub); the pipeline (a GitHub Actions workflow) will live at the repo root `/.github/workflows/securegate-ci.yml`.
