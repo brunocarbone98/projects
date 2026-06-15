@@ -4,6 +4,9 @@
 # stateless Python microservices, and a managed PostgreSQL database. No Vercel,
 # no Neon. Render reads this file from the REPO ROOT (not inside FullStackHub/).
 #
+# Every resource is pinned to the Virginia (US East) region so they can reach
+# each other over Render's private network.
+#
 # What is wired automatically (no dashboard steps):
 #   - DATABASE_URL .......... from the managed Postgres below (internal URL)
 #   - JWT_ACCESS/REFRESH .... generated secrets
@@ -21,6 +24,7 @@
 databases:
   - name: shipping-hub-db
     plan: free # free Postgres is deleted ~90 days after creation — upgrade for anything permanent
+    region: virginia
     databaseName: shipping_hub
     user: shipping
 
@@ -30,6 +34,7 @@ services:
     name: shipping-hub-api
     runtime: docker
     plan: free
+    region: virginia
     dockerfilePath: FullStackHub/apps/api/Dockerfile
     dockerContext: FullStackHub
     healthCheckPath: /health
@@ -58,6 +63,7 @@ services:
     name: shipping-hub-web
     runtime: docker
     plan: free
+    region: virginia
     dockerfilePath: FullStackHub/apps/web/Dockerfile
     dockerContext: FullStackHub
     # No healthCheckPath: a plain TCP port check avoids locale-redirect edge cases.
@@ -74,6 +80,7 @@ services:
     name: shipping-hub-pricing
     runtime: docker
     plan: free
+    region: virginia
     dockerfilePath: FullStackHub/services/pricing/Dockerfile
     dockerContext: FullStackHub/services/pricing
     healthCheckPath: /health
@@ -83,6 +90,7 @@ services:
     name: shipping-hub-labels
     runtime: docker
     plan: free
+    region: virginia
     dockerfilePath: FullStackHub/services/labels/Dockerfile
     dockerContext: FullStackHub/services/labels
     healthCheckPath: /health
