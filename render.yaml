@@ -1,38 +1,88 @@
-# Render Blueprint — Shipping Hub BACKEND (Option B).
-# Render reads render.yaml from the REPO ROOT, so it lives here (not inside
-# FullStackHub/). This deploys the Express API + the two Python microservices.
-# The web app goes to Vercel and the database to Neon — see DEPLOY.md.
+# Render Blueprint — Shipping Hub, ALL-IN-ONE on Render.
 #
-# After the first deploy, set the env vars marked `sync: false` in the Render
-# dashboard (DATABASE_URL = your Neon string; the two *_SERVICE_URL = each
-# service's URL; CORS_ORIGINS / PUBLIC_WEB_URL = your Vercel URL).
+# Everything runs on Render: the Next.js web app, the Express API, the two
+# stateless Python microservices, and a managed PostgreSQL database. No Vercel,
+# no Neon. Render reads this file from the REPO ROOT (not inside FullStackHub/).
+#
+# What is wired automatically (no dashboard steps):
+#   - DATABASE_URL .......... from the managed Postgres below (internal URL)
+#   - JWT_ACCESS/REFRESH .... generated secrets
+#   - PRICING/LABELS URLs ... API -> Python services over Render's private network
+#   - API_INTERNAL_URL ...... web -> API over Render's private network
+#
+# What you set once, after the first deploy (the public URLs aren't known until
+# the services exist) — see DEPLOY.md:
+#   - shipping-hub-api:  CORS_ORIGINS, PUBLIC_WEB_URL  -> the web service URL
+#   - shipping-hub-web:  NEXT_PUBLIC_API_URL -> the API URL,
+#                        NEXT_PUBLIC_SITE_URL -> the web service's own URL
+# These only affect CORS, the footer "API docs" link and SEO canonicals; the
+# app is fully functional over the private network without them.
+
+databases:
+  - name: shipping-hub-db
+    plan: free # free Postgres is deleted ~90 days after creation — upgrade for anything permanent
+    databaseName: shipping_hub
+    user: shipping
 
 services:
+  # ---- Express API — the ONLY service that talks to PostgreSQL ----
   - type: web
     name: shipping-hub-api
     runtime: docker
+    plan: free
     dockerfilePath: FullStackHub/apps/api/Dockerfile
     dockerContext: FullStackHub
     healthCheckPath: /health
     envVars:
-      - { key: DATABASE_URL, sync: false } # your Neon connection string
-      - { key: JWT_ACCESS_SECRET, generateValue: true }
-      - { key: JWT_REFRESH_SECRET, generateValue: true }
-      - { key: PRICING_SERVICE_URL, sync: false } # https://shipping-hub-pricing.onrender.com
-      - { key: LABELS_SERVICE_URL, sync: false } # https://shipping-hub-labels.onrender.com
-      - { key: CORS_ORIGINS, sync: false } # your Vercel URL, e.g. https://shipping-hub.vercel.app
-      - { key: PUBLIC_WEB_URL, sync: false } # your Vercel URL
+      - key: PORT
+        value: 4000 # pinned so the internal URL below (shipping-hub-api:4000) is stable
+      - key: DATABASE_URL
+        fromDatabase:
+          name: shipping-hub-db
+          property: connectionString # internal connection string (no public egress)
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: PRICING_SERVICE_URL
+        value: http://shipping-hub-pricing:8001 # private network: <service-name>:<port>
+      - key: LABELS_SERVICE_URL
+        value: http://shipping-hub-labels:8002
+      - key: CORS_ORIGINS
+        sync: false # set to the web service URL after the first deploy
+      - key: PUBLIC_WEB_URL
+        sync: false # set to the web service URL after the first deploy
 
+  # ---- Next.js public site + dashboards (SSR) ----
+  - type: web
+    name: shipping-hub-web
+    runtime: docker
+    plan: free
+    dockerfilePath: FullStackHub/apps/web/Dockerfile
+    dockerContext: FullStackHub
+    # No healthCheckPath: a plain TCP port check avoids locale-redirect edge cases.
+    envVars:
+      - key: API_INTERNAL_URL
+        value: http://shipping-hub-api:4000 # server-side fetches over the private network
+      - key: NEXT_PUBLIC_API_URL
+        sync: false # API public URL — baked at build, used only for the footer docs link
+      - key: NEXT_PUBLIC_SITE_URL
+        sync: false # this service's own public URL — baked at build, used for canonical/OG
+
+  # ---- Stateless pricing microservice (FastAPI) ----
   - type: web
     name: shipping-hub-pricing
     runtime: docker
+    plan: free
     dockerfilePath: FullStackHub/services/pricing/Dockerfile
     dockerContext: FullStackHub/services/pricing
     healthCheckPath: /health
 
+  # ---- Stateless label microservice (FastAPI) ----
   - type: web
     name: shipping-hub-labels
     runtime: docker
+    plan: free
     dockerfilePath: FullStackHub/services/labels/Dockerfile
     dockerContext: FullStackHub/services/labels
     healthCheckPath: /health
