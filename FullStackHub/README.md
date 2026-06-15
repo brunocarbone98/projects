@@ -8,6 +8,9 @@ operations staff advance shipment states that feed the public timeline.
 > Phased plan in [`ROADMAP.md`](./ROADMAP.md) · conventions in [`CLAUDE.md`](./CLAUDE.md).
 > **Phases 0–6 are implemented.**
 
+**▶ Live app:** <https://shipping-hub.up.railway.app/> · **▶ Browser-only demo:**
+<https://brunocarbone98.github.io/projects/ShippingHubDemo/> ([`../ShippingHubDemo`](../ShippingHubDemo))
+
 ## Architecture
 
 ```mermaid
@@ -130,8 +133,9 @@ API reference: <http://localhost:4000/api/v1/docs>.
 
 ## Deploy
 
-Runs as a **single container on Railway** via the root [`../Dockerfile`](../Dockerfile): the web, API and
-both Python services run together, with the Next.js web as the only public process and PostgreSQL on
-Railway's managed database. Step-by-step walkthrough in [`../DEPLOY.md`](../DEPLOY.md). Local dev is
+Deployed **live at <https://shipping-hub.up.railway.app/>**. Runs as a **single container on Railway**
+via the root [`../Dockerfile`](../Dockerfile): the web, API and both Python services run together, with
+the Next.js web as the only public process and PostgreSQL on Railway's managed database. Step-by-step
+walkthrough in [`../DEPLOY.md`](../DEPLOY.md). Local dev is
 unchanged — `docker compose` (Postgres + the Python services' `services/*/Dockerfile`) plus `pnpm dev`.
 Notification env vars (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see `apps/api/.env.example`.
