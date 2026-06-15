@@ -1,0 +1,32 @@
+/* A few base rules on top of Tailwind (loaded via the Play CDN in index.html). */
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Keep the Leaflet map below the sticky header and rounded inside its card. */
+.leaflet-container {
+  z-index: 0;
+  height: 100%;
+  width: 100%;
+  border-radius: 1rem;
+  background: #e2e8f0;
+}
+
+/* Hide the default disclosure triangle on FAQ <details>. */
+summary {
+  list-style: none;
+}
+summary::-webkit-details-marker {
+  display: none;
+}
+
+[data-action],
+button {
+  cursor: pointer;
+}
