@@ -1,7 +1,5 @@
 import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/navigation";
-import { cn } from "@/lib/cn";
-import { primaryButton } from "@/lib/ui";
 import { Container } from "./Container";
 import { LocaleSwitcher } from "./LocaleSwitcher";
 import { Logo } from "./Logo";
@@ -17,28 +15,31 @@ export function Header() {
   ] as const;
 
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/80 backdrop-blur">
-      <Container className="flex h-16 items-center justify-between gap-4">
-        <Link href="/" className="flex items-center gap-2 font-semibold text-slate-900">
+    <header className="sticky top-0 z-50 border-b border-slate-200/70 bg-white/85 backdrop-blur">
+      <Container className="flex items-center justify-between gap-4 py-3">
+        <Link href="/" className="flex items-center gap-2 font-bold text-slate-900">
           <Logo />
           <span>Shipping Hub</span>
         </Link>
 
-        <nav className="hidden items-center gap-1 md:flex">
+        <nav className="hidden items-center gap-6 md:flex">
           {links.map((link) => (
             <Link
               key={link.href}
               href={link.href}
-              className="rounded-lg px-3 py-2 text-sm text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+              className="text-sm text-slate-600 transition hover:text-brand-700"
             >
               {link.label}
             </Link>
           ))}
         </nav>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <LocaleSwitcher />
-          <Link href="/login" className={cn(primaryButton, "px-3.5 py-2")}>
+          <Link
+            href="/login"
+            className="rounded-lg bg-brand-600 px-3.5 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700"
+          >
             {t("signIn")}
           </Link>
         </div>

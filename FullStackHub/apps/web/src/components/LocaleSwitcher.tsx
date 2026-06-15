@@ -29,7 +29,7 @@ export function LocaleSwitcher() {
       onClick={() => switchTo(other)}
       aria-label={t("label")}
       className={cn(
-        "rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold uppercase text-slate-600 transition hover:bg-slate-100",
+        "rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold uppercase text-slate-600 transition hover:bg-slate-50",
         isPending && "opacity-60",
       )}
     >
