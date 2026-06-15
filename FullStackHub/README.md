@@ -84,7 +84,7 @@ stateless — they receive data, compute/generate, and return a result.
   append-only entries), `idempotency_key` on every money movement (double-click safe), and automatic
   reversal on label-generation failure.
 - **6 — Polish**: Leaflet route map on the tracking page, email (Resend) + outbound webhook
-  notifications on status changes, container/Render deploy configs.
+  notifications on status changes, container/Railway deploy configs.
 
 `PTY-YYYY-NNNNNN-C` tracking numbers carry a Luhn check digit.
 
@@ -130,10 +130,8 @@ API reference: <http://localhost:4000/api/v1/docs>.
 
 ## Deploy
 
-**All-in-one on Render** (recommended): the root [`../render.yaml`](../render.yaml) blueprint stands
-up the web app, API, both Python services and a managed PostgreSQL database, wiring the database URL,
-JWT secrets and all internal service-to-service URLs automatically. A split option (**Vercel** web ·
-**Render** API + Python · **Neon** PostgreSQL) is also supported. Step-by-step walkthrough for both in
+Runs all-in-one on **Railway** — one project with the web app, API, both Python services and a managed
+PostgreSQL, talking over Railway's private network. Step-by-step walkthrough in
 [`../DEPLOY.md`](../DEPLOY.md). Container images are in `apps/api/Dockerfile`, `apps/web/Dockerfile`
-and `services/*/Dockerfile`. Notification env vars (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional —
-see `apps/api/.env.example`.
+and `services/*/Dockerfile` (the same ones used for local `docker compose`). Notification env vars
+(`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see `apps/api/.env.example`.

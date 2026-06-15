@@ -13,7 +13,7 @@ entirely in the browser, so it can be hosted as plain static files on **GitHub P
 > | What | The real distributed system | A browser-only simulation of it |
 > | Stack | Next.js · Express · PostgreSQL · FastAPI | Vanilla ES modules + localStorage |
 > | Data | PostgreSQL (shared, server-side) | `localStorage` (per browser, on your device) |
-> | Hosting | Render / Vercel (needs a runtime) | GitHub Pages (static files) |
+> | Hosting | Railway (needs a runtime) | GitHub Pages (static files) |
 > | Use it for | Showing the architecture | Letting anyone try the UX instantly |
 
 ## What you can do

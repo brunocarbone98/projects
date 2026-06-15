@@ -4,7 +4,7 @@ Personal monorepo with three folders:
 
 - **[`FullStackHub/`](./FullStackHub)** — **Shipping Hub**: a full-stack international parcel
   shipping & tracking platform (Next.js · Express · PostgreSQL · FastAPI). The real
-  distributed system; deploys to Render/Vercel. Docs in
+  distributed system; deploys to Railway. Docs in
   [`FullStackHub/README.md`](./FullStackHub/README.md) and [`DEPLOY.md`](./DEPLOY.md).
 - **[`ShippingHubDemo/`](./ShippingHubDemo)** — the **same Shipping Hub as a static,
   browser-only demo** you can open in one click. All logic runs client-side and data lives
@@ -17,7 +17,7 @@ Personal monorepo with three folders:
 |---|---|---|
 | What it is | The real distributed system | A browser-only simulation of it |
 | Stack | Next.js · Express · PostgreSQL · FastAPI | Vanilla ES modules + `localStorage` |
-| Hosting | Render / Vercel (needs a runtime) | **GitHub Pages** (static files) |
+| Hosting | **Railway** (needs a runtime) | **GitHub Pages** (static files) |
 | Best for | Showing the architecture | Letting anyone try the UX instantly |
 
 The demo reuses the full-stack app's **domain logic** (Luhn tracking codes, the shipment

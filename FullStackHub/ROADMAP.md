@@ -20,7 +20,7 @@ International courier and parcel platform (example: Panama ↔ USA ↔ LatAm) wi
 |---|---|---|
 | **Next.js + React + TypeScript + Tailwind** | `apps/web` | Public SEO site (tracking, quoter, coverage, FAQ) + customer and admin dashboards. SSR/SSG, i18n, dynamic metadata, sitemap. |
 | **Node.js (Express) + TypeScript** | `apps/api` | Transactional REST API: authentication, users, shipments, tracking events, wallet/ledger, invoices. The only layer that writes to the database. |
-| **PostgreSQL** | Local Docker → Neon/Supabase in prod | Single source of truth: users, shipments, events, rates, accounting ledger. |
+| **PostgreSQL** | Local Docker → Railway-managed Postgres in prod | Single source of truth: users, shipments, events, rates, accounting ledger. |
 | **Python (FastAPI)** | `services/pricing` and `services/labels` | Stateless microservices: (1) rate quoting + ETA calculation; (2) PDF label generation with barcode and QR. The Node API consumes them over internal HTTP. |
 | **Shared types** | `packages/shared` | Zod schemas + TypeScript types shared between `web` and `api` (API contracts, status enums). |
 
@@ -140,7 +140,7 @@ Rules: valid transitions are defined in a map in `packages/shared`; each transit
 - Email notifications on status changes (Resend) + outbound webhooks for e-commerce.
 - Route map on the tracking page (Leaflet + OpenStreetMap).
 - E2E with Playwright (track, create shipment, pay); README with screenshots and an architecture diagram.
-- Deploy: **Vercel** (web) · **Railway or Render** (api + Python services) · **Neon** (PostgreSQL).
+- Deploy: all-in-one on **Railway** (web · api · Python services · managed PostgreSQL).
 **Deliverable:** a public URL in your portfolio + a documented repo.
 
 ---
