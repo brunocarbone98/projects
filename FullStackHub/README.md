@@ -130,8 +130,8 @@ API reference: <http://localhost:4000/api/v1/docs>.
 
 ## Deploy
 
-Runs all-in-one on **Railway** — one project with the web app, API, both Python services and a managed
-PostgreSQL, talking over Railway's private network. Step-by-step walkthrough in
-[`../DEPLOY.md`](../DEPLOY.md). Container images are in `apps/api/Dockerfile`, `apps/web/Dockerfile`
-and `services/*/Dockerfile` (the same ones used for local `docker compose`). Notification env vars
-(`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see `apps/api/.env.example`.
+Runs as a **single container on Railway** via the root [`../Dockerfile`](../Dockerfile): the web, API and
+both Python services run together, with the Next.js web as the only public process and PostgreSQL on
+Railway's managed database. Step-by-step walkthrough in [`../DEPLOY.md`](../DEPLOY.md). Local dev is
+unchanged — `docker compose` (Postgres + the Python services' `services/*/Dockerfile`) plus `pnpm dev`.
+Notification env vars (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see `apps/api/.env.example`.
