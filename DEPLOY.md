@@ -31,12 +31,22 @@ Internet ─▶ web :$PORT (public)
 2. **New → Database → Add PostgreSQL.**
 
 ## 2. Environment variables
-On the service → **Variables**, add just three:
+On the **app** service (not the database) → **Variables**, add just three:
 ```
 DATABASE_URL       = ${{Postgres.DATABASE_URL}}
 JWT_ACCESS_SECRET  = <a long random string>
 JWT_REFRESH_SECRET = <a different long random string>
 ```
+
+> **Get `DATABASE_URL` right — this is the #1 deploy gotcha.** `${{Postgres.…}}`
+> only resolves if `Postgres` is the **exact** name of your database service; if
+> yours is called `PostgreSQL` (or anything else) a hand-typed reference resolves
+> to an **empty string** and the API crash-loops. So don't type it by hand:
+> click **New Variable**, name it `DATABASE_URL`, and in the value field type
+> `${{` — Railway pops a **dropdown**; pick your Postgres service → `DATABASE_URL`.
+> After saving, the variable should show a resolved `postgresql://…` value, not
+> the literal `${{…}}` text. (If it's empty, the boot log now says exactly this.)
+
 That's all — the internal URLs (web→api, api→pricing/labels) are hard-wired to
 `localhost` inside the image. (Optional: `PUBLIC_WEB_URL` / `CORS_ORIGINS` = your
 public domain, used for tracking links / CORS.) Generate the secrets with e.g.
