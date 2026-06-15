@@ -28,6 +28,7 @@ export async function generateMetadata({
     title: { default: t("title"), template: `%s · ${t("siteName")}` },
     description: t("description"),
     applicationName: t("siteName"),
+    icons: { icon: "/icon.svg", shortcut: "/icon.svg", apple: "/icon.svg" },
     alternates: {
       canonical: `/${locale}`,
       languages: {
