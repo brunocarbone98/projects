@@ -19,6 +19,9 @@ next-env.d.ts
 
 # Tests
 coverage/
+# ...but never the Next.js public "/coverage" route page (a real source dir).
+!apps/web/app/**/coverage/
+!apps/web/app/**/coverage/**
 
 # Python (services/)
 __pycache__/
