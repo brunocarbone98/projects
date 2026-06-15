@@ -112,7 +112,7 @@
     <div class="wrap nav-inner">
         <div class="logo">bruno_carbone<span class="dot">.</span>dev</div>
         <div class="nav-links">
-            <a onclick="document.getElementById('cybershield').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">CyberShield</a>
+            <a onclick="document.getElementById('securegate').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">SecureGate</a>
             <a onclick="document.getElementById('fullstack-hub').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">Full-Stack Hub</a>
             <a onclick="document.getElementById('portfolio-web').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">Web Portfolio</a>
             <a href="MainPage.html">← Home</a>
@@ -125,39 +125,41 @@
         <div class="eyebrow">business card</div>
         <h1>What I've <span class="grad">built</span></h1>
         <p class="lead">A detailed look at the projects that make up my portfolio: what they are, the purpose behind each one, and the stack that makes them work.</p>
-        <a onclick="document.getElementById('cybershield').scrollIntoView({behavior:'smooth'})" class="btn" style="cursor:pointer">View projects ↓</a>
+        <a onclick="document.getElementById('securegate').scrollIntoView({behavior:'smooth'})" class="btn" style="cursor:pointer">View projects ↓</a>
     </div>
 </header>
 
 <!-- PROJECT 01 -->
-<section class="project" id="cybershield">
+<section class="project" id="securegate">
     <div class="wrap">
         <div class="pnum">01</div>
-        <div class="ptag">DEVSECOPS · SECURITY MONITORING</div>
-        <h2>CyberShield</h2>
-        <p class="psummary">A microservices backend with security built into every stage of the development cycle, from the code to the production infrastructure.</p>
+        <div class="ptag">DEVSECOPS · SECURE CI/CD PIPELINE</div>
+        <h2>SecureGate</h2>
+        <p class="psummary">A Java microservices backend wrapped in a CI/CD pipeline that blocks insecure or low-quality code before it ever ships.</p>
+        <div style="margin-bottom:40px;display:flex;flex-wrap:wrap;gap:14px">
+            <a href="https://github.com/brunocarbone98/projects/tree/main/SecureGate" target="_blank" rel="noopener" class="btn">See repository ↗</a>
+        </div>
 
         <div class="pgrid">
             <div>
                 <div class="block">
                     <div class="block-label">What it is</div>
-                    <p>An automated microservices backend built on a CI/CD pipeline that runs static code analysis and API tests on every change. The infrastructure is containerized and scalable, with real-time intrusion detection through alerts and centralized logging of all system activity.</p>
+                    <p>A compact Java (Spring Boot) microservices backend — an auth service and an API-key vault with role-based access — wrapped in a DevSecOps pipeline. Every pull request must pass automated gates in GitHub Actions: REST Assured API tests, a SonarQube quality gate for code quality and security vulnerabilities, dependency and container scanning, and coverage thresholds. Code that fails a gate is blocked from merging; clean code ships as a hardened Docker image.</p>
                 </div>
                 <div class="block">
                     <div class="block-label">Purpose</div>
-                    <p>To demonstrate DevSecOps practices: integrating security and code quality into the development flow itself, rather than treating them as a final step. The system automatically validates every change before deploying it and monitors the production infrastructure, reflecting the ability to build software that is secure, observable, and ready to scale.</p>
+                    <p>To demonstrate shift-left DevSecOps: building security and quality into the development flow itself rather than bolting them on at the end. The pipeline catches vulnerabilities, broken API contracts and coverage regressions in CI — not in production — reflecting the ability to ship software that is secure, tested, and verifiable by default.</p>
                 </div>
             </div>
 
             <div class="spec">
                 <div class="spec-head">Stack used</div>
-                <div class="spec-row"><div class="tech">Java · Spring Boot</div><div class="role">Microservices backend</div></div>
-                <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI/CD pipeline orchestrating build, analysis, and tests</div></div>
-                <div class="spec-row"><div class="tech">SonarQube</div><div class="role">Static code analysis: quality and vulnerabilities</div></div>
-                <div class="spec-row"><div class="tech">REST Assured</div><div class="role">Automated API testing</div></div>
-                <div class="spec-row"><div class="tech">Docker</div><div class="role">Containerization of the services</div></div>
-                <div class="spec-row"><div class="tech">AWS</div><div class="role">Scalable infrastructure</div></div>
-                <div class="spec-row"><div class="tech">Splunk</div><div class="role">Centralized logging and real-time intrusion detection</div></div>
+                <div class="spec-row"><div class="tech">Java · Spring Boot</div><div class="role">Microservices backend (auth + API-key vault)</div></div>
+                <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI/CD pipeline orchestrating build, tests, scans, and gates</div></div>
+                <div class="spec-row"><div class="tech">SonarQube</div><div class="role">Static-analysis quality gate: bugs &amp; vulnerabilities</div></div>
+                <div class="spec-row"><div class="tech">REST Assured</div><div class="role">Automated API testing, incl. authz &amp; security negatives</div></div>
+                <div class="spec-row"><div class="tech">Docker</div><div class="role">Multi-stage, non-root container images</div></div>
+                <div class="spec-row"><div class="tech">Trivy</div><div class="role">Dependency &amp; image vulnerability scanning</div></div>
             </div>
         </div>
     </div>

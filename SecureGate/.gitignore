@@ -1,0 +1,23 @@
+# Maven build output
+target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# Runtime / local config
+*.log
+application-local.properties
+application-local.yml
+
+# OS noise
+.DS_Store
+
+# Generated security artifacts (SBOM, scan reports)
+**/dependency-check-report.*
+**/trivy-results.*
+**/*.cdx.json
