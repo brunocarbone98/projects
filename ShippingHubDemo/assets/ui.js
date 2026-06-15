@@ -120,37 +120,30 @@ export function toast(message) {
 /* ---------------------------------------------------- header / footer ----- */
 
 function navLink(href, label, active) {
-  const cls = active
-    ? "text-brand-700 font-semibold"
-    : "text-slate-600 hover:text-brand-700";
+  const cls = active ? "text-brand-700 font-semibold" : "text-slate-600 hover:text-slate-900";
   return `<a href="${href}" class="text-sm ${cls}">${escapeHtml(label)}</a>`;
 }
 
-export function renderHeader({ t, locale, user, route }) {
-  const otherLocale = locale === "es" ? "en" : "es";
-  const publicNav = [
-    navLink("#/", t("Nav.home"), route === "home"),
-    navLink("#/track", t("Nav.track"), route === "track"),
-    navLink("#/quote", t("Nav.quote"), route === "quote"),
-    navLink("#/coverage", t("Nav.coverage"), route === "coverage"),
-    navLink("#/faq", t("Nav.faq"), route === "faq"),
-  ].join("");
+export function renderHeader({ t, locale, route }) {
+  const localeBtn = (code) =>
+    `<button data-action="locale" data-locale="${code}" class="rounded-md px-2 py-1 ${locale === code ? "bg-brand-600 text-white" : "text-slate-500 hover:text-slate-700"}">${code.toUpperCase()}</button>`;
 
-  const account = user
-    ? `<a href="#/app" class="text-sm font-semibold text-brand-700 hover:text-brand-800">${escapeHtml(t("Dashboard.nav.overview"))}</a>
-       <button data-action="logout" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">${escapeHtml(t("Dashboard.signOut"))}</button>`
-    : `<a href="#/login" class="rounded-lg bg-brand-600 px-3.5 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-brand-700">${escapeHtml(t("Nav.signIn"))}</a>`;
-
-  return `<header class="sticky top-0 z-50 border-b border-slate-200/70 bg-white/85 backdrop-blur">
+  return `<header class="sticky top-0 z-50 border-b border-slate-200 bg-white/90 backdrop-blur">
     <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
       <a href="#/" class="flex items-center gap-2 font-bold text-slate-900">
         <span class="grid h-8 w-8 place-items-center rounded-lg bg-brand-600 text-white">📦</span>
         <span>Shipping Hub</span>
       </a>
-      <nav class="hidden items-center gap-6 md:flex">${publicNav}</nav>
+      <nav class="hidden items-center gap-6 md:flex">
+        ${navLink("#/track", t("Nav.track"), route === "track")}
+        ${navLink("#/quote", t("Nav.quote"), route === "quote")}
+        ${navLink("#/coverage", t("Nav.coverage"), route === "coverage")}
+        ${navLink("#/faq", t("Nav.faq"), route === "faq")}
+      </nav>
       <div class="flex items-center gap-3">
-        <button data-action="locale" data-locale="${otherLocale}" class="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50" title="${escapeHtml(t("Locale.label"))}">${otherLocale.toUpperCase()}</button>
-        ${account}
+        <div class="flex items-center rounded-lg border border-slate-200 p-0.5 text-xs font-semibold">${localeBtn("es")}${localeBtn("en")}</div>
+        <a href="#/login" class="hidden text-sm font-medium text-slate-600 hover:text-slate-900 sm:block">${escapeHtml(t("Nav.signIn"))}</a>
+        <a href="#/track" class="rounded-lg border border-brand-200 px-3.5 py-1.5 text-sm font-semibold text-brand-700 hover:bg-brand-50">${escapeHtml(t("Nav.trackCta"))}</a>
       </div>
     </div>
   </header>`;
