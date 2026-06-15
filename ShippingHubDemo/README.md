@@ -38,6 +38,8 @@ Everything is interactive and persists in your browser:
 | `admin@shippinghub.test` | Admin |
 | `courier@shippinghub.test` | Courier |
 
+…plus 20 more seeded customer profiles, each with their own shipments and wallet activity (so the staff "all shipments" view and the data feel realistic).
+
 ## How it works
 
 The "backend" is reimplemented in the browser, reusing the **exact domain logic** of the
