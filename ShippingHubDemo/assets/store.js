@@ -7,7 +7,7 @@
 import { buildTrackingCode, canTransition, computeQuote } from "./domain.js";
 import { buildSeed, ORIGIN } from "./seed.js";
 
-const DB_KEY = "shippinghub.demo.v1";
+const DB_KEY = "shippinghub.demo.v2";
 const SESSION_KEY = "shippinghub.demo.session";
 const LOCALE_KEY = "shippinghub.demo.locale";
 

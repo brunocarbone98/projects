@@ -96,7 +96,7 @@ pnpm install
 # 1. PostgreSQL (user/pass/db: shipping / shipping / shipping_hub)
 docker compose up -d
 
-# 2. Migrate + seed demo data (10 shipments across every state)
+# 2. Migrate + seed demo data (22 customers, 60 shipments across every state, with wallet activity)
 pnpm --filter @shipping-hub/api db:deploy
 pnpm --filter @shipping-hub/api db:seed
 
@@ -109,7 +109,8 @@ cd services/labels  && python3 -m venv .venv && . .venv/bin/activate && pip inst
 ```
 
 Demo accounts (password `Password123!`): `admin@shippinghub.test`,
-`courier@shippinghub.test`, `ana@example.com`, `luis@example.com`.
+`courier@shippinghub.test`, `ana@example.com`, `luis@example.com` (plus 20 more
+customer profiles, e.g. `maria.gonzalez@example.com`).
 
 ```bash
 curl http://localhost:4000/api/v1/tracking/PTY-2026-001001-0   # public, no auth
