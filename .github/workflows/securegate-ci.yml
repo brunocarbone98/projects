@@ -1,0 +1,97 @@
+name: SecureGate CI
+
+# SecureGate is a black-box QA suite: it needs a running Shipping Hub. This pipeline
+# stands the API up against a throwaway PostgreSQL, seeds it, then runs the suite.
+on:
+  pull_request:
+    paths:
+      - "SecureGate/**"
+      - "FullStackHub/**"
+      - ".github/workflows/securegate-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "SecureGate/**"
+      - ".github/workflows/securegate-ci.yml"
+
+jobs:
+  qa-suite:
+    name: API + BDD suite vs. local Shipping Hub
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: shipping
+          POSTGRES_PASSWORD: shipping
+          POSTGRES_DB: shipping_hub
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shipping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://shipping:shipping@localhost:5432/shipping_hub?schema=public
+      JWT_ACCESS_SECRET: ci-access-secret-change-me
+      JWT_REFRESH_SECRET: ci-refresh-secret-change-me
+      PORT: "4000"
+      CORS_ORIGINS: http://localhost:3000
+      PUBLIC_WEB_URL: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: FullStackHub/pnpm-lock.yaml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Install Shipping Hub dependencies
+        working-directory: FullStackHub
+        run: pnpm install --frozen-lockfile
+
+      - name: Migrate + seed the database
+        working-directory: FullStackHub
+        run: |
+          pnpm --filter @shipping-hub/api db:deploy
+          pnpm --filter @shipping-hub/api db:seed
+
+      - name: Start the Shipping Hub API
+        working-directory: FullStackHub
+        run: |
+          nohup pnpm --filter @shipping-hub/api start > /tmp/api.log 2>&1 &
+          curl -sS --retry 60 --retry-delay 1 --retry-connrefused -m 60 http://localhost:4000/health
+          echo "API is up."
+
+      - name: Run the SecureGate QA suite
+        working-directory: SecureGate
+        run: ./mvnw -B verify
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: securegate-reports
+          path: |
+            SecureGate/target/cucumber/
+            SecureGate/target/failsafe-reports/
+          if-no-files-found: ignore
+
+      - name: API log (on failure)
+        if: failure()
+        run: tail -n 100 /tmp/api.log || true

@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "type": "object",
+  "required": ["balanceCents", "currency", "entries"],
+  "properties": {
+    "balanceCents": { "type": "integer" },
+    "currency": { "type": "string" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "amountCents", "kind", "createdAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "amountCents": { "type": "integer" },
+          "kind": { "type": "string", "enum": ["TOPUP", "PAYMENT", "REVERSAL"] },
+          "description": { "type": ["string", "null"] },
+          "createdAt": { "type": "string" }
+        }
+      }
+    }
+  }
+}

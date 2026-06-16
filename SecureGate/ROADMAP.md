@@ -4,6 +4,8 @@
 > **System under test:** [`../FullStackHub`](../FullStackHub) — Shipping Hub, live at <https://shipping-hub.up.railway.app/>.
 > **Stack:** Java 21, Maven, REST Assured, Selenium WebDriver, Cucumber (BDD), JUnit 5, Allure, SonarQube, GitHub Actions, Docker.
 > **How to use this file:** keep it at the project root. When starting each phase with Claude Code, open plan mode and ask it to read the corresponding section.
+>
+> **Progress:** Phases 0–2 are **implemented** — the Maven project, the REST Assured API suite and the Cucumber BDD layer run green against a local Shipping Hub (`./mvnw verify`, 37 tests), with a GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) that stands the API up and runs them. Phases 3–6 are pending.
 
 ---
 
@@ -79,14 +81,14 @@ SecureGate/
 
 > Each phase ends with something demonstrable and a commit/tag.
 
-### Phase 0 — Foundations (2–4 days)
+### Phase 0 — Foundations (2–4 days) — ✅ implemented
 **Stack:** Maven, JUnit 5, REST Assured, Selenium (WebDriverManager).
 - Maven project; a config layer with environment profiles (`local`/`live`) and base URLs for the Shipping Hub API + web; base test classes; REST Assured + WebDriver factories.
 - `CLAUDE.md`; `.claude/agents/`; CI skeleton (`securegate-ci.yml`) running a **smoke test** against `GET /api/v1/tracking/PTY-2026-001001-0` on the live env.
 - **Deliverable:** `./mvnw verify` runs the smoke test against the configured Shipping Hub; CI green.
 - **Delegate:** `api-test-engineer` (config + smoke) · `devsecops` (CI skeleton).
 
-### Phase 1 — API contract & functional tests (1–2 weeks)
+### Phase 1 — API contract & functional tests (1–2 weeks) — ✅ implemented
 **Stack:** REST Assured + JSON-schema validation.
 - **Tracking:** valid Luhn code → timeline; bad check digit / unknown code → 4xx; rate-limit behaviour.
 - **Quote:** valid price + ETA; validation errors.
@@ -95,7 +97,7 @@ SecureGate/
 - **Deliverable:** a green REST Assured suite covering the public + authenticated API, with schema contracts.
 - **Delegate:** `api-test-engineer`.
 
-### Phase 2 — BDD layer with Cucumber (1 week)
+### Phase 2 — BDD layer with Cucumber (1 week) — ✅ implemented
 **Stack:** Cucumber (Gherkin) + JUnit.
 - Feature files for **Track a parcel**, **Get a quote**, **Sign in**, **Create a shipment**, **Pay a label**; step definitions reusing the API clients; tags (`@smoke`, `@regression`, `@security`).
 - **Deliverable:** readable BDD scenarios run via `mvn verify`; living documentation generated.

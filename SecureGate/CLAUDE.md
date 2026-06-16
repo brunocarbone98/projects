@@ -2,7 +2,7 @@
 
 Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../FullStackHub), live at <https://shipping-hub.up.railway.app/>). The full phased plan lives in `ROADMAP.md`: when starting a phase, read its corresponding section.
 
-**Current phase:** Roadmap stage — **not yet built**. Phase 0 (foundations) is next. The suite tests Shipping Hub through its public API (REST Assured) and web UI (Selenium + Page Object Model), with Cucumber BDD scenarios and security negatives, run in GitHub Actions behind a SonarQube quality gate with Allure reporting.
+**Current phase:** Phases 0–2 implemented. The Maven project, the config/support layer, the **REST Assured API suite** (tracking, quote, auth, shipments, wallet — JSON-schema contracts + authn/authz/validation negatives) and the **Cucumber BDD** layer run green against a local Shipping Hub (`./mvnw verify` — 37 tests), with a GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) that stands the API up and runs them. Phases 3–6 (Selenium UI E2E, the SonarQube quality gate, Allure reporting, polish) are pending.
 
 ## Structure
 
@@ -18,10 +18,10 @@ Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../
 
 | Command | What it does |
 |---|---|
-| `./mvnw verify` | Run the full suite (API + BDD + UI) against the configured environment |
-| `./mvnw verify -Denv=live` | Target <https://shipping-hub.up.railway.app/> |
-| `./mvnw verify -Denv=local` | Target a local Shipping Hub (web `:3000` / api `:4000`) |
-| `./mvnw verify -Pui` | UI E2E only |
+| `./mvnw verify` | Run the API + BDD suite against the configured Shipping Hub (default `env=local`, api `:4000`) |
+| `./mvnw verify -DapiBaseUrl=http://host:4000` | Point at a specific API instance |
+| `./mvnw verify -Dcucumber.filter.tags="@public"` | Run only the public (read-only) BDD scenarios |
+| `./mvnw verify -Dit.test=RateLimitIT -DexcludedGroups=` | Run the opt-in rate-limit check |
 
 ## Conventions
 

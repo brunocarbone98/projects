@@ -2,7 +2,11 @@
 
 **Automated QA & security test suite for [Shipping Hub](../FullStackHub)** — the full-stack parcel platform (live at <https://shipping-hub.up.railway.app/>). SecureGate tests it the way a QA Automation Engineer would: API, UI and BDD, in CI, behind a quality gate.
 
-> **Status: roadmap stage.** Built phase by phase per [`ROADMAP.md`](./ROADMAP.md); the sections below describe the **target** suite. Conventions in [`CLAUDE.md`](./CLAUDE.md). Nothing here is implemented yet.
+> **Status: Phases 0–2 implemented.** The REST Assured API suite and the Cucumber BDD layer
+> (37 tests) run green against a local Shipping Hub via `./mvnw verify`, with a GitHub Actions
+> pipeline that stands the API up and runs them. Phases 3–6 (Selenium UI E2E, SonarQube quality
+> gate, Allure reporting) are on the roadmap — see [`ROADMAP.md`](./ROADMAP.md). Conventions in
+> [`CLAUDE.md`](./CLAUDE.md).
 
 ## What it tests
 
@@ -42,12 +46,23 @@ flowchart LR
 | Reporting | Allure |
 | CI/CD | GitHub Actions |
 
-## Getting started (once Phase 0 lands)
+## Getting started
+
+SecureGate is black-box, so it needs a running Shipping Hub. Bring up a local instance, then run
+the suite:
 
 ```bash
-./mvnw verify -Denv=live    # test the live Shipping Hub
-./mvnw verify -Denv=local   # test a local Shipping Hub (bring ../FullStackHub up first)
+# 1. Start a local Shipping Hub (in ../FullStackHub)
+docker compose up -d                          # PostgreSQL
+pnpm --filter @shipping-hub/api db:deploy      # migrate
+pnpm --filter @shipping-hub/api db:seed        # seed demo data
+pnpm --filter @shipping-hub/api dev            # API on http://localhost:4000
+
+# 2. Run the QA suite (in ./SecureGate)
+./mvnw verify                                  # 28 REST Assured + 9 Cucumber tests
 ```
+
+CI does exactly this automatically — see [`/.github/workflows/securegate-ci.yml`](../.github/workflows/securegate-ci.yml).
 
 ## Roadmap
 
