@@ -133,9 +133,9 @@
 <section class="project" id="securegate">
     <div class="wrap">
         <div class="pnum">01</div>
-        <div class="ptag">DEVSECOPS · SECURE CI/CD PIPELINE</div>
+        <div class="ptag">QA AUTOMATION · API &amp; E2E TESTING</div>
         <h2>SecureGate</h2>
-        <p class="psummary">A Java microservices backend wrapped in a CI/CD pipeline that blocks insecure or low-quality code before it ever ships.</p>
+        <p class="psummary">An automated QA suite that tests the Shipping Hub platform end to end — API, UI and BDD — in a CI pipeline with a quality gate.</p>
         <div style="margin-bottom:40px;display:flex;flex-wrap:wrap;gap:14px">
             <a href="https://github.com/brunocarbone98/projects/tree/main/SecureGate" target="_blank" rel="noopener" class="btn">See repository ↗</a>
         </div>
@@ -144,22 +144,22 @@
             <div>
                 <div class="block">
                     <div class="block-label">What it is</div>
-                    <p>A compact Java (Spring Boot) microservices backend — an auth service and an API-key vault with role-based access — wrapped in a DevSecOps pipeline. Every pull request must pass automated gates in GitHub Actions: REST Assured API tests, a SonarQube quality gate for code quality and security vulnerabilities, dependency and container scanning, and coverage thresholds. Code that fails a gate is blocked from merging; clean code ships as a hardened Docker image.</p>
+                    <p>A professional QA automation suite that validates the Shipping Hub platform (project 02) the way a QA Automation Engineer would: API contract and functional tests with REST Assured, end-to-end UI journeys with Selenium under the Page Object Model, and BDD scenarios with Cucumber — including security-oriented negatives such as rate limiting, broken authorization and tampered tokens. It runs in GitHub Actions behind a SonarQube quality gate and publishes an Allure report.</p>
                 </div>
                 <div class="block">
                     <div class="block-label">Purpose</div>
-                    <p>To demonstrate shift-left DevSecOps: building security and quality into the development flow itself rather than bolting them on at the end. The pipeline catches vulnerabilities, broken API contracts and coverage regressions in CI — not in production — reflecting the ability to ship software that is secure, tested, and verifiable by default.</p>
+                    <p>To demonstrate professional QA automation against a real distributed system: designing a layered test strategy (API, BDD, UI), automating it in CI, and gating quality — reflecting hands-on experience testing production software rather than toy examples.</p>
                 </div>
             </div>
 
             <div class="spec">
                 <div class="spec-head">Stack used</div>
-                <div class="spec-row"><div class="tech">Java · Spring Boot</div><div class="role">Microservices backend (auth + API-key vault)</div></div>
-                <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI/CD pipeline orchestrating build, tests, scans, and gates</div></div>
-                <div class="spec-row"><div class="tech">SonarQube</div><div class="role">Static-analysis quality gate: bugs &amp; vulnerabilities</div></div>
-                <div class="spec-row"><div class="tech">REST Assured</div><div class="role">Automated API testing, incl. authz &amp; security negatives</div></div>
-                <div class="spec-row"><div class="tech">Docker</div><div class="role">Multi-stage, non-root container images</div></div>
-                <div class="spec-row"><div class="tech">Trivy</div><div class="role">Dependency &amp; image vulnerability scanning</div></div>
+                <div class="spec-row"><div class="tech">Java · REST Assured</div><div class="role">API contract &amp; functional testing, with security negatives</div></div>
+                <div class="spec-row"><div class="tech">Selenium · POM</div><div class="role">End-to-end UI journeys under the Page Object Model</div></div>
+                <div class="spec-row"><div class="tech">Cucumber (BDD)</div><div class="role">Gherkin scenarios as living documentation</div></div>
+                <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI pipeline: nightly and on-demand test runs</div></div>
+                <div class="spec-row"><div class="tech">SonarQube</div><div class="role">Static-analysis quality gate on the test framework</div></div>
+                <div class="spec-row"><div class="tech">Allure</div><div class="role">Test reporting with history and trends</div></div>
             </div>
         </div>
     </div>

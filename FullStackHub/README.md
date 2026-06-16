@@ -10,6 +10,9 @@ operations staff advance shipment states that feed the public timeline.
 
 **▶ Live app:** <https://shipping-hub.up.railway.app/>
 
+> **QA / testing:** an automated end-to-end QA & security suite for this platform lives in
+> [`../SecureGate`](../SecureGate) (Java · REST Assured · Selenium · Cucumber). *(Roadmap stage.)*
+
 ## Architecture
 
 ```mermaid

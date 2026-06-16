@@ -17,7 +17,7 @@ application-local.yml
 # OS noise
 .DS_Store
 
-# Generated security artifacts (SBOM, scan reports)
-**/dependency-check-report.*
-**/trivy-results.*
-**/*.cdx.json
+# Test reports & artifacts (generated)
+allure-results/
+allure-report/
+**/screenshots/
