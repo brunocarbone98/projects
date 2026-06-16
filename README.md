@@ -8,7 +8,7 @@ Personal monorepo with three folders:
   [`FullStackHub/README.md`](./FullStackHub/README.md) and [`DEPLOY.md`](./DEPLOY.md).
 - **[`SecureGate/`](./SecureGate)** — an automated **QA & security test suite** that tests
   Shipping Hub end to end (Java · REST Assured · Selenium · Cucumber, in CI). Roadmap in
-  [`SecureGate/ROADMAP.md`](./SecureGate/ROADMAP.md). *(Roadmap stage — not yet built.)*
+  [`SecureGate/ROADMAP.md`](./SecureGate/ROADMAP.md). *(Phases 0–2 implemented: API + BDD suites.)*
 - **[`PersonalWebsite/`](./PersonalWebsite)** — static personal / portfolio site.
 
 **▶ Live app:** <https://shipping-hub.up.railway.app/>
