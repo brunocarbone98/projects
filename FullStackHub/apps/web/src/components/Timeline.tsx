@@ -19,10 +19,7 @@ export function Timeline({ events }: { events: PublicTrackingEventDto[] }) {
         return (
           <li key={`${event.status}-${event.occurredAt}-${index}`} className="relative flex gap-4">
             {!isLast && (
-              <span
-                className="absolute left-[7px] top-5 -bottom-6 w-px bg-slate-200"
-                aria-hidden
-              />
+              <span className="absolute left-[7px] top-5 -bottom-6 w-px bg-slate-200" aria-hidden />
             )}
             <span
               className={cn(

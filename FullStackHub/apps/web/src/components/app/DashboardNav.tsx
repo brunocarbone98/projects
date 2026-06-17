@@ -39,7 +39,10 @@ export function DashboardNav({
             </Link>
           )}
           {isCustomer && (
-            <Link href="/app/wallet" className="rounded-lg px-3 py-1.5 text-slate-600 hover:bg-slate-100">
+            <Link
+              href="/app/wallet"
+              className="rounded-lg px-3 py-1.5 text-slate-600 hover:bg-slate-100"
+            >
               {t("nav.wallet")}
             </Link>
           )}

@@ -19,7 +19,13 @@ export function ShareLink({ copyLabel, copiedLabel }: { copyLabel: string; copie
 
   return (
     <button type="button" onClick={copy} className={cn(ghostButton, "py-2 text-sm")}>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        className="h-4 w-4"
+      >
         {copied ? (
           <path d="m5 13 4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
         ) : (

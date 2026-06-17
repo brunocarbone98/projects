@@ -48,9 +48,18 @@
     },
     "steps": {
       "title": "Cómo funciona",
-      "one": { "title": "Crea un envío", "description": "Ingresa origen, destino y datos del paquete para generar la etiqueta y el número de guía." },
-      "two": { "title": "Lo movemos", "description": "Operaciones escanea el paquete en cada bodega y registra eventos de rastreo inmutables." },
-      "three": { "title": "Rastrea en tiempo real", "description": "Comparte el enlace de rastreo: el destinatario ve cada actualización en su idioma." }
+      "one": {
+        "title": "Crea un envío",
+        "description": "Ingresa origen, destino y datos del paquete para generar la etiqueta y el número de guía."
+      },
+      "two": {
+        "title": "Lo movemos",
+        "description": "Operaciones escanea el paquete en cada bodega y registra eventos de rastreo inmutables."
+      },
+      "three": {
+        "title": "Rastrea en tiempo real",
+        "description": "Comparte el enlace de rastreo: el destinatario ve cada actualización en su idioma."
+      }
     },
     "cta": {
       "title": "¿Tienes un número de guía?",
@@ -156,7 +165,10 @@
     "zones": {
       "PA": { "name": "Panamá (nacional)", "countries": "Todo Panamá" },
       "US": { "name": "Estados Unidos", "countries": "Los 50 estados" },
-      "LATAM": { "name": "Latinoamérica", "countries": "Colombia, México, Perú, Chile, Costa Rica, Argentina, Ecuador y más" }
+      "LATAM": {
+        "name": "Latinoamérica",
+        "countries": "Colombia, México, Perú, Chile, Costa Rica, Argentina, Ecuador y más"
+      }
     },
     "note": "Los tiempos de tránsito son días hábiles y no incluyen demoras de aduana ni feriados locales."
   },
@@ -164,12 +176,30 @@
     "title": "Preguntas frecuentes",
     "subtitle": "Todo lo que necesitas saber sobre rastreo y envíos.",
     "items": [
-      { "question": "¿Necesito una cuenta para rastrear un paquete?", "answer": "No. El rastreo es público: solo ingresa tu número de guía en la página de rastreo y verás el historial completo." },
-      { "question": "¿Cómo es un número de guía?", "answer": "Los números de guía siguen el formato PTY-AAAA-NNNNNN-C, donde el último dígito es un dígito verificador que protege contra errores de tipeo." },
-      { "question": "¿Con qué frecuencia se actualiza el rastreo?", "answer": "Cada vez que operaciones escanea tu paquete en una bodega se registra un evento de rastreo inmutable que aparece al instante en la página pública." },
-      { "question": "¿A qué países llegan?", "answer": "Enviamos dentro de Panamá e internacionalmente a Estados Unidos y por toda Latinoamérica. Consulta la página de cobertura para más detalles." },
-      { "question": "¿Cómo se calcula el precio del envío?", "answer": "El precio se basa en la zona de destino, el nivel de servicio y el peso facturable (el mayor entre el peso real y el volumétrico)." },
-      { "question": "¿Puedo ver una estimación de entrega?", "answer": "Sí. Cada envío muestra una fecha estimada de entrega según el nivel de servicio y el destino." }
+      {
+        "question": "¿Necesito una cuenta para rastrear un paquete?",
+        "answer": "No. El rastreo es público: solo ingresa tu número de guía en la página de rastreo y verás el historial completo."
+      },
+      {
+        "question": "¿Cómo es un número de guía?",
+        "answer": "Los números de guía siguen el formato PTY-AAAA-NNNNNN-C, donde el último dígito es un dígito verificador que protege contra errores de tipeo."
+      },
+      {
+        "question": "¿Con qué frecuencia se actualiza el rastreo?",
+        "answer": "Cada vez que operaciones escanea tu paquete en una bodega se registra un evento de rastreo inmutable que aparece al instante en la página pública."
+      },
+      {
+        "question": "¿A qué países llegan?",
+        "answer": "Enviamos dentro de Panamá e internacionalmente a Estados Unidos y por toda Latinoamérica. Consulta la página de cobertura para más detalles."
+      },
+      {
+        "question": "¿Cómo se calcula el precio del envío?",
+        "answer": "El precio se basa en la zona de destino, el nivel de servicio y el peso facturable (el mayor entre el peso real y el volumétrico)."
+      },
+      {
+        "question": "¿Puedo ver una estimación de entrega?",
+        "answer": "Sí. Cada envío muestra una fecha estimada de entrega según el nivel de servicio y el destino."
+      }
     ]
   },
   "Footer": {

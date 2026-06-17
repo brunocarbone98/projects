@@ -48,9 +48,18 @@
     },
     "steps": {
       "title": "How it works",
-      "one": { "title": "Create a shipment", "description": "Enter origin, destination and parcel details to generate a label and tracking number." },
-      "two": { "title": "We move it", "description": "Operations scan the parcel at each hub, writing immutable tracking events." },
-      "three": { "title": "Track in real time", "description": "Share the tracking link — recipients see every update in their language." }
+      "one": {
+        "title": "Create a shipment",
+        "description": "Enter origin, destination and parcel details to generate a label and tracking number."
+      },
+      "two": {
+        "title": "We move it",
+        "description": "Operations scan the parcel at each hub, writing immutable tracking events."
+      },
+      "three": {
+        "title": "Track in real time",
+        "description": "Share the tracking link — recipients see every update in their language."
+      }
     },
     "cta": {
       "title": "Have a tracking number?",
@@ -156,7 +165,10 @@
     "zones": {
       "PA": { "name": "Panama (domestic)", "countries": "Nationwide Panama" },
       "US": { "name": "United States", "countries": "All 50 states" },
-      "LATAM": { "name": "Latin America", "countries": "Colombia, Mexico, Peru, Chile, Costa Rica, Argentina, Ecuador and more" }
+      "LATAM": {
+        "name": "Latin America",
+        "countries": "Colombia, Mexico, Peru, Chile, Costa Rica, Argentina, Ecuador and more"
+      }
     },
     "note": "Transit times are business days and exclude customs delays and local holidays."
   },
@@ -164,12 +176,30 @@
     "title": "Frequently asked questions",
     "subtitle": "Everything you need to know about tracking and shipping.",
     "items": [
-      { "question": "Do I need an account to track a package?", "answer": "No. Tracking is public — just enter your tracking number on the tracking page and you'll see the full history." },
-      { "question": "What does a tracking number look like?", "answer": "Tracking numbers follow the format PTY-YYYY-NNNNNN-C, where the last digit is a check digit that guards against typos." },
-      { "question": "How often is tracking updated?", "answer": "Every time operations scan your parcel at a facility, an immutable tracking event is recorded and appears instantly on the public page." },
-      { "question": "Which countries do you serve?", "answer": "We ship domestically within Panama and internationally to the United States and across Latin America. See the coverage page for details." },
-      { "question": "How is shipping priced?", "answer": "Pricing is based on destination zone, service level and billable weight (the greater of actual and volumetric weight)." },
-      { "question": "Can I see a delivery estimate?", "answer": "Yes. Each shipment shows an estimated delivery date based on the selected service level and destination." }
+      {
+        "question": "Do I need an account to track a package?",
+        "answer": "No. Tracking is public — just enter your tracking number on the tracking page and you'll see the full history."
+      },
+      {
+        "question": "What does a tracking number look like?",
+        "answer": "Tracking numbers follow the format PTY-YYYY-NNNNNN-C, where the last digit is a check digit that guards against typos."
+      },
+      {
+        "question": "How often is tracking updated?",
+        "answer": "Every time operations scan your parcel at a facility, an immutable tracking event is recorded and appears instantly on the public page."
+      },
+      {
+        "question": "Which countries do you serve?",
+        "answer": "We ship domestically within Panama and internationally to the United States and across Latin America. See the coverage page for details."
+      },
+      {
+        "question": "How is shipping priced?",
+        "answer": "Pricing is based on destination zone, service level and billable weight (the greater of actual and volumetric weight)."
+      },
+      {
+        "question": "Can I see a delivery estimate?",
+        "answer": "Yes. Each shipment shows an estimated delivery date based on the selected service level and destination."
+      }
     ]
   },
   "Footer": {

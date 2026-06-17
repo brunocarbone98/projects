@@ -35,7 +35,13 @@ export function RegisterEventForm({
         <label htmlFor="status" className={label}>
           {t("status")}
         </label>
-        <select id="status" name="status" required defaultValue={allowedStatuses[0]} className={field}>
+        <select
+          id="status"
+          name="status"
+          required
+          defaultValue={allowedStatuses[0]}
+          className={field}
+        >
           {allowedStatuses.map((status) => (
             <option key={status} value={status}>
               {tStatus(status)}
@@ -47,7 +53,12 @@ export function RegisterEventForm({
         <label htmlFor="location" className={label}>
           {t("location")}
         </label>
-        <input id="location" name="location" placeholder={t("locationPlaceholder")} className={field} />
+        <input
+          id="location"
+          name="location"
+          placeholder={t("locationPlaceholder")}
+          className={field}
+        />
       </div>
       <div>
         <label htmlFor="description" className={label}>

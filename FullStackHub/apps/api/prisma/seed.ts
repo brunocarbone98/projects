@@ -9,7 +9,12 @@
 //   shipment, recorded as correct double-entry ledger transactions.
 import { buildTrackingCode, type ServiceLevel, type ShipmentStatus } from "@shipping-hub/shared";
 import { hashPassword } from "../src/auth/passwords.js";
-import { addBusinessDays, billableWeightGrams, computePriceCents, resolveZoneCode } from "../src/domain/pricing.js";
+import {
+  addBusinessDays,
+  billableWeightGrams,
+  computePriceCents,
+  resolveZoneCode,
+} from "../src/domain/pricing.js";
 import { prisma } from "../src/prisma.js";
 import { RATES, seedReferenceData } from "./reference.js";
 
@@ -65,7 +70,12 @@ const happyPath = (origin: string): EventSeed[] => [
   { status: "CREATED", location: origin, description: "Shipment created", dayOffset: 0 },
   { status: "LABEL_PAID", location: origin, description: "Label paid", dayOffset: 0 },
   { status: "PICKED_UP", location: origin, description: "Picked up by courier", dayOffset: 0 },
-  { status: "IN_TRANSIT", location: "Tocumen Intl (PTY)", description: "Departed origin facility", dayOffset: 1 },
+  {
+    status: "IN_TRANSIT",
+    location: "Tocumen Intl (PTY)",
+    description: "Departed origin facility",
+    dayOffset: 1,
+  },
 ];
 
 // The original hand-crafted 10 shipments for ana (customer1) and luis (customer2).
@@ -78,9 +88,24 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     baseDaysAgo: 4,
     events: [
       ...happyPath(ORIGIN_LABEL),
-      { status: "AT_DESTINATION_HUB", location: "Miami, US", description: "Arrived at destination hub", dayOffset: 2 },
-      { status: "OUT_FOR_DELIVERY", location: "Miami, US", description: "Out for delivery", dayOffset: 3 },
-      { status: "DELIVERED", location: "Miami, US", description: "Delivered, signed by recipient", dayOffset: 3 },
+      {
+        status: "AT_DESTINATION_HUB",
+        location: "Miami, US",
+        description: "Arrived at destination hub",
+        dayOffset: 2,
+      },
+      {
+        status: "OUT_FOR_DELIVERY",
+        location: "Miami, US",
+        description: "Out for delivery",
+        dayOffset: 3,
+      },
+      {
+        status: "DELIVERED",
+        location: "Miami, US",
+        description: "Delivered, signed by recipient",
+        dayOffset: 3,
+      },
     ],
   },
   {
@@ -91,8 +116,18 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     baseDaysAgo: 5,
     events: [
       ...happyPath(ORIGIN_LABEL),
-      { status: "AT_DESTINATION_HUB", location: "Bogotá, CO", description: "Arrived at destination hub", dayOffset: 3 },
-      { status: "OUT_FOR_DELIVERY", location: "Bogotá, CO", description: "Out for delivery", dayOffset: 4 },
+      {
+        status: "AT_DESTINATION_HUB",
+        location: "Bogotá, CO",
+        description: "Arrived at destination hub",
+        dayOffset: 3,
+      },
+      {
+        status: "OUT_FOR_DELIVERY",
+        location: "Bogotá, CO",
+        description: "Out for delivery",
+        dayOffset: 4,
+      },
     ],
   },
   {
@@ -111,7 +146,12 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     baseDaysAgo: 2,
     events: [
       ...happyPath(ORIGIN_LABEL),
-      { status: "AT_DESTINATION_HUB", location: "New York, US", description: "Arrived at destination hub", dayOffset: 2 },
+      {
+        status: "AT_DESTINATION_HUB",
+        location: "New York, US",
+        description: "Arrived at destination hub",
+        dayOffset: 2,
+      },
     ],
   },
   {
@@ -123,7 +163,12 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     events: [
       { status: "CREATED", location: ORIGIN_LABEL, description: "Shipment created", dayOffset: 0 },
       { status: "LABEL_PAID", location: ORIGIN_LABEL, description: "Label paid", dayOffset: 0 },
-      { status: "PICKED_UP", location: ORIGIN_LABEL, description: "Picked up by courier", dayOffset: 0 },
+      {
+        status: "PICKED_UP",
+        location: ORIGIN_LABEL,
+        description: "Picked up by courier",
+        dayOffset: 0,
+      },
     ],
   },
   {
@@ -143,7 +188,9 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     destination: D("Colón", "PA", { postalCode: "0301" }),
     parcel: { weightGrams: 1200, lengthCm: 20, widthCm: 15, heightCm: 12 },
     baseDaysAgo: 0,
-    events: [{ status: "CREATED", location: ORIGIN_LABEL, description: "Shipment created", dayOffset: 0 }],
+    events: [
+      { status: "CREATED", location: ORIGIN_LABEL, description: "Shipment created", dayOffset: 0 },
+    ],
   },
   {
     owner: "customer2",
@@ -153,7 +200,12 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     baseDaysAgo: 6,
     events: [
       ...happyPath(ORIGIN_LABEL),
-      { status: "EXCEPTION", location: "Buenos Aires, AR", description: "Customs hold — documentation requested", dayOffset: 4 },
+      {
+        status: "EXCEPTION",
+        location: "Buenos Aires, AR",
+        description: "Customs hold — documentation requested",
+        dayOffset: 4,
+      },
     ],
   },
   {
@@ -164,8 +216,18 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     baseDaysAgo: 9,
     events: [
       ...happyPath(ORIGIN_LABEL),
-      { status: "EXCEPTION", location: "Quito, EC", description: "Address could not be verified", dayOffset: 4 },
-      { status: "RETURNED_TO_SENDER", location: ORIGIN_LABEL, description: "Returned to sender", dayOffset: 8 },
+      {
+        status: "EXCEPTION",
+        location: "Quito, EC",
+        description: "Address could not be verified",
+        dayOffset: 4,
+      },
+      {
+        status: "RETURNED_TO_SENDER",
+        location: ORIGIN_LABEL,
+        description: "Returned to sender",
+        dayOffset: 8,
+      },
     ],
   },
   {
@@ -177,18 +239,38 @@ const SHIPMENTS: (ShipmentSpec & { owner: "customer1" | "customer2" })[] = [
     events: [
       { status: "CREATED", location: ORIGIN_LABEL, description: "Shipment created", dayOffset: 0 },
       { status: "LABEL_PAID", location: ORIGIN_LABEL, description: "Label paid", dayOffset: 0 },
-      { status: "CANCELLED", location: ORIGIN_LABEL, description: "Cancelled at customer request", dayOffset: 0 },
+      {
+        status: "CANCELLED",
+        location: ORIGIN_LABEL,
+        description: "Cancelled at customer request",
+        dayOffset: 0,
+      },
     ],
   },
 ];
 
 // 20 additional customer profiles.
 const CUSTOMER_NAMES = [
-  "María González", "Carlos Rodríguez", "Sofía Martínez", "Diego Hernández",
-  "Valentina López", "Andrés Ramírez", "Camila Torres", "José Morales",
-  "Daniela Castillo", "Miguel Ortega", "Gabriela Flores", "Ricardo Mendoza",
-  "Isabela Vargas", "Fernando Jiménez", "Lucía Romero", "Javier Navarro",
-  "Paula Guerrero", "Sebastián Ríos", "Natalia Cruz", "Emily Johnson",
+  "María González",
+  "Carlos Rodríguez",
+  "Sofía Martínez",
+  "Diego Hernández",
+  "Valentina López",
+  "Andrés Ramírez",
+  "Camila Torres",
+  "José Morales",
+  "Daniela Castillo",
+  "Miguel Ortega",
+  "Gabriela Flores",
+  "Ricardo Mendoza",
+  "Isabela Vargas",
+  "Fernando Jiménez",
+  "Lucía Romero",
+  "Javier Navarro",
+  "Paula Guerrero",
+  "Sebastián Ríos",
+  "Natalia Cruz",
+  "Emily Johnson",
 ];
 
 const emailFor = (name: string): string =>
@@ -225,17 +307,38 @@ const PARCELS = [
   { weightGrams: 9500, lengthCm: 50, widthCm: 40, heightCm: 30 },
 ];
 const STATUS_CYCLE: ShipmentStatus[] = [
-  "DELIVERED", "IN_TRANSIT", "OUT_FOR_DELIVERY", "AT_DESTINATION_HUB", "LABEL_PAID",
-  "CREATED", "PICKED_UP", "EXCEPTION", "RETURNED_TO_SENDER", "CANCELLED",
+  "DELIVERED",
+  "IN_TRANSIT",
+  "OUT_FOR_DELIVERY",
+  "AT_DESTINATION_HUB",
+  "LABEL_PAID",
+  "CREATED",
+  "PICKED_UP",
+  "EXCEPTION",
+  "RETURNED_TO_SENDER",
+  "CANCELLED",
 ];
 const BASE_DAYS_AGO: Record<ShipmentStatus, number> = {
-  CREATED: 0, LABEL_PAID: 1, PICKED_UP: 1, IN_TRANSIT: 2, AT_DESTINATION_HUB: 3,
-  OUT_FOR_DELIVERY: 4, DELIVERED: 5, EXCEPTION: 6, RETURNED_TO_SENDER: 10, CANCELLED: 1,
+  CREATED: 0,
+  LABEL_PAID: 1,
+  PICKED_UP: 1,
+  IN_TRANSIT: 2,
+  AT_DESTINATION_HUB: 3,
+  OUT_FOR_DELIVERY: 4,
+  DELIVERED: 5,
+  EXCEPTION: 6,
+  RETURNED_TO_SENDER: 10,
+  CANCELLED: 1,
 };
 
 /** Build a coherent event chain (with day offsets) ending at `target`. */
 function eventsForStatus(target: ShipmentStatus, destLabel: string): EventSeed[] {
-  const E = (status: ShipmentStatus, location: string, description: string, dayOffset: number): EventSeed => ({ status, location, description, dayOffset });
+  const E = (
+    status: ShipmentStatus,
+    location: string,
+    description: string,
+    dayOffset: number,
+  ): EventSeed => ({ status, location, description, dayOffset });
   const chain: EventSeed[] = [
     E("CREATED", ORIGIN_LABEL, "Shipment created", 0),
     E("LABEL_PAID", ORIGIN_LABEL, "Label paid", 0),
@@ -246,12 +349,26 @@ function eventsForStatus(target: ShipmentStatus, destLabel: string): EventSeed[]
     E("DELIVERED", destLabel, "Delivered, signed by recipient", 3),
   ];
   const mainIdx: Partial<Record<ShipmentStatus, number>> = {
-    CREATED: 0, LABEL_PAID: 1, PICKED_UP: 2, IN_TRANSIT: 3, AT_DESTINATION_HUB: 4, OUT_FOR_DELIVERY: 5, DELIVERED: 6,
+    CREATED: 0,
+    LABEL_PAID: 1,
+    PICKED_UP: 2,
+    IN_TRANSIT: 3,
+    AT_DESTINATION_HUB: 4,
+    OUT_FOR_DELIVERY: 5,
+    DELIVERED: 6,
   };
   if (mainIdx[target] !== undefined) return chain.slice(0, mainIdx[target]! + 1);
-  if (target === "EXCEPTION") return [...chain.slice(0, 4), E("EXCEPTION", destLabel, "Customs hold — documentation requested", 4)];
+  if (target === "EXCEPTION")
+    return [
+      ...chain.slice(0, 4),
+      E("EXCEPTION", destLabel, "Customs hold — documentation requested", 4),
+    ];
   if (target === "RETURNED_TO_SENDER") {
-    return [...chain.slice(0, 4), E("EXCEPTION", destLabel, "Address could not be verified", 4), E("RETURNED_TO_SENDER", ORIGIN_LABEL, "Returned to sender", 8)];
+    return [
+      ...chain.slice(0, 4),
+      E("EXCEPTION", destLabel, "Address could not be verified", 4),
+      E("RETURNED_TO_SENDER", ORIGIN_LABEL, "Returned to sender", 8),
+    ];
   }
   return [chain[0], E("CANCELLED", ORIGIN_LABEL, "Cancelled at customer request", 0)]; // CANCELLED (before paying)
 }
@@ -300,22 +417,55 @@ async function main(): Promise<void> {
 
   const passwordHash = await hashPassword(DEMO_PASSWORD);
   const [, courier, customer1, customer2] = await Promise.all([
-    prisma.user.upsert({ where: { email: "admin@shippinghub.test" }, create: { email: "admin@shippinghub.test", name: "Ops Admin", role: "ADMIN", passwordHash }, update: { passwordHash, role: "ADMIN" } }),
-    prisma.user.upsert({ where: { email: "courier@shippinghub.test" }, create: { email: "courier@shippinghub.test", name: "Field Courier", role: "COURIER", passwordHash }, update: { passwordHash, role: "COURIER" } }),
-    prisma.user.upsert({ where: { email: "ana@example.com" }, create: { email: "ana@example.com", name: "Ana Pérez", role: "CUSTOMER", passwordHash }, update: { passwordHash } }),
-    prisma.user.upsert({ where: { email: "luis@example.com" }, create: { email: "luis@example.com", name: "Luis Gómez", role: "CUSTOMER", passwordHash }, update: { passwordHash } }),
+    prisma.user.upsert({
+      where: { email: "admin@shippinghub.test" },
+      create: { email: "admin@shippinghub.test", name: "Ops Admin", role: "ADMIN", passwordHash },
+      update: { passwordHash, role: "ADMIN" },
+    }),
+    prisma.user.upsert({
+      where: { email: "courier@shippinghub.test" },
+      create: {
+        email: "courier@shippinghub.test",
+        name: "Field Courier",
+        role: "COURIER",
+        passwordHash,
+      },
+      update: { passwordHash, role: "COURIER" },
+    }),
+    prisma.user.upsert({
+      where: { email: "ana@example.com" },
+      create: { email: "ana@example.com", name: "Ana Pérez", role: "CUSTOMER", passwordHash },
+      update: { passwordHash },
+    }),
+    prisma.user.upsert({
+      where: { email: "luis@example.com" },
+      create: { email: "luis@example.com", name: "Luis Gómez", role: "CUSTOMER", passwordHash },
+      update: { passwordHash },
+    }),
   ]);
 
   const extraCustomers = await Promise.all(
     CUSTOMER_NAMES.map((name) => {
       const email = emailFor(name);
-      return prisma.user.upsert({ where: { email }, create: { email, name, role: "CUSTOMER", passwordHash }, update: { name, passwordHash } });
+      return prisma.user.upsert({
+        where: { email },
+        create: { email, name, role: "CUSTOMER", passwordHash },
+        update: { name, passwordHash },
+      });
     }),
   );
 
   // Singleton system accounts for the double-entry ledger.
-  const cash = await prisma.walletAccount.upsert({ where: { systemKey: "CASH" }, create: { kind: "CASH", systemKey: "CASH" }, update: {} });
-  const revenue = await prisma.walletAccount.upsert({ where: { systemKey: "REVENUE" }, create: { kind: "REVENUE", systemKey: "REVENUE" }, update: {} });
+  const cash = await prisma.walletAccount.upsert({
+    where: { systemKey: "CASH" },
+    create: { kind: "CASH", systemKey: "CASH" },
+    update: {},
+  });
+  const revenue = await prisma.walletAccount.upsert({
+    where: { systemKey: "REVENUE" },
+    create: { kind: "REVENUE", systemKey: "REVENUE" },
+    update: {},
+  });
 
   let sequence = 1000;
   const year = new Date().getUTCFullYear();
@@ -326,8 +476,16 @@ async function main(): Promise<void> {
     const trackingCode = buildTrackingCode(year, sequence);
     const zoneCode = resolveZoneCode(spec.destination.country);
     const [baseCents, perKgCents, , etaMaxDays] = RATES[zoneCode][spec.serviceLevel];
-    const billable = billableWeightGrams(spec.parcel.weightGrams, spec.parcel.lengthCm, spec.parcel.widthCm, spec.parcel.heightCm);
-    const priceCents = computePriceCents({ serviceLevel: spec.serviceLevel, baseCents, perKgCents, etaMinDays: 0, etaMaxDays }, billable);
+    const billable = billableWeightGrams(
+      spec.parcel.weightGrams,
+      spec.parcel.lengthCm,
+      spec.parcel.widthCm,
+      spec.parcel.heightCm,
+    );
+    const priceCents = computePriceCents(
+      { serviceLevel: spec.serviceLevel, baseCents, perKgCents, etaMinDays: 0, etaMaxDays },
+      billable,
+    );
 
     const base = new Date();
     base.setUTCDate(base.getUTCDate() - spec.baseDaysAgo);
@@ -397,38 +555,93 @@ async function main(): Promise<void> {
     const customer = allCustomers[c];
     const ships = tracked.get(customer.id) ?? [];
     if (ships.length === 0) continue;
-    const wallet = await prisma.walletAccount.upsert({ where: { userId: customer.id }, create: { kind: "USER", userId: customer.id }, update: {} });
+    const wallet = await prisma.walletAccount.upsert({
+      where: { userId: customer.id },
+      create: { kind: "USER", userId: customer.id },
+      update: {},
+    });
 
     const paidShips = ships.filter((s) => s.paid);
     const totalPaid = paidShips.reduce((sum, s) => sum + s.priceCents, 0);
     const remainder = remainders[c % remainders.length];
     const topUpCents = totalPaid + remainder;
-    const earliest = ships.reduce((min, s) => (s.createdAt < min ? s.createdAt : min), ships[0].createdAt);
+    const earliest = ships.reduce(
+      (min, s) => (s.createdAt < min ? s.createdAt : min),
+      ships[0].createdAt,
+    );
     const topUpAt = new Date(earliest.getTime() - 24 * 3600 * 1000);
 
-    const topUpTx = await prisma.ledgerTransaction.create({ data: { idempotencyKey: `seed:topup:${customer.id}`, kind: "TOPUP", description: `Wallet top-up ${dollars(topUpCents)}`, createdAt: topUpAt } });
+    const topUpTx = await prisma.ledgerTransaction.create({
+      data: {
+        idempotencyKey: `seed:topup:${customer.id}`,
+        kind: "TOPUP",
+        description: `Wallet top-up ${dollars(topUpCents)}`,
+        createdAt: topUpAt,
+      },
+    });
     await prisma.ledgerEntry.createMany({
       data: [
-        { transactionId: topUpTx.id, accountId: wallet.id, amountCents: topUpCents, createdAt: topUpAt },
-        { transactionId: topUpTx.id, accountId: cash.id, amountCents: -topUpCents, createdAt: topUpAt },
+        {
+          transactionId: topUpTx.id,
+          accountId: wallet.id,
+          amountCents: topUpCents,
+          createdAt: topUpAt,
+        },
+        {
+          transactionId: topUpTx.id,
+          accountId: cash.id,
+          amountCents: -topUpCents,
+          createdAt: topUpAt,
+        },
       ],
     });
 
     let p = 0;
     for (const ship of paidShips) {
-      const payTx = await prisma.ledgerTransaction.create({ data: { idempotencyKey: `seed:pay:${customer.id}:${p}`, kind: "PAYMENT", description: `Label payment for ${ship.trackingCode}`, createdAt: ship.labelPaidAt } });
+      const payTx = await prisma.ledgerTransaction.create({
+        data: {
+          idempotencyKey: `seed:pay:${customer.id}:${p}`,
+          kind: "PAYMENT",
+          description: `Label payment for ${ship.trackingCode}`,
+          createdAt: ship.labelPaidAt,
+        },
+      });
       await prisma.ledgerEntry.createMany({
         data: [
-          { transactionId: payTx.id, accountId: wallet.id, amountCents: -ship.priceCents, createdAt: ship.labelPaidAt },
-          { transactionId: payTx.id, accountId: revenue.id, amountCents: ship.priceCents, createdAt: ship.labelPaidAt },
+          {
+            transactionId: payTx.id,
+            accountId: wallet.id,
+            amountCents: -ship.priceCents,
+            createdAt: ship.labelPaidAt,
+          },
+          {
+            transactionId: payTx.id,
+            accountId: revenue.id,
+            amountCents: ship.priceCents,
+            createdAt: ship.labelPaidAt,
+          },
         ],
       });
-      await prisma.payment.create({ data: { userId: customer.id, shipmentId: ship.shipmentId, transactionId: payTx.id, amountCents: ship.priceCents, currency: "USD", status: "COMPLETED", createdAt: ship.labelPaidAt } });
+      await prisma.payment.create({
+        data: {
+          userId: customer.id,
+          shipmentId: ship.shipmentId,
+          transactionId: payTx.id,
+          amountCents: ship.priceCents,
+          currency: "USD",
+          status: "COMPLETED",
+          createdAt: ship.labelPaidAt,
+        },
+      });
       p++;
     }
   }
 
-  await prisma.counter.upsert({ where: { id: "shipment" }, create: { id: "shipment", value: sequence }, update: { value: sequence } });
+  await prisma.counter.upsert({
+    where: { id: "shipment" },
+    create: { id: "shipment", value: sequence },
+    update: { value: sequence },
+  });
 
   const totalShipments = [...tracked.values()].reduce((n, s) => n + s.length, 0);
   console.log("Seed complete.");

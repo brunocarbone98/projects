@@ -67,7 +67,10 @@ export function QuoteCalculator() {
           className="space-y-4"
         >
           <div>
-            <label htmlFor="destination" className="mb-1.5 block text-sm font-medium text-slate-700">
+            <label
+              htmlFor="destination"
+              className="mb-1.5 block text-sm font-medium text-slate-700"
+            >
               {t("form.destination")}
             </label>
             <select

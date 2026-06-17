@@ -201,10 +201,18 @@ export const openapiDocument = {
       },
     },
     "/auth/refresh": {
-      post: { tags: ["Auth"], summary: "Rotate the refresh token", responses: { "200": { description: "OK" } } },
+      post: {
+        tags: ["Auth"],
+        summary: "Rotate the refresh token",
+        responses: { "200": { description: "OK" } },
+      },
     },
     "/auth/logout": {
-      post: { tags: ["Auth"], summary: "Revoke a refresh token", responses: { "204": { description: "No content" } } },
+      post: {
+        tags: ["Auth"],
+        summary: "Revoke a refresh token",
+        responses: { "204": { description: "No content" } },
+      },
     },
     "/auth/me": {
       get: {

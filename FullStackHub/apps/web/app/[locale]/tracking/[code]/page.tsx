@@ -37,11 +37,7 @@ const loadTracking = cache(async (code: string): Promise<LoadResult> => {
   }
 });
 
-export async function generateMetadata({
-  params,
-}: {
-  params: Promise<Params>;
-}): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: Promise<Params> }): Promise<Metadata> {
   const { locale, code } = await params;
   const t = await getTranslations({ locale, namespace: "Metadata" });
   const result = await loadTracking(code);
@@ -133,7 +129,10 @@ export default async function TrackingResultPage({ params }: { params: Promise<P
 
   return (
     <Container className="py-12">
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdString(jsonLd) }} />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: jsonLdString(jsonLd) }}
+      />
 
       <div className="mx-auto max-w-3xl">
         <div className="flex flex-wrap items-start justify-between gap-4">

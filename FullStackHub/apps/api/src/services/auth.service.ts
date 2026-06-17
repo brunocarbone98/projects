@@ -1,11 +1,7 @@
 import type { AuthResponseDto, AuthTokensDto, UserDto } from "@shipping-hub/shared";
 import type { User } from "@prisma/client";
 import { hashPassword, verifyPassword } from "../auth/passwords.js";
-import {
-  generateRefreshToken,
-  hashRefreshToken,
-  signAccessToken,
-} from "../auth/tokens.js";
+import { generateRefreshToken, hashRefreshToken, signAccessToken } from "../auth/tokens.js";
 import { env } from "../env.js";
 import { AppError, conflict, invalidCredentials } from "../http/errors.js";
 import { prisma } from "../prisma.js";
@@ -49,10 +45,7 @@ export async function register(input: {
   return { user: toUserDto(user), tokens: await issueTokens(user) };
 }
 
-export async function login(input: {
-  email: string;
-  password: string;
-}): Promise<AuthResponseDto> {
+export async function login(input: { email: string; password: string }): Promise<AuthResponseDto> {
   const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
   if (!user) throw invalidCredentials();
   if (!(await verifyPassword(input.password, user.passwordHash))) throw invalidCredentials();

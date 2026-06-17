@@ -305,7 +305,10 @@ export async function reversePayment(paymentId: string): Promise<void> {
             recordedAt: new Date(),
           },
         });
-        await tx.shipment.update({ where: { id: payment.shipmentId }, data: { status: "CREATED" } });
+        await tx.shipment.update({
+          where: { id: payment.shipmentId },
+          data: { status: "CREATED" },
+        });
       }
     }
   });

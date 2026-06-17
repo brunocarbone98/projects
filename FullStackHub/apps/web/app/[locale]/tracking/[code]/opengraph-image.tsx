@@ -32,63 +32,61 @@ export default async function Image({
   const accent = data ? (TONE_COLOR[data.status] ?? "#a5b4fc") : "#a5b4fc";
 
   return new ImageResponse(
-    (
-      <div
-        style={{
-          width: "100%",
-          height: "100%",
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-          padding: "72px",
-          background: "linear-gradient(135deg, #312e81 0%, #4f46e5 100%)",
-          color: "white",
-          fontFamily: "sans-serif",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: "64px",
-              height: "64px",
-              borderRadius: "16px",
-              background: "rgba(255,255,255,0.15)",
-              fontSize: "36px",
-            }}
-          >
-            📦
-          </div>
-          <div style={{ fontSize: "34px", fontWeight: 700 }}>Shipping Hub</div>
+    <div
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        padding: "72px",
+        background: "linear-gradient(135deg, #312e81 0%, #4f46e5 100%)",
+        color: "white",
+        fontFamily: "sans-serif",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "64px",
+            height: "64px",
+            borderRadius: "16px",
+            background: "rgba(255,255,255,0.15)",
+            fontSize: "36px",
+          }}
+        >
+          📦
         </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <div style={{ fontSize: "30px", color: "#c7d2fe" }}>{eyebrow}</div>
-          <div style={{ fontSize: "76px", fontWeight: 800, letterSpacing: "-2px" }}>{headline}</div>
-          {data && (
-            <div style={{ display: "flex", alignItems: "center", gap: "16px", fontSize: "30px" }}>
-              <span
-                style={{
-                  display: "flex",
-                  width: "18px",
-                  height: "18px",
-                  borderRadius: "9999px",
-                  background: accent,
-                }}
-              />
-              <span style={{ color: "#e0e7ff" }}>
-                {data.origin.city}, {data.origin.country} → {data.destination.city},{" "}
-                {data.destination.country}
-              </span>
-            </div>
-          )}
-        </div>
-
-        <div style={{ display: "flex", fontSize: "26px", color: "#c7d2fe" }}>{tOg("tagline")}</div>
+        <div style={{ fontSize: "34px", fontWeight: 700 }}>Shipping Hub</div>
       </div>
-    ),
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+        <div style={{ fontSize: "30px", color: "#c7d2fe" }}>{eyebrow}</div>
+        <div style={{ fontSize: "76px", fontWeight: 800, letterSpacing: "-2px" }}>{headline}</div>
+        {data && (
+          <div style={{ display: "flex", alignItems: "center", gap: "16px", fontSize: "30px" }}>
+            <span
+              style={{
+                display: "flex",
+                width: "18px",
+                height: "18px",
+                borderRadius: "9999px",
+                background: accent,
+              }}
+            />
+            <span style={{ color: "#e0e7ff" }}>
+              {data.origin.city}, {data.origin.country} → {data.destination.city},{" "}
+              {data.destination.country}
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", fontSize: "26px", color: "#c7d2fe" }}>{tOg("tagline")}</div>
+    </div>,
     { ...size },
   );
 }

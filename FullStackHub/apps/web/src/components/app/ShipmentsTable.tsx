@@ -39,7 +39,8 @@ export function ShipmentsTable({ shipments }: { shipments: ShipmentDto[] }) {
                 <StatusBadge status={shipment.status} size="sm" />
               </td>
               <td className="px-4 py-3 text-slate-600">
-                {shipment.origin.country} → {shipment.destination.city}, {shipment.destination.country}
+                {shipment.origin.country} → {shipment.destination.city},{" "}
+                {shipment.destination.country}
               </td>
               <td className="px-4 py-3 text-slate-600">{tService(shipment.serviceLevel)}</td>
               <td className="px-4 py-3 text-slate-600">{formatDate(shipment.createdAt, locale)}</td>

@@ -54,7 +54,9 @@ function toAddressInput(a: AddressForm) {
 }
 
 const isAddressComplete = (a: AddressForm): boolean =>
-  Boolean(a.contactName.trim() && a.line1.trim() && a.city.trim() && a.postalCode.trim() && a.country);
+  Boolean(
+    a.contactName.trim() && a.line1.trim() && a.city.trim() && a.postalCode.trim() && a.country,
+  );
 
 function AddressFields({
   value,

@@ -11,7 +11,7 @@ operations staff advance shipment states that feed the public timeline.
 **▶ Live app:** <https://shipping-hub.up.railway.app/>
 
 > **QA / testing:** an automated end-to-end QA & security suite for this platform lives in
-> [`../SecureGate`](../SecureGate) (Java · REST Assured · Selenium · Cucumber). *(Complete — API + BDD + UI, 43 tests in CI.)*
+> [`../SecureGate`](../SecureGate) (Java · REST Assured · Selenium · Cucumber). _(Complete — API + BDD + UI, 43 tests in CI.)_
 
 ## Architecture
 
@@ -55,23 +55,23 @@ stateless — they receive data, compute/generate, and return a result.
 
 ## Screenshots
 
-| Public tracking (SSR + route map) | Wallet — double-entry ledger |
-|---|---|
-| ![Public tracking](screenshots/02-tracking.png) | ![Wallet](screenshots/05-wallet.png) |
-| **Landing** | **Customer dashboard** |
-| ![Landing](screenshots/01-landing.png) | ![Dashboard](screenshots/04-dashboard.png) |
-| **Quote calculator** | **Shipments** |
-| ![Quote calculator](screenshots/03-quote.png) | ![Shipments](screenshots/06-shipments.png) |
+| Public tracking (SSR + route map)               | Wallet — double-entry ledger               |
+| ----------------------------------------------- | ------------------------------------------ |
+| ![Public tracking](screenshots/02-tracking.png) | ![Wallet](screenshots/05-wallet.png)       |
+| **Landing**                                     | **Customer dashboard**                     |
+| ![Landing](screenshots/01-landing.png)          | ![Dashboard](screenshots/04-dashboard.png) |
+| **Quote calculator**                            | **Shipments**                              |
+| ![Quote calculator](screenshots/03-quote.png)   | ![Shipments](screenshots/06-shipments.png) |
 
 ## Stack
 
-| Area | Tech |
-|---|---|
-| Web (`apps/web`) | Next.js 15 (App Router), React 19, TypeScript, Tailwind v4, next-intl (es/en), Leaflet |
-| API (`apps/api`) | Express 5, TypeScript, Prisma, PostgreSQL |
-| Services (`services/*`) | FastAPI (pricing/ETA, PDF labels) |
-| Shared (`packages/shared`) | Zod schemas, DTOs, enums, the shipment state machine, tracking-code (Luhn) |
-| Tooling | pnpm workspaces, Turborepo, ESLint, Prettier, Vitest, GitHub Actions |
+| Area                       | Tech                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------- |
+| Web (`apps/web`)           | Next.js 15 (App Router), React 19, TypeScript, Tailwind v4, next-intl (es/en), Leaflet |
+| API (`apps/api`)           | Express 5, TypeScript, Prisma, PostgreSQL                                              |
+| Services (`services/*`)    | FastAPI (pricing/ETA, PDF labels)                                                      |
+| Shared (`packages/shared`) | Zod schemas, DTOs, enums, the shipment state machine, tracking-code (Luhn)             |
+| Tooling                    | pnpm workspaces, Turborepo, ESLint, Prettier, Vitest, GitHub Actions                   |
 
 ## Features by phase
 
@@ -126,12 +126,12 @@ API reference: <http://localhost:4000/api/v1/docs>.
 
 ## Scripts
 
-| Command | What it does |
-|---|---|
-| `pnpm dev` | Run web + api via Turborepo |
-| `pnpm lint` / `pnpm typecheck` | ESLint / `tsc --noEmit` across the repo |
-| `pnpm test` | Shared unit + API integration tests (needs PostgreSQL) |
-| `pnpm --filter @shipping-hub/api db:migrate` | Create/apply a Prisma migration |
+| Command                                      | What it does                                           |
+| -------------------------------------------- | ------------------------------------------------------ |
+| `pnpm dev`                                   | Run web + api via Turborepo                            |
+| `pnpm lint` / `pnpm typecheck`               | ESLint / `tsc --noEmit` across the repo                |
+| `pnpm test`                                  | Shared unit + API integration tests (needs PostgreSQL) |
+| `pnpm --filter @shipping-hub/api db:migrate` | Create/apply a Prisma migration                        |
 
 ## Deploy
 
