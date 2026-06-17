@@ -19,16 +19,26 @@
     <rest-assured.version>5.5.0</rest-assured.version>
     <cucumber.version>7.20.1</cucumber.version>
     <jackson.version>2.18.2</jackson.version>
+    <selenium.version>4.27.0</selenium.version>
+    <allure.version>2.29.0</allure.version>
     <failsafe.version>3.5.2</failsafe.version>
 
     <!-- The suite tests a RUNNING Shipping Hub. Default target is a local instance
-         (API on :4000). Override with -Denv=live for the Phase-3 UI suite. -->
+         (API on :4000, web on :3000). -->
     <env>local</env>
-    <!-- Failsafe tag filters. The rate-limit test is load-style and would consume the
-         per-IP budget of the other tracking tests, so it is excluded by default; run it
-         deliberately with -Dgroups=ratelimit -DexcludedGroups=. CI uses -Dgroups=smoke. -->
+
+    <!-- Failsafe tag filters. `ratelimit` is load-style (consumes the per-IP budget) and `ui`
+         needs a running web app + browser, so both are excluded from the default run.
+         The CI ui job runs the full set with the web up via -DexcludedGroups=ratelimit;
+         run the rate-limit check on its own with -Dit.test=RateLimitIT -DexcludedGroups=. -->
     <groups></groups>
-    <excludedGroups>ratelimit</excludedGroups>
+    <excludedGroups>ratelimit,ui</excludedGroups>
+
+    <!-- SonarQube / SonarCloud (Phase 5). Run with `mvn sonar:sonar -Dsonar.token=$SONAR_TOKEN`
+         (needs a SonarCloud project + token). Override the org/key for your account. -->
+    <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+    <sonar.sources>pom.xml</sonar.sources>
+    <sonar.tests>src/test/java</sonar.tests>
   </properties>
 
   <dependencyManagement>
@@ -54,6 +64,13 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
+      <dependency>
+        <groupId>io.qameta.allure</groupId>
+        <artifactId>allure-bom</artifactId>
+        <version>${allure.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
@@ -71,6 +88,14 @@
     <dependency><groupId>io.cucumber</groupId><artifactId>cucumber-junit-platform-engine</artifactId><scope>test</scope></dependency>
     <dependency><groupId>io.cucumber</groupId><artifactId>cucumber-picocontainer</artifactId><scope>test</scope></dependency>
 
+    <!-- Selenium WebDriver (UI E2E, Phase 3). Selenium Manager auto-resolves the driver. -->
+    <dependency><groupId>org.seleniumhq.selenium</groupId><artifactId>selenium-java</artifactId><version>${selenium.version}</version><scope>test</scope></dependency>
+
+    <!-- Allure reporting (Phase 5): JUnit 5 + Cucumber results, with REST Assured attachments -->
+    <dependency><groupId>io.qameta.allure</groupId><artifactId>allure-junit5</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>io.qameta.allure</groupId><artifactId>allure-cucumber7-jvm</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>io.qameta.allure</groupId><artifactId>allure-rest-assured</artifactId><scope>test</scope></dependency>
+
     <!-- JSON for request bodies / assertions -->
     <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><scope>test</scope></dependency>
 
@@ -86,9 +111,9 @@
         <version>3.13.0</version>
       </plugin>
 
-      <!-- The suite is integration-level: it runs against a running Shipping Hub in
-           the `verify` phase via Failsafe (test classes are named *IT). There are no
-           Surefire unit tests, so Surefire finds nothing and is a no-op. -->
+      <!-- The suite is integration-level: it runs against a running Shipping Hub in the
+           `verify` phase via Failsafe (test classes are named *IT). Surefire finds no unit
+           tests and is a no-op. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-failsafe-plugin</artifactId>
@@ -98,6 +123,7 @@
           <excludedGroups>${excludedGroups}</excludedGroups>
           <systemPropertyVariables>
             <env>${env}</env>
+            <allure.results.directory>${project.build.directory}/allure-results</allure.results.directory>
           </systemPropertyVariables>
         </configuration>
         <executions>
@@ -108,6 +134,17 @@
             </goals>
           </execution>
         </executions>
+      </plugin>
+
+      <!-- Allure report generation: `mvn allure:report` -> target/site/allure-maven-plugin -->
+      <plugin>
+        <groupId>io.qameta.allure</groupId>
+        <artifactId>allure-maven</artifactId>
+        <version>2.12.0</version>
+        <configuration>
+          <reportVersion>${allure.version}</reportVersion>
+          <resultsDirectory>${project.build.directory}/allure-results</resultsDirectory>
+        </configuration>
       </plugin>
     </plugins>
   </build>

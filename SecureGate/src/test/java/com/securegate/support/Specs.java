@@ -2,6 +2,7 @@ package com.securegate.support;
 
 import static io.restassured.http.ContentType.JSON;
 
+import io.qameta.allure.restassured.AllureRestAssured;
 import io.restassured.builder.RequestSpecBuilder;
 import io.restassured.specification.RequestSpecification;
 
@@ -10,13 +11,14 @@ public final class Specs {
 
   private Specs() {}
 
-  /** Base spec for the JSON API under {@code /api/v1}. */
+  /** Base spec for the JSON API under {@code /api/v1}. Attaches each call to the Allure report. */
   public static RequestSpecification api() {
     return new RequestSpecBuilder()
         .setBaseUri(Config.get().apiBaseUrl())
         .setBasePath("/api/v1")
         .setContentType(JSON)
         .setAccept(JSON)
+        .addFilter(new AllureRestAssured())
         .build();
   }
 

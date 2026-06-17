@@ -2,7 +2,7 @@
 
 Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../FullStackHub), live at <https://shipping-hub.up.railway.app/>). The full phased plan lives in `ROADMAP.md`: when starting a phase, read its corresponding section.
 
-**Current phase:** Phases 0–2 implemented. The Maven project, the config/support layer, the **REST Assured API suite** (tracking, quote, auth, shipments, wallet — JSON-schema contracts + authn/authz/validation negatives) and the **Cucumber BDD** layer run green against a local Shipping Hub (`./mvnw verify` — 37 tests), with a GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) that stands the API up and runs them. Phases 3–6 (Selenium UI E2E, the SonarQube quality gate, Allure reporting, polish) are pending.
+**Current phase:** Phases 0–6 implemented. The full suite — **REST Assured API** (tracking, quote, auth, shipments, wallet — JSON-schema contracts + security negatives), **Cucumber BDD** journeys, and **Selenium UI E2E** (Page Object Model: tracking, quote, sign-in, language switch) — runs against a local Shipping Hub with **Allure** reporting and a token-gated **SonarQube** step. A GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) stands up the API + web + Chrome and runs everything on every PR and nightly. **43 tests** (28 REST Assured · 9 Cucumber · 6 Selenium).
 
 ## Structure
 
@@ -19,6 +19,8 @@ Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../
 | Command | What it does |
 |---|---|
 | `./mvnw verify` | Run the API + BDD suite against the configured Shipping Hub (default `env=local`, api `:4000`) |
+| `./mvnw verify -DexcludedGroups=ratelimit` | Full suite incl. **UI E2E** (needs the web app on `:3000` + a browser) |
+| `./mvnw allure:report` | Build the Allure HTML report → `target/site/allure-maven-plugin` |
 | `./mvnw verify -DapiBaseUrl=http://host:4000` | Point at a specific API instance |
 | `./mvnw verify -Dcucumber.filter.tags="@public"` | Run only the public (read-only) BDD scenarios |
 | `./mvnw verify -Dit.test=RateLimitIT -DexcludedGroups=` | Run the opt-in rate-limit check |

@@ -21,3 +21,6 @@ application-local.yml
 allure-results/
 allure-report/
 **/screenshots/
+
+# Allure command-line tool, downloaded on demand by the allure-maven plugin
+.allure/

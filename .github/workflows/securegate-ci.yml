@@ -1,7 +1,8 @@
 name: SecureGate CI
 
 # SecureGate is a black-box QA suite: it needs a running Shipping Hub. This pipeline
-# stands the API up against a throwaway PostgreSQL, seeds it, then runs the suite.
+# stands up PostgreSQL + the API + the web app, seeds demo data, then runs the full
+# suite (REST Assured API + Cucumber BDD + Selenium UI) and publishes an Allure report.
 on:
   pull_request:
     paths:
@@ -13,10 +14,12 @@ on:
     paths:
       - "SecureGate/**"
       - ".github/workflows/securegate-ci.yml"
+  schedule:
+    - cron: "0 6 * * *" # nightly regression at 06:00 UTC
 
 jobs:
   qa-suite:
-    name: API + BDD suite vs. local Shipping Hub
+    name: API + BDD + UI vs. local Shipping Hub
     runs-on: ubuntu-latest
 
     services:
@@ -41,6 +44,10 @@ jobs:
       PORT: "4000"
       CORS_ORIGINS: http://localhost:3000
       PUBLIC_WEB_URL: http://localhost:3000
+      API_INTERNAL_URL: http://localhost:4000
+      NEXT_PUBLIC_SITE_URL: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +68,11 @@ jobs:
           java-version: "21"
           cache: maven
 
+      - id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          install-dependencies: true
+
       - name: Install Shipping Hub dependencies
         working-directory: FullStackHub
         run: pnpm install --frozen-lockfile
@@ -78,9 +90,24 @@ jobs:
           curl -sS --retry 60 --retry-delay 1 --retry-connrefused -m 60 http://localhost:4000/health
           echo "API is up."
 
-      - name: Run the SecureGate QA suite
+      - name: Build + start the Shipping Hub web app
+        working-directory: FullStackHub
+        run: |
+          pnpm --filter @shipping-hub/web build
+          nohup pnpm --filter @shipping-hub/web start > /tmp/web.log 2>&1 &
+          curl -sS --retry 90 --retry-delay 2 --retry-connrefused -m 180 -o /dev/null http://localhost:3000/en
+          echo "Web is up."
+
+      - name: Run the SecureGate suite (API + BDD + UI)
         working-directory: SecureGate
-        run: ./mvnw -B verify
+        env:
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: ./mvnw -B verify -DexcludedGroups=ratelimit
+
+      - name: Generate the Allure report
+        if: always()
+        working-directory: SecureGate
+        run: ./mvnw -B -q allure:report || true
 
       - name: Upload reports
         if: always()
@@ -88,10 +115,23 @@ jobs:
         with:
           name: securegate-reports
           path: |
+            SecureGate/target/site/allure-maven-plugin/
             SecureGate/target/cucumber/
+            SecureGate/target/screenshots/
             SecureGate/target/failsafe-reports/
           if-no-files-found: ignore
 
-      - name: API log (on failure)
+      - name: SonarQube quality gate (when SONAR_TOKEN is configured)
+        if: ${{ env.SONAR_TOKEN != '' }}
+        working-directory: SecureGate
+        run: >-
+          ./mvnw -B -DskipTests sonar:sonar
+          -Dsonar.token=$SONAR_TOKEN
+          -Dsonar.projectKey=${{ github.repository_owner }}_securegate
+          -Dsonar.organization=${{ github.repository_owner }}
+
+      - name: Service logs (on failure)
         if: failure()
-        run: tail -n 100 /tmp/api.log || true
+        run: |
+          echo "--- API log ---"; tail -n 80 /tmp/api.log || true
+          echo "--- Web log ---"; tail -n 80 /tmp/web.log || true
