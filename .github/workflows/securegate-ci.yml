@@ -92,6 +92,8 @@ jobs:
 
       - name: Build + start the Shipping Hub web app
         working-directory: FullStackHub
+        env:
+          PORT: "3000" # the web listens on 3000; the API already owns 4000 (job-level PORT)
         run: |
           pnpm --filter @shipping-hub/web build
           nohup pnpm --filter @shipping-hub/web start > /tmp/web.log 2>&1 &
