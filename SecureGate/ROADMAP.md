@@ -5,7 +5,7 @@
 > **Stack:** Java 21, Maven, REST Assured, Selenium WebDriver, Cucumber (BDD), JUnit 5, Allure, SonarQube, GitHub Actions, Docker.
 > **How to use this file:** keep it at the project root. When starting each phase with Claude Code, open plan mode and ask it to read the corresponding section.
 >
-> **Progress:** Phases 0–2 are **implemented** — the Maven project, the REST Assured API suite and the Cucumber BDD layer run green against a local Shipping Hub (`./mvnw verify`, 37 tests), with a GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) that stands the API up and runs them. Phases 3–6 are pending.
+> **Progress:** Phases 0–6 are **implemented** — REST Assured API tests, Cucumber BDD journeys and Selenium UI E2E (43 tests) run against a local Shipping Hub with Allure reporting and a token-gated SonarQube step, all orchestrated by a GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) that stands up the API + web + Chrome on every PR and nightly. (Coverage/JaCoCo is intentionally not tracked: a black-box suite has no production code of its own to cover.)
 
 ---
 
@@ -103,25 +103,25 @@ SecureGate/
 - **Deliverable:** readable BDD scenarios run via `mvn verify`; living documentation generated.
 - **Delegate:** `bdd-engineer`.
 
-### Phase 3 — UI end-to-end with Selenium + POM (1–2 weeks)
+### Phase 3 — UI end-to-end with Selenium + POM (1–2 weeks) — ✅ implemented
 **Stack:** Selenium WebDriver + Page Object Model (headless Chrome).
 - Page objects for landing, tracking, quote, login, dashboard, the **create-shipment wizard** and wallet; E2E flows for the critical journeys; an **es/en** language-switch check; screenshots on failure.
 - **Deliverable:** the E2E suite drives the real web app for the critical journeys.
 - **Delegate:** `ui-test-engineer`.
 
-### Phase 4 — CI/CD pipeline (1 week)
+### Phase 4 — CI/CD pipeline (1 week) — ✅ implemented
 **Stack:** GitHub Actions + (optionally) Selenium in Docker.
 - Pipeline: checkout → JDK + Maven cache → API + BDD + UI suites against the **live Railway** Shipping Hub (and/or spin Shipping Hub up locally from `../FullStackHub` in CI); headless browser / Selenium container; **nightly schedule** + on-demand; upload the Allure results.
 - **Deliverable:** a green pipeline that produces a test report; a nightly run against production.
 - **Delegate:** `devsecops`.
 
-### Phase 5 — Quality gate & reporting (1 week)
-**Stack:** SonarQube/SonarCloud + JaCoCo + Allure.
-- SonarQube static analysis of the **test framework** with a **quality gate**; an Allure report with history & trends (published to GitHub Pages); flaky-test **retries + quarantine**.
+### Phase 5 — Quality gate & reporting (1 week) — ✅ implemented
+**Stack:** SonarQube/SonarCloud + Allure.
+- SonarQube static analysis of the **test framework** with a **quality gate** (token-gated CI step); an **Allure** report (`mvn allure:report`, uploaded as a CI artifact). Coverage/JaCoCo is intentionally omitted — a black-box suite has no production code of its own to cover. (Optional extras: publish the Allure report to GitHub Pages with history; flaky-test retries + quarantine.)
 - **Deliverable:** Sonar gate green; a published Allure report with history; status/quality badges.
 - **Delegate:** `devsecops` · `code-reviewer`.
 
-### Phase 6 — Polish & docs (3–5 days)
+### Phase 6 — Polish & docs (3–5 days) — ✅ implemented
 - README with the **test strategy**, a **coverage matrix** (Shipping Hub feature → tests), the report link and screenshots; a short **test plan** + a sample bug report; tag a release; wire the portfolio entry.
 - **Deliverable:** a documented QA repo + the SecureGate portfolio entry linking to the live report.
 - **Delegate:** `code-reviewer` (final review) · `devsecops`.

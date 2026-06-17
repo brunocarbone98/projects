@@ -2,10 +2,10 @@
 
 **Automated QA & security test suite for [Shipping Hub](../FullStackHub)** — the full-stack parcel platform (live at <https://shipping-hub.up.railway.app/>). SecureGate tests it the way a QA Automation Engineer would: API, UI and BDD, in CI, behind a quality gate.
 
-> **Status: Phases 0–2 implemented.** The REST Assured API suite and the Cucumber BDD layer
-> (37 tests) run green against a local Shipping Hub via `./mvnw verify`, with a GitHub Actions
-> pipeline that stands the API up and runs them. Phases 3–6 (Selenium UI E2E, SonarQube quality
-> gate, Allure reporting) are on the roadmap — see [`ROADMAP.md`](./ROADMAP.md). Conventions in
+> **Status: Phases 0–6 implemented.** The full QA suite — **REST Assured API**, **Cucumber BDD**
+> and **Selenium UI E2E** (43 tests) — runs against a local Shipping Hub with **Allure** reporting
+> and a token-gated **SonarQube** step. The GitHub Actions pipeline stands up the API + web + Chrome
+> and runs everything on every PR and nightly. See [`ROADMAP.md`](./ROADMAP.md); conventions in
 > [`CLAUDE.md`](./CLAUDE.md).
 
 ## What it tests
@@ -60,9 +60,26 @@ pnpm --filter @shipping-hub/api dev            # API on http://localhost:4000
 
 # 2. Run the QA suite (in ./SecureGate)
 ./mvnw verify                                  # 28 REST Assured + 9 Cucumber tests
+./mvnw allure:report                           # -> target/site/allure-maven-plugin
+
+# UI E2E also needs the web app (pnpm --filter @shipping-hub/web dev) + a browser:
+./mvnw verify -DexcludedGroups=ratelimit       # adds the 6 Selenium UI tests
 ```
 
-CI does exactly this automatically — see [`/.github/workflows/securegate-ci.yml`](../.github/workflows/securegate-ci.yml).
+CI does all of this automatically (API + web + Chrome) — see [`/.github/workflows/securegate-ci.yml`](../.github/workflows/securegate-ci.yml).
+
+## What's covered
+
+| Shipping Hub feature | API (REST Assured) | BDD (Cucumber) | UI (Selenium) |
+|---|---|---|---|
+| Public tracking | contract · 400 · 404 · 429 | ✅ | landing → result · not-found |
+| Quote | contract · validation | ✅ | calculator → price |
+| Auth (login/refresh/me) | + JWT/authz negatives | ✅ | sign-in · invalid-creds error |
+| Shipments | CRUD · owner-scoped authz | — | — |
+| Wallet | ledger · top-up · idempotency | top-up | — |
+| Language (es/en) | — | — | header switch |
+
+Each run produces an **Allure** report (REST Assured calls attached); CI uploads it as an artifact.
 
 ## Roadmap
 
