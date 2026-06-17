@@ -72,6 +72,10 @@ jobs:
         uses: browser-actions/setup-chrome@v1
         with:
           install-dependencies: true
+          install-chromedriver: true
+
+      - name: Remove any stale chromedriver from PATH
+        run: sudo rm -f /usr/bin/chromedriver /usr/local/bin/chromedriver || true
 
       - name: Install Shipping Hub dependencies
         working-directory: FullStackHub
@@ -104,6 +108,7 @@ jobs:
         working-directory: SecureGate
         env:
           CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+          CHROMEDRIVER_BIN: ${{ steps.chrome.outputs.chromedriver-path }}
         run: ./mvnw -B verify -DexcludedGroups=ratelimit
 
       - name: Generate the Allure report

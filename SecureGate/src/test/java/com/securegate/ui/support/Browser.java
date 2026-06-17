@@ -1,8 +1,10 @@
 package com.securegate.ui.support;
 
+import java.io.File;
 import java.time.Duration;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.chrome.ChromeDriverService;
 import org.openqa.selenium.chrome.ChromeOptions;
 
 /**
@@ -25,7 +27,17 @@ public final class Browser {
     if (binary != null && !binary.isBlank()) {
       options.setBinary(binary);
     }
-    driver = new ChromeDriver(options);
+    // Use an explicit chromedriver when provided (CI pins one that matches the installed
+    // Chrome, avoiding a stale driver on PATH); otherwise let Selenium Manager resolve it.
+    String driverPath =
+        System.getProperty("webdriver.chrome.driver", System.getenv("CHROMEDRIVER_BIN"));
+    if (driverPath != null && !driverPath.isBlank()) {
+      ChromeDriverService service =
+          new ChromeDriverService.Builder().usingDriverExecutable(new File(driverPath)).build();
+      driver = new ChromeDriver(service, options);
+    } else {
+      driver = new ChromeDriver(options);
+    }
     driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
     return driver;
   }
