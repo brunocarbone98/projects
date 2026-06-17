@@ -64,7 +64,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       {/* Features */}
       <section className="py-20">
         <Container>
-          <h2 className="text-2xl font-bold tracking-tight text-slate-900">{t("features.title")}</h2>
+          <h2 className="text-2xl font-bold tracking-tight text-slate-900">
+            {t("features.title")}
+          </h2>
           <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
             {features.map((feature) => (
               <Card key={feature.key} className="p-6">

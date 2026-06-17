@@ -46,7 +46,9 @@ async function deliverWebhook(event: StatusChangeEvent): Promise<void> {
   const secret = process.env.WEBHOOK_SECRET;
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (secret) {
-    headers["x-shipping-hub-signature"] = createHmac("sha256", secret).update(payload).digest("hex");
+    headers["x-shipping-hub-signature"] = createHmac("sha256", secret)
+      .update(payload)
+      .digest("hex");
   }
   await fetch(url, { method: "POST", headers, body: payload });
 }

@@ -69,7 +69,9 @@ export default async function ShipmentDetailPage({
             <dl className="grid gap-5 sm:grid-cols-2">
               <div>
                 <dt className="text-sm text-slate-500">{t("service")}</dt>
-                <dd className="mt-1 font-medium text-slate-900">{tService(shipment.serviceLevel)}</dd>
+                <dd className="mt-1 font-medium text-slate-900">
+                  {tService(shipment.serviceLevel)}
+                </dd>
               </div>
               <div>
                 <dt className="text-sm text-slate-500">{t("estimated")}</dt>
@@ -100,8 +102,8 @@ export default async function ShipmentDetailPage({
               <div>
                 <dt className="text-sm text-slate-500">{t("weight")}</dt>
                 <dd className="mt-1 font-medium text-slate-900">
-                  {(shipment.parcel.weightGrams / 1000).toFixed(2)} kg ·{" "}
-                  {shipment.parcel.lengthCm}×{shipment.parcel.widthCm}×{shipment.parcel.heightCm} cm
+                  {(shipment.parcel.weightGrams / 1000).toFixed(2)} kg · {shipment.parcel.lengthCm}×
+                  {shipment.parcel.widthCm}×{shipment.parcel.heightCm} cm
                 </dd>
               </div>
             </dl>

@@ -1,4 +1,9 @@
-import type { AuthResponseDto, CreateShipmentInput, ShipmentDto, UserRole } from "@shipping-hub/shared";
+import type {
+  AuthResponseDto,
+  CreateShipmentInput,
+  ShipmentDto,
+  UserRole,
+} from "@shipping-hub/shared";
 import type { Express } from "express";
 import supertest from "supertest";
 import { buildApp } from "../src/app.js";
@@ -32,9 +37,7 @@ export const sampleShipment: CreateShipmentInput = {
   parcel: { weightGrams: 2000, lengthCm: 30, widthCm: 20, heightCm: 15 },
 };
 
-export async function registerCustomer(
-  email = "customer@example.com",
-): Promise<AuthResponseDto> {
+export async function registerCustomer(email = "customer@example.com"): Promise<AuthResponseDto> {
   const res = await api()
     .post("/api/v1/auth/register")
     .send({ email, password: DEFAULT_PASSWORD, name: "Test Customer" });
@@ -50,9 +53,7 @@ export async function createStaff(
   await prisma.user.create({
     data: { email, name: `${role} User`, role, passwordHash: await hashPassword(DEFAULT_PASSWORD) },
   });
-  const res = await api()
-    .post("/api/v1/auth/login")
-    .send({ email, password: DEFAULT_PASSWORD });
+  const res = await api().post("/api/v1/auth/login").send({ email, password: DEFAULT_PASSWORD });
   if (res.status !== 200) throw new Error(`login failed: ${res.status} ${res.text}`);
   return res.body as AuthResponseDto;
 }

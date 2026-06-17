@@ -36,7 +36,9 @@ describe("shipments", () => {
     await createShipment(ana.tokens.accessToken);
     await createShipment(luis.tokens.accessToken);
 
-    const res = await api().get("/api/v1/shipments").set("Authorization", bearer(ana.tokens.accessToken));
+    const res = await api()
+      .get("/api/v1/shipments")
+      .set("Authorization", bearer(ana.tokens.accessToken));
     expect(res.status).toBe(200);
     const body = res.body as PaginatedDto<ShipmentDto>;
     expect(body.total).toBe(2);

@@ -48,7 +48,9 @@ describe("auth", () => {
   it("returns the current user with a valid token and 401 without one", async () => {
     const { tokens } = await registerCustomer("me@example.com");
 
-    const ok = await api().get("/api/v1/auth/me").set("Authorization", `Bearer ${tokens.accessToken}`);
+    const ok = await api()
+      .get("/api/v1/auth/me")
+      .set("Authorization", `Bearer ${tokens.accessToken}`);
     expect(ok.status).toBe(200);
     expect(ok.body.user.email).toBe("me@example.com");
 
@@ -59,12 +61,16 @@ describe("auth", () => {
   it("rotates refresh tokens and invalidates the used one", async () => {
     const { tokens } = await registerCustomer("rotate@example.com");
 
-    const first = await api().post("/api/v1/auth/refresh").send({ refreshToken: tokens.refreshToken });
+    const first = await api()
+      .post("/api/v1/auth/refresh")
+      .send({ refreshToken: tokens.refreshToken });
     expect(first.status).toBe(200);
     expect(first.body.refreshToken).not.toBe(tokens.refreshToken);
 
     // Reusing the original (now revoked) refresh token must fail.
-    const reuse = await api().post("/api/v1/auth/refresh").send({ refreshToken: tokens.refreshToken });
+    const reuse = await api()
+      .post("/api/v1/auth/refresh")
+      .send({ refreshToken: tokens.refreshToken });
     expect(reuse.status).toBe(401);
     expect(reuse.body.error.code).toBe("INVALID_TOKEN");
   });

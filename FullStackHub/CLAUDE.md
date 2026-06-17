@@ -14,16 +14,16 @@ International parcel shipping & tracking platform (UPS/FedEx style) with a bilin
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `pnpm install` | Install all workspace dependencies |
-| `pnpm dev` | Start web (http://localhost:3000) and api (http://localhost:4000) via Turborepo |
-| `pnpm --filter @shipping-hub/web dev` | Web only |
-| `pnpm --filter @shipping-hub/api dev` | API only |
-| `pnpm lint` | ESLint (flat config at the root) over the whole repo |
-| `pnpm typecheck` | `tsc --noEmit` in each workspace, via Turborepo |
-| `pnpm format` / `pnpm format:check` | Prettier |
-| `docker compose up -d` | Local PostgreSQL (port 5432; user/pass/db: `shipping` / `shipping` / `shipping_hub`) |
+| Command                               | What it does                                                                         |
+| ------------------------------------- | ------------------------------------------------------------------------------------ |
+| `pnpm install`                        | Install all workspace dependencies                                                   |
+| `pnpm dev`                            | Start web (http://localhost:3000) and api (http://localhost:4000) via Turborepo      |
+| `pnpm --filter @shipping-hub/web dev` | Web only                                                                             |
+| `pnpm --filter @shipping-hub/api dev` | API only                                                                             |
+| `pnpm lint`                           | ESLint (flat config at the root) over the whole repo                                 |
+| `pnpm typecheck`                      | `tsc --noEmit` in each workspace, via Turborepo                                      |
+| `pnpm format` / `pnpm format:check`   | Prettier                                                                             |
+| `docker compose up -d`                | Local PostgreSQL (port 5432; user/pass/db: `shipping` / `shipping` / `shipping_hub`) |
 
 ## Conventions
 

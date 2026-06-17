@@ -42,9 +42,7 @@ export default async function WalletPage({ params }: { params: Promise<{ locale:
                   <tr key={entry.id}>
                     <td className="px-6 py-3">
                       <p className="font-medium text-slate-900">{t(`kinds.${entry.kind}`)}</p>
-                      {entry.description && (
-                        <p className="text-slate-500">{entry.description}</p>
-                      )}
+                      {entry.description && <p className="text-slate-500">{entry.description}</p>}
                     </td>
                     <td className="px-6 py-3 text-right text-slate-500">
                       {formatDateTime(entry.createdAt, locale)}

@@ -31,7 +31,14 @@ export function AuthForm({ mode, locale }: { mode: "login" | "register"; locale:
         <label htmlFor="email" className={label}>
           {t(`${mode}.email`)}
         </label>
-        <input id="email" name="email" type="email" autoComplete="email" required className={field} />
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autoComplete="email"
+          required
+          className={field}
+        />
       </div>
 
       <div>

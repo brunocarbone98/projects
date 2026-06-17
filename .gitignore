@@ -4,3 +4,7 @@ node_modules/
 .turbo/
 .DS_Store
 *.log
+
+# Editor / IDE settings (machine-specific, not project config)
+.idea/
+.vscode/

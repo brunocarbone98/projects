@@ -37,7 +37,6 @@ export const invalidCredentials = (message = "Invalid email or password") =>
   new AppError(401, "INVALID_CREDENTIALS", message);
 export const forbidden = (message = "You do not have access to this resource") =>
   new AppError(403, "FORBIDDEN", message);
-export const notFound = (message = "Resource not found") =>
-  new AppError(404, "NOT_FOUND", message);
+export const notFound = (message = "Resource not found") => new AppError(404, "NOT_FOUND", message);
 export const conflict = (code: ErrorCode, message: string, details?: unknown) =>
   new AppError(409, code, message, details);

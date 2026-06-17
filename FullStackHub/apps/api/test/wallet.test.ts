@@ -4,13 +4,19 @@ import { reversePayment } from "../src/services/wallet.service.js";
 import { api, bearer, createShipment, registerCustomer } from "./helpers.js";
 
 const topup = (token: string, amountCents: number, idempotencyKey: string) =>
-  api().post("/api/v1/wallet/topup").set("Authorization", bearer(token)).send({ amountCents, idempotencyKey });
+  api()
+    .post("/api/v1/wallet/topup")
+    .set("Authorization", bearer(token))
+    .send({ amountCents, idempotencyKey });
 
 const getWallet = (token: string) =>
   api().get("/api/v1/wallet").set("Authorization", bearer(token));
 
 const pay = (token: string, shipmentId: string, idempotencyKey: string) =>
-  api().post(`/api/v1/shipments/${shipmentId}/pay`).set("Authorization", bearer(token)).send({ idempotencyKey });
+  api()
+    .post(`/api/v1/shipments/${shipmentId}/pay`)
+    .set("Authorization", bearer(token))
+    .send({ idempotencyKey });
 
 describe("wallet + double-entry ledger", () => {
   it("starts at zero and tops up", async () => {
@@ -57,7 +63,9 @@ describe("wallet + double-entry ledger", () => {
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
 
-    expect((await getWallet(tokens.accessToken)).body.balanceCents).toBe(20000 - shipment.priceCents);
+    expect((await getWallet(tokens.accessToken)).body.balanceCents).toBe(
+      20000 - shipment.priceCents,
+    );
     expect(await prisma.payment.count({ where: { shipmentId: shipment.id } })).toBe(1);
   });
 
