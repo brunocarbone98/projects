@@ -1,6 +1,7 @@
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import { Card } from "@/components/Card";
 import { Container } from "@/components/Container";
+import { HeroGlobe } from "@/components/HeroGlobe";
 import { TrackingForm } from "@/components/TrackingForm";
 import { Link } from "@/i18n/navigation";
 import { cn } from "@/lib/cn";
@@ -26,7 +27,11 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
     <>
       {/* Hero */}
       <section className="relative overflow-hidden bg-gradient-to-b from-brand-950 via-brand-900 to-brand-800 text-white">
-        <Container className="py-20 sm:py-24">
+        {/* Animated globe filling the empty right half of the hero. */}
+        <div className="pointer-events-none absolute inset-y-0 right-0 z-0 hidden w-[55%] lg:block xl:w-1/2">
+          <HeroGlobe />
+        </div>
+        <Container className="relative z-10 py-20 sm:py-24">
           <div className="max-w-2xl">
             <span className="inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-brand-100 ring-1 ring-inset ring-white/15">
               {t("hero.badge")}
