@@ -8,3 +8,6 @@ next-env.d.ts
 
 # Keep the roadmap exactly as authored
 ROADMAP.md
+
+# Auto-generated coastline data for the hero globe
+apps/web/src/lib/world-coastlines.ts
