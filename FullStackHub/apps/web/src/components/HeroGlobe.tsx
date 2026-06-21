@@ -2,22 +2,33 @@
 
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
+import { COASTLINES } from "@/lib/world-coastlines";
 
 /**
  * Decorative, dependency-free globe for the hero's empty space: a rotating
- * dotted Earth with great-circle shipping routes between international hubs and
- * pulses travelling along them. Rendered on a single Canvas 2D context and
- * paused entirely when the user prefers reduced motion.
+ * wireframe Earth drawn as outlines — the globe limb, a faint graticule and the
+ * continent coastlines — with great-circle shipping routes between hubs and
+ * pulses travelling along them. Paused entirely when the user prefers reduced
+ * motion.
  */
 
 type Vec3 = { x: number; y: number; z: number };
+
+// A polyline on the sphere, with reusable buffers so each frame projects every
+// point exactly once and allocates nothing.
+type Line = {
+  pts: Vec3[];
+  sx: Float32Array;
+  sy: Float32Array;
+  depth: Float32Array;
+};
 
 const DEG = Math.PI / 180;
 
 // Tilt the rotation axis a touch so the poles read as a sphere, not a disc.
 const AXIS_TILT = -20 * DEG;
-// Radians per second of spin (west -> east, a slow ~50s revolution).
-const SPIN = (2 * Math.PI) / 50;
+// Radians per second of spin (west -> east, a slow ~60s revolution).
+const SPIN = (2 * Math.PI) / 60;
 
 // Major international shipping hubs spread across every continent, so the spin
 // always brings new connections into view. [lat, lng] in degrees.
@@ -63,19 +74,34 @@ function latLngToVec3(latDeg: number, lngDeg: number): Vec3 {
   return { x: cosLat * Math.sin(lng), y: Math.sin(lat), z: cosLat * Math.cos(lng) };
 }
 
-// Evenly spaced dots over the sphere: each latitude band holds a count
-// proportional to its circumference, which reads as a clean wireframe globe.
-function buildGlobeDots(): Vec3[] {
-  const dots: Vec3[] = [];
-  const latStep = 8;
-  const equatorDots = 56;
-  for (let lat = -84; lat <= 84; lat += latStep) {
-    const count = Math.max(1, Math.round(equatorDots * Math.cos(lat * DEG)));
-    for (let i = 0; i < count; i += 1) {
-      dots.push(latLngToVec3(lat, -180 + (360 * i) / count));
-    }
+function makeLine(pts: Vec3[]): Line {
+  return {
+    pts,
+    sx: new Float32Array(pts.length),
+    sy: new Float32Array(pts.length),
+    depth: new Float32Array(pts.length),
+  };
+}
+
+// Continent coastlines, converted once from the embedded [lng, lat] data.
+function buildCoastlines(): Line[] {
+  return COASTLINES.map((ring) => makeLine(ring.map(([lng, lat]) => latLngToVec3(lat, lng))));
+}
+
+// Faint meridians and parallels that give the sphere its wireframe structure.
+function buildGraticule(): Line[] {
+  const lines: Line[] = [];
+  for (let lng = -180; lng < 180; lng += 30) {
+    const pts: Vec3[] = [];
+    for (let lat = -90; lat <= 90; lat += 4) pts.push(latLngToVec3(lat, lng));
+    lines.push(makeLine(pts));
   }
-  return dots;
+  for (let lat = -60; lat <= 60; lat += 30) {
+    const pts: Vec3[] = [];
+    for (let lng = -180; lng <= 180; lng += 4) pts.push(latLngToVec3(lat, lng));
+    lines.push(makeLine(pts));
+  }
+  return lines;
 }
 
 // Great-circle arc between two unit vectors, bulged above the surface so routes
@@ -119,7 +145,8 @@ export function HeroGlobe({ className }: { className?: string }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const dots = buildGlobeDots();
+    const coastlines = buildCoastlines();
+    const graticule = buildGraticule();
     const hubs = HUBS.map(([lat, lng]) => latLngToVec3(lat, lng));
     const arcs = ROUTES.map(([from, to], index) => ({
       points: buildArc(hubs[from], hubs[to]),
@@ -136,12 +163,11 @@ export function HeroGlobe({ className }: { className?: string }) {
     let cx = 0;
     let cy = 0;
     let radius = 0;
-    let dpr = 1;
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
       width = rect.width;
       height = rect.height;
       canvas.width = Math.round(width * dpr);
@@ -171,19 +197,62 @@ export function HeroGlobe({ className }: { className?: string }) {
         cy,
         radius * 1.05,
       );
-      body.addColorStop(0, "rgba(67, 56, 202, 0.35)");
-      body.addColorStop(1, "rgba(30, 27, 75, 0.12)");
+      body.addColorStop(0, "rgba(67, 56, 202, 0.3)");
+      body.addColorStop(1, "rgba(30, 27, 75, 0.1)");
       ctx.fillStyle = body;
       ctx.beginPath();
       ctx.arc(cx, cy, radius, 0, Math.PI * 2);
       ctx.fill();
     };
 
+    // Project every point of a line once into its reusable screen buffers.
+    const projectLine = (line: Line, sinR: number, cosR: number) => {
+      const { pts, sx, sy, depth } = line;
+      for (let i = 0; i < pts.length; i += 1) {
+        const p = pts[i];
+        const x = p.x * cosR + p.z * sinR;
+        const z1 = -p.x * sinR + p.z * cosR;
+        const y = p.y * cosT - z1 * sinT;
+        sx[i] = cx + x * radius;
+        sy[i] = cy - y * radius;
+        depth[i] = p.y * sinT + z1 * cosT;
+      }
+    };
+
+    // Stroke a set of lines in two batched passes: the far hemisphere faintly,
+    // the near hemisphere brighter, so the wireframe reads as see-through.
+    const drawLines = (
+      lines: Line[],
+      sinR: number,
+      cosR: number,
+      rgb: string,
+      backAlpha: number,
+      frontAlpha: number,
+      lineWidth: number,
+    ) => {
+      for (const line of lines) projectLine(line, sinR, cosR);
+      ctx.lineWidth = lineWidth;
+      ctx.lineJoin = "round";
+      for (let pass = 0; pass < 2; pass += 1) {
+        const front = pass === 1;
+        ctx.strokeStyle = `rgba(${rgb}, ${front ? frontAlpha : backAlpha})`;
+        ctx.beginPath();
+        for (const line of lines) {
+          const { sx, sy, depth } = line;
+          for (let i = 1; i < sx.length; i += 1) {
+            const segmentIsFront = depth[i - 1] + depth[i] >= 0;
+            if (segmentIsFront !== front) continue;
+            ctx.moveTo(sx[i - 1], sy[i - 1]);
+            ctx.lineTo(sx[i], sy[i]);
+          }
+        }
+        ctx.stroke();
+      }
+    };
+
     const draw = (rot: number, timeSec: number) => {
       ctx.clearRect(0, 0, width, height);
       if (radius <= 0) return;
-      drawAtmosphere();
-
       const sinR = Math.sin(rot);
       const cosR = Math.cos(rot);
       const project = (p: Vec3) => {
@@ -191,17 +260,17 @@ export function HeroGlobe({ className }: { className?: string }) {
         return { sx: cx + r.x * radius, sy: cy - r.y * radius, depth: r.z };
       };
 
-      // Globe dots, dimmer towards the back hemisphere for depth.
-      for (const dot of dots) {
-        const { sx, sy, depth } = project(dot);
-        const front = (depth + 1) / 2;
-        const alpha = 0.12 + front * 0.5;
-        const size = 0.6 + front * 1.0;
-        ctx.fillStyle = `rgba(165, 180, 252, ${alpha.toFixed(3)})`;
-        ctx.beginPath();
-        ctx.arc(sx, sy, size, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      drawAtmosphere();
+
+      // Globe outline (limb).
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = "rgba(165, 180, 252, 0.3)";
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      drawLines(graticule, sinR, cosR, "165, 180, 252", 0.05, 0.16, 0.8);
+      drawLines(coastlines, sinR, cosR, "199, 210, 254", 0.13, 0.62, 1.0);
 
       // Route arcs: fade each segment by depth so they wrap the visible side.
       ctx.lineWidth = 1.2;
@@ -212,7 +281,7 @@ export function HeroGlobe({ className }: { className?: string }) {
           const b = project(arc.points[i]);
           const depth = (a.depth + b.depth) / 2;
           if (depth < -0.2) continue;
-          const alpha = Math.max(0, Math.min(1, (depth + 0.2) / 1.2)) * 0.7;
+          const alpha = Math.max(0, Math.min(1, (depth + 0.2) / 1.2)) * 0.75;
           ctx.strokeStyle = `rgba(251, 191, 36, ${alpha.toFixed(3)})`;
           ctx.beginPath();
           ctx.moveTo(a.sx, a.sy);
@@ -269,12 +338,12 @@ export function HeroGlobe({ className }: { className?: string }) {
     resize();
     const observer = new ResizeObserver(() => {
       resize();
-      if (reduceMotion) draw(0.6, 0);
+      if (reduceMotion) draw(0.9, 0);
     });
     observer.observe(canvas);
 
     if (reduceMotion) {
-      draw(0.6, 0);
+      draw(0.9, 0);
     } else {
       frame = window.requestAnimationFrame(loop);
     }
