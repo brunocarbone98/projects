@@ -25,8 +25,9 @@ type Line = {
 
 const DEG = Math.PI / 180;
 
-// Tilt the rotation axis a touch so the poles read as a sphere, not a disc.
-const AXIS_TILT = -20 * DEG;
+// Tilt the rotation axis slightly so the globe is viewed just above the
+// equator — centred, not from below or steeply from above.
+const AXIS_TILT = 8 * DEG;
 // Radians per second of spin (west -> east, a slow ~60s revolution).
 const SPIN = (2 * Math.PI) / 60;
 
