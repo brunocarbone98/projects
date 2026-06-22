@@ -20,6 +20,12 @@
     <cucumber.version>7.20.1</cucumber.version>
     <jackson.version>2.18.2</jackson.version>
     <selenium.version>4.27.0</selenium.version>
+    <!-- Selenium pulls in Guava transitively. Selenium 4.27 resolves Guava 33.2.1-jre, whose
+         AbstractFuture still uses sun.misc.Unsafe and therefore triggers the JDK's "terminally
+         deprecated method in sun.misc.Unsafe" warning on JDK 23+. Guava >= 33.4.x switched that
+         code to VarHandle, so pinning it here removes the warning at the source on every JDK
+         (incl. the JDK 21 baseline) and in every runner (Maven fork, IDE, etc.). -->
+    <guava.version>33.4.8-jre</guava.version>
     <allure.version>2.29.0</allure.version>
     <failsafe.version>3.5.2</failsafe.version>
     <slf4j.version>2.0.16</slf4j.version>
@@ -28,11 +34,6 @@
          (API on :4000, web on :3000). -->
     <env>local</env>
 
-    <!-- Extra JVM args passed to the forked Failsafe test JVM. Empty by default; the
-         `silence-unsafe-warning` profile sets it to the JDK 23+ flag that mutes Guava's
-         "terminally deprecated sun.misc.Unsafe" warning. Kept as a property so the flag is
-         only applied on JDKs that understand it. -->
-    <failsafe.argLine></failsafe.argLine>
 
     <!-- Failsafe tag filters. `ratelimit` is load-style (consumes the per-IP budget) and `ui`
          needs a running web app + browser, so both are excluded from the default run.
@@ -77,6 +78,12 @@
         <version>${allure.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+      <!-- Force a Guava that no longer calls sun.misc.Unsafe (see <guava.version> above). -->
+      <dependency>
+        <groupId>com.google.guava</groupId>
+        <artifactId>guava</artifactId>
+        <version>${guava.version}</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -131,13 +138,6 @@
         <artifactId>maven-failsafe-plugin</artifactId>
         <version>${failsafe.version}</version>
         <configuration>
-          <!-- Guava (pulled in transitively by Selenium) triggers the JDK's "terminally
-               deprecated sun.misc.Unsafe" warning. On JDK 23+ it can be silenced with
-               -sun-misc-unsafe-memory-access=allow, but that flag does NOT exist on the JDK 21
-               baseline this suite (and CI) targets and would make the forked test JVM fail to
-               start. So the flag is supplied via the JDK-version-activated
-               `silence-unsafe-warning` profile and is empty otherwise. -->
-          <argLine>${failsafe.argLine}</argLine>
           <groups>${groups}</groups>
           <excludedGroups>${excludedGroups}</excludedGroups>
           <systemPropertyVariables>
@@ -167,19 +167,4 @@
       </plugin>
     </plugins>
   </build>
-
-  <profiles>
-    <!-- Active only on JDK 23+, where the flag exists. Mutes Guava's "terminally deprecated
-         sun.misc.Unsafe" warning in the forked Failsafe JVM. On JDK 21 (the CI baseline) this
-         profile stays inactive, so the unknown flag is never passed and the JVM starts fine. -->
-    <profile>
-      <id>silence-unsafe-warning</id>
-      <activation>
-        <jdk>[23,)</jdk>
-      </activation>
-      <properties>
-        <failsafe.argLine>--sun-misc-unsafe-memory-access=allow</failsafe.argLine>
-      </properties>
-    </profile>
-  </profiles>
 </project>
