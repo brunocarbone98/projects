@@ -109,7 +109,7 @@ jobs:
         env:
           CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
           CHROMEDRIVER_BIN: ${{ steps.chrome.outputs.chromedriver-path }}
-        run: ./mvnw -B verify -DexcludedGroups=ratelimit
+        run: ./mvnw -B verify -DexcludedGroups=ratelimit -Dheadless=true
 
       - name: Generate the Allure report
         if: always()

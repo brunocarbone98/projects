@@ -8,9 +8,14 @@ import org.openqa.selenium.chrome.ChromeDriverService;
 import org.openqa.selenium.chrome.ChromeOptions;
 
 /**
- * Headless-Chrome WebDriver lifecycle. Selenium Manager (bundled with Selenium 4) resolves the
- * matching driver automatically; a specific browser binary can be forced with
- * {@code -Dchrome.binary=...} or the {@code CHROME_BIN} env var.
+ * Chrome WebDriver lifecycle. Selenium Manager (bundled with Selenium 4) resolves the matching
+ * driver automatically; a specific browser binary can be forced with {@code -Dchrome.binary=...}
+ * or the {@code CHROME_BIN} env var.
+ *
+ * <p>By default Chrome runs in a real, <em>visible</em> window so you can watch the tests replay
+ * their scripted actions. CI (or any headless machine) can opt back into headless mode with
+ * {@code -Dheadless=true} (or by setting the {@code HEADLESS=true} env var), e.g.
+ * {@code ./mvnw verify -Denv=local -Dheadless=true}.
  */
 public final class Browser {
 
@@ -21,8 +26,10 @@ public final class Browser {
   public static WebDriver start() {
     ChromeOptions options = new ChromeOptions();
     options.addArguments(
-        "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-        "--window-size=1280,900");
+        "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900");
+    if (isHeadless()) {
+      options.addArguments("--headless=new");
+    }
     String binary = System.getProperty("chrome.binary", System.getenv("CHROME_BIN"));
     if (binary != null && !binary.isBlank()) {
       options.setBinary(binary);
@@ -40,6 +47,16 @@ public final class Browser {
     }
     driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(30));
     return driver;
+  }
+
+  /**
+   * Visible by default so you can watch the test replay the scripted actions. Set
+   * {@code -Dheadless=true} (or {@code HEADLESS=true}) on CI/headless machines to run without a
+   * window.
+   */
+  private static boolean isHeadless() {
+    String flag = System.getProperty("headless", System.getenv("HEADLESS"));
+    return flag != null && flag.equalsIgnoreCase("true");
   }
 
   public static WebDriver get() {

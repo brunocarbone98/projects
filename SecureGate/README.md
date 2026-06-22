@@ -64,7 +64,44 @@ pnpm --filter @shipping-hub/api dev            # API on http://localhost:4000
 
 # UI E2E also needs the web app (pnpm --filter @shipping-hub/web dev) + a browser:
 ./mvnw verify -DexcludedGroups=ratelimit       # adds the 6 Selenium UI tests
+
+# Run the Selenium tests without a window (CI / headless machines):
+./mvnw verify -DexcludedGroups=ratelimit -Dheadless=true
 ```
+
+> **The browser is now visible by default.** The Selenium tests open a real Chrome window so you can
+> watch each test replay its scripted actions. You need a local Chrome installed — Selenium Manager
+> downloads the matching driver automatically. On CI or any machine without a display, opt back into
+> headless with `-Dheadless=true` (or set `HEADLESS=true`).
+
+> **Tests failing with `java.net.ConnectException: Connection refused`?** That means the Shipping Hub
+> isn't running — every `com.securegate` test is black-box and talks to it over HTTP, so the whole
+> suite "fails" when nothing is listening on `http://localhost:4000`. On Windows you can bring the
+> whole stack up (Postgres + pricing/labels + API + web) and run the suite in one command:
+>
+> ```powershell
+> pwsh scripts\run-local-stack.ps1 -RunTests
+> ```
+
+### Running the complete suite (all 44 tests)
+
+The default `mvnw verify` excludes two tag groups (`ratelimit`, `ui`). To run **everything**, with the
+stack up (Postgres + API + web + Chrome):
+
+```powershell
+# 43 tests: API + BDD + the 6 Selenium UI tests
+./mvnw verify -DexcludedGroups=ratelimit
+
+# the 44th test (load-style; consumes the per-IP rate-limit budget, so it runs on its own)
+./mvnw verify "-Dit.test=RateLimitIT" "-DexcludedGroups=."
+```
+
+> **Verified in a clean Windows sandbox (June 2026):** with the bundled Node 22 + PostgreSQL under
+> `%USERPROFILE%\sg-tools` and a local Chrome, **all 44 tests pass** — even without Python installed.
+> The `pricing`/`labels` microservices are *optional*: the API computes quotes locally (identical
+> result) when `pricing` is down, and the suite never downloads a label. The only caveat is that the
+> first UI run against a freshly-started `next dev` can time out while Next.js compiles routes on
+> demand; `run-local-stack.ps1` now pre-warms those routes so the UI tests are deterministic.
 
 CI does all of this automatically (API + web + Chrome) — see [`/.github/workflows/securegate-ci.yml`](../.github/workflows/securegate-ci.yml).
 
