@@ -2,6 +2,8 @@ package com.securegate.ui.support;
 
 import java.io.File;
 import java.time.Duration;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.chrome.ChromeDriverService;
@@ -20,6 +22,22 @@ import org.openqa.selenium.chrome.ChromeOptions;
 public final class Browser {
 
   private static WebDriver driver;
+
+  // The installed Chrome is often newer than the CDP versions Selenium bundles, which makes
+  // Selenium log a noisy (but harmless) "Unable to find CDP implementation matching ..." warning on
+  // every driver start. The UI tests use only the standard WebDriver protocol, not CDP, so we mute
+  // those loggers. NOTE: JUL keeps only weak references to loggers, so we must hold strong
+  // references in static fields — otherwise the configured loggers get garbage-collected and are
+  // recreated with their default (warning-emitting) level.
+  private static final Logger CDP_VERSION_FINDER_LOG =
+      Logger.getLogger("org.openqa.selenium.devtools.CdpVersionFinder");
+  private static final Logger CHROMIUM_DRIVER_LOG =
+      Logger.getLogger("org.openqa.selenium.chromium.ChromiumDriver");
+
+  static {
+    CDP_VERSION_FINDER_LOG.setLevel(Level.OFF);
+    CHROMIUM_DRIVER_LOG.setLevel(Level.OFF);
+  }
 
   private Browser() {}
 
