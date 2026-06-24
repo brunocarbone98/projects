@@ -89,9 +89,14 @@ Every `com.securegate` test is an **integration** test against a running Shippin
 gotchas bite if you just green-arrow the `com.securegate` folder:
 
 1. **The IDE does not start the stack.** With the Shipping Hub down, every test would otherwise fail
-   with a raw `Connection refused`. The base classes now run a one-shot `/health` check first, so a
-   down stack instead **skips** the API/UI tests (and fails the BDD run) with a single message
-   telling you to start the stack — no wall of connection errors.
+   with a raw `Connection refused`. The base classes now run a one-shot readiness check first, so a
+   down stack instead **skips** every test (API, BDD and UI) with a single message telling you to
+   start the stack — no wall of connection errors, nothing reported as failed. The check is
+   **database-aware**: it probes a real data read (the seeded demo tracking code), not just
+   `/health` (which touches no DB). So if the API is up but PostgreSQL has crashed — e.g. the bundled
+   Windows cluster dying with exception `0xC0000142`, which makes every endpoint return `500` — the
+   suite skips with "API is up but its database is not responding … restart the stack" instead of a
+   wall of `500`s.
 2. **The IDE's JUnit runner ignores Maven's group exclusions** (`ratelimit`, `ui`), so running the
    folder directly also fires the Selenium UI tests (need a browser) and the slow `RateLimitIT`.
    Prefer running through Maven so the exclusions apply.
@@ -103,7 +108,7 @@ this one click:
 - **SecureGate · verify (needs local stack)** — runs `mvnw verify` (honoring the group exclusions).
 
 Run the first once, then the second. Or do both at once from a terminal:
-`pwsh SecureGate/scripts/run-local-stack.ps1 -RunTests`.
+`powershell -ExecutionPolicy Bypass -File SecureGate\scripts\run-local-stack.ps1 -RunTests`.
 
 ### Running the complete suite (all 44 tests)
 

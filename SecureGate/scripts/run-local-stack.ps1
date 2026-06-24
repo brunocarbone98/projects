@@ -67,13 +67,21 @@ function Test-Port($port) {
     catch { $false }
 }
 
+# Start the bundled cluster in sg-tools. Returns $true if pg_ctl reported success.
+function Start-BundledPostgres {
+    if (-not (Test-Path (Join-Path $pgBin 'pg_ctl.exe'))) {
+        Write-Warning 'No bundled PostgreSQL cluster in sg-tools. Start your own Postgres (docker compose up -d in FullStackHub).'
+        return $false
+    }
+    & (Join-Path $pgBin 'pg_ctl.exe') -D $pgData -l (Join-Path $tools 'pg.log') -w start
+    return ($LASTEXITCODE -eq 0)
+}
+
 Write-Step 'PostgreSQL (:5432)'
 if (Test-Port 5432) {
     Write-Host '    already listening - reusing it'
-} elseif (Test-Path (Join-Path $pgBin 'pg_ctl.exe')) {
-    & (Join-Path $pgBin 'pg_ctl.exe') -D $pgData -l (Join-Path $tools 'pg.log') -w start
 } else {
-    Write-Warning 'No PostgreSQL on :5432 and no bundled cluster in sg-tools. Start your own Postgres (docker compose up -d in FullStackHub).'
+    Start-BundledPostgres | Out-Null
 }
 
 # --- 2. API .env --------------------------------------------------------------
@@ -140,6 +148,39 @@ for ($i = 0; $i -lt 60; $i++) {
 }
 if (-not $ok) { throw 'API never became healthy on :4000 - check the API window/logs.' }
 Write-Host 'Stack is up. API is healthy.' -ForegroundColor Green
+
+# --- 6a. verify the DATABASE answers, not just /health -----------------------
+# /health touches no database, so it stays 200 even when PostgreSQL is down - and then EVERY
+# data-backed endpoint returns 500. On Windows the bundled Postgres occasionally crashes (Windows
+# exception 0xC0000142, visible in %USERPROFILE%\sg-tools\pg.log) after it has started. Probe a real
+# read; if it fails, bring Postgres back up once and re-probe, then fail loudly rather than handing
+# the suite a stack on which every test 500s.
+$demoTrack = 'http://localhost:4000/api/v1/tracking/PTY-2026-001001-0'
+function Test-DbBackedRead {
+    try {
+        $resp = Invoke-WebRequest $demoTrack -TimeoutSec 5 -UseBasicParsing
+        return ([int]$resp.StatusCode -lt 500)
+    } catch {
+        # Windows PowerShell 5.1 throws on a non-2xx/3xx; read the status off the response.
+        # A 4xx (404/429) still means API + database answered - only a 5xx (or a connection error,
+        # which leaves no status) counts as "database down".
+        $code = 0
+        try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+        return ($code -ge 400 -and $code -lt 500)
+    }
+}
+
+Write-Step 'verifying the database answers a real read'
+if (-not (Test-DbBackedRead)) {
+    Write-Warning 'API is up but a data read returned 5xx - PostgreSQL looks down. Restarting it...'
+    if (-not (Test-Port 5432)) { Start-BundledPostgres | Out-Null }
+    $dbOk = $false
+    for ($i = 0; $i -lt 15; $i++) { if (Test-DbBackedRead) { $dbOk = $true; break }; Start-Sleep 2 }
+    if (-not $dbOk) {
+        throw 'Database never came back: data-backed endpoints still return 500. Check %USERPROFILE%\sg-tools\pg.log for a 0xC0000142 crash, then re-run this script.'
+    }
+}
+Write-Host 'Database is reachable (data-backed read OK).' -ForegroundColor Green
 
 # --- 6b. wait for the web app + warm up the routes the UI tests hit ----------
 # In `next dev` the first hit to a route triggers an on-demand compile that can take >15s -

@@ -1,22 +1,23 @@
 package com.securegate.bdd;
 
 import com.securegate.support.SutPreflight;
-import io.cucumber.java.BeforeAll;
+import io.cucumber.java.Before;
+import org.junit.jupiter.api.Assumptions;
 
 /**
- * Fails the BDD run fast with one clear, actionable message when the Shipping Hub is down, instead
- * of letting the first API-backed step throw a raw "Connection refused". Cucumber has no notion of
- * an aborted/skipped run the way JUnit's {@code Assumptions} do, so this throws rather than skips.
+ * Skips every BDD scenario with one clear, actionable message when the Shipping Hub is down, instead
+ * of letting the first API-backed step throw a raw "Connection refused".
+ *
+ * <p>This is a per-scenario {@code @Before} hook (not a run-level {@code @BeforeAll}) on purpose:
+ * Cucumber maps an {@link org.opentest4j.TestAbortedException} — what {@link Assumptions#assumeTrue}
+ * throws — to a SKIPPED scenario, so a down stack leaves the whole suite cleanly "ignored", matching
+ * how the API/UI base classes abort. A {@code @BeforeAll} failure, by contrast, would error the run.
  * See {@link com.securegate.support.SutPreflight}.
  */
 public final class Hooks {
 
-  private Hooks() {}
-
-  @BeforeAll
-  public static void requireShippingHub() {
-    if (!SutPreflight.isApiUp()) {
-      throw new IllegalStateException(SutPreflight.apiDownMessage());
-    }
+  @Before
+  public void requireShippingHub() {
+    Assumptions.assumeTrue(SutPreflight.isApiReady(), SutPreflight::apiNotReadyMessage);
   }
 }
