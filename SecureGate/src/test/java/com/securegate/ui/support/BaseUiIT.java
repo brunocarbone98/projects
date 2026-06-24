@@ -1,8 +1,10 @@
 package com.securegate.ui.support;
 
 import com.securegate.support.Config;
+import com.securegate.support.SutPreflight;
 import java.time.Duration;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.TestInstance;
@@ -26,6 +28,10 @@ public abstract class BaseUiIT {
 
   @BeforeAll
   void startBrowser() {
+    // The UI suite drives the web app, which in turn calls the API — skip with a clear message
+    // (rather than launching Chrome only to fail) when either side of the stack is down.
+    Assumptions.assumeTrue(SutPreflight.isApiUp(), SutPreflight::apiDownMessage);
+    Assumptions.assumeTrue(SutPreflight.isWebUp(), SutPreflight::webDownMessage);
     driver = Browser.start();
     wait = new WebDriverWait(driver, Duration.ofSeconds(15));
   }

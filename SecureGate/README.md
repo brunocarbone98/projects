@@ -83,6 +83,28 @@ pnpm --filter @shipping-hub/api dev            # API on http://localhost:4000
 > pwsh scripts\run-local-stack.ps1 -RunTests
 > ```
 
+### Running from IntelliJ (or any IDE)
+
+Every `com.securegate` test is an **integration** test against a running Shipping Hub, so two IDE
+gotchas bite if you just green-arrow the `com.securegate` folder:
+
+1. **The IDE does not start the stack.** With the Shipping Hub down, every test would otherwise fail
+   with a raw `Connection refused`. The base classes now run a one-shot `/health` check first, so a
+   down stack instead **skips** the API/UI tests (and fails the BDD run) with a single message
+   telling you to start the stack — no wall of connection errors.
+2. **The IDE's JUnit runner ignores Maven's group exclusions** (`ratelimit`, `ui`), so running the
+   folder directly also fires the Selenium UI tests (need a browser) and the slow `RateLimitIT`.
+   Prefer running through Maven so the exclusions apply.
+
+Two committed run configurations (under [`.run/`](../.run), so they survive reopening the IDE) make
+this one click:
+
+- **SecureGate · start local stack** — brings Postgres + API + web up and waits for health.
+- **SecureGate · verify (needs local stack)** — runs `mvnw verify` (honoring the group exclusions).
+
+Run the first once, then the second. Or do both at once from a terminal:
+`pwsh SecureGate/scripts/run-local-stack.ps1 -RunTests`.
+
 ### Running the complete suite (all 44 tests)
 
 The default `mvnw verify` excludes two tag groups (`ratelimit`, `ui`). To run **everything**, with the
