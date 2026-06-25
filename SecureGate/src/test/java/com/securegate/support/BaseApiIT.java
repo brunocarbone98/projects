@@ -9,6 +9,9 @@ public abstract class BaseApiIT {
 
   @BeforeAll
   static void configureRestAssured() {
+    // Bring the local Shipping Hub up if it is down (no-op when it is already running or when
+    // auto-start does not apply), so a green-arrow run from the IDE just works. See SutPreflight.
+    SutPreflight.ensureLocalStackReady();
     // Skip (not fail) with one actionable message when the Shipping Hub is not ready — whether the
     // API is down (connection refused) or up but its database is dead (every endpoint 500s) — instead
     // of letting every test blow up. See SutPreflight.

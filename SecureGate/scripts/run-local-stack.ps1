@@ -45,6 +45,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# pnpm/prisma/pg_ctl report failure via exit code, which we check explicitly (and retry). Stop
+# PowerShell 7+ from turning a non-zero native exit into a terminating error here; harmless on 5.1.
+$PSNativeCommandUseErrorActionPreference = $false
 
 # --- paths --------------------------------------------------------------------
 $repoRoot   = Resolve-Path (Join-Path $PSScriptRoot '..\..')         # ...\projects
@@ -69,12 +72,61 @@ function Test-Port($port) {
 
 # Start the bundled cluster in sg-tools. Returns $true if pg_ctl reported success.
 function Start-BundledPostgres {
-    if (-not (Test-Path (Join-Path $pgBin 'pg_ctl.exe'))) {
+    $pgCtl = Join-Path $pgBin 'pg_ctl.exe'
+    if (-not (Test-Path $pgCtl)) {
         Write-Warning 'No bundled PostgreSQL cluster in sg-tools. Start your own Postgres (docker compose up -d in FullStackHub).'
         return $false
     }
-    & (Join-Path $pgBin 'pg_ctl.exe') -D $pgData -l (Join-Path $tools 'pg.log') -w start
-    return ($LASTEXITCODE -eq 0)
+    # Start postgres FULLY DETACHED, exactly like the API/web below (Start-Process -WindowStyle Hidden,
+    # which uses ShellExecute and so inherits NONE of this script's handles), then confirm readiness via
+    # Wait-PostgresReady rather than `pg_ctl -w`. This is essential, not cosmetic: the long-lived
+    # postgres server must not inherit this script's stdout/stderr (or a redirected stand-in) - if it
+    # does, it keeps that handle open for its whole lifetime and whatever is waiting on the script
+    # (PowerShell's `&`, or Start-Process -Wait waiting for the redirected stream to close) blocks
+    # forever, hanging the bring-up at "PostgreSQL (:5432)" even though the server is actually up. That
+    # is exactly what happens when the suite auto-starts the stack from the IDE/Maven (output captured
+    # to a log, stdin closed). Detaching + polling sidesteps the whole handle-inheritance trap.
+    Start-Process -FilePath $pgCtl `
+        -ArgumentList @('-D', $pgData, '-l', (Join-Path $tools 'pg.log'), 'start') `
+        -WindowStyle Hidden | Out-Null
+    return $true
+}
+
+# Wait until PostgreSQL actually ACCEPTS connections - not merely that the :5432 port is open. Right
+# after pg_ctl start, and especially while the cluster is replaying WAL after an unclean shutdown, the
+# port can be open while the server still refuses queries. Running `prisma migrate deploy` / `db seed`
+# or starting the API in that window fails with P1001 ("Can't reach database server"), which cascades
+# into "API is up but its database is down" 500s. pg_isready reports the real accepting state, so
+# polling it here closes that race.
+function Wait-PostgresReady {
+    param([int]$TimeoutSec = 60)
+    $pgReady = Join-Path $pgBin 'pg_isready.exe'
+    for ($i = 0; $i -lt ($TimeoutSec * 2); $i++) {
+        if (Test-Path $pgReady) {
+            & $pgReady -h 127.0.0.1 -p 5432 -q 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        } elseif (Test-Port 5432) {
+            return $true   # no bundled pg_isready to ask; an open port is the best signal we have
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+# Run a native command, retrying a few times. Even with Wait-PostgresReady, the very first prisma call
+# can occasionally lose a race with the server finishing startup; a couple of retries makes migrate and
+# seed deterministic, and turns a real failure into a clear throw instead of a silently half-built DB.
+function Invoke-WithRetry {
+    param([string]$Label, [scriptblock]$Action, [int]$Tries = 3)
+    for ($n = 1; $n -le $Tries; $n++) {
+        & $Action
+        if ($LASTEXITCODE -eq 0) { return }
+        if ($n -lt $Tries) {
+            Write-Warning "$Label failed (attempt $n/$Tries); retrying in 3s..."
+            Start-Sleep 3
+        }
+    }
+    throw "$Label failed after $Tries attempts - see the output above."
 }
 
 Write-Step 'PostgreSQL (:5432)'
@@ -83,6 +135,10 @@ if (Test-Port 5432) {
 } else {
     Start-BundledPostgres | Out-Null
 }
+if (-not (Wait-PostgresReady 60)) {
+    throw 'PostgreSQL is not accepting connections on :5432 after 60s. Check %USERPROFILE%\sg-tools\pg.log (look for a 0xC0000142 crash), then re-run this script.'
+}
+Write-Host '    accepting connections'
 
 # --- 2. API .env --------------------------------------------------------------
 $apiDir = Join-Path $hub 'apps\api'
@@ -100,9 +156,9 @@ try {
         & $pnpm install
     }
     Write-Step 'prisma migrate deploy + generate'
-    & $pnpm --filter '@shipping-hub/api' db:deploy
+    Invoke-WithRetry 'db:deploy' { & $pnpm --filter '@shipping-hub/api' db:deploy }
     Write-Step 'seed demo data (idempotent)'
-    & $pnpm --filter '@shipping-hub/api' db:seed
+    Invoke-WithRetry 'db:seed' { & $pnpm --filter '@shipping-hub/api' db:seed }
 } finally {
     Pop-Location
 }

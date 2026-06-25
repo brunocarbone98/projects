@@ -18,6 +18,9 @@ public final class Hooks {
 
   @Before
   public void requireShippingHub() {
+    // Bring the local Shipping Hub up if it is down (no-op once it is running), so green-arrowing the
+    // BDD scenarios in the IDE just works instead of skipping the whole suite. See SutPreflight.
+    SutPreflight.ensureLocalStackReady();
     Assumptions.assumeTrue(SutPreflight.isApiReady(), SutPreflight::apiNotReadyMessage);
   }
 }

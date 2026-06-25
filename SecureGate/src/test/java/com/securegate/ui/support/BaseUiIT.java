@@ -28,6 +28,8 @@ public abstract class BaseUiIT {
 
   @BeforeAll
   void startBrowser() {
+    // Bring the local Shipping Hub (API + web) up if it is down, so a green-arrow UI run just works.
+    SutPreflight.ensureLocalStackReady();
     // The UI suite drives the web app, which in turn calls the API — skip with a clear message
     // (rather than launching Chrome only to fail) when either side of the stack is down, including
     // the case where the API is up but its database is dead (every page would render an error).

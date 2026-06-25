@@ -86,28 +86,31 @@ pnpm --filter @shipping-hub/api dev            # API on http://localhost:4000
 ### Running from IntelliJ (or any IDE)
 
 Every `com.securegate` test is an **integration** test against a running Shipping Hub, so two IDE
-gotchas bite if you just green-arrow the `com.securegate` folder:
+gotchas used to bite if you just green-arrow the `com.securegate` folder:
 
-1. **The IDE does not start the stack.** With the Shipping Hub down, every test would otherwise fail
-   with a raw `Connection refused`. The base classes now run a one-shot readiness check first, so a
-   down stack instead **skips** every test (API, BDD and UI) with a single message telling you to
-   start the stack — no wall of connection errors, nothing reported as failed. The check is
-   **database-aware**: it probes a real data read (the seeded demo tracking code), not just
-   `/health` (which touches no DB). So if the API is up but PostgreSQL has crashed — e.g. the bundled
-   Windows cluster dying with exception `0xC0000142`, which makes every endpoint return `500` — the
-   suite skips with "API is up but its database is not responding … restart the stack" instead of a
-   wall of `500`s.
+1. **The stack auto-starts — green-arrow just works.** Before any test touches the API, the suite
+   runs a one-shot readiness check, and if the local Shipping Hub is **down it starts it for you**
+   (runs [`scripts/run-local-stack.ps1`](scripts/run-local-stack.ps1) and waits until the API, its
+   database, and the web app are up). The first test then blocks for ~1 minute while the stack comes
+   up; everything after is instant. No more "all tests skipped because nothing is on `:4000`". The
+   check is **database-aware**: it probes a real data read (the seeded demo tracking code), not just
+   `/health` (which touches no DB), so an API that is up but whose PostgreSQL has crashed is treated
+   as down and the stack is brought back. Auto-start is local-only (`-Denv=local`, Windows, never in
+   CI) and can be turned off with **`-Dsg.autostart=false`** — in which case a down stack falls back
+   to the old behavior: every test is cleanly **skipped** (not failed) with one message telling you to
+   start the stack by hand. Live bring-up progress is written to
+   `SecureGate/target/local-stack-autostart.log`.
 2. **The IDE's JUnit runner ignores Maven's group exclusions** (`ratelimit`, `ui`), so running the
    folder directly also fires the Selenium UI tests (need a browser) and the slow `RateLimitIT`.
    Prefer running through Maven so the exclusions apply.
 
-Two committed run configurations (under [`.run/`](../.run), so they survive reopening the IDE) make
-this one click:
+You no longer need to start anything first — but two committed run configurations (under
+[`.run/`](../.run), so they survive reopening the IDE) are still handy:
 
 - **SecureGate · start local stack** — brings Postgres + API + web up and waits for health.
 - **SecureGate · verify (needs local stack)** — runs `mvnw verify` (honoring the group exclusions).
 
-Run the first once, then the second. Or do both at once from a terminal:
+Or do everything at once from a terminal:
 `powershell -ExecutionPolicy Bypass -File SecureGate\scripts\run-local-stack.ps1 -RunTests`.
 
 ### Running the complete suite (all 44 tests)
