@@ -123,9 +123,10 @@ are worth knowing:
    Serenity/Screenplay UI scenarios (they need the web app on `:3000` + a browser). Karate runners
    are also available per-feature in the IDE via `ApiFeatureRunners` (green-arrow a single feature).
 
-Two committed run configurations (under [`.run/`](../.run), so they survive reopening the IDE) help:
+Three committed run configurations (under [`.run/`](../.run), so they survive reopening the IDE) help:
 
 - **SecureGate · start local stack** — brings Postgres + API + web up and waits for health.
+- **SecureGate · start stack and verify** — brings the stack up and runs the full suite in one go.
 - **SecureGate · verify (needs local stack)** — runs `mvnw verify -Pui` (the full suite).
 
 ### Running everything

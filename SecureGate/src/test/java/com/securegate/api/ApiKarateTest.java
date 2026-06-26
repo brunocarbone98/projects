@@ -33,16 +33,33 @@ class ApiKarateTest {
 
   @Test
   void runApiSuite() {
-    boolean includeRateLimit = Boolean.parseBoolean(System.getProperty("sg.ratelimit", "false"));
     int threads = Integer.getInteger("sg.karate.threads", 4);
 
-    Results results =
-        (includeRateLimit
-                ? Runner.path("classpath:karate")
-                : Runner.path("classpath:karate").tags("~@ratelimit"))
+    // Main suite: every feature EXCEPT the load-style @ratelimit one, run in parallel.
+    Results main =
+        Runner.path("classpath:karate")
+            .tags("~@ratelimit")
             .outputCucumberJson(true)
             .parallel(threads);
 
-    assertEquals(0, results.getFailCount(), results.getErrorMessages());
+    int failures = main.getFailCount();
+    StringBuilder errors = new StringBuilder(main.getErrorMessages());
+
+    // The rate-limit check is load-style: it exhausts the public tracking endpoint's per-IP budget
+    // (default 60 req / 60s). Because every scenario shares the same source IP, it must NOT run
+    // concurrently with — or before — the public tracking/health scenarios, or they would receive
+    // 429 instead of their asserted 200/400/404. So when opted in (-Dsg.ratelimit=true) we run it
+    // on its own, single-threaded, AFTER the main suite has already passed, into a separate report
+    // dir. Nothing public-facing runs after it, so there is nothing left to throttle.
+    if (Boolean.parseBoolean(System.getProperty("sg.ratelimit", "false"))) {
+      Results rateLimit =
+          Runner.path("classpath:karate/ratelimit.feature")
+              .reportDir("target/karate-reports-ratelimit")
+              .parallel(1);
+      failures += rateLimit.getFailCount();
+      errors.append(System.lineSeparator()).append(rateLimit.getErrorMessages());
+    }
+
+    assertEquals(0, failures, errors.toString());
   }
 }
