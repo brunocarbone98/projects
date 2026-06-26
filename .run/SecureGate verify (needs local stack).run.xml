@@ -6,7 +6,9 @@
       <option name="myRunnerParameters">
         <MavenRunnerParameters>
           <option name="profiles">
-            <set />
+            <set>
+              <option value="ui" />
+            </set>
           </option>
           <option name="goals">
             <list>
@@ -15,7 +17,9 @@
           </option>
           <option name="pomFileName" value="pom.xml" />
           <option name="profilesMap">
-            <map />
+            <map>
+              <entry key="ui" value="true" />
+            </map>
           </option>
           <option name="projectsCmdOptionValues">
             <list />

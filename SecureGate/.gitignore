@@ -17,10 +17,11 @@ application-local.yml
 # OS noise
 .DS_Store
 
-# Test reports & artifacts (generated)
-allure-results/
-allure-report/
+# Test reports & artifacts (generated; most live under target/ already)
 **/screenshots/
+karate-reports/
+site/serenity/
+target/newman/
 
-# Allure command-line tool, downloaded on demand by the allure-maven plugin
-.allure/
+# Serenity working dir
+.serenity/

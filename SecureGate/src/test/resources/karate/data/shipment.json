@@ -1,0 +1,23 @@
+{
+  "origin": {
+    "contactName": "Ana Perez",
+    "line1": "123 Test Street",
+    "city": "Panama City",
+    "postalCode": "00000",
+    "country": "PA"
+  },
+  "destination": {
+    "contactName": "John Doe",
+    "line1": "123 Test Street",
+    "city": "Miami",
+    "postalCode": "00000",
+    "country": "US"
+  },
+  "serviceLevel": "EXPRESS",
+  "parcel": {
+    "weightGrams": 2000,
+    "lengthCm": 30,
+    "widthCm": 20,
+    "heightCm": 10
+  }
+}

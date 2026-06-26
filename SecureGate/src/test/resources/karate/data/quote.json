@@ -1,0 +1,9 @@
+{
+  "originCountry": "PA",
+  "destinationCountry": "US",
+  "weightGrams": 2000,
+  "lengthCm": 30,
+  "widthCm": 20,
+  "heightCm": 10,
+  "serviceLevel": "EXPRESS"
+}
