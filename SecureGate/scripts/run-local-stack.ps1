@@ -29,18 +29,19 @@
 
 .EXAMPLE
     pwsh SecureGate\scripts\run-local-stack.ps1 -RunTests
-        Starts the stack, waits for /health, then runs `mvnw verify -Denv=local`.
+        Starts the stack, waits for /health, then runs the full suite
+        (`mvnw verify -Denv=local -Pui`: Karate API + Serenity/Screenplay UI).
 
 .EXAMPLE
     pwsh SecureGate\scripts\run-local-stack.ps1 -RunTests -Headed
-        Same, but the Selenium UI tests open a real, visible Chrome window (-Dheadless=false).
+        Same, but the Serenity UI tests open a real, visible Chrome window (-Dheadless.mode=false).
 #>
 [CmdletBinding()]
 param(
     [switch]$RunTests,
-    # Open a real, visible Chrome window for the Selenium UI tests instead of running headless.
+    # Open a real, visible Chrome window for the Serenity UI tests instead of running headless.
     [switch]$Headed,
-    # Extra args passed straight to mvnw, e.g. -MvnArgs '-DexcludedGroups=' for the full set.
+    # Extra args passed straight to mvnw, e.g. -Dsg.ratelimit=true to add the rate-limit check.
     [string]$MvnArgs = ''
 )
 
@@ -263,14 +264,14 @@ Write-Host 'Web app is up and routes are warm.' -ForegroundColor Green
 if ($RunTests) {
     $mvnExtra = $MvnArgs.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
     if ($Headed) {
-        Write-Step 'running the SecureGate suite with a VISIBLE browser (mvnw verify -Denv=local -Dheadless=false)'
-        $mvnExtra = @('-Dheadless=false') + $mvnExtra
+        Write-Step 'running the full SecureGate suite with a VISIBLE browser (mvnw verify -Denv=local -Pui -Dheadless.mode=false)'
+        $mvnExtra = @('-Dheadless.mode=false') + $mvnExtra
     } else {
-        Write-Step 'running the SecureGate suite (mvnw verify -Denv=local)'
+        Write-Step 'running the full SecureGate suite (mvnw verify -Denv=local -Pui)'
     }
     Push-Location $secureGate
     try {
-        & .\mvnw.cmd verify -Denv=local $mvnExtra
+        & .\mvnw.cmd verify -Denv=local -Pui $mvnExtra
     } finally {
         Pop-Location
     }

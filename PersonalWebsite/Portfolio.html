@@ -144,7 +144,7 @@
             <div>
                 <div class="block">
                     <div class="block-label">What it is</div>
-                    <p>A professional QA automation suite that validates the Shipping Hub platform (project 02) the way a QA Automation Engineer would: API contract and functional tests with REST Assured, end-to-end UI journeys with Selenium under the Page Object Model, and BDD scenarios with Cucumber — including security-oriented negatives such as rate limiting, broken authorization and tampered tokens. All three layers — the REST Assured API suite, the Cucumber BDD journeys and the Selenium UI E2E (Page Object Model) — are implemented and run in CI (43 automated tests): the pipeline spins up the API, the web app and a headless browser, produces an Allure report, and includes a SonarQube quality-gate step.</p>
+                    <p>A professional QA automation suite that validates the Shipping Hub platform (project 02) the way a QA Automation Engineer would: API contract and functional tests with Karate, end-to-end UI journeys with Selenium under the Serenity Screenplay pattern, BDD scenarios with Cucumber/Gherkin, and a hand-runnable Postman/Newman collection — including security-oriented negatives such as rate limiting, broken authorization and tampered tokens. The Page Object Model was retired in favour of Screenplay (Actors performing Tasks, asking Questions), which stays maintainable as the UI surface grows. All layers run in CI: the pipeline spins up the API, the web app and a headless browser, produces Serenity living documentation plus a Karate report, and includes a SonarQube quality-gate step.</p>
                 </div>
                 <div class="block">
                     <div class="block-label">Purpose</div>
@@ -154,12 +154,13 @@
 
             <div class="spec">
                 <div class="spec-head">Stack used</div>
-                <div class="spec-row"><div class="tech">Java · REST Assured</div><div class="role">API contract &amp; functional testing, with security negatives</div></div>
-                <div class="spec-row"><div class="tech">Selenium · POM</div><div class="role">End-to-end UI journeys under the Page Object Model</div></div>
+                <div class="spec-row"><div class="tech">Java · Karate</div><div class="role">API contract &amp; functional testing (Gherkin + match), with security negatives</div></div>
+                <div class="spec-row"><div class="tech">Selenium · Serenity Screenplay</div><div class="role">End-to-end UI journeys as Actors performing Tasks (replaces POM)</div></div>
                 <div class="spec-row"><div class="tech">Cucumber (BDD)</div><div class="role">Gherkin scenarios as living documentation</div></div>
+                <div class="spec-row"><div class="tech">Postman · Newman</div><div class="role">Hand-runnable API collection, headless in CI</div></div>
                 <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI pipeline: nightly and on-demand test runs</div></div>
                 <div class="spec-row"><div class="tech">SonarQube</div><div class="role">Static-analysis quality gate on the test framework</div></div>
-                <div class="spec-row"><div class="tech">Allure</div><div class="role">Test reporting with history and trends</div></div>
+                <div class="spec-row"><div class="tech">Serenity BDD</div><div class="role">Living documentation reports with screenshots</div></div>
             </div>
         </div>
     </div>

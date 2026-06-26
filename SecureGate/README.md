@@ -2,48 +2,54 @@
 
 **Automated QA & security test suite for [Shipping Hub](../FullStackHub)** — the full-stack parcel platform (live at <https://shipping-hub.up.railway.app/>). SecureGate tests it the way a QA Automation Engineer would: API, UI and BDD, in CI, behind a quality gate.
 
-> **Status: Phases 0–6 implemented.** The full QA suite — **REST Assured API**, **Cucumber BDD**
-> and **Selenium UI E2E** (43 tests) — runs against a local Shipping Hub with **Allure** reporting
-> and a token-gated **SonarQube** step. The GitHub Actions pipeline stands up the API + web + Chrome
-> and runs everything on every PR and nightly. See [`ROADMAP.md`](./ROADMAP.md); conventions in
+> **Modernized test stack.** The suite now runs on **Karate** (API, Gherkin-native), **Serenity BDD +
+> Screenplay** over **Selenium** (UI E2E), **Cucumber/Gherkin** (journeys), and a **Postman/Newman**
+> collection — all in Java 21 (OOP). The previous Page Object Model grew hard to maintain as the UI
+> surface widened, so UI tests moved to the **Screenplay pattern** (Actors performing Tasks, asking
+> Questions). Reporting is **Serenity**'s living documentation plus Karate's HTML report; the
+> token-gated **SonarQube** gate stays. See [`ROADMAP.md`](./ROADMAP.md); conventions in
 > [`CLAUDE.md`](./CLAUDE.md).
 
 ## What it tests
 
 The **Shipping Hub** platform (Next.js web + Express API + Python services + PostgreSQL) — through its public API and web UI only (**black-box**):
 
-- **API** (REST Assured): tracking, quote, auth, shipments, wallet — contracts, validation, idempotency, and security negatives (rate limiting, authz, tampered JWT).
-- **UI E2E** (Selenium + Page Object Model): the critical journeys in a real browser.
-- **BDD** (Cucumber): those journeys as readable Gherkin specs.
+- **API** (Karate): tracking, quote, auth, shipments, wallet — contracts (schema-style `match`), validation, idempotency, and security negatives (rate limiting, authz, tampered JWT).
+- **UI E2E** (Serenity + Screenplay + Selenium): the critical journeys in a real browser, written as Actors performing Tasks.
+- **BDD** (Cucumber + Gherkin): those journeys as readable specs that Serenity turns into living documentation.
+- **Postman/Newman**: a hand-runnable, shareable collection of the same API checks.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     subgraph SG["SecureGate test suite"]
-      API["REST Assured<br/>API tests"]
-      BDD["Cucumber<br/>BDD scenarios"]
-      UI["Selenium + POM<br/>UI E2E"]
+      API["Karate<br/>API features (Gherkin)"]
+      PM["Postman / Newman<br/>API collection"]
+      UI["Serenity + Screenplay<br/>UI E2E (Selenium)"]
+      BDD["Cucumber + Gherkin<br/>UI journeys"]
     end
     API --> SUT
-    BDD --> SUT
+    PM --> SUT
+    BDD --> UI
     UI --> SUT
     SUT[("Shipping Hub<br/>web · API · services")]
     SG --> CI["GitHub Actions"]
     CI --> GATE{"SonarQube gate"}
-    CI --> REP["Allure report"]
+    CI --> REP["Serenity report<br/>+ Karate report"]
 ```
 
 ## Stack
 
 | Area | Tech |
 |---|---|
-| API testing | Java 21, REST Assured, JSON-schema validation |
-| UI E2E | Selenium WebDriver, Page Object Model, WebDriverManager |
-| BDD | Cucumber (Gherkin) |
+| API testing | Java 21, **Karate** (Gherkin-native HTTP + `match` contracts) |
+| API collection | **Postman** collection + **Newman** (headless) |
+| UI E2E | **Selenium** WebDriver via **Serenity Screenplay** (Tasks/Questions — replaces Page Object Model) |
+| BDD | **Cucumber** (Gherkin), integrated with Serenity |
 | Runner / build | JUnit 5, Maven |
-| Quality gate | SonarQube / SonarCloud, JaCoCo |
-| Reporting | Allure |
+| Quality gate | SonarQube / SonarCloud |
+| Reporting | **Serenity** living documentation + Karate HTML report |
 | CI/CD | GitHub Actions |
 
 ## Getting started
@@ -53,101 +59,105 @@ the suite:
 
 ```bash
 # 1. Start a local Shipping Hub (in ../FullStackHub)
-docker compose up -d                          # PostgreSQL
-pnpm --filter @shipping-hub/api db:deploy      # migrate
-pnpm --filter @shipping-hub/api db:seed        # seed demo data
-pnpm --filter @shipping-hub/api dev            # API on http://localhost:4000
+docker compose up -d                           # PostgreSQL
+pnpm --filter @shipping-hub/api db:deploy       # migrate
+pnpm --filter @shipping-hub/api db:seed         # seed demo data
+pnpm --filter @shipping-hub/api dev             # API on http://localhost:4000
 
-# 2. Run the QA suite (in ./SecureGate)
-./mvnw verify                                  # 28 REST Assured + 9 Cucumber tests
-./mvnw allure:report                           # -> target/site/allure-maven-plugin
+# 2. Run the API suite (Karate) (in ./SecureGate)
+./mvnw verify                                   # 28 Karate API scenarios
 
-# UI E2E also needs the web app (pnpm --filter @shipping-hub/web dev) + a browser:
-./mvnw verify -DexcludedGroups=ratelimit       # adds the 6 Selenium UI tests
+# 3. Add the UI E2E suite (Serenity/Screenplay) — needs the web app + a browser:
+pnpm --filter @shipping-hub/web dev             # web on http://localhost:3000
+./mvnw verify -Pui                              # adds the 6 Serenity UI scenarios
 
-# Run the Selenium tests without a window (CI / headless machines):
-./mvnw verify -DexcludedGroups=ratelimit -Dheadless=true
+# Run the UI tests without a window (CI / headless machines):
+./mvnw verify -Pui -Dheadless.mode=true
 ```
 
-> **The browser is now visible by default.** The Selenium tests open a real Chrome window so you can
-> watch each test replay its scripted actions. You need a local Chrome installed — Selenium Manager
-> downloads the matching driver automatically. On CI or any machine without a display, opt back into
-> headless with `-Dheadless=true` (or set `HEADLESS=true`).
+> **The browser is visible by default.** The Serenity UI tests open a real Chrome window so you can
+> watch each actor replay its scripted actions. You need a local Chrome installed — Selenium Manager
+> downloads the matching driver automatically. On CI or any machine without a display, opt into
+> headless with `-Dheadless.mode=true`.
 
-> **Tests failing with `java.net.ConnectException: Connection refused`?** That means the Shipping Hub
-> isn't running — every `com.securegate` test is black-box and talks to it over HTTP, so the whole
-> suite "fails" when nothing is listening on `http://localhost:4000`. On Windows you can bring the
-> whole stack up (Postgres + pricing/labels + API + web) and run the suite in one command:
+> **Tests skipped with a "Shipping Hub is not reachable" message?** That means the stack isn't
+> running — every `com.securegate` test is black-box and talks to it over HTTP, so the whole suite is
+> cleanly **skipped** (not failed) when nothing is on `http://localhost:4000`. On Windows you can
+> bring the whole stack up (Postgres + pricing/labels + API + web) and run the suite in one command:
 >
 > ```powershell
 > pwsh scripts\run-local-stack.ps1 -RunTests
 > ```
 
+### Reports
+
+```bash
+./mvnw verify -Pui            # runs the suite
+./mvnw serenity:aggregate     # -> target/site/serenity/index.html  (UI living documentation)
+# Karate writes its report automatically -> target/karate-reports/karate-summary.html
+```
+
+### The Postman collection
+
+```bash
+cd postman
+npx newman run SecureGate.postman_collection.json -e SecureGate.local.postman_environment.json
+```
+
+See [`postman/README.md`](./postman/README.md).
+
 ### Running from IntelliJ (or any IDE)
 
-Every `com.securegate` test is an **integration** test against a running Shipping Hub, so two IDE
-gotchas used to bite if you just green-arrow the `com.securegate` folder:
+Every `com.securegate` test is an **integration** test against a running Shipping Hub, so two things
+are worth knowing:
 
 1. **The stack auto-starts — green-arrow just works.** Before any test touches the API, the suite
    runs a one-shot readiness check, and if the local Shipping Hub is **down it starts it for you**
    (runs [`scripts/run-local-stack.ps1`](scripts/run-local-stack.ps1) and waits until the API, its
-   database, and the web app are up). The first test then blocks for ~1 minute while the stack comes
-   up; everything after is instant. No more "all tests skipped because nothing is on `:4000`". The
-   check is **database-aware**: it probes a real data read (the seeded demo tracking code), not just
-   `/health` (which touches no DB), so an API that is up but whose PostgreSQL has crashed is treated
-   as down and the stack is brought back. Auto-start is local-only (`-Denv=local`, Windows, never in
-   CI) and can be turned off with **`-Dsg.autostart=false`** — in which case a down stack falls back
-   to the old behavior: every test is cleanly **skipped** (not failed) with one message telling you to
-   start the stack by hand. Live bring-up progress is written to
-   `SecureGate/target/local-stack-autostart.log`.
-2. **The IDE's JUnit runner ignores Maven's group exclusions** (`ratelimit`, `ui`), so running the
-   folder directly also fires the Selenium UI tests (need a browser) and the slow `RateLimitIT`.
-   Prefer running through Maven so the exclusions apply.
+   database, and the web app are up). The check is **database-aware**: it probes a real data read (the
+   seeded demo tracking code), not just `/health`. Auto-start is local-only (`-Denv=local`, Windows,
+   never in CI) and can be turned off with **`-Dsg.autostart=false`** — in which case a down stack
+   falls back to cleanly **skipping** every test with one actionable message. Live bring-up progress
+   is written to `SecureGate/target/local-stack-autostart.log`.
+2. **The UI suite is opt-in.** `./mvnw verify` runs only the Karate API suite. Add `-Pui` to run the
+   Serenity/Screenplay UI scenarios (they need the web app on `:3000` + a browser). Karate runners
+   are also available per-feature in the IDE via `ApiFeatureRunners` (green-arrow a single feature).
 
-You no longer need to start anything first — but two committed run configurations (under
-[`.run/`](../.run), so they survive reopening the IDE) are still handy:
+Three committed run configurations (under [`.run/`](../.run), so they survive reopening the IDE) help:
 
 - **SecureGate · start local stack** — brings Postgres + API + web up and waits for health.
-- **SecureGate · verify (needs local stack)** — runs `mvnw verify` (honoring the group exclusions).
+- **SecureGate · start stack and verify** — brings the stack up and runs the full suite in one go.
+- **SecureGate · verify (needs local stack)** — runs `mvnw verify -Pui` (the full suite).
 
-Or do everything at once from a terminal:
-`powershell -ExecutionPolicy Bypass -File SecureGate\scripts\run-local-stack.ps1 -RunTests`.
-
-### Running the complete suite (all 44 tests)
-
-The default `mvnw verify` excludes two tag groups (`ratelimit`, `ui`). To run **everything**, with the
-stack up (Postgres + API + web + Chrome):
+### Running everything
 
 ```powershell
-# 43 tests: API + BDD + the 6 Selenium UI tests
-./mvnw verify -DexcludedGroups=ratelimit
+# Full suite: 28 Karate API + 6 Serenity UI scenarios (stack up: Postgres + API + web + Chrome)
+./mvnw verify -Pui
 
-# the 44th test (load-style; consumes the per-IP rate-limit budget, so it runs on its own)
-./mvnw verify "-Dit.test=RateLimitIT" "-DexcludedGroups=."
+# the opt-in rate-limit check (load-style; consumes the per-IP budget, so it runs on its own)
+./mvnw verify "-Dtest=ApiKarateTest" -Dsg.ratelimit=true
 ```
-
-> **Verified in a clean Windows sandbox (June 2026):** with the bundled Node 22 + PostgreSQL under
-> `%USERPROFILE%\sg-tools` and a local Chrome, **all 44 tests pass** — even without Python installed.
-> The `pricing`/`labels` microservices are *optional*: the API computes quotes locally (identical
-> result) when `pricing` is down, and the suite never downloads a label. The only caveat is that the
-> first UI run against a freshly-started `next dev` can time out while Next.js compiles routes on
-> demand; `run-local-stack.ps1` now pre-warms those routes so the UI tests are deterministic.
 
 CI does all of this automatically (API + web + Chrome) — see [`/.github/workflows/securegate-ci.yml`](../.github/workflows/securegate-ci.yml).
 
 ## What's covered
 
-| Shipping Hub feature | API (REST Assured) | BDD (Cucumber) | UI (Selenium) |
-|---|---|---|---|
-| Public tracking | contract · 400 · 404 · 429 | ✅ | landing → result · not-found |
-| Quote | contract · validation | ✅ | calculator → price |
-| Auth (login/refresh/me) | + JWT/authz negatives | ✅ | sign-in · invalid-creds error |
-| Shipments | CRUD · owner-scoped authz | — | — |
-| Wallet | ledger · top-up · idempotency | top-up | — |
-| Language (es/en) | — | — | header switch |
+| Shipping Hub feature | API (Karate) | UI (Serenity/Screenplay) |
+|---|---|---|
+| Public tracking | contract · 400 · 404 · 429 | landing → result · not-found |
+| Quote | contract · validation | calculator → price |
+| Auth (login/refresh/me) | + JWT/authz negatives | sign-in · invalid-creds error |
+| Shipments | CRUD · owner-scoped authz | — |
+| Wallet | ledger · top-up · idempotency | — |
+| Language (es/en) | — | header switch |
 
-Each run produces an **Allure** report (REST Assured calls attached); CI uploads it as an artifact.
+Each run produces a **Serenity** report (UI journeys, with screenshots on failure) and a **Karate**
+HTML report (every API call attached); CI uploads both as artifacts.
 
 ## Roadmap
 
-Seven phases (0–6), from a smoke test to a full API + BDD + UI suite in CI with a quality gate and a published report — see [`ROADMAP.md`](./ROADMAP.md). The system under test is [`../FullStackHub`](../FullStackHub); the pipeline (a GitHub Actions workflow) will live at the repo root `/.github/workflows/securegate-ci.yml`.
+Seven phases (0–6), from a smoke test to a full Karate API + Serenity/Screenplay UI suite in CI with
+a quality gate and published reports — see [`ROADMAP.md`](./ROADMAP.md). The system under test is
+[`../FullStackHub`](../FullStackHub); the pipeline (a GitHub Actions workflow) lives at the repo root
+`/.github/workflows/securegate-ci.yml`.

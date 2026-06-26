@@ -6,7 +6,7 @@
 
   <groupId>com.securegate</groupId>
   <artifactId>securegate</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <packaging>jar</packaging>
   <name>SecureGate</name>
   <description>Automated QA &amp; security test suite for the Shipping Hub platform</description>
@@ -15,35 +15,31 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>21</maven.compiler.release>
 
-    <junit.version>5.11.4</junit.version>
-    <rest-assured.version>5.5.0</rest-assured.version>
-    <cucumber.version>7.20.1</cucumber.version>
-    <jackson.version>2.18.2</jackson.version>
-    <selenium.version>4.27.0</selenium.version>
-    <!-- Selenium pulls in Guava transitively. Selenium 4.27 resolves Guava 33.2.1-jre, whose
-         AbstractFuture still uses sun.misc.Unsafe and therefore triggers the JDK's "terminally
-         deprecated method in sun.misc.Unsafe" warning on JDK 23+. Guava >= 33.4.x switched that
-         code to VarHandle, so pinning it here removes the warning at the source on every JDK
-         (incl. the JDK 21 baseline) and in every runner (Maven fork, IDE, etc.). -->
-    <guava.version>33.4.8-jre</guava.version>
-    <allure.version>2.29.0</allure.version>
-    <failsafe.version>3.5.2</failsafe.version>
+    <!-- Test stack versions. JUnit is pinned to the version Serenity 5.3.10 is built on (JUnit 6),
+         whose platform Cucumber 7.34.2 also requires (DiscoveryIssueReporter). -->
+    <junit.version>6.0.3</junit.version>
+    <serenity.version>5.3.10</serenity.version>
+    <!-- Must match the Cucumber that Serenity 5.3.10 is built against (its SerenityReporter plugs
+         into Cucumber's plugin SPI), otherwise the BDD reports break. -->
+    <cucumber.version>7.34.2</cucumber.version>
+    <karate.version>1.4.1</karate.version>
     <slf4j.version>2.0.16</slf4j.version>
 
+    <!-- Plugin versions -->
+    <surefire.version>3.5.2</surefire.version>
+
     <!-- The suite tests a RUNNING Shipping Hub. Default target is a local instance
-         (API on :4000, web on :3000). -->
+         (API on :4000, web on :3000). Selected with -Denv=local|live. -->
     <env>local</env>
 
+    <!-- The Serenity UI acceptance suite (Screenplay) needs the web app on :3000 plus a real
+         browser, so its runner class is EXCLUDED from the default run. Include it with the `ui`
+         profile: `./mvnw verify -Pui` (CI does this). The Karate `@ratelimit` check is load-style
+         and is excluded inside the Karate runner; opt in with -Dsg.ratelimit=true. -->
+    <excludedTests>**/UiAcceptanceTest.java</excludedTests>
 
-    <!-- Failsafe tag filters. `ratelimit` is load-style (consumes the per-IP budget) and `ui`
-         needs a running web app + browser, so both are excluded from the default run.
-         The CI ui job runs the full set with the web up via -DexcludedGroups=ratelimit;
-         run the rate-limit check on its own with -Dit.test=RateLimitIT -DexcludedGroups=. -->
-    <groups></groups>
-    <excludedGroups>ratelimit,ui</excludedGroups>
-
-    <!-- SonarQube / SonarCloud (Phase 5). Run with `mvn sonar:sonar -Dsonar.token=$SONAR_TOKEN`
-         (needs a SonarCloud project + token). Override the org/key for your account. -->
+    <!-- SonarQube / SonarCloud quality gate (token-gated CI step). Run with
+         `mvn sonar:sonar -Dsonar.token=$SONAR_TOKEN`. Override org/key for your account. -->
     <sonar.host.url>https://sonarcloud.io</sonar.host.url>
     <sonar.sources>pom.xml</sonar.sources>
     <sonar.tests>src/test/java</sonar.tests>
@@ -51,6 +47,7 @@
 
   <dependencyManagement>
     <dependencies>
+      <!-- Align every JUnit 5 artifact (Serenity, Karate and our runners all pull it in). -->
       <dependency>
         <groupId>org.junit</groupId>
         <artifactId>junit-bom</artifactId>
@@ -58,6 +55,16 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
+      <!-- Serenity BDD (core + Screenplay + Cucumber + WebDriver) version management. -->
+      <dependency>
+        <groupId>net.serenity-bdd</groupId>
+        <artifactId>serenity-bom</artifactId>
+        <version>${serenity.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- Cucumber engine/runtime: Serenity marks these `test`-scoped in its own POM, so they are
+           not transitive — pin them here at the version Serenity expects. -->
       <dependency>
         <groupId>io.cucumber</groupId>
         <artifactId>cucumber-bom</artifactId>
@@ -65,61 +72,40 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
-      <dependency>
-        <groupId>com.fasterxml.jackson</groupId>
-        <artifactId>jackson-bom</artifactId>
-        <version>${jackson.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
-      <dependency>
-        <groupId>io.qameta.allure</groupId>
-        <artifactId>allure-bom</artifactId>
-        <version>${allure.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
-      <!-- Force a Guava that no longer calls sun.misc.Unsafe (see <guava.version> above). -->
-      <dependency>
-        <groupId>com.google.guava</groupId>
-        <artifactId>guava</artifactId>
-        <version>${guava.version}</version>
-      </dependency>
     </dependencies>
   </dependencyManagement>
 
   <dependencies>
-    <!-- JUnit 5 (Jupiter + Platform Suite for the Cucumber runner) -->
+    <!-- JUnit 5 (Jupiter + Platform Suite to host the Serenity/Cucumber acceptance suite). -->
     <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
     <dependency><groupId>org.junit.platform</groupId><artifactId>junit-platform-suite</artifactId><scope>test</scope></dependency>
 
-    <!-- REST Assured (API testing) + JSON-schema contract validation -->
-    <dependency><groupId>io.rest-assured</groupId><artifactId>rest-assured</artifactId><version>${rest-assured.version}</version><scope>test</scope></dependency>
-    <dependency><groupId>io.rest-assured</groupId><artifactId>json-schema-validator</artifactId><version>${rest-assured.version}</version><scope>test</scope></dependency>
+    <!-- ==========================================================================================
+         UI / E2E: Serenity BDD + Screenplay pattern over Selenium WebDriver.
+         Screenplay (Actors performing Tasks, asking Questions) replaces the Page Object Model,
+         which grew hard to maintain as the UI surface widened.
+         ========================================================================================== -->
+    <dependency><groupId>net.serenity-bdd</groupId><artifactId>serenity-core</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>net.serenity-bdd</groupId><artifactId>serenity-screenplay</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>net.serenity-bdd</groupId><artifactId>serenity-screenplay-webdriver</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>net.serenity-bdd</groupId><artifactId>serenity-ensure</artifactId><scope>test</scope></dependency>
 
-    <!-- Cucumber (BDD) on the JUnit Platform, with PicoContainer for scenario DI -->
+    <!-- BDD: Cucumber (Gherkin) wired into Serenity for living documentation + reports.
+         serenity-cucumber brings the SerenityReporter; the Cucumber engine + Java backend are
+         declared explicitly because Serenity scopes them `test` (non-transitive). -->
+    <dependency><groupId>net.serenity-bdd</groupId><artifactId>serenity-cucumber</artifactId><scope>test</scope></dependency>
     <dependency><groupId>io.cucumber</groupId><artifactId>cucumber-java</artifactId><scope>test</scope></dependency>
     <dependency><groupId>io.cucumber</groupId><artifactId>cucumber-junit-platform-engine</artifactId><scope>test</scope></dependency>
-    <dependency><groupId>io.cucumber</groupId><artifactId>cucumber-picocontainer</artifactId><scope>test</scope></dependency>
 
-    <!-- Selenium WebDriver (UI E2E, Phase 3). Selenium Manager auto-resolves the driver. -->
-    <dependency><groupId>org.seleniumhq.selenium</groupId><artifactId>selenium-java</artifactId><version>${selenium.version}</version><scope>test</scope></dependency>
+    <!-- ==========================================================================================
+         API: Karate — Gherkin-native API testing (HTTP, JSON, schema-style match, parallel runner).
+         Replaces the hand-written REST Assured client. Karate brings its own engine, so it coexists
+         cleanly with Cucumber (no shared runner).
+         ========================================================================================== -->
+    <dependency><groupId>com.intuit.karate</groupId><artifactId>karate-junit5</artifactId><version>${karate.version}</version><scope>test</scope></dependency>
 
-    <!-- Allure reporting (Phase 5): JUnit 5 + Cucumber results, with REST Assured attachments -->
-    <dependency><groupId>io.qameta.allure</groupId><artifactId>allure-junit5</artifactId><scope>test</scope></dependency>
-    <dependency><groupId>io.qameta.allure</groupId><artifactId>allure-cucumber7-jvm</artifactId><scope>test</scope></dependency>
-    <dependency><groupId>io.qameta.allure</groupId><artifactId>allure-rest-assured</artifactId><scope>test</scope></dependency>
-
-    <!-- JSON for request bodies / assertions -->
-    <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><scope>test</scope></dependency>
-
-    <!-- Hamcrest matchers -->
+    <!-- Hamcrest matchers for Screenplay Questions / Ensure assertions. -->
     <dependency><groupId>org.hamcrest</groupId><artifactId>hamcrest</artifactId><version>3.0</version><scope>test</scope></dependency>
-
-    <!-- SLF4J no-op provider: gives Selenium's SLF4J facade a concrete backend so the
-         "No SLF4J providers were found / Defaulting to NOP" startup warning is gone, while
-         keeping the test output quiet (the provider discards messages). -->
-    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-nop</artifactId><version>${slf4j.version}</version><scope>test</scope></dependency>
   </dependencies>
 
   <build>
@@ -130,41 +116,52 @@
         <version>3.13.0</version>
       </plugin>
 
-      <!-- The suite is integration-level: it runs against a running Shipping Hub in the
-           `verify` phase via Failsafe (test classes are named *IT). Surefire finds no unit
-           tests and is a no-op. -->
+      <!-- The whole suite is integration-level (it drives a running Shipping Hub) but is wired on
+           the JUnit Platform and run in the `test` phase by Surefire: Karate runners (*Test) and the
+           Serenity/Cucumber acceptance suite (*Test). `mvn verify` still triggers it. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-failsafe-plugin</artifactId>
-        <version>${failsafe.version}</version>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.version}</version>
         <configuration>
-          <groups>${groups}</groups>
-          <excludedGroups>${excludedGroups}</excludedGroups>
+          <!-- Exclude the UI suite by default (see ${excludedTests}); the `ui` profile re-includes it. -->
+          <excludes>
+            <exclude>${excludedTests}</exclude>
+          </excludes>
           <systemPropertyVariables>
             <env>${env}</env>
-            <allure.results.directory>${project.build.directory}/allure-results</allure.results.directory>
           </systemPropertyVariables>
         </configuration>
+      </plugin>
+
+      <!-- Serenity aggregate report: target/site/serenity/index.html.
+           Bound to `post-integration-test` so `mvn verify` produces the report; CI also calls
+           `serenity:aggregate` explicitly with always() so a report exists even on test failure. -->
+      <plugin>
+        <groupId>net.serenity-bdd.maven.plugins</groupId>
+        <artifactId>serenity-maven-plugin</artifactId>
+        <version>${serenity.version}</version>
         <executions>
           <execution>
+            <id>serenity-reports</id>
+            <phase>post-integration-test</phase>
             <goals>
-              <goal>integration-test</goal>
-              <goal>verify</goal>
+              <goal>aggregate</goal>
             </goals>
           </execution>
         </executions>
       </plugin>
-
-      <!-- Allure report generation: `mvn allure:report` -> target/site/allure-maven-plugin -->
-      <plugin>
-        <groupId>io.qameta.allure</groupId>
-        <artifactId>allure-maven</artifactId>
-        <version>2.12.0</version>
-        <configuration>
-          <reportVersion>${allure.version}</reportVersion>
-          <resultsDirectory>${project.build.directory}/allure-results</resultsDirectory>
-        </configuration>
-      </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- `-Pui` runs the Serenity UI acceptance suite too (needs the web app on :3000 + a browser).
+         It disables the default exclusion by pointing it at a pattern that matches nothing. -->
+    <profile>
+      <id>ui</id>
+      <properties>
+        <excludedTests>**/__no_such_exclusion__.java</excludedTests>
+      </properties>
+    </profile>
+  </profiles>
 </project>
