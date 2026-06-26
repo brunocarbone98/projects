@@ -17,29 +17,28 @@ Feature: Shipping quotes
     And assert response.etaMinDays <= response.etaMaxDays
     And assert response.billableWeightGrams >= 2000
 
+  # The Background re-reads `baseQuote` before every scenario, so mutating it here is isolated.
+
   Scenario: a missing destination country is rejected with 400
-    * def body = karate.copy(baseQuote)
-    * remove body.destinationCountry
+    * remove baseQuote.destinationCountry
     Given path 'quote'
-    And request body
+    And request baseQuote
     When method post
     Then status 400
     And match response.error.code == 'VALIDATION_ERROR'
 
   Scenario: an over-limit weight is rejected with 400
-    * def body = karate.copy(baseQuote)
-    * set body.weightGrams = 80000
+    * set baseQuote.weightGrams = 80000
     Given path 'quote'
-    And request body
+    And request baseQuote
     When method post
     Then status 400
     And match response.error.code == 'VALIDATION_ERROR'
 
   Scenario: an unknown service level is rejected with 400
-    * def body = karate.copy(baseQuote)
-    * set body.serviceLevel = 'PREMIUM'
+    * set baseQuote.serviceLevel = 'PREMIUM'
     Given path 'quote'
-    And request body
+    And request baseQuote
     When method post
     Then status 400
     And match response.error.code == 'VALIDATION_ERROR'
