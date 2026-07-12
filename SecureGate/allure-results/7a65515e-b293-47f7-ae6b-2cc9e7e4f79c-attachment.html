@@ -1,0 +1,37 @@
+<div>POST to http://localhost:4000/api/v1/quote</div>
+
+    <h4>Body</h4>
+    <div>
+    <pre class="preformated-text">
+{
+    &quot;originCountry&quot;: &quot;PA&quot;,
+    &quot;destinationCountry&quot;: &quot;US&quot;,
+    &quot;weightGrams&quot;: 2000,
+    &quot;lengthCm&quot;: 30,
+    &quot;widthCm&quot;: 20,
+    &quot;heightCm&quot;: 10,
+    &quot;serviceLevel&quot;: &quot;EXPRESS&quot;
+}    </pre>
+    </div>
+
+    <h4>Headers</h4>
+    <div>
+            <div>Accept: application/json, application/javascript, text/javascript, text/json</div>
+            <div>Content-Type: application/json</div>
+    </div>
+
+
+
+    <h4>Curl</h4>
+    <div>
+        curl -v -X POST &#39;http://localhost:4000/api/v1/quote&#39; -H &#39;Accept: application/json, application/javascript, text/javascript, text/json&#39; -H &#39;Content-Type: application/json&#39; -d &#39;{
+    &quot;originCountry&quot;: &quot;PA&quot;,
+    &quot;destinationCountry&quot;: &quot;US&quot;,
+    &quot;weightGrams&quot;: 2000,
+    &quot;lengthCm&quot;: 30,
+    &quot;widthCm&quot;: 20,
+    &quot;heightCm&quot;: 10,
+    &quot;serviceLevel&quot;: &quot;EXPRESS&quot;
+}&#39;
+    </div>
+

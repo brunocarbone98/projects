@@ -1,0 +1,28 @@
+<div>POST to http://localhost:4000/api/v1/wallet/topup</div>
+
+    <h4>Body</h4>
+    <div>
+    <pre class="preformated-text">
+{
+    &quot;idempotencyKey&quot;: &quot;bdd-171324794940000&quot;,
+    &quot;amountCents&quot;: 5000
+}    </pre>
+    </div>
+
+    <h4>Headers</h4>
+    <div>
+            <div>Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlYTEwMzY5Zi1lM2I1LTQ4YWQtOGUwMS01ZTQzOTE4MmI1MWUiLCJlbWFpbCI6InNnKzE3ODI0OTMzNTQ5MTUtNzc2ODQzQHNlY3VyZWdhdGUudGVzdCIsInJvbGUiOiJDVVNUT01FUiIsImlhdCI6MTc4MjQ5MzM1NSwiZXhwIjoxNzgyNDk0MjU1fQ.AvgQ3ldKXlb4PIzXmhTpBFswSJk6AhvoEsmdtdIH5Uk</div>
+            <div>Accept: application/json, application/javascript, text/javascript, text/json</div>
+            <div>Content-Type: application/json</div>
+    </div>
+
+
+
+    <h4>Curl</h4>
+    <div>
+        curl -v -X POST &#39;http://localhost:4000/api/v1/wallet/topup&#39; -H &#39;Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlYTEwMzY5Zi1lM2I1LTQ4YWQtOGUwMS01ZTQzOTE4MmI1MWUiLCJlbWFpbCI6InNnKzE3ODI0OTMzNTQ5MTUtNzc2ODQzQHNlY3VyZWdhdGUudGVzdCIsInJvbGUiOiJDVVNUT01FUiIsImlhdCI6MTc4MjQ5MzM1NSwiZXhwIjoxNzgyNDk0MjU1fQ.AvgQ3ldKXlb4PIzXmhTpBFswSJk6AhvoEsmdtdIH5Uk&#39; -H &#39;Accept: application/json, application/javascript, text/javascript, text/json&#39; -H &#39;Content-Type: application/json&#39; -d &#39;{
+    &quot;idempotencyKey&quot;: &quot;bdd-171324794940000&quot;,
+    &quot;amountCents&quot;: 5000
+}&#39;
+    </div>
+

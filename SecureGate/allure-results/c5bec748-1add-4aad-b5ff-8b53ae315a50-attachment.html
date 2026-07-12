@@ -1,0 +1,65 @@
+<div>POST to http://localhost:4000/api/v1/shipments</div>
+
+    <h4>Body</h4>
+    <div>
+    <pre class="preformated-text">
+{
+    &quot;origin&quot;: {
+        &quot;contactName&quot;: &quot;Ana Perez&quot;,
+        &quot;line1&quot;: &quot;123 Test Street&quot;,
+        &quot;city&quot;: &quot;Panama City&quot;,
+        &quot;postalCode&quot;: &quot;00000&quot;,
+        &quot;country&quot;: &quot;PA&quot;
+    },
+    &quot;destination&quot;: {
+        &quot;contactName&quot;: &quot;John Doe&quot;,
+        &quot;line1&quot;: &quot;123 Test Street&quot;,
+        &quot;city&quot;: &quot;Miami&quot;,
+        &quot;postalCode&quot;: &quot;00000&quot;,
+        &quot;country&quot;: &quot;US&quot;
+    },
+    &quot;serviceLevel&quot;: &quot;EXPRESS&quot;,
+    &quot;parcel&quot;: {
+        &quot;weightGrams&quot;: 2000,
+        &quot;lengthCm&quot;: 30,
+        &quot;widthCm&quot;: 20,
+        &quot;heightCm&quot;: 10
+    }
+}    </pre>
+    </div>
+
+    <h4>Headers</h4>
+    <div>
+            <div>Accept: application/json, application/javascript, text/javascript, text/json</div>
+            <div>Content-Type: application/json</div>
+    </div>
+
+
+
+    <h4>Curl</h4>
+    <div>
+        curl -v -X POST &#39;http://localhost:4000/api/v1/shipments&#39; -H &#39;Accept: application/json, application/javascript, text/javascript, text/json&#39; -H &#39;Content-Type: application/json&#39; -d &#39;{
+    &quot;origin&quot;: {
+        &quot;contactName&quot;: &quot;Ana Perez&quot;,
+        &quot;line1&quot;: &quot;123 Test Street&quot;,
+        &quot;city&quot;: &quot;Panama City&quot;,
+        &quot;postalCode&quot;: &quot;00000&quot;,
+        &quot;country&quot;: &quot;PA&quot;
+    },
+    &quot;destination&quot;: {
+        &quot;contactName&quot;: &quot;John Doe&quot;,
+        &quot;line1&quot;: &quot;123 Test Street&quot;,
+        &quot;city&quot;: &quot;Miami&quot;,
+        &quot;postalCode&quot;: &quot;00000&quot;,
+        &quot;country&quot;: &quot;US&quot;
+    },
+    &quot;serviceLevel&quot;: &quot;EXPRESS&quot;,
+    &quot;parcel&quot;: {
+        &quot;weightGrams&quot;: 2000,
+        &quot;lengthCm&quot;: 30,
+        &quot;widthCm&quot;: 20,
+        &quot;heightCm&quot;: 10
+    }
+}&#39;
+    </div>
+
