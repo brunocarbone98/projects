@@ -2,7 +2,8 @@ name: SecureGate CI
 
 # SecureGate is a black-box QA suite: it needs a running Shipping Hub. This pipeline
 # stands up PostgreSQL + the API + the web app, seeds demo data, then runs the full
-# suite (REST Assured API + Cucumber BDD + Selenium UI) and publishes an Allure report.
+# suite (Karate API + Serenity/Screenplay UI + Cucumber BDD) plus the Postman/Newman
+# collection, and publishes the Serenity + Karate reports.
 on:
   pull_request:
     paths:
@@ -104,17 +105,27 @@ jobs:
           curl -sS --retry 90 --retry-delay 2 --retry-connrefused -m 180 -o /dev/null http://localhost:3000/en
           echo "Web is up."
 
-      - name: Run the SecureGate suite (API + BDD + UI)
+      - name: Run the SecureGate suite (Karate API + Serenity/Screenplay UI)
         working-directory: SecureGate
         env:
           CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
-          CHROMEDRIVER_BIN: ${{ steps.chrome.outputs.chromedriver-path }}
-        run: ./mvnw -B verify -DexcludedGroups=ratelimit -Dheadless=true
+        run: >-
+          ./mvnw -B verify -Pui
+          -Dheadless.mode=true
+          -Dwebdriver.chrome.driver=${{ steps.chrome.outputs.chromedriver-path }}
 
-      - name: Generate the Allure report
+      - name: Run the Postman collection (Newman, non-blocking smoke)
+        if: always()
+        continue-on-error: true
+        working-directory: SecureGate/postman
+        run: >-
+          npx --yes newman run SecureGate.postman_collection.json
+          -e SecureGate.local.postman_environment.json
+
+      - name: Generate the Serenity report
         if: always()
         working-directory: SecureGate
-        run: ./mvnw -B -q allure:report || true
+        run: ./mvnw -B -q serenity:aggregate || true
 
       - name: Upload reports
         if: always()
@@ -122,10 +133,10 @@ jobs:
         with:
           name: securegate-reports
           path: |
-            SecureGate/target/site/allure-maven-plugin/
-            SecureGate/target/cucumber/
+            SecureGate/target/site/serenity/
+            SecureGate/target/karate-reports/
             SecureGate/target/screenshots/
-            SecureGate/target/failsafe-reports/
+            SecureGate/target/surefire-reports/
           if-no-files-found: ignore
 
       - name: SonarQube quality gate (when SONAR_TOKEN is configured)

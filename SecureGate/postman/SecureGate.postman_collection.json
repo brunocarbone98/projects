@@ -1,0 +1,431 @@
+{
+  "info": {
+    "name": "SecureGate · Shipping Hub API",
+    "_postman_id": "9f1c2b40-7d3a-4e6b-9a21-securegate0001",
+    "description": "Black-box API checks for the Shipping Hub platform, runnable in Postman or headless with Newman.\n\nFolders run top-to-bottom: Auth registers a fresh customer and stores its token as a collection variable, which Shipments and Wallet then reuse. Point `baseUrl` at a running Shipping Hub via an environment (see postman/SecureGate.local.postman_environment.json).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000" },
+    { "key": "demoTrackingCode", "value": "PTY-2026-001001-0" },
+    { "key": "customerEmail", "value": "ana@example.com" },
+    { "key": "customerPassword", "value": "Password123!" },
+    { "key": "freshEmail", "value": "" },
+    { "key": "accessToken", "value": "" },
+    { "key": "shipmentId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('service is the API', () => { pm.expect(b.status).to.eql('ok'); pm.expect(b.service).to.eql('api'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Tracking",
+      "item": [
+        {
+          "name": "GET /tracking/:code (seeded demo)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/tracking/{{demoTrackingCode}}", "host": ["{{baseUrl}}"], "path": ["api", "v1", "tracking", "{{demoTrackingCode}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('matches the tracking contract', () => {",
+                  "  pm.expect(b.trackingCode).to.eql(pm.variables.get('demoTrackingCode'));",
+                  "  pm.expect(['EXPRESS','STANDARD','ECONOMY']).to.include(b.serviceLevel);",
+                  "  pm.expect(b.events.length).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /tracking/:code (malformed -> 400)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/tracking/PTY-2026-1-9", "host": ["{{baseUrl}}"], "path": ["api", "v1", "tracking", "PTY-2026-1-9"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 VALIDATION_ERROR', () => { pm.response.to.have.status(400); pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /tracking/:code (unknown -> 404)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/tracking/PTY-2026-987654-1", "host": ["{{baseUrl}}"], "path": ["api", "v1", "tracking", "PTY-2026-987654-1"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 NOT_FOUND', () => { pm.response.to.have.status(404); pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Quote",
+      "item": [
+        {
+          "name": "POST /quote (valid)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"originCountry\": \"PA\",\n  \"destinationCountry\": \"US\",\n  \"weightGrams\": 2000,\n  \"lengthCm\": 30,\n  \"widthCm\": 20,\n  \"heightCm\": 10,\n  \"serviceLevel\": \"EXPRESS\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/quote", "host": ["{{baseUrl}}"], "path": ["api", "v1", "quote"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('priced in USD with a sane ETA', () => {",
+                  "  pm.expect(b.currency).to.eql('USD');",
+                  "  pm.expect(b.priceCents).to.be.above(0);",
+                  "  pm.expect(b.etaMinDays).to.be.at.most(b.etaMaxDays);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /quote (missing destination -> 400)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"originCountry\": \"PA\",\n  \"weightGrams\": 2000,\n  \"lengthCm\": 30,\n  \"widthCm\": 20,\n  \"heightCm\": 10,\n  \"serviceLevel\": \"EXPRESS\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/quote", "host": ["{{baseUrl}}"], "path": ["api", "v1", "quote"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 VALIDATION_ERROR', () => { pm.response.to.have.status(400); pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "POST /auth/register (fresh customer)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('freshEmail', 'sg+' + Date.now() + '@securegate.test');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('returns a CUSTOMER + tokens', () => {",
+                  "  pm.expect(b.user.role).to.eql('CUSTOMER');",
+                  "  pm.expect(b.tokens.accessToken).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('accessToken', b.tokens.accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{freshEmail}}\",\n  \"password\": \"Password123!\",\n  \"name\": \"SecureGate Bot\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/auth/register", "host": ["{{baseUrl}}"], "path": ["api", "v1", "auth", "register"] }
+          }
+        },
+        {
+          "name": "POST /auth/login (demo customer)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customerEmail}}\",\n  \"password\": \"{{customerPassword}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/auth/login", "host": ["{{baseUrl}}"], "path": ["api", "v1", "auth", "login"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns tokens', () => pm.expect(pm.response.json().tokens.accessToken).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /auth/me (with token)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/auth/me", "host": ["{{baseUrl}}"], "path": ["api", "v1", "auth", "me"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns the current user', () => pm.expect(pm.response.json().user.email).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /auth/me (no token -> 401)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/auth/me", "host": ["{{baseUrl}}"], "path": ["api", "v1", "auth", "me"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 UNAUTHENTICATED', () => { pm.response.to.have.status(401); pm.expect(pm.response.json().error.code).to.eql('UNAUTHENTICATED'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Shipments",
+      "item": [
+        {
+          "name": "POST /shipments (create)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"origin\": { \"contactName\": \"Ana Perez\", \"line1\": \"123 Test Street\", \"city\": \"Panama City\", \"postalCode\": \"00000\", \"country\": \"PA\" },\n  \"destination\": { \"contactName\": \"John Doe\", \"line1\": \"123 Test Street\", \"city\": \"Miami\", \"postalCode\": \"00000\", \"country\": \"US\" },\n  \"serviceLevel\": \"EXPRESS\",\n  \"parcel\": { \"weightGrams\": 2000, \"lengthCm\": 30, \"widthCm\": 20, \"heightCm\": 10 }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/shipments", "host": ["{{baseUrl}}"], "path": ["api", "v1", "shipments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('CREATED with a valid tracking code', () => {",
+                  "  pm.expect(b.status).to.eql('CREATED');",
+                  "  pm.expect(b.trackingCode).to.match(/^PTY-\\d{4}-\\d{6}-\\d$/);",
+                  "});",
+                  "pm.collectionVariables.set('shipmentId', b.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /shipments/:id (read own)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/shipments/{{shipmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "v1", "shipments", "{{shipmentId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('is the shipment we created', () => pm.expect(pm.response.json().id).to.eql(pm.variables.get('shipmentId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /shipments (no token -> 401)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"origin\": { \"contactName\": \"Ana Perez\", \"line1\": \"123 Test Street\", \"city\": \"Panama City\", \"postalCode\": \"00000\", \"country\": \"PA\" },\n  \"destination\": { \"contactName\": \"John Doe\", \"line1\": \"123 Test Street\", \"city\": \"Miami\", \"postalCode\": \"00000\", \"country\": \"US\" },\n  \"serviceLevel\": \"EXPRESS\",\n  \"parcel\": { \"weightGrams\": 2000, \"lengthCm\": 30, \"widthCm\": 20, \"heightCm\": 10 }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/shipments", "host": ["{{baseUrl}}"], "path": ["api", "v1", "shipments"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 UNAUTHENTICATED', () => { pm.response.to.have.status(401); pm.expect(pm.response.json().error.code).to.eql('UNAUTHENTICATED'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Wallet",
+      "item": [
+        {
+          "name": "GET /wallet (fresh -> empty)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/wallet", "host": ["{{baseUrl}}"], "path": ["api", "v1", "wallet"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('USD wallet with a numeric balance', () => { pm.expect(b.currency).to.eql('USD'); pm.expect(b.balanceCents).to.be.a('number'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /wallet/topup (idempotent)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idemKey', 'postman-' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('balance increased by the top-up', () => pm.expect(pm.response.json().balanceCents).to.be.at.least(5000));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amountCents\": 5000,\n  \"idempotencyKey\": \"{{idemKey}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/wallet/topup", "host": ["{{baseUrl}}"], "path": ["api", "v1", "wallet", "topup"] }
+          }
+        },
+        {
+          "name": "GET /wallet (no token -> 401)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/wallet", "host": ["{{baseUrl}}"], "path": ["api", "v1", "wallet"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 UNAUTHENTICATED', () => { pm.response.to.have.status(401); pm.expect(pm.response.json().error.code).to.eql('UNAUTHENTICATED'); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
