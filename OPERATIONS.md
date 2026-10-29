@@ -56,7 +56,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 | Shift | Cadence | Runtime | Definition | Output |
 | --- | --- | --- | --- | --- |
-| SRE patrol | every 6 hours — cron `0 */6 * * *` UTC | Claude Code cloud scheduled task `Autonomous maintenance · SRE patrol` | `.claude/shifts/sre-patrol.md` | status report; `fix(agents): …` PR, or one diagnosis comment on the incident issue, or one issue |
+| SRE patrol | every 6 hours — cron `28 */6 * * *` UTC | Claude Code cloud scheduled task `Autonomous maintenance · SRE patrol` | `.claude/shifts/sre-patrol.md` | status report; `fix(agents): …` PR, or one diagnosis comment on the incident issue, or one issue |
 | Nightly maintenance | daily 08:40 UTC (03:40 Panama) — cron `40 8 * * *` | Claude Code cloud scheduled task `Autonomous maintenance · Nightly maintenance` | `.claude/shifts/nightly-maintenance.md` | `chore(agents): nightly maintenance <date>` PR, or `🧪 Nightly maintenance failed: <date>` issue, or nothing |
 | Weekly security review | Mondays 10:20 UTC — cron `20 10 * * 1` | Claude Code cloud scheduled task `Autonomous maintenance · Weekly security review` | `.claude/shifts/weekly-security-review.md` | `chore(deps): weekly security bumps <date>` PR and/or `🔐 Weekly security review: <date>` issue, or nothing |
 | Uptime patrol | every 30 minutes + manual | GitHub Actions `Uptime patrol` | `.github/workflows/uptime-patrol.yml` | `🚨 Production incident: Shipping Hub is unhealthy` issue — opened, updated once per failing run, closed on recovery |
@@ -67,7 +67,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 ### 3.1 SRE patrol
 
-- **Trigger:** cloud scheduled task `Autonomous maintenance · SRE patrol`, cron `0 */6 * * *` (UTC), a fresh session each time.
+- **Trigger:** cloud scheduled task `Autonomous maintenance · SRE patrol`, cron `28 */6 * * *` (UTC), a fresh session each time.
 - **Runtime:** Claude Code cloud. It needs only the GitHub API (reachable from the cloud) and never starts a stack.
 - **Steps:** (1) through the GitHub API/MCP, read the last 24 hours of *Uptime patrol*, *CI* and *SecureGate CI* runs and any open `incident`, `maintenance` or `security` issues; (2) if everything is green and no incident is open, stop and report "no action"; (3) if an incident is open, read the failing probe output — when the cause is in-repo (a bad workflow, a bad URL, configuration in `start.sh`/`Dockerfile`) branch `agents/sre-patrol/<date>` and open a fix PR; when it is the hosting (Railway down, the database) comment once on the incident issue with the diagnosis and the human action needed (restart, check `DATABASE_URL`), and do not spam; (4) if CI or SecureGate CI failed on `main`, diagnose from the logs — a fix PR when it is a flaky or broken test or workflow, otherwise open or update one issue; (5) report.
 - **Outputs:** a short bullet report in the session; at most one PR (`fix(agents): …`, label `agent`), one comment or one issue per run.
@@ -130,7 +130,7 @@ A scheduled task in Claude Code (claude.ai/code) starts a fresh cloud session on
 
 | Task name | Cron (UTC) | Panama (UTC−5) | Prompt |
 | --- | --- | --- | --- |
-| `Autonomous maintenance · SRE patrol` | `0 */6 * * *` | 19:00 · 01:00 · 07:00 · 13:00 | Read `.claude/shifts/sre-patrol.md` on the default branch and follow it |
+| `Autonomous maintenance · SRE patrol` | `28 */6 * * *` | 19:28 · 01:28 · 07:28 · 13:28 | Read `.claude/shifts/sre-patrol.md` on the default branch and follow it |
 | `Autonomous maintenance · Nightly maintenance` | `40 8 * * *` | 03:40 daily | Read `.claude/shifts/nightly-maintenance.md` on the default branch and follow it |
 | `Autonomous maintenance · Weekly security review` | `20 10 * * 1` | Mondays 05:20 | Read `.claude/shifts/weekly-security-review.md` on the default branch and follow it |
 

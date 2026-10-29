@@ -54,7 +54,7 @@ Root agents work from the repository root and read the relevant project `CLAUDE.
 
 | Shift | Cron (UTC) | Prompt file |
 | --- | --- | --- |
-| SRE patrol | `0 */6 * * *` | `.claude/shifts/sre-patrol.md` |
+| SRE patrol | `28 */6 * * *` | `.claude/shifts/sre-patrol.md` |
 | Nightly maintenance | `40 8 * * *` (03:40 Panama) | `.claude/shifts/nightly-maintenance.md` |
 | Weekly security review | `20 10 * * 1` | `.claude/shifts/weekly-security-review.md` |
 
