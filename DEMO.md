@@ -8,7 +8,7 @@ Twelve minutes, five acts, one browser. The goal: show a working product, the en
 
 - [ ] Open <https://shipping-hub.up.railway.app/en/tracking/PTY-2026-001001-0> — the tracking page renders with the timeline and the route map. If it does not, see "If something breaks" and fix it today, not tomorrow.
 - [ ] Sign in as `ana@example.com` / `Password123!`, open the wallet, sign out.
-- [ ] Actions tab → **Uptime patrol** → **Run workflow** → wait for the green run and open its step summary: the probe table is what you will show.
+- [ ] Actions tab → **Uptime patrol** → **Run workflow** → wait for the run and open its step summary: the probe table is what you will show. If every row says `🛡️ challenged`, Railway's edge bot protection answered the monitor instead of the app (the run is green with a warning and opens no incident): open the live app in your browser to prove it is up, and use it as a talking point about monitoring vantage.
 - [ ] Issues → Labels shows `agent` · `incident` · `dependencies` · `security` · `maintenance` · `bug`; otherwise Actions → **Sync labels** → **Run workflow** (the `label:agent` / `label:incident` filters you will show are empty without them).
 - [ ] Make sure at least one open agent PR (`label:agent`) or Dependabot PR (`label:dependencies`) exists. If none does, run a shift by hand from the repo root: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"`.
 - [ ] Repository → Settings → Secrets and variables → Actions: `CLAUDE_CODE_OAUTH_TOKEN` is set (otherwise `@claude` only prints a setup notice).
@@ -92,6 +92,7 @@ Close with the story: "The last commit was in July. After 60 days without activi
 - **Railway is down** — the incident issue *is* the demo: open `label:incident`, show the probe table, the SRE patrol diagnosis comment and, after recovery, the auto-close comment. Restart from Railway (the service → Deployments → Restart) while you talk; `DEPLOY.md` → Monitoring & incidents has the steps.
 - **CI is red** — show how an agent triages it: open the failing run and its logs, then explain the SRE patrol decision rule (a flaky or broken test or workflow → fix PR; anything else → an issue), or comment `@claude why did this run fail?` on the PR and let Claude on-call do it live.
 - **No internet** — walk through `FullStackHub/screenshots/` (landing, tracking, quote, dashboard, wallet, shipments, the Railway deployment, the database schema and users) and the README diagram from a local clone.
+- **The Uptime patrol shows `🛡️ challenged` rows** — Railway's edge bot protection ("Checking your browser…", server `railway-hikari`) answered the monitor, not the app; the run stays green with a warning and no incident is opened. Show the live app in the browser, then the run summary: a monitor that cannot see is reported as *unobserved*, never as *healthy* — that honesty is the point. The decision to let monitors through lives in Railway's service settings.
 - **`@claude` does not react** — open the `Claude on-call` run: if it printed the setup notice, the token secret is missing; show the notice itself ("this is the one thing that needs a human") and move on.
 
 ## Cheat-sheet
