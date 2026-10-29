@@ -74,6 +74,47 @@ domain:
 - `https://<your-domain>/en/tracking/PTY-2026-001001-0` → the SSR tracking page
 - Sign in with a demo account (`ana@example.com` / `Password123!`) and open the wallet.
 
+## Monitoring & incidents
+The live app is watched by the **Uptime patrol** workflow
+([`.github/workflows/uptime-patrol.yml`](./.github/workflows/uptime-patrol.yml)): every 30
+minutes, and on demand from the Actions tab (Uptime patrol → **Run workflow**). It checks out one commit (`fetch-depth: 1`) only to run
+[`.github/scripts/uptime-probe.sh`](./.github/scripts/uptime-probe.sh) — the probe logic, runnable
+locally with `BASE_URL=https://shipping-hub.up.railway.app .github/scripts/uptime-probe.sh` — needs
+no repository secrets, and only probes `https://shipping-hub.up.railway.app`:
+
+| Probe | Expected |
+| --- | --- |
+| `/en` | 200 — the landing page renders |
+| `/en/tracking/PTY-2026-001001-0` | 200 **and** the body contains `PTY-2026-001001-0` — SSR plus a real database read of the seeded demo shipment |
+| `/es/quote` | 200 — the Spanish quote page |
+| `/sitemap.xml` | 200 — the generated sitemap |
+
+Each probe is a `curl` with two retries. The results (endpoint · status · time · result) go to
+the run's step summary, and the run fails when any probe fails, so the README badge turns red.
+
+**Incident issue lifecycle.** When a probe fails, the workflow opens
+`🚨 Production incident: Shipping Hub is unhealthy` (label `incident`) with the probe table,
+the run link and what a human should check. Every further failing run adds one comment with
+the new table — never a second issue. The first green run afterwards comments
+`Recovered — all probes green at <UTC time>` with the run link and closes the issue as completed.
+
+**What a human does.**
+
+1. Railway → the app service → **Deployments** → read the latest deploy log. If the boot log
+   says `FATAL: DATABASE_URL is empty`, fix the variable as described in section 2 (pick the
+   Postgres service from the `${{` dropdown; never type the reference by hand) and redeploy.
+2. Otherwise **Restart** the latest deployment (or redeploy) and watch the log until the web
+   answers on `/en`. The container already restarts itself when a process exits
+   (`restartPolicyType: ON_FAILURE` in `railway.json`), so a persistent incident usually means
+   configuration or the database.
+3. If the database is the problem, open the Postgres service in Railway and check its status.
+4. Nothing to do on GitHub: the issue closes itself on the next green run.
+
+The **SRE patrol** shift (every 6 hours) reads these results: when the cause is in the
+repository (the workflow, a URL, `start.sh`, `Dockerfile`) it opens a fix PR; when it is the
+hosting it comments the diagnosis and the human action once on the incident issue. The whole
+loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
+
 ## Notes
 - **One container, several processes:** the web, API and Python services run
   together (the web is the public entrypoint, the rest stay on `localhost`). It's a
