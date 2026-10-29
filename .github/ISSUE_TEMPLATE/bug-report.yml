@@ -1,0 +1,53 @@
+name: Bug report
+description: Something is broken in Shipping Hub, SecureGate or the portfolio site.
+title: "[bug] "
+labels: [bug]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: The part of the repository where the bug lives.
+      options:
+        - FullStackHub
+        - SecureGate
+        - PersonalWebsite
+        - repo
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: Where it happens — a page of the live app, a local URL, a workflow run or a file path.
+      placeholder: https://shipping-hub.up.railway.app/en/tracking/PTY-2026-001001-0
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, from a fresh page or a fresh command. Mention the account used (demo accounts only, never real credentials).
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead — the error message, HTTP status, failing scenario name or a screenshot.
+    validations:
+      required: true
+  - type: input
+    id: tracking_code
+    attributes:
+      label: Tracking code (if relevant)
+      description: The shipment involved, for example the seeded demo shipment PTY-2026-001001-0.
+      placeholder: PTY-2026-001001-0

@@ -1,0 +1,85 @@
+# Dependabot — grouped version updates for every package ecosystem in the monorepo.
+# Every PR carries the `dependencies` label and the `chore(deps)` commit prefix. The nightly
+# maintenance shift reviews them (CI state + changelog, a one-paragraph verdict); a human merges.
+# Minor and patch updates arrive as one grouped PR per ecosystem; majors come one by one.
+version: 2
+updates:
+  # Shipping Hub — pnpm workspaces (apps/web, apps/api, packages/shared); one lockfile at the root.
+  - package-ecosystem: npm
+    directory: /FullStackHub
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: America/Panama
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # Shipping Hub — the two stateless FastAPI services (requirements.txt each).
+  - package-ecosystem: pip
+    directory: /FullStackHub/services/pricing
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: America/Panama
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /FullStackHub/services/labels
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: America/Panama
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # SecureGate — Maven (pom.xml: Karate, Serenity, Selenium, Cucumber, JUnit 5).
+  - package-ecosystem: maven
+    directory: /SecureGate
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: America/Panama
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The actions used by the workflows in .github/workflows (pinned to major versions).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      github-actions:
+        patterns: ["*"]

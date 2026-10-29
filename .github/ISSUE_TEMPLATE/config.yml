@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Shipping Hub — live app
+    url: https://shipping-hub.up.railway.app/
+    about: The production deployment that Uptime patrol probes every 30 minutes. Demo tracking code PTY-2026-001001-0.
+  - name: SecureGate reports (GitHub Actions)
+    url: https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml
+    about: Every SecureGate CI run uploads the Serenity and Karate reports as the securegate-reports artifact.

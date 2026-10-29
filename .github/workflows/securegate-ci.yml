@@ -17,6 +17,7 @@ on:
       - ".github/workflows/securegate-ci.yml"
   schedule:
     - cron: "0 6 * * *" # nightly regression at 06:00 UTC
+  workflow_dispatch:
 
 jobs:
   qa-suite:
