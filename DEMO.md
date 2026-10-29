@@ -73,7 +73,7 @@ Say: "Everything you see is one container on Railway — Next.js web, Express AP
 2. **Agent PRs** (tab 10): `label:agent` — the nightly maintenance PR with its check-results table, Dependabot PRs with the shift's verdict comment. "Agents open PRs; I merge."
 3. **Ask the on-call agent** (tab 11): pick the "Ask the on-call agent" template; the body already starts with `@claude ` — ask something small and concrete, for example `@claude summarise the latest SecureGate CI run and list any skipped scenarios`. Submit, switch to tab 9: the `Claude on-call` run starts within seconds and the agent answers in a comment on the issue.
 4. **The configuration** (tab 12): `.claude/agents/` — five root agents (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`); `.claude/shifts/` — three shift prompts (a shift is a Markdown file, reviewed like code); `.claude/scripts/` — the local-stack helpers the shifts use.
-5. **The scheduled tasks** (tab 13): three Claude Code cloud tasks — SRE patrol every 6 h, nightly maintenance at 08:40 UTC, weekly security review on Mondays at 10:20 UTC — each a fresh session whose transcript you can open.
+5. **The scheduled tasks** (tab 13): three Claude Code cloud tasks — SRE patrol every 6 h, nightly maintenance at 08:40 UTC, weekly security review on Mondays at 10:20 UTC — each resuming its standing session, whose transcript you can open run after run.
 
 Close with the story: "The last commit was in July. After 60 days without activity GitHub disabled the SecureGate nightly — its last run was 2026-09-10 — and nobody noticed. Now the agents produce the activity, and silence turns into an issue or a PR."
 
