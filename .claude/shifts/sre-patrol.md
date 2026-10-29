@@ -19,7 +19,7 @@
 3. **An incident issue is open.** Read its latest probe table and the failing Uptime patrol run. Decide:
    - **In-repo cause** (a wrong URL or expectation in `uptime-patrol.yml`, a config error in `start.sh`, `Dockerfile` or `railway.json`, a broken sitemap or route in `FullStackHub/apps/web`): branch `agents/sre-patrol/<date>` from `main`, fix it, run the relevant checks (`.claude/scripts/run-checks.sh` for FullStackHub changes; `python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" <workflow>` for workflows), open the PR `fix(agents): <what>` with label `agent`, the PR template filled and `Opened by: sre-patrol`. Comment once on the incident issue with the PR link.
    - **Hosting cause** (Railway container down or restarting, every probe timing out or 5xx, database unreachable → `DATABASE_URL`): comment **once** on the incident issue with the diagnosis and the human action (Railway → service → Deployments → Restart; verify the `DATABASE_URL` reference resolves to a `postgresql://` value; read the deploy logs) — only if no earlier comment already says the same. One diagnosis per distinct cause; never spam.
-4. **CI or SecureGate CI failed on `main`.** Diagnose from the logs. A flaky or broken test, a broken workflow step, an outdated action or a registry hiccup you can fix safely → branch `agents/sre-patrol/<date>` + PR `fix(agents): <what>` (same rules; run the fixed suite locally when possible and paste the real result). Anything else (a product bug, infrastructure, a decision) → open or update one issue `🧪 Nightly maintenance failed: <date>` (labels `agent`, `maintenance`) with the evidence — update the issue for that date rather than opening a second one.
+4. **CI or SecureGate CI failed on `main`.** Diagnose from the logs. A flaky or broken test, a broken workflow step, an outdated action or a registry hiccup you can fix safely → branch `agents/sre-patrol/<date>` + PR `fix(agents): <what>` (same rules; run the fixed suite locally when possible and paste the real result). Anything else (a product bug, infrastructure, a decision) → open or update one issue `🧪 Nightly maintenance failed: <date>` (labels `agent`, `maintenance`) with the evidence. The title is shared on purpose with the nightly maintenance shift — one `maintenance` issue per date for a red pipeline on `main`, whichever shift finds it first — so look for that date's issue and update it rather than opening a second one, and say that the SRE patrol found it.
 5. **Report** (format below).
 
 ## Decision rules
@@ -34,7 +34,7 @@
 
 - Branch `agents/sre-patrol/<YYYY-MM-DD>`; PR `fix(agents): <what>`, label `agent`, PR template filled, `Opened by: sre-patrol`.
 - Incident issue: one comment starting with `**SRE patrol diagnosis (<UTC time>)**` — cause, evidence, the human action or the PR link.
-- Issue `🧪 Nightly maintenance failed: <date>` (labels `agent`, `maintenance`) for pipeline failures you cannot fix safely.
+- Issue `🧪 Nightly maintenance failed: <date>` (labels `agent`, `maintenance`) for pipeline failures on `main` you cannot fix safely — the same title the nightly maintenance shift uses (one issue per date; update it when it already exists).
 
 ## Guardrails
 

@@ -56,7 +56,11 @@ log() { printf '[local-api] %s\n' "$*"; }
 die() { printf '[local-api] ERROR: %s\n' "$*" >&2; exit 1; }
 
 api_up() { curl -fsS -m 5 -o /dev/null "$BASE_URL/health" 2>/dev/null; }
-http_code() { curl -sS -m 10 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo "000"; }
+http_code() { # prints the HTTP status; curl itself prints 000 when nothing answered
+  local code
+  code="$(curl -sS -m 10 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null)" || true
+  printf '%s' "${code:-000}"
+}
 
 ensure_postgres() {
   local pg_isready=/usr/lib/postgresql/16/bin/pg_isready
