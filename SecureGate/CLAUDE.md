@@ -46,9 +46,18 @@ Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../
 
 ## Subagents (`.claude/agents/`)
 
-- `api-test-engineer` — Karate API features, `match` contracts, security negatives, Postman collection.
-- `ui-test-engineer` — Serenity Screenplay (Tasks/Questions) over Selenium WebDriver.
-- `bdd-engineer` — Cucumber features + Screenplay step definitions.
-- `devsecops` — GitHub Actions pipeline, SonarQube gate, Serenity/Karate reporting, Selenium-in-CI.
-- `code-reviewer` — reviews test code (flakiness, assertions, conventions); read-only.
-- `test-runner` — runs `./mvnw verify` and reports only the failures.
+- `api-test-engineer` — Karate API features (`match` contracts, validation and security negatives, `helpers/*.feature` via `call`, `TrackingCodes` interop) and the Postman/Newman collection.
+- `ui-test-engineer` — Serenity Screenplay (`screenplay/ui` Targets, Tasks, Questions) over Selenium WebDriver; explicit waits only; the UI suite needs Chrome, so in the cloud it hands the run to SecureGate CI.
+- `bdd-engineer` — Cucumber features in `features/ui` (`@ui`/`@public`) and thin step definitions that delegate to Screenplay.
+- `devsecops` — the pipeline `/.github/workflows/securegate-ci.yml`, Chrome in CI, Serenity/Karate report artifacts, Newman step, token-gated SonarQube gate.
+- `code-reviewer` — reviews test code (read-only): `Thread.sleep`/implicit waits, status-only assertions, order dependence, selectors outside Targets, leaked secrets, naming.
+- `test-runner` — runs `./mvnw -q verify` (API) or `-Pui -Dheadless.mode=true` (UI, CI only), reads `target/surefire-reports/*.xml` and the Karate summary; `tests="0"` / all skipped = the stack was down, reported as such (`model: haiku`).
+
+Repo-wide agents live in `/.claude/agents/` (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`) and work from the repository root.
+
+## Autonomous maintenance
+
+- SecureGate is maintained around the clock by Claude Code agents; humans review and merge every PR. **SecureGate CI** runs the full suite (Karate API + Serenity UI with Chrome + Newman) nightly at 06:00 UTC and on PRs touching `SecureGate/**` or `FullStackHub/**`.
+- Shifts covering this project (`/.claude/shifts/`): **nightly maintenance** (08:40 UTC) starts a local Shipping Hub and runs `./mvnw -q -B verify`, reading `target/surefire-reports/TEST-com.securegate.api.ApiKarateTest.xml` and `target/karate-reports/karate-summary-json.txt` — `tests="0"` means the suite did not run (no reachable stack) and is never reported as a pass; **SRE patrol** (every 6 h) triages red SecureGate CI runs; the **weekly security review** checks Maven dependency updates.
+- Helper scripts (`/.claude/scripts/`): `local-postgres.sh` (PostgreSQL 16 on 127.0.0.1:5432), `local-api.sh` (migrate + seed + API on :4000; `stop` ends it), `run-checks.sh` (FullStackHub checks + pytest). The Selenium UI suite needs Chrome and runs only in SecureGate CI.
+- Operations manual, roster and guardrails: [`../OPERATIONS.md`](../OPERATIONS.md).
