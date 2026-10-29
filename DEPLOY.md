@@ -98,6 +98,14 @@ the run link and what a human should check. Every further failing run adds one c
 the new table — never a second issue. The first green run afterwards comments
 `Recovered — all probes green at <UTC time>` with the run link and closes the issue as completed.
 
+**Unobserved runs.** Railway's edge (server `railway-hikari`) may answer automated clients with
+its bot protection instead of the app: HTTP 429, or an HTTP 200 "Checking your browser…" page.
+The probe reports such answers as `🛡️ challenged`; when every probe is challenged the run ends as
+**Unobserved** (`healthy=unknown`): the job fails with a "patrol is blind" message so the badge
+shows that monitoring is not seeing the app, but no incident is opened, updated or closed. Open
+the app in a browser to see its real state, and decide in Railway's service settings whether
+automated monitors should be allowed through.
+
 **What a human does.**
 
 1. Railway → the app service → **Deployments** → read the latest deploy log. If the boot log
