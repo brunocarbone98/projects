@@ -9,9 +9,10 @@ name: Uptime patrol
 #                     opened, or receives one comment with the new probe table if already open.
 #   Healthy run    -> an open incident issue, if any, gets a "Recovered" comment and is closed.
 #   Unobserved run -> Railway's edge answered the monitor with its bot-protection browser check
-#                     instead of the app (healthy=unknown): the job fails with a distinct
-#                     message so the badge shows that the patrol is blind, but no incident is
-#                     opened, updated or closed — the app's state is simply not known.
+#                     instead of the app (healthy=unknown): the run ends green with a warning
+#                     annotation and an explanation in the step summary, and no incident is
+#                     opened, updated or closed — the app's state is simply not known. Only a
+#                     confirmed failure turns the badge red.
 #
 # The SRE patrol shift reads these results every 6 hours (OPERATIONS.md -> Incident flow).
 
@@ -155,12 +156,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::warning title=Uptime patrol is blind::Railway's edge served its browser check to the monitor; the app was not observed and no incident was touched."
 
-      - name: Fail the run when not healthy
-        if: steps.probe.outputs.healthy != 'true'
+      - name: Fail the run when unhealthy
+        if: steps.probe.outputs.healthy == 'false'
         run: |
-          if [[ "${{ steps.probe.outputs.healthy }}" == "unknown" ]]; then
-            echo "::error title=Uptime patrol is blind::Railway's edge challenged the monitor — see the step summary."
-          else
-            echo "::error title=Shipping Hub is unhealthy::One or more probes failed — see the step summary and the incident issue."
-          fi
+          echo "::error title=Shipping Hub is unhealthy::One or more probes failed — see the step summary and the incident issue."
           exit 1

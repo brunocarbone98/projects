@@ -4,7 +4,7 @@ Instructions for any coding agent — Claude Code, Codex, Cursor, Copilot — wo
 
 ## Map
 
-- `FullStackHub/` — **Shipping Hub**, a bilingual (es/en) parcel shipping & tracking platform: Next.js 15 web (`apps/web`), Express 5 + Prisma API (`apps/api`, the only layer touching PostgreSQL), two stateless FastAPI services (`services/pricing`, `services/labels`), shared Zod contracts (`packages/shared`); pnpm 10 workspaces + Turborepo. Live on Railway as one container (root `Dockerfile`, `start.sh`, `railway.json`).
+- `FullStackHub/` — **Shipping Hub**, a bilingual (es/en) parcel shipping & tracking platform: Next.js 16 web (`apps/web`), Express 5 + Prisma API (`apps/api`, the only layer touching PostgreSQL), two stateless FastAPI services (`services/pricing`, `services/labels`), shared Zod contracts (`packages/shared`); pnpm 10 workspaces + Turborepo. Live on Railway as one container (root `Dockerfile`, `start.sh`, `railway.json`).
 - `SecureGate/` — the black-box QA & security suite for Shipping Hub: Java 21, Maven (`./mvnw`), Karate API features, Serenity BDD + Screenplay over Selenium for UI, Cucumber, a Postman/Newman collection, a token-gated SonarQube gate.
 - `PersonalWebsite/` — static two-page portfolio (`MainPage.html`, `Portfolio.html`, `favicon.svg`), vanilla HTML/CSS/JS, served by GitHub Pages.
 

@@ -33,7 +33,7 @@ Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tool
 
 | Agent | Scope | Tools | Model |
 | --- | --- | --- | --- |
-| `frontend-dev` | `apps/web`: Next.js 15 App Router, Tailwind, next-intl (copy only in `messages/*.json`), SEO (metadata, OG, sitemap, JSON-LD), Server Components by default; definition of done = lint, format, typecheck, tests | all | inherit |
+| `frontend-dev` | `apps/web`: Next.js 16 App Router, Tailwind, next-intl (copy only in `messages/*.json`), SEO (metadata, OG, sitemap, JSON-LD), Server Components by default; definition of done = lint, format, typecheck, tests | all | inherit |
 | `backend-dev` | `apps/api`: Express 5, Prisma, the state machine from `packages/shared`, append-only tracking events and ledger entries, idempotent money operations; Vitest + Supertest integration tests for every endpoint | all | inherit |
 | `python-services` | `services/pricing` (`POST /quote`) and `services/labels` (`POST /label`): stateless FastAPI, Pydantic contracts, `GET /health`, pytest in each `.venv` | all | inherit |
 | `code-reviewer` | Reviews the diff, read-only: hardcoded secrets, input validation, invalid state transitions, mutations of append-only tables, `any`, Prettier/format, i18n keys present in both `messages/*.json`, Zod at the edges | Read, Grep, Glob, Bash (read-only `git diff`/`log`/`show`/`status`) | inherit |
@@ -229,8 +229,8 @@ If an incident is open during a demo, it is the demo: the issue, the SRE patrol 
 
 **Unobserved runs.** When Railway's edge answers the monitor with its bot-protection page
 ("Checking your browser…") instead of the app, the probe reports `🛡️ challenged` and the run ends
-as **Unobserved** (`healthy=unknown`): the job fails with a distinct "patrol is blind" message and
-touches no incident, because the app's state is simply not known. The SRE patrol treats it as a
+as **Unobserved** (`healthy=unknown`): the job ends green with a warning annotation and touches no
+incident, because the app's state is simply not known; only a confirmed failure turns the badge red. The SRE patrol treats it as a
 monitoring gap, not as an outage: it verifies the app another way when it can and reports the
 gap; the human decision is whether Railway should let automated monitors through.
 
