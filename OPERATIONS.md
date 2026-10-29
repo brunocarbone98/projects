@@ -52,7 +52,7 @@ Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tool
 
 ## 3. Shifts
 
-A shift is a scheduled job. Its prompt is a complete, standalone Markdown file in `.claude/shifts/`: identity and goal, environment notes (cloud network limits, the helper scripts), step-by-step, decision rules, exact outputs (branch, PR and issue titles with labels), the guardrails of section 5, and the report format. The Claude Code cloud scheduled task tells a fresh cloud session to read `.claude/shifts/<name>.md` on the default branch and follow it (the stored prompt is described in 4.2); the session clones the repository, does the work and ends. GitHub Actions workflows cover what the cloud cannot reach (the live app, a browser) and what must react to events (`@claude` mentions, PRs, pushes).
+A shift is a scheduled job. Its prompt is a complete, standalone Markdown file in `.claude/shifts/`: identity and goal, environment notes (cloud network limits, the helper scripts), step-by-step, decision rules, exact outputs (branch, PR and issue titles with labels), the guardrails of section 5, and the report format. The Claude Code cloud scheduled task resumes the shift's standing session and tells it to sync the checkout, read `.claude/shifts/<name>.md` and follow it (the stored prompt is described in 4.2); the session clones the repository, does the work and ends. GitHub Actions workflows cover what the cloud cannot reach (the live app, a browser) and what must react to events (`@claude` mentions, PRs, pushes).
 
 | Shift | Cadence | Runtime | Definition | Output |
 | --- | --- | --- | --- | --- |
@@ -67,7 +67,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 ### 3.1 SRE patrol
 
-- **Trigger:** cloud scheduled task `Autonomous maintenance · SRE patrol`, cron `28 */6 * * *` (UTC), a fresh session each time.
+- **Trigger:** cloud scheduled task `Autonomous maintenance · SRE patrol`, cron `28 */6 * * *` (UTC), resuming the shift's standing session (the checkout is synced to the default branch first).
 - **Runtime:** Claude Code cloud. It normally needs only the GitHub API (reachable from the cloud); it starts a local stack (`.claude/scripts/local-api.sh`, then `cd SecureGate && ./mvnw -q -B verify`) only to reproduce a SecureGate CI failure before proposing a fix.
 - **Steps:** (1) through the GitHub API/MCP, read the last 24 hours of *Uptime patrol*, *CI* and *SecureGate CI* runs and any open `incident`, `maintenance` or `security` issues; (2) if everything is green and no incident is open, stop and report "no action"; (3) if an incident is open, read the failing probe output — when the cause is in-repo (a bad workflow, a bad URL, configuration in `start.sh`/`Dockerfile`) branch `agents/sre-patrol/<date>` and open a fix PR; when it is the hosting (Railway down, the database) comment once on the incident issue with the diagnosis and the human action needed (restart, check `DATABASE_URL`), and do not spam; (4) if CI or SecureGate CI failed on `main`, diagnose from the logs — a fix PR when it is a flaky or broken test or workflow, otherwise open or update one issue; (5) report.
 - **Outputs:** a short bullet report in the session; at most one PR (`fix(agents): …`, label `agent`), one comment or one issue per run.
@@ -75,7 +75,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 ### 3.2 Nightly maintenance
 
-- **Trigger:** cloud scheduled task `Autonomous maintenance · Nightly maintenance`, cron `40 8 * * *` (08:40 UTC = 03:40 Panama), a fresh session each time.
+- **Trigger:** cloud scheduled task `Autonomous maintenance · Nightly maintenance`, cron `40 8 * * *` (08:40 UTC = 03:40 Panama), resuming the shift's standing session (the checkout is synced to the default branch first).
 - **Runtime:** Claude Code cloud, against a stack the shift starts itself (PostgreSQL 16 + the API; no Docker, no browser).
 - **Steps:** (1) fresh branch `agents/nightly-maintenance/<date>`; (2) `pnpm install --frozen-lockfile`, `.claude/scripts/local-postgres.sh`, `.claude/scripts/run-checks.sh` (lint, format:check, typecheck, Vitest, pytest); (3) `.claude/scripts/local-api.sh`, then `cd SecureGate && ./mvnw -q verify` (Karate API) and read the surefire and Karate summaries — `tests="0"` means the suite did not run; (4) review the open Dependabot PRs: read the CI state and the changelog, comment a one-paragraph verdict (safe to merge / needs attention), never merge; (5) docs drift pass (counts, commands, links); (6) pick at most one small improvement when there is obvious value — a missing edge-case test, a typo, a doc fix, a dead link — never a behaviour change in money, state-machine or auth code; (7) if anything changed, run the checks again and open one PR titled `chore(agents): nightly maintenance <date>` with the check results table in the body; if a check failed and cannot be fixed safely, open or update `🧪 Nightly maintenance failed: <date>` (labels `agent`, `maintenance`); if nothing changed and nothing failed, no PR and no issue; (8) report.
 - **Outputs:** at most one PR and/or one issue; verdict comments on Dependabot PRs.
@@ -83,7 +83,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 ### 3.3 Weekly security review
 
-- **Trigger:** cloud scheduled task `Autonomous maintenance · Weekly security review`, cron `20 10 * * 1` (Mondays 10:20 UTC), a fresh session each time.
+- **Trigger:** cloud scheduled task `Autonomous maintenance · Weekly security review`, cron `20 10 * * 1` (Mondays 10:20 UTC), resuming the shift's standing session (the checkout is synced to the default branch first).
 - **Runtime:** Claude Code cloud (npm, PyPI and Maven Central are reachable for the audits).
 - **Steps:** `pnpm audit` (FullStackHub); `pip-audit` in each service `.venv`; `./mvnw -q versions:display-dependency-updates` (SecureGate); the secret grep below; configuration review — helmet, CORS, rate limits, JWT TTLs, cookie flags in `apps/web/src/lib/auth/cookies.ts`; the root `Dockerfile` base image; the workflow `permissions:` blocks.
 
@@ -128,13 +128,13 @@ Until the secret exists, the job's `Not configured yet` step writes these instru
 
 ### 4.2 Claude Code cloud scheduled tasks
 
-A scheduled task in Claude Code (claude.ai/code) starts a fresh cloud session on a cron, with a stored prompt, in the cloud environment connected to this repository. The session clones the default branch, works with the repository's `.claude/` configuration (agents, settings, hooks, scripts), and ends when the prompt is done. Every run is an ordinary session: you can open it, read each command and output, and reply to it.
+A scheduled task in Claude Code (claude.ai/code) resumes a standing cloud session on a cron, with a stored prompt — one standing session per shift, created with the repository as its source, which is what gives it the checkout, the git credentials and the GitHub MCP tools (a fresh session started by a task cannot attach the repository; verified on 2026-10-29, when the first version of the tasks could reach neither the GitHub API nor the MCP tools). Each firing is treated as an independent run: the session syncs the checkout to the default branch (`git fetch origin && git checkout -B main origin/main`), works with the repository's `.claude/` configuration (agents, settings, hooks, scripts), and ends when the prompt is done. Every run is an ordinary session: you can open it, read each command and output, and reply to it.
 
 | Task name | Cron (UTC) | Panama (UTC−5) | Prompt (summary) |
 | --- | --- | --- | --- |
-| `Autonomous maintenance · SRE patrol` | `28 */6 * * *` | 19:28 · 01:28 · 07:28 · 13:28 | Read `.claude/shifts/sre-patrol.md` on the default branch and follow it |
-| `Autonomous maintenance · Nightly maintenance` | `40 8 * * *` | 03:40 daily | Read `.claude/shifts/nightly-maintenance.md` on the default branch and follow it |
-| `Autonomous maintenance · Weekly security review` | `20 10 * * 1` | Mondays 05:20 | Read `.claude/shifts/weekly-security-review.md` on the default branch and follow it |
+| `Autonomous maintenance · SRE patrol` | `28 */6 * * *` | 19:28 · 01:28 · 07:28 · 13:28 | Sync the checkout, then read `.claude/shifts/sre-patrol.md` on the default branch and follow it |
+| `Autonomous maintenance · Nightly maintenance` | `40 8 * * *` | 03:40 daily | Sync the checkout, then read `.claude/shifts/nightly-maintenance.md` on the default branch and follow it |
+| `Autonomous maintenance · Weekly security review` | `20 10 * * 1` | Mondays 05:20 | Sync the checkout, then read `.claude/shifts/weekly-security-review.md` on the default branch and follow it |
 
 The prompt is deliberately short and the shift file in the repository is the source of truth, so changing a shift is a normal reviewed PR, not a settings change. The stored prompt bootstraps the checkout (attaches `brunocarbone98/projects` with push access, loads the GitHub MCP tools), tells the session to read and follow `.claude/shifts/<name>.md` on the default branch — after the root `CLAUDE.md` and `AGENTS.md` — repeats the hard guardrails (never push to `main`, never force-push, never merge, never weaken a test, never print secrets), and, if the file is missing because the refresh is not merged yet, does nothing else and ends with a one-line "waiting for the merge" report. Everything written to the repository or to GitHub is in English; the final report to the maintainer is in Spanish.
 

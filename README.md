@@ -47,7 +47,7 @@ flowchart TB
 
 ## Autonomous maintenance
 
-The repository is maintained around the clock by Claude Code agents on two runtimes: **GitHub Actions** for anything that must reach the live app, a browser or a GitHub event, and **Claude Code cloud scheduled tasks** for the agent shifts — each a fresh session whose prompt is a Markdown file in [`.claude/shifts/`](./.claude/shifts), reviewed like code.
+The repository is maintained around the clock by Claude Code agents on two runtimes: **GitHub Actions** for anything that must reach the live app, a browser or a GitHub event, and **Claude Code cloud scheduled tasks** for the agent shifts — each a standing session resumed on a schedule, whose prompt is a Markdown file in [`.claude/shifts/`](./.claude/shifts), reviewed like code.
 
 | Shift | Cadence | Runtime | What it does | Output |
 | --- | --- | --- | --- | --- |

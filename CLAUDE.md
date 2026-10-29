@@ -58,7 +58,7 @@ Root agents work from the repository root and read the relevant project `CLAUDE.
 | Nightly maintenance | `40 8 * * *` (03:40 Panama) | `.claude/shifts/nightly-maintenance.md` |
 | Weekly security review | `20 10 * * 1` | `.claude/shifts/weekly-security-review.md` |
 
-Each shift is a Claude Code cloud scheduled task that starts a fresh session whose stored prompt boils down to "read `.claude/shifts/<name>.md` on the default branch and follow it" (the full prompt: `OPERATIONS.md` → 4.2). The three tasks already exist — do not create them again. To run one by hand: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"` from the repo root, or ask "run the nightly maintenance shift" in an interactive session. Runtimes, outputs and the incident flow: `OPERATIONS.md`.
+Each shift is a Claude Code cloud scheduled task that resumes the shift's standing session with a stored prompt that boils down to "sync the checkout to the default branch, read `.claude/shifts/<name>.md` and follow it" (the full prompt: `OPERATIONS.md` → 4.2). The three tasks already exist — do not create them again. To run one by hand: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"` from the repo root, or ask "run the nightly maintenance shift" in an interactive session. Runtimes, outputs and the incident flow: `OPERATIONS.md`.
 
 Guardrails: the eight rules in `AGENTS.md` → Guardrails apply to every session and every shift — follow them, do not restate them.
 
