@@ -1,12 +1,12 @@
 name: Ask the on-call agent
-description: Hand a small, well-scoped task to the Claude on-call agent. It answers in the issue and opens a pull request when code changes are needed; a human reviews and merges.
+description: Hand a small, well-scoped task to the Claude on-call agent. It answers in the issue and, when code changes are needed, pushes a claude/… branch with a ready-to-open pull request link; a human reviews and merges.
 title: "[agent] "
 labels: [agent]
 body:
   - type: markdown
     attributes:
       value: |
-        The **Claude on-call** workflow (`.github/workflows/claude.yml`) picks up every new issue whose body contains `@claude`, so keep the mention as the first word of the task below. The agent works on a `claude/…` branch, runs the project's own checks and never merges. It needs the `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) repository secret — see `OPERATIONS.md` → Runtimes → GitHub Actions.
+        The **Claude on-call** workflow (`.github/workflows/claude.yml`) picks up every new issue whose body contains `@claude`, so keep the mention as the first word of the task below. The agent works on a `claude/…` branch, runs the project's own checks (pnpm, `./mvnw`, pytest, the `.claude/scripts` helpers), pushes the branch and posts a link to open the pull request — it never opens or merges one itself. It needs the `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) repository secret — see `OPERATIONS.md` → Runtimes → GitHub Actions.
   - type: dropdown
     id: area
     attributes:
@@ -29,7 +29,7 @@ body:
 
         Scope: <files or folders to touch; what must not change>.
         Verify with: <the project's own checks — FullStackHub: `pnpm lint && pnpm format:check && pnpm typecheck && pnpm test`; services: `pytest`; SecureGate: `./mvnw -q verify` with a local stack up>.
-        Deliver: <a comment with the answer, or a pull request that follows `.github/pull_request_template.md`>.
+        Deliver: <a comment with the answer, or commits on a `claude/…` branch plus the link to open the pull request, its body following `.github/pull_request_template.md`>.
     validations:
       required: true
   - type: textarea
