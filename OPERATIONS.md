@@ -52,7 +52,7 @@ Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tool
 
 ## 3. Shifts
 
-A shift is a scheduled job. Its prompt is a complete, standalone Markdown file in `.claude/shifts/`: identity and goal, environment notes (cloud network limits, the helper scripts), step-by-step, decision rules, exact outputs (branch, PR and issue titles with labels), the guardrails of section 5, and the report format. The Claude Code cloud scheduled task tells a fresh cloud session to read `.claude/shifts/<name>.md` on the default branch and follow it (the stored prompt is described in 4.2); the session clones the repository, does the work and ends. GitHub Actions workflows cover what the cloud cannot reach (the live app, a browser) and what must react to events (`@claude` mentions, PRs, pushes).
+A shift is a scheduled job. Its prompt is a complete, standalone Markdown file in `.claude/shifts/`: identity and goal, environment notes (cloud network limits, the helper scripts), step-by-step, decision rules, exact outputs (branch, PR and issue titles with labels), the guardrails of section 5, and the report format. The Claude Code cloud scheduled task resumes the shift's standing session and tells it to sync the checkout, read `.claude/shifts/<name>.md` and follow it (the stored prompt is described in 4.2); the session clones the repository, does the work and ends. GitHub Actions workflows cover what the cloud cannot reach (the live app, a browser) and what must react to events (`@claude` mentions, PRs, pushes).
 
 | Shift | Cadence | Runtime | Definition | Output |
 | --- | --- | --- | --- | --- |
