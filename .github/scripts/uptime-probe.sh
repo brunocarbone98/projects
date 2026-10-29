@@ -9,7 +9,7 @@
 #   BASE_URL=https://shipping-hub.up.railway.app .github/scripts/uptime-probe.sh
 #   BASE_URL=http://localhost:3000 .github/scripts/uptime-probe.sh        # a local stack
 #
-# Probes (every one must answer HTTP 200):
+# Probes (every one must answer HTTP 200 with the app's own page):
 #   /en                               landing page
 #   /en/tracking/PTY-2026-001001-0    SSR tracking page — the body must also contain the
 #                                     tracking code, which proves web + API + a real database
@@ -32,11 +32,17 @@
 #   USER_AGENT           optional — User-Agent header (default: the monitor's own identity)
 #   GITHUB_STEP_SUMMARY  when set, the Markdown report is appended to it (the run summary)
 #   GITHUB_OUTPUT        when set, two step outputs are appended to it:
-#                          healthy=true|false
+#                          healthy=true|false|unknown
 #                          report=<the Markdown report, multi-line, heredoc delimiter>
 #
+# Railway's edge (server "railway-hikari") can answer automated clients with its bot
+# protection instead of the app: HTTP 429, or an HTTP 200 "Checking your browser…" page. A
+# probe that gets that page is reported as "challenged" — it is neither a pass nor a product
+# failure, because the app was not observed. When every probe is challenged the overall state
+# is `unknown` (the workflow then fails the run with a distinct message but opens no incident).
+#
 # The report is always printed to stdout too. Exit code: 0 whenever the probes could run,
-# healthy or not — the workflow's last step fails the job when healthy != 'true'. Non-zero
+# whatever the state — the workflow's last step fails the job when healthy != 'true'. Non-zero
 # only when the script cannot run at all (BASE_URL missing, curl missing).
 # =============================================================================
 set -euo pipefail
@@ -71,6 +77,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 checked_at="$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 rows=()
 failed=0
+challenged=0
 
 for probe in "${PROBES[@]}"; do
   path="${probe%%|*}"
@@ -100,7 +107,11 @@ for probe in "${PROBES[@]}"; do
   fi
 
   verdict="✅ pass"
-  if [[ "$status" != "200" ]]; then
+  if grep -qi "Checking your browser" "$body" 2>/dev/null; then
+    # Railway's bot protection answered instead of the app (HTTP 200, "Checking your browser…").
+    challenged=$((challenged + 1))
+    verdict="🛡️ challenged — the edge answered with its browser check; the app was not observed"
+  elif [[ "$status" != "200" ]]; then
     failed=$((failed + 1))
     if [[ "$status" == "000" ]]; then
       reason="no response (curl exit ${curl_rc})"
@@ -127,12 +138,16 @@ for probe in "${PROBES[@]}"; do
 done
 
 total=${#PROBES[@]}
-if ((failed == 0)); then
+if ((failed == 0 && challenged == 0)); then
   healthy=true
   overall="**Healthy** — ${total}/${total} probes passed."
-else
+elif ((failed > 0)); then
   healthy=false
   overall="**Unhealthy** — ${failed} of ${total} probes failed."
+  ((challenged > 0)) && overall="${overall} ${challenged} more answered by the edge's browser check."
+else
+  healthy=unknown
+  overall="**Unobserved** — ${challenged} of ${total} probes were answered by Railway's edge browser check (bot protection) instead of the app, so the app could not be observed from this runner. No incident is opened or closed on this state."
 fi
 
 report="$(

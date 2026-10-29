@@ -8,6 +8,10 @@ name: Uptime patrol
 #                     "🚨 Production incident: Shipping Hub is unhealthy" (label `incident`) is
 #                     opened, or receives one comment with the new probe table if already open.
 #   Healthy run    -> an open incident issue, if any, gets a "Recovered" comment and is closed.
+#   Unobserved run -> Railway's edge answered the monitor with its bot-protection browser check
+#                     instead of the app (healthy=unknown): the job fails with a distinct
+#                     message so the badge shows that the patrol is blind, but no incident is
+#                     opened, updated or closed — the app's state is simply not known.
 #
 # The SRE patrol shift reads these results every 6 hours (OPERATIONS.md -> Incident flow).
 
@@ -44,7 +48,7 @@ jobs:
         run: .github/scripts/uptime-probe.sh
 
       - name: Open or update the incident issue
-        if: steps.probe.outputs.healthy != 'true'
+        if: steps.probe.outputs.healthy == 'false'
         uses: actions/github-script@v7
         env:
           REPORT: ${{ steps.probe.outputs.report }}
@@ -139,8 +143,24 @@ jobs:
             });
             core.notice(`Incident issue #${incident.number} closed — recovered at ${now}: ${incident.html_url}`);
 
-      - name: Fail the run when unhealthy
+      - name: Explain an unobserved run
+        if: steps.probe.outputs.healthy == 'unknown'
+        run: |
+          {
+            echo "### The patrol could not observe the app"
+            echo
+            echo "Railway's edge answered every probe with its bot-protection browser check (\"Checking your browser…\", server \`railway-hikari\`) instead of the app, so this run proves nothing about Shipping Hub. No incident was opened or closed."
+            echo
+            echo "What a human can do: open <${BASE_URL}/en> in a browser to see the real state; in Railway, check the service's networking / bot-protection settings and decide whether automated monitors should be allowed; see \`DEPLOY.md\` → Monitoring & incidents."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=Uptime patrol is blind::Railway's edge served its browser check to the monitor; the app was not observed and no incident was touched."
+
+      - name: Fail the run when not healthy
         if: steps.probe.outputs.healthy != 'true'
         run: |
-          echo "::error title=Shipping Hub is unhealthy::One or more probes failed — see the step summary and the incident issue."
+          if [[ "${{ steps.probe.outputs.healthy }}" == "unknown" ]]; then
+            echo "::error title=Uptime patrol is blind::Railway's edge challenged the monitor — see the step summary."
+          else
+            echo "::error title=Shipping Hub is unhealthy::One or more probes failed — see the step summary and the incident issue."
+          fi
           exit 1
