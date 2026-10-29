@@ -17,13 +17,19 @@
 #   /es/quote                         Spanish quote page
 #   /sitemap.xml                      generated sitemap
 #
-# Each probe is one curl with two retries:
-#   curl -sS -o <tmp> -w '%{http_code} %{time_total}' --retry 2 --retry-delay 5 \
-#        --retry-all-errors -m 30 <url>
+# Each probe is one curl with two retries, identified as this monitor (a well-behaved-bot
+# User-Agent plus a browser-like Accept header, so edge/bot filters can tell it apart from
+# anonymous scripted traffic):
+#   curl -sS -o <tmp> -D <headers> -w '%{http_code} %{time_total}' --retry 2 --retry-delay 5 \
+#        --retry-all-errors -m 30 -A "$USER_AGENT" -H "Accept: ..." <url>
+# When a probe fails, the step log also prints the diagnostic response headers (server,
+# retry-after, content-type, cf-ray, x-railway-*) and the first 200 characters of the body,
+# so a 429/5xx can be attributed to the edge or to the app. The Markdown report stays as is.
 #
 # Environment:
 #   BASE_URL             required — origin to probe, without a trailing slash
 #   TRACKING_CODE        optional — tracking code to probe (default: PTY-2026-001001-0)
+#   USER_AGENT           optional — User-Agent header (default: the monitor's own identity)
 #   GITHUB_STEP_SUMMARY  when set, the Markdown report is appended to it (the run summary)
 #   GITHUB_OUTPUT        when set, two step outputs are appended to it:
 #                          healthy=true|false
@@ -47,6 +53,8 @@ fi
 
 BASE_URL="${BASE_URL%/}"
 TRACKING_CODE="${TRACKING_CODE:-PTY-2026-001001-0}"
+USER_AGENT="${USER_AGENT:-Mozilla/5.0 (compatible; ShippingHub-UptimePatrol/1.0; +https://github.com/brunocarbone98/projects)}"
+ACCEPT_HEADER="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 
 # "<path>|<extra expectation>" — the expectation is empty (HTTP 200 is enough) or
 # "body:<text>" (HTTP 200 and the response body must contain <text>).
@@ -69,14 +77,17 @@ for probe in "${PROBES[@]}"; do
   expect="${probe#*|}"
   url="${BASE_URL}${path}"
   body="${WORK_DIR}/body"
+  headers="${WORK_DIR}/headers"
   errors="${WORK_DIR}/errors"
   : >"$body"
+  : >"$headers"
   : >"$errors"
 
   # curl writes "<http_code> <time_total>" even when the transfer fails (http_code is then 000).
   curl_rc=0
-  stats="$(curl -sS -o "$body" -w '%{http_code} %{time_total}' \
+  stats="$(curl -sS -o "$body" -D "$headers" -w '%{http_code} %{time_total}' \
     --retry 2 --retry-delay 5 --retry-all-errors -m 30 \
+    -A "$USER_AGENT" -H "Accept: ${ACCEPT_HEADER}" \
     "$url" 2>"$errors")" || curl_rc=$?
 
   status="${stats%% *}"
@@ -105,6 +116,13 @@ for probe in "${PROBES[@]}"; do
   fi
 
   echo "[uptime-probe] ${path}: HTTP ${status} in ${time_cell} — ${verdict}"
+  if [[ "$verdict" != "✅ pass" ]]; then
+    # Diagnostics for the step log only: which layer answered (edge vs app) and what it said.
+    diag_headers="$(tr -d '\r' <"$headers" | grep -iE '^(HTTP/|server:|retry-after:|content-type:|cf-ray:|x-railway)' | tail -n 8 || true)"
+    [[ -n "$diag_headers" ]] && printf '[uptime-probe]   response headers:\n%s\n' "$(sed 's/^/[uptime-probe]     /' <<<"$diag_headers")"
+    diag_body="$(tr -d '\r\n' <"$body" | head -c 200 || true)"
+    [[ -n "$diag_body" ]] && echo "[uptime-probe]   body (first 200 chars): ${diag_body}"
+  fi
   rows+=("| [\`${path}\`](${url}) | ${status} | ${time_cell} | ${verdict} |")
 done
 
