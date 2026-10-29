@@ -8,3 +8,8 @@ node_modules/
 # Editor / IDE settings (machine-specific, not project config)
 .idea/
 .vscode/
+
+# Claude Code: personal overrides stay local (the committed .claude/settings.json is project config)
+.claude/settings.local.json
+**/.claude/settings.local.json
+CLAUDE.local.md

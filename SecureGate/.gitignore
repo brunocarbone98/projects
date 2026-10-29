@@ -22,6 +22,8 @@ application-local.yml
 karate-reports/
 site/serenity/
 target/newman/
+# Allure is not part of the stack (reports are Serenity + Karate); never commit its output
+allure-results/
 
 # Serenity working dir
 .serenity/
