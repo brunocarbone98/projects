@@ -227,6 +227,13 @@ Rules of thumb when auditing: a PR without the `agent` label and a filled `Opene
 
 If an incident is open during a demo, it is the demo: the issue, the SRE patrol comment and the recovery comment show the whole loop (`DEMO.md` → If something breaks).
 
+**Unobserved runs.** When Railway's edge answers the monitor with its bot-protection page
+("Checking your browser…") instead of the app, the probe reports `🛡️ challenged` and the run ends
+as **Unobserved** (`healthy=unknown`): the job fails with a distinct "patrol is blind" message and
+touches no incident, because the app's state is simply not known. The SRE patrol treats it as a
+monitoring gap, not as an outage: it verifies the app another way when it can and reports the
+gap; the human decision is whether Railway should let automated monitors through.
+
 ## 9. FAQ
 
 **What does this cost?** GitHub Actions minutes are free for public repositories on the standard runners; Uptime patrol is a few seconds of `curl` 48 times a day. The Claude Code cloud shifts are billed against the maintainer's Claude plan, and Claude on-call against the same subscription token (or per token with `ANTHROPIC_API_KEY`). The SRE patrol is read-only and cheap; the nightly maintenance is the expensive one because it runs every suite — pause that task in claude.ai/code to cut most of the cost.
