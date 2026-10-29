@@ -122,7 +122,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 Until the secret exists, the job's `Not configured yet` step writes these instructions to its summary and the job still succeeds, so the badge is never red for configuration reasons.
 
-**Schedules and inactivity.** GitHub disables scheduled workflows in a public repository after 60 days without repository activity — this is exactly what happened to the SecureGate nightly (last scheduled run 2026-09-10, last commit 2026-07-11). Repository activity keeps schedules enabled and re-enables them; the agents' pushes provide that activity by design. To re-enable one by hand: Actions tab → select the workflow in the left sidebar → the banner says the scheduled workflow was disabled for inactivity → **Enable workflow**. Every workflow also has `workflow_dispatch`, so any of them can be run on demand with **Run workflow**.
+**Schedules and inactivity.** GitHub disables scheduled workflows in a public repository after 60 days without repository activity — this is exactly what happened to the SecureGate nightly (last scheduled run 2026-09-10, last commit 2026-07-11). A workflow in that state (`disabled_inactivity`) does not come back by itself: a push does not re-enable it (verified on 2026-10-29 — after this refresh was pushed, SecureGate CI stayed disabled and did not run on its pull request). A human re-enables it once; from then on the agents' pushes provide the activity that keeps it enabled. To re-enable one by hand: Actions tab → select the workflow in the left sidebar → the banner says the scheduled workflow was disabled for inactivity → **Enable workflow**. Every workflow also has `workflow_dispatch`, so any of them can be run on demand with **Run workflow**.
 
 ### 4.2 Claude Code cloud scheduled tasks
 
@@ -235,4 +235,4 @@ If an incident is open during a demo, it is the demo: the issue, the SRE patrol 
 
 **How do I ask the on-call agent for something?** Comment `@claude <request>` in any issue or PR, or open an issue from the "Ask the on-call agent" template. It answers in a comment and, when code changes are needed, pushes a `claude/…` branch and opens a PR.
 
-**Why did the SecureGate nightly stop in September?** GitHub disabled it after 60 days without repository activity (last scheduled run 2026-09-10; last commit 2026-07-11). The shifts now produce that activity; section 4.1 explains how to re-enable a workflow by hand.
+**Why did the SecureGate nightly stop in September?** GitHub disabled it after 60 days without repository activity (last scheduled run 2026-09-10; last commit 2026-07-11). It stays disabled until a human re-enables it once (Actions → SecureGate CI → **Enable workflow**; section 4.1); from then on the shifts produce the activity that keeps it enabled.

@@ -12,7 +12,7 @@ Twelve minutes, five acts, one browser. The goal: show a working product, the en
 - [ ] Make sure at least one open agent PR (`label:agent`) or Dependabot PR (`label:dependencies`) exists. If none does, run a shift by hand from the repo root: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"`.
 - [ ] Repository → Settings → Secrets and variables → Actions: `CLAUDE_CODE_OAUTH_TOKEN` is set (otherwise `@claude` only prints a setup notice).
 - [ ] Open the scheduled-task list in claude.ai/code: the three `Autonomous maintenance · …` tasks are enabled and have recent runs you can open.
-- [ ] Skim the latest **SecureGate CI** run: green, with a `securegate-reports` artifact.
+- [ ] Actions tab → **SecureGate CI**: if a banner says the workflow was disabled for inactivity, click **Enable workflow** (GitHub set it to `disabled_inactivity` on 2026-09-10 and a push does not bring it back; until you click, nothing from SecureGate runs, not even on pull requests). Then **Run workflow** on `main` and wait for the green run with its `securegate-reports` artifact.
 - [ ] Optional, if you plan to show a local run: pull `main`, then `cd FullStackHub && pnpm install && pnpm test` once.
 
 ### T-10 min — tabs to have open, in this order
