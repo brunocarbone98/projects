@@ -9,7 +9,8 @@ node_modules/
 .idea/
 .vscode/
 
-# Claude Code: personal overrides stay local (the committed .claude/settings.json is project config)
+# Claude Code: personal overrides stay local. .claude/settings.json is project config: a human seeds it
+# from the committed .claude/settings.example.json and commits it (OPERATIONS.md, "Project settings").
 .claude/settings.local.json
 **/.claude/settings.local.json
 CLAUDE.local.md

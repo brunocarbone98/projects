@@ -9,6 +9,7 @@ Twelve minutes, five acts, one browser. The goal: show a working product, the en
 - [ ] Open <https://shipping-hub.up.railway.app/en/tracking/PTY-2026-001001-0> — the tracking page renders with the timeline and the route map. If it does not, see "If something breaks" and fix it today, not tomorrow.
 - [ ] Sign in as `ana@example.com` / `Password123!`, open the wallet, sign out.
 - [ ] Actions tab → **Uptime patrol** → **Run workflow** → wait for the green run and open its step summary: the probe table is what you will show.
+- [ ] Issues → Labels shows `agent` · `incident` · `dependencies` · `security` · `maintenance` · `bug`; otherwise Actions → **Sync labels** → **Run workflow** (the `label:agent` / `label:incident` filters you will show are empty without them).
 - [ ] Make sure at least one open agent PR (`label:agent`) or Dependabot PR (`label:dependencies`) exists. If none does, run a shift by hand from the repo root: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"`.
 - [ ] Repository → Settings → Secrets and variables → Actions: `CLAUDE_CODE_OAUTH_TOKEN` is set (otherwise `@claude` only prints a setup notice).
 - [ ] Open the scheduled-task list in claude.ai/code: the three `Autonomous maintenance · …` tasks are enabled and have recent runs you can open.

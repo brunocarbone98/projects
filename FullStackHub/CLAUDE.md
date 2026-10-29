@@ -52,7 +52,7 @@ Repo-wide agents live in `/.claude/agents/` (`sre-patrol`, `repo-steward`, `qa-r
 
 ## Autonomous maintenance
 
-- Shipping Hub is maintained around the clock by Claude Code agents; humans review and merge every PR. **CI** runs lint, format:check, typecheck and Vitest on every push and PR; **Uptime patrol** probes the live app every 30 minutes and opens an `incident` issue when it is unhealthy; **SecureGate CI** runs the black-box suite nightly and on PRs.
+- Shipping Hub is maintained around the clock by Claude Code agents; humans review and merge every PR. **CI** runs lint, format:check, typecheck and Vitest on every push to `main` and every PR; **Uptime patrol** probes the live app every 30 minutes and opens an `incident` issue when it is unhealthy; **SecureGate CI** runs the black-box suite nightly and on PRs.
 - Shifts covering this project (`/.claude/shifts/`): **nightly maintenance** (08:40 UTC — every check plus the Karate API suite against a local stack, at most one small `chore(agents)` PR), **weekly security review** (Mondays — `pnpm audit`, `pip-audit`, helmet/CORS/rate-limit/cookie review) and **SRE patrol** (every 6 h — incidents and red pipelines).
 - Helper scripts (`/.claude/scripts/`): `local-postgres.sh` (PostgreSQL 16 on 127.0.0.1:5432, `shipping`/`shipping`, `shipping_hub` + `shipping_hub_test`), `local-api.sh` (migrate + seed + API on :4000), `run-checks.sh` (every check, one summary table).
 - Operations manual, roster and guardrails: [`../OPERATIONS.md`](../OPERATIONS.md).

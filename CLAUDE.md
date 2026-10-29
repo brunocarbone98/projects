@@ -13,7 +13,7 @@ For Claude Code sessions opened at the repository root. `AGENTS.md` (imported ab
 
 ## Claude Code specifics
 
-- `.claude/settings.example.json` holds the project settings an agent must never grant itself. Copy it to `.claude/settings.json` once (a human decision) to pre-allow the safe recurring commands (the FullStackHub lint/format:check/typecheck/test scripts, `./mvnw`, `pytest`, read-only `git status/diff/log`, `.claude/scripts/*`), to hard-block force-pushes and pushes to `main`, and to run `.claude/hooks/format-on-save.sh` after every `Edit`/`Write` (files under `FullStackHub/` are formatted with Prettier, except `ROADMAP.md`, `world-coastlines.ts`, `pnpm-lock.yaml`; the hook always exits 0). Personal overrides go in `.claude/settings.local.json` (gitignored).
+- `.claude/settings.example.json` holds the project settings an agent must never grant itself. Copy it to `.claude/settings.json` once (a human decision) to pre-allow the safe recurring commands (the FullStackHub lint/format:check/typecheck/test scripts, `./mvnw`, `pytest`, read-only `git status/diff/log`, `.claude/scripts/*`), to hard-block force-pushes and pushes to `main`, and to run `.claude/hooks/format-on-save.sh` after every `Edit`/`Write` (files under `FullStackHub/` are formatted with Prettier, except `ROADMAP.md`, `world-coastlines.ts`, `pnpm-lock.yaml`; the hook always exits 0). Then commit `.claude/settings.json` — project config, not gitignored — so cloud sessions and clones get the allow-list and the hook. Personal overrides go in `.claude/settings.local.json` (gitignored).
 - Subagents live in `.claude/agents/` at the root and inside each project. The definition closest to the working directory wins, which is why `FullStackHub/` and `SecureGate/` each have their own `code-reviewer` and `test-runner`.
 - Delegate long suites to `test-runner` and run `code-reviewer` on the diff before opening a PR; both report, neither fixes.
 - Imports: a bare `@path` line in a CLAUDE.md imports that file (this one imports `AGENTS.md`); paths in backticks are not imported.
@@ -58,7 +58,7 @@ Root agents work from the repository root and read the relevant project `CLAUDE.
 | Nightly maintenance | `40 8 * * *` (03:40 Panama) | `.claude/shifts/nightly-maintenance.md` |
 | Weekly security review | `20 10 * * 1` | `.claude/shifts/weekly-security-review.md` |
 
-Each shift is a Claude Code cloud scheduled task that starts a fresh session with the prompt "Read `.claude/shifts/<name>.md` on the default branch and follow it". To run one by hand: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"` from the repo root, or ask "run the nightly maintenance shift" in an interactive session. Runtimes, outputs and the incident flow: `OPERATIONS.md`.
+Each shift is a Claude Code cloud scheduled task that starts a fresh session whose stored prompt boils down to "read `.claude/shifts/<name>.md` on the default branch and follow it" (the full prompt: `OPERATIONS.md` → 4.2). The three tasks already exist — do not create them again. To run one by hand: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"` from the repo root, or ask "run the nightly maintenance shift" in an interactive session. Runtimes, outputs and the incident flow: `OPERATIONS.md`.
 
 Guardrails: the eight rules in `AGENTS.md` → Guardrails apply to every session and every shift — follow them, do not restate them.
 

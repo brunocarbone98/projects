@@ -54,8 +54,8 @@ The repository is maintained around the clock by Claude Code agents on two runti
 | CI | every push to `main`, every PR | GitHub Actions · `ci.yml` | Lint, format check, typecheck, Vitest (shared + API against PostgreSQL) | Green/red check |
 | SecureGate CI | PRs touching `SecureGate/` or `FullStackHub/`; nightly 06:00 UTC | GitHub Actions · `securegate-ci.yml` | Starts Postgres + API + web + Chrome; runs Karate API + Serenity UI + Newman | `securegate-reports` artifact (Serenity, Karate, surefire) |
 | Uptime patrol | every 30 min + manual | GitHub Actions · `uptime-patrol.yml` | Probes `/en`, the demo tracking page, `/es/quote` and `/sitemap.xml` on the live app | Opens, updates and auto-closes `🚨 Production incident: Shipping Hub is unhealthy` (label `incident`) |
-| Claude on-call | on `@claude` in an issue, PR comment or review | GitHub Actions · `claude.yml` | Reads the request, works on a branch, answers in a comment | Comments and PRs |
-| Dependabot | npm and pip weekly, Mondays 04:00 America/Panama; Maven grouped; GitHub Actions monthly | GitHub · `dependabot.yml` | Grouped minor/patch bumps for npm, pip, Maven and Actions | PRs labelled `dependencies` |
+| Claude on-call | on `@claude` in an issue, PR comment or review | GitHub Actions · `claude.yml` | Reads the request, works on a branch, answers in a comment | Comments; `claude/…` branches with a ready-to-open PR link |
+| Dependabot | npm, pip and Maven weekly, Mondays 04:00 America/Panama (grouped minor/patch, at most 5 open PRs per ecosystem); GitHub Actions monthly, grouped | GitHub · `dependabot.yml` | Grouped minor/patch bumps for npm, pip, Maven and Actions | PRs labelled `dependencies` |
 | SRE patrol | every 6 h (`28 */6 * * *` UTC) | Claude Code cloud · `.claude/shifts/sre-patrol.md` | Reads the last 24 h of workflow runs and open incidents; diagnoses from logs | `fix(agents): …` PR when the cause is in-repo; one diagnosis comment on the incident issue when it is the hosting |
 | Nightly maintenance | daily 08:40 UTC (`40 8 * * *`) | Claude Code cloud · `.claude/shifts/nightly-maintenance.md` | Runs every check and the Karate API suite against a local stack, reviews Dependabot PRs, fixes docs drift, picks at most one small improvement | `chore(agents): nightly maintenance <date>` PR or `🧪 Nightly maintenance failed: <date>` issue — nothing when nothing is needed |
 | Weekly security review | Mondays 10:20 UTC (`20 10 * * 1`) | Claude Code cloud · `.claude/shifts/weekly-security-review.md` | `pnpm audit`, `pip-audit`, Maven updates, secret grep, auth/CORS/rate-limit/Dockerfile/workflow-permissions review | `chore(deps): weekly security bumps <date>` PR; `🔐 Weekly security review: <date>` issue for everything else |
@@ -115,7 +115,7 @@ open PersonalWebsite/MainPage.html                     # xdg-open on Linux
 │   ├── shifts/              sre-patrol.md · nightly-maintenance.md · weekly-security-review.md
 │   ├── scripts/             local-postgres.sh · local-api.sh · run-checks.sh
 │   ├── hooks/               format-on-save.sh — Prettier on FullStackHub files after every edit
-│   └── settings.example.json  pre-allowed commands + the PostToolUse hook — copy to settings.json to enable
+│   └── settings.example.json  pre-allowed commands + the PostToolUse hook — copy to settings.json and commit to enable
 ├── .github/
 │   ├── workflows/           ci.yml · securegate-ci.yml · uptime-patrol.yml · claude.yml · labels.yml
 │   ├── scripts/             uptime-probe.sh (the Uptime patrol probe, runnable locally)

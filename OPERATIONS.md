@@ -17,13 +17,13 @@ Design principles:
 
 ## 2. Roster
 
-Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tools`, `model`, `color`); the body is the agent's system prompt. Model policy: `inherit` (the session's model) for developer, reviewer and auditor agents; `haiku` for the two report-only `test-runner`s. "all" in the Tools column means the frontmatter omits `tools`, so the agent inherits every tool of the session. Root agents work from the repository root and read the relevant project `CLAUDE.md` before touching that project. Command restrictions ("read-only", "`git diff` only") are instructions in the agent body; hard blocks live in `.claude/settings.json`, seeded by a human from `.claude/settings.example.json` (see *Project settings* below).
+Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tools`, `model`, `color`); the body is the agent's system prompt. Model policy: `inherit` (the session's model) for developer, reviewer and auditor agents; `haiku` for the two report-only `test-runner`s. "all" in the Tools column means the frontmatter omits `tools`, so the agent inherits every tool of the session. Root agents work from the repository root and read the relevant project `CLAUDE.md` before touching that project. Command restrictions ("read-only usage", "read-only `git diff`/`log`/`show`/`status`") are instructions in the agent body; hard blocks live in `.claude/settings.json`, seeded by a human from `.claude/settings.example.json` and committed (see *Project settings* below).
 
 ### 2.1 Root — `.claude/agents/`
 
 | Agent | Scope | Tools | Model |
 | --- | --- | --- | --- |
-| `sre-patrol` (red) | Reads the latest *Uptime patrol*, *CI* and *SecureGate CI* runs (GitHub MCP tools when available, otherwise `gh api` or `curl https://api.github.com/...`), open `incident` issues and recent PR check states; diagnoses failures from logs; writes a severity-ordered status report and, when the cause is in-repo (a workflow bug, a flaky test, a broken script), the exact fix for `repo-steward` | Read, Grep, Glob, Bash (read-only usage) | inherit |
+| `sre-patrol` (red) | Reads the latest *Uptime patrol*, *CI* and *SecureGate CI* runs (GitHub MCP tools when available, otherwise `gh api` or `curl https://api.github.com/...`), open `incident` issues and recent PR check states; diagnoses failures from logs; writes a severity-ordered status report and, when the cause is in-repo (a workflow bug, a flaky test, a broken script), the exact fix for `repo-steward` | Read, Grep, Glob, Bash (read-only usage) + read-only GitHub MCP tools (`mcp__github__actions_list`, `actions_get`, `get_job_logs`, `get_check_run`, `list_issues`, `issue_read`, `search_issues`, `list_pull_requests`, `pull_request_read`) | inherit |
 | `repo-steward` (blue) | Repository hygiene: CI triage and small fixes, Dependabot PR review (reads changelogs and CI, comments a verdict), lockfile regeneration only with the project tooling (`pnpm install`, `./mvnw`), keeps the PR template filled, opens PRs following section 6 | all | inherit |
 | `qa-regression` (green) | Runs Vitest (shared + API; PostgreSQL via `.claude/scripts/local-postgres.sh`), pytest (both services, in their `.venv`s) and the Karate API suite (`cd SecureGate && ./mvnw -q verify` after `.claude/scripts/local-api.sh`); reads `SecureGate/target/surefire-reports/*.xml` and `SecureGate/target/karate-reports/karate-summary-json.txt` to count passed/failed/skipped; reports only failures with file:line and a likely cause; never edits product code | Bash, Read, Grep, Glob | inherit |
 | `security-auditor` (orange) | `pnpm audit --audit-level=moderate` (FullStackHub), `pip-audit` installed into each service `.venv` (or `pip list --outdated`), `./mvnw -q versions:display-dependency-updates` (SecureGate), a secret-pattern grep (AWS keys, `sk-`, `ghp_`, Slack tokens, PEM headers — the exact command is in 3.3), review of `apps/api/src/app.ts` (helmet, CORS, rate limits), `apps/api/src/auth/*`, `apps/api/src/env.ts`, the root `Dockerfile` base image and the workflow `permissions:` blocks; findings ordered by severity, each with a proposed patch; read-only | Read, Grep, Glob, Bash | inherit |
@@ -36,7 +36,7 @@ Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tool
 | `frontend-dev` | `apps/web`: Next.js 15 App Router, Tailwind, next-intl (copy only in `messages/*.json`), SEO (metadata, OG, sitemap, JSON-LD), Server Components by default; definition of done = lint, format, typecheck, tests | all | inherit |
 | `backend-dev` | `apps/api`: Express 5, Prisma, the state machine from `packages/shared`, append-only tracking events and ledger entries, idempotent money operations; Vitest + Supertest integration tests for every endpoint | all | inherit |
 | `python-services` | `services/pricing` (`POST /quote`) and `services/labels` (`POST /label`): stateless FastAPI, Pydantic contracts, `GET /health`, pytest in each `.venv` | all | inherit |
-| `code-reviewer` | Reviews the diff, read-only: hardcoded secrets, input validation, invalid state transitions, mutations of append-only tables, `any`, Prettier/format, i18n keys present in both `messages/*.json`, Zod at the edges | Read, Grep, Glob, Bash (`git diff` only) | inherit |
+| `code-reviewer` | Reviews the diff, read-only: hardcoded secrets, input validation, invalid state transitions, mutations of append-only tables, `any`, Prettier/format, i18n keys present in both `messages/*.json`, Zod at the edges | Read, Grep, Glob, Bash (read-only `git diff`/`log`/`show`/`status`) | inherit |
 | `test-runner` | Vitest for `packages/shared` and `apps/api` (`pnpm test` from `FullStackHub/`; the API suite needs PostgreSQL on `localhost:5432` with the credentials in `apps/api/.env.test` → `../.claude/scripts/local-postgres.sh`) and pytest for `services/pricing` and `services/labels` in their own `.venv`s; reports only failures. There is no Playwright suite — E2E lives in SecureGate | Bash, Read | haiku |
 
 ### 2.3 SecureGate — `SecureGate/.claude/agents/`
@@ -47,12 +47,12 @@ Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tool
 | `ui-test-engineer` | Screenplay: `screenplay/ui` Targets, `tasks`, `questions`; no selectors in step definitions; explicit waits; `serenity.conf`; the headless flag. The UI suite needs Chrome — in the cloud environment it says so and hands the run to SecureGate CI | all | inherit |
 | `bdd-engineer` | Gherkin in `features/ui/*.feature` (tags `@ui`/`@public`); step definitions delegate to Screenplay tasks and questions; Serenity living documentation | all | inherit |
 | `devsecops` | The pipeline `.github/workflows/securegate-ci.yml`: SonarQube step, Serenity/Karate report artifacts, Chrome in CI, the Newman step; how to re-run it and read its artifacts | all | inherit |
-| `code-reviewer` | Test-code review, read-only: flakiness (`Thread.sleep`, implicit waits), weak assertions (`status == 200` only), leaked secrets, naming | Read, Grep, Glob | inherit |
+| `code-reviewer` | Test-code review, read-only: flakiness (`Thread.sleep`, implicit waits), weak assertions (`status == 200` only), leaked secrets, naming | Read, Grep, Glob, Bash (read-only `git diff`/`log`/`show`/`status`) | inherit |
 | `test-runner` | `./mvnw -q verify` (API) or `-Pui -Dheadless.mode=true` (UI, CI only); reads `target/surefire-reports/*.xml` and reports tests/failures/errors/skipped — "all skipped" means the stack was down and is reported as such | Bash, Read | haiku |
 
 ## 3. Shifts
 
-A shift is a scheduled job. Its prompt is a complete, standalone Markdown file in `.claude/shifts/`: identity and goal, environment notes (cloud network limits, the helper scripts), step-by-step, decision rules, exact outputs (branch, PR and issue titles with labels), the guardrails of section 5, and the report format. The Claude Code cloud scheduled task sends "Read `.claude/shifts/<name>.md` on the default branch and follow it" (with a condensed fallback in case the file is missing) to a fresh cloud session, which clones the repository, does the work and ends. GitHub Actions workflows cover what the cloud cannot reach (the live app, a browser) and what must react to events (`@claude` mentions, PRs, pushes).
+A shift is a scheduled job. Its prompt is a complete, standalone Markdown file in `.claude/shifts/`: identity and goal, environment notes (cloud network limits, the helper scripts), step-by-step, decision rules, exact outputs (branch, PR and issue titles with labels), the guardrails of section 5, and the report format. The Claude Code cloud scheduled task tells a fresh cloud session to read `.claude/shifts/<name>.md` on the default branch and follow it (the stored prompt is described in 4.2); the session clones the repository, does the work and ends. GitHub Actions workflows cover what the cloud cannot reach (the live app, a browser) and what must react to events (`@claude` mentions, PRs, pushes).
 
 | Shift | Cadence | Runtime | Definition | Output |
 | --- | --- | --- | --- | --- |
@@ -60,15 +60,15 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 | Nightly maintenance | daily 08:40 UTC (03:40 Panama) — cron `40 8 * * *` | Claude Code cloud scheduled task `Autonomous maintenance · Nightly maintenance` | `.claude/shifts/nightly-maintenance.md` | `chore(agents): nightly maintenance <date>` PR, or `🧪 Nightly maintenance failed: <date>` issue, or nothing |
 | Weekly security review | Mondays 10:20 UTC — cron `20 10 * * 1` | Claude Code cloud scheduled task `Autonomous maintenance · Weekly security review` | `.claude/shifts/weekly-security-review.md` | `chore(deps): weekly security bumps <date>` PR and/or `🔐 Weekly security review: <date>` issue, or nothing |
 | Uptime patrol | every 30 minutes + manual | GitHub Actions `Uptime patrol` | `.github/workflows/uptime-patrol.yml` | `🚨 Production incident: Shipping Hub is unhealthy` issue — opened, updated once per failing run, closed on recovery |
-| Claude on-call | on `@claude` in issues, PR comments and reviews | GitHub Actions `Claude on-call` | `.github/workflows/claude.yml` | comments; commits on a `claude/…` branch and PRs when code changes are needed |
+| Claude on-call | on `@claude` in issues, PR comments and reviews | GitHub Actions `Claude on-call` | `.github/workflows/claude.yml` | comments; commits on a `claude/…` branch and posts a link to open the PR when code changes are needed |
 | CI | push to `main`, every PR, manual | GitHub Actions `CI` | `.github/workflows/ci.yml` | check status |
 | SecureGate CI | PRs touching `SecureGate/` or `FullStackHub/`; pushes to `main` touching SecureGate; nightly 06:00 UTC; manual | GitHub Actions `SecureGate CI` | `.github/workflows/securegate-ci.yml` | check status + the `securegate-reports` artifact |
-| Dependabot | npm and pip weekly, Mondays 04:00 America/Panama; Maven grouped; GitHub Actions monthly | GitHub Dependabot | `.github/dependabot.yml` | PRs labelled `dependencies` |
+| Dependabot | npm, pip and Maven weekly, Mondays 04:00 America/Panama (grouped minor/patch, at most 5 open PRs per ecosystem); GitHub Actions monthly, grouped | GitHub Dependabot | `.github/dependabot.yml` | PRs labelled `dependencies` |
 
 ### 3.1 SRE patrol
 
 - **Trigger:** cloud scheduled task `Autonomous maintenance · SRE patrol`, cron `28 */6 * * *` (UTC), a fresh session each time.
-- **Runtime:** Claude Code cloud. It needs only the GitHub API (reachable from the cloud) and never starts a stack.
+- **Runtime:** Claude Code cloud. It normally needs only the GitHub API (reachable from the cloud); it starts a local stack (`.claude/scripts/local-api.sh`, then `cd SecureGate && ./mvnw -q -B verify`) only to reproduce a SecureGate CI failure before proposing a fix.
 - **Steps:** (1) through the GitHub API/MCP, read the last 24 hours of *Uptime patrol*, *CI* and *SecureGate CI* runs and any open `incident`, `maintenance` or `security` issues; (2) if everything is green and no incident is open, stop and report "no action"; (3) if an incident is open, read the failing probe output — when the cause is in-repo (a bad workflow, a bad URL, configuration in `start.sh`/`Dockerfile`) branch `agents/sre-patrol/<date>` and open a fix PR; when it is the hosting (Railway down, the database) comment once on the incident issue with the diagnosis and the human action needed (restart, check `DATABASE_URL`), and do not spam; (4) if CI or SecureGate CI failed on `main`, diagnose from the logs — a fix PR when it is a flaky or broken test or workflow, otherwise open or update one issue; (5) report.
 - **Outputs:** a short bullet report in the session; at most one PR (`fix(agents): …`, label `agent`), one comment or one issue per run.
 - **Expected cost/duration:** the cheapest shift — read-only API calls, a few minutes when everything is green; four runs a day.
@@ -99,7 +99,8 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 - **Uptime patrol** (`.github/workflows/uptime-patrol.yml`; every 30 minutes and on demand) probes `https://shipping-hub.up.railway.app` — `/en`, `/en/tracking/PTY-2026-001001-0` (the body must contain the code), `/es/quote`, `/sitemap.xml` — with retries, writes an endpoint · status · time · result table to the step summary, opens/updates or closes the incident issue, and fails the run when unhealthy so the badge turns red. A one-commit checkout only to run `.github/scripts/uptime-probe.sh` (the probe logic, runnable locally: `BASE_URL=https://shipping-hub.up.railway.app .github/scripts/uptime-probe.sh`); no repository secrets. See section 8 and `DEPLOY.md` → Monitoring & incidents.
 - **Claude on-call** (`.github/workflows/claude.yml`) runs `anthropics/claude-code-action@v1` in interactive mode: it answers `@claude` mentions in issue comments, PR comments and PR reviews, and new issues whose body or title contains `@claude`. Until a token secret exists it writes a setup notice to the step summary and exits green (section 4.1).
 - **CI** and **SecureGate CI** are unchanged in purpose; both now accept `workflow_dispatch`, so they can be run by hand from the Actions tab.
-- **Dependabot** (`.github/dependabot.yml`): npm (`/FullStackHub`) and pip (`/FullStackHub/services/pricing`, `/FullStackHub/services/labels`) weekly on Mondays at 04:00 America/Panama with grouped minor-and-patch updates, at most 5 open npm PRs, label `dependencies`, commit prefix `chore(deps)`; Maven (`/SecureGate`) grouped minor/patch; GitHub Actions (`/`) monthly, grouped. The nightly maintenance shift reviews these PRs; a human merges.
+- **Dependabot** (`.github/dependabot.yml`): npm (`/FullStackHub`), pip (`/FullStackHub/services/pricing`, `/FullStackHub/services/labels`) and Maven (`/SecureGate`) weekly on Mondays at 04:00 America/Panama with grouped minor-and-patch updates, at most 5 open PRs per ecosystem, label `dependencies`, commit prefix `chore(deps)`; GitHub Actions (`/`) monthly, grouped, same limit and label. The nightly maintenance shift reviews these PRs; a human merges.
+- **Sync labels** (`.github/workflows/labels.yml`) creates or updates the six labels of section 6 — name, colour, description — from `.github/labels.json`; it never deletes a label. It runs on `workflow_dispatch` and on a push to `main` that touches `.github/labels.json` or the workflow itself, so the merge that adds the file runs it once. A fresh repository has only GitHub's default labels; if Issues → Labels does not show `agent`, `incident`, `dependencies`, `security` and `maintenance`, run it by hand (Actions → Sync labels → **Run workflow**) — without them the issue templates, Dependabot and the shifts silently drop their labels and every `label:agent` / `label:incident` filter shows nothing.
 
 ## 4. Runtimes
 
@@ -111,7 +112,8 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 | `.github/workflows/securegate-ci.yml` | `SecureGate CI` | PRs touching `SecureGate/**` or `FullStackHub/**`; pushes to `main` touching `SecureGate/**`; nightly `0 6 * * *` UTC; `workflow_dispatch` |
 | `.github/workflows/uptime-patrol.yml` | `Uptime patrol` | `*/30 * * * *` (every 30 minutes); `workflow_dispatch` |
 | `.github/workflows/claude.yml` | `Claude on-call` | `issue_comment` created, `pull_request_review_comment` created, `pull_request_review` submitted, `issues` opened — only when the text contains `@claude` |
-| `.github/dependabot.yml` | Dependabot | weekly Mondays 04:00 America/Panama (npm, pip); Maven grouped minor/patch; Actions monthly |
+| `.github/workflows/labels.yml` | `Sync labels` | `workflow_dispatch`; push to `main` touching `.github/labels.json` or the workflow itself — creates or updates the six labels from `.github/labels.json`, never deletes one |
+| `.github/dependabot.yml` | Dependabot | weekly Mondays 04:00 America/Panama (npm, pip, Maven — grouped minor/patch, at most 5 open PRs each); GitHub Actions monthly, grouped |
 
 **Enabling Claude on-call.** The workflow needs one secret:
 
@@ -122,21 +124,21 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 Until the secret exists, the job's `Not configured yet` step writes these instructions to its summary and the job still succeeds, so the badge is never red for configuration reasons.
 
-**Schedules and inactivity.** GitHub disables scheduled workflows in a public repository after 60 days without repository activity — this is exactly what happened to the SecureGate nightly (last scheduled run 2026-09-10, last commit 2026-07-11). A workflow in that state (`disabled_inactivity`) does not come back by itself: a push does not re-enable it (verified on 2026-10-29 — after this refresh was pushed, SecureGate CI stayed disabled and did not run on its pull request). A human re-enables it once; from then on the agents' pushes provide the activity that keeps it enabled. To re-enable one by hand: Actions tab → select the workflow in the left sidebar → the banner says the scheduled workflow was disabled for inactivity → **Enable workflow**. Every workflow also has `workflow_dispatch`, so any of them can be run on demand with **Run workflow**.
+**Schedules and inactivity.** GitHub disables scheduled workflows in a public repository after 60 days without repository activity — this is exactly what happened to the SecureGate nightly (last scheduled run 2026-09-10, last commit 2026-07-11). A workflow in that state (`disabled_inactivity`) does not come back by itself: a push does not re-enable it (verified on 2026-10-29 — after this refresh was pushed, SecureGate CI stayed disabled and did not run on its pull request). A human re-enables it once; from then on the agents' pushes provide the activity that keeps it enabled. To re-enable one by hand: Actions tab → select the workflow in the left sidebar → the banner says the scheduled workflow was disabled for inactivity → **Enable workflow**. CI, SecureGate CI, Uptime patrol and Sync labels also have `workflow_dispatch`, so they can be run on demand with **Run workflow**; Claude on-call is event-driven only — mention `@claude` again (or re-run a past run from its page).
 
 ### 4.2 Claude Code cloud scheduled tasks
 
 A scheduled task in Claude Code (claude.ai/code) starts a fresh cloud session on a cron, with a stored prompt, in the cloud environment connected to this repository. The session clones the default branch, works with the repository's `.claude/` configuration (agents, settings, hooks, scripts), and ends when the prompt is done. Every run is an ordinary session: you can open it, read each command and output, and reply to it.
 
-| Task name | Cron (UTC) | Panama (UTC−5) | Prompt |
+| Task name | Cron (UTC) | Panama (UTC−5) | Prompt (summary) |
 | --- | --- | --- | --- |
 | `Autonomous maintenance · SRE patrol` | `28 */6 * * *` | 19:28 · 01:28 · 07:28 · 13:28 | Read `.claude/shifts/sre-patrol.md` on the default branch and follow it |
 | `Autonomous maintenance · Nightly maintenance` | `40 8 * * *` | 03:40 daily | Read `.claude/shifts/nightly-maintenance.md` on the default branch and follow it |
 | `Autonomous maintenance · Weekly security review` | `20 10 * * 1` | Mondays 05:20 | Read `.claude/shifts/weekly-security-review.md` on the default branch and follow it |
 
-The prompt is deliberately tiny: the shift file in the repository is the source of truth, so changing a shift is a normal reviewed PR, not a settings change. Each task also carries a condensed fallback of its shift in case the file is missing on the default branch.
+The prompt is deliberately short and the shift file in the repository is the source of truth, so changing a shift is a normal reviewed PR, not a settings change. The stored prompt bootstraps the checkout (attaches `brunocarbone98/projects` with push access, loads the GitHub MCP tools), tells the session to read and follow `.claude/shifts/<name>.md` on the default branch — after the root `CLAUDE.md` and `AGENTS.md` — repeats the hard guardrails (never push to `main`, never force-push, never merge, never weaken a test, never print secrets), and, if the file is missing because the refresh is not merged yet, does nothing else and ends with a one-line "waiting for the merge" report. Everything written to the repository or to GitHub is in English; the final report to the maintainer is in Spanish.
 
-**Managing the tasks.** The maintainer creates them in Claude Code after this refresh is merged. From the scheduled-task list in claude.ai/code a task can be paused, resumed, edited or deleted; prefer pausing over deleting to keep its run history. A paused task never fires; a resumed one fires at its next cron slot.
+**Managing the tasks.** The three tasks already exist: they were created on 2026-10-29 together with this refresh and are listed in claude.ai/code → scheduled tasks. Do not create them again — a second task per shift would race the first for the same `agents/<shift>/<date>` branch and duplicate verdict comments and issues, against guardrail 2. Until the pull request that introduces the shifts (#35) is merged, each run only reports that it is waiting for that merge. From the scheduled-task list a task can be paused, resumed, edited or deleted; prefer pausing over deleting to keep its run history. A paused task never fires; a resumed one fires at its next cron slot.
 
 **Running a shift by hand.** From the repository root, non-interactively:
 
@@ -157,6 +159,10 @@ permissions, so no agent here ever writes `settings.json`. A human enables it on
 ```bash
 cp .claude/settings.example.json .claude/settings.json
 ```
+
+then commit `.claude/settings.json`: it is project configuration and deliberately not gitignored (only
+`settings.local.json` is), and cloud sessions and fresh clones get the allow-list and the hook only from
+the committed file — until then the cloud shifts run without them.
 
 What it does: pre-allows the safe recurring commands (FullStackHub `pnpm lint` / `format:check` /
 `typecheck` / `test`, `./mvnw`, `pytest`, read-only `git status` / `diff` / `log`,
@@ -187,7 +193,7 @@ Verified behaviour behind rule 7: with no Shipping Hub reachable, `./mvnw -q ver
 
 | Item | Convention |
 | --- | --- |
-| Labels | `agent` (work by/for agents) · `incident` (uptime) · `dependencies` (Dependabot) · `security` · `maintenance` · `bug` |
+| Labels | `agent` (work by/for agents) · `incident` (uptime) · `dependencies` (Dependabot) · `security` · `maintenance` · `bug` — defined in `.github/labels.json` and created/updated by the `Sync labels` workflow (`.github/workflows/labels.yml`), which runs on the merge that adds the file and on **Run workflow**; if Issues → Labels does not show them, run it once from the Actions tab, otherwise the issue templates, Dependabot and the shifts cannot apply them |
 | Branches | `agents/<shift>/<YYYY-MM-DD>`, e.g. `agents/nightly-maintenance/2026-10-29`; Claude on-call uses the action's default `claude/` prefix |
 | PR titles | `chore(agents): nightly maintenance 2026-10-29` · `fix(agents): …` · `docs(agents): …` · `chore(deps): …` (the weekly review uses `chore(deps): weekly security bumps <date>`; Dependabot uses its `chore(deps)` prefix) |
 | PR body | `.github/pull_request_template.md`: Summary · Changes · How I verified (a checkbox list with the exact commands per project) · Risks & rollback · `Opened by:` (human, or the shift name) · the reminder that agents never merge. Every agent PR carries the `agent` label |
@@ -231,8 +237,8 @@ If an incident is open during a demo, it is the demo: the issue, the SRE patrol 
 
 **Who merges?** Always a human. Dependabot PRs get a verdict comment from the nightly shift; the human merges or closes them.
 
-**How do I add a new shift?** (1) Write `.claude/shifts/<name>.md` — identity and goal, environment notes, steps, decision rules, exact outputs (branch, PR and issue titles with labels from section 6), the guardrails verbatim, the report format. (2) Add it to the tables in `README.md`, `CLAUDE.md` and this file; `docs-keeper` checks that they agree. (3) Merge it through a PR. (4) In claude.ai/code create a scheduled task named `Autonomous maintenance · <Shift name>` with the cron and the prompt "Read `.claude/shifts/<name>.md` on the default branch and follow it". (5) If the shift needs the live app or a browser, make it a GitHub Actions workflow instead.
+**How do I add a new shift?** (1) Write `.claude/shifts/<name>.md` — identity and goal, environment notes, steps, decision rules, exact outputs (branch, PR and issue titles with labels from section 6), the guardrails verbatim, the report format. (2) Add it to the tables in `README.md`, `CLAUDE.md` and this file; `docs-keeper` checks that they agree. (3) Merge it through a PR. (4) For the new shift only — the three existing tasks already exist (section 4.2) — create in claude.ai/code a scheduled task named `Autonomous maintenance · <Shift name>` with its cron and a prompt modelled on the existing ones: the bootstrap, "read `.claude/shifts/<name>.md` on the default branch and follow it", the hard rules. (5) If the shift needs the live app or a browser, make it a GitHub Actions workflow instead.
 
-**How do I ask the on-call agent for something?** Comment `@claude <request>` in any issue or PR, or open an issue from the "Ask the on-call agent" template. It answers in a comment and, when code changes are needed, pushes a `claude/…` branch and opens a PR.
+**How do I ask the on-call agent for something?** Comment `@claude <request>` in any issue or PR, or open an issue from the "Ask the on-call agent" template. It answers in a comment and, when code changes are needed, pushes a `claude/…` branch and posts a link to open the PR (the action never opens PRs itself).
 
 **Why did the SecureGate nightly stop in September?** GitHub disabled it after 60 days without repository activity (last scheduled run 2026-09-10; last commit 2026-07-11). It stays disabled until a human re-enables it once (Actions → SecureGate CI → **Enable workflow**; section 4.1); from then on the shifts produce the activity that keeps it enabled.
