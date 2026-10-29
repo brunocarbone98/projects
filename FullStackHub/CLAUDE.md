@@ -6,7 +6,7 @@ International parcel shipping & tracking platform (UPS/FedEx style) with a bilin
 
 ## Monorepo structure
 
-- `apps/web` — Next.js 15 (App Router) + Tailwind: public SEO site + dashboards.
+- `apps/web` — Next.js 16 (App Router) + Tailwind: public SEO site + dashboards.
 - `apps/api` — Express + TypeScript: transactional REST API. **The only layer that touches PostgreSQL** (Prisma from Phase 1 onwards).
 - `services/pricing` and `services/labels` — stateless FastAPI microservices (pricing/ETA quotes and PDF labels); the API consumes them over internal HTTP.
 - `packages/shared` — Zod schemas + TS types shared between web and api (API contracts, enums and the state machine from Phase 1 onwards).
@@ -42,7 +42,7 @@ International parcel shipping & tracking platform (UPS/FedEx style) with a bilin
 
 ## Subagents (`.claude/agents/`)
 
-- `frontend-dev` — tasks in `apps/web` (Next.js 15 App Router, Tailwind v4, next-intl es/en, SEO); done when lint, format:check and typecheck pass and both message files have the new keys.
+- `frontend-dev` — tasks in `apps/web` (Next.js 16 App Router, Tailwind v4, next-intl es/en, SEO); done when lint, format:check and typecheck pass and both message files have the new keys.
 - `backend-dev` — tasks in `apps/api` (Express 5, Prisma, state machine, ledger, auth); every endpoint gets a Vitest + Supertest integration test.
 - `python-services` — tasks in `services/pricing` and `services/labels` (FastAPI, Pydantic, pytest in each service's `.venv`).
 - `code-reviewer` — reviews the diff (read-only): secrets, Zod at the edges, append-only tables, state transitions, idempotency, i18n keys in both message files, Prettier, no `any`.

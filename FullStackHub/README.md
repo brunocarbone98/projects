@@ -22,7 +22,7 @@ flowchart LR
       U["Customer / Staff"]
     end
 
-    subgraph Web["apps/web — Next.js 15"]
+    subgraph Web["apps/web — Next.js 16"]
       PUB["Public SSR site<br/>(tracking, quoter, coverage, FAQ)"]
       APP["Dashboards<br/>(httpOnly-cookie auth)"]
     end
@@ -67,7 +67,7 @@ stateless — they receive data, compute/generate, and return a result.
 
 | Area                       | Tech                                                                                   |
 | -------------------------- | -------------------------------------------------------------------------------------- |
-| Web (`apps/web`)           | Next.js 15 (App Router), React 19, TypeScript, Tailwind v4, next-intl (es/en), Leaflet |
+| Web (`apps/web`)           | Next.js 16 (App Router), React 19, TypeScript, Tailwind v4, next-intl (es/en), Leaflet |
 | API (`apps/api`)           | Express 5, TypeScript, Prisma, PostgreSQL                                              |
 | Services (`services/*`)    | FastAPI (pricing/ETA, PDF labels)                                                      |
 | Shared (`packages/shared`) | Zod schemas, DTOs, enums, the shipment state machine, tracking-code (Luhn)             |

@@ -101,8 +101,9 @@ the new table — never a second issue. The first green run afterwards comments
 **Unobserved runs.** Railway's edge (server `railway-hikari`) may answer automated clients with
 its bot protection instead of the app: HTTP 429, or an HTTP 200 "Checking your browser…" page.
 The probe reports such answers as `🛡️ challenged`; when every probe is challenged the run ends as
-**Unobserved** (`healthy=unknown`): the job fails with a "patrol is blind" message so the badge
-shows that monitoring is not seeing the app, but no incident is opened, updated or closed. Open
+**Unobserved** (`healthy=unknown`): the job ends green with a warning annotation and an
+explanation in its summary, no incident is opened, updated or closed, and the badge turns red only
+on a confirmed failure. Open
 the app in a browser to see its real state, and decide in Railway's service settings whether
 automated monitors should be allowed through.
 
