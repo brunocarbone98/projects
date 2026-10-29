@@ -1,0 +1,115 @@
+name: Claude on-call
+
+# The on-call agent. Mention @claude in an issue, a PR comment or a PR review — or open an issue
+# whose body or title contains @claude (the "Ask the on-call agent" issue template does) — and
+# anthropics/claude-code-action answers from this runner. It reads the request and replies in a
+# comment; when code changes are needed it commits on a claude/… branch, runs the project checks
+# allowed below (pnpm, ./mvnw, pytest, the .claude/scripts helpers), pushes the branch and posts a
+# link to open the pull request — the action never opens the PR itself, and a human reviews and
+# merges everything.
+#
+# Credential: the repository secret CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, Claude
+# Pro/Max subscriptions) or ANTHROPIC_API_KEY. Until one exists the job only writes a setup
+# notice to its summary and succeeds, so the badge is never red for configuration reasons.
+# No github_token is passed on purpose: the action authenticates as the Claude GitHub App, so
+# CI runs on the commits it pushes.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened]
+
+jobs:
+  on-call:
+    name: Answer the @claude mention
+    # One clause per event, as in the action's own example workflow. An `issue_comment` payload
+    # also carries the issue body, so an unguarded `contains(github.event.issue.body, '@claude')`
+    # would start a run for every comment on an issue opened from the agent-task form — including
+    # the comments Claude itself posts — each ending as a green no-op once the action finds no
+    # @claude in the comment, and a queued no-op can cancel a pending real request in the
+    # concurrency group below.
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    concurrency:
+      group: claude-on-call-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    env:
+      # `secrets` cannot be used in a job-level `if:`, so this env value gates the steps instead.
+      CLAUDE_TOKEN_PRESENT: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Not configured yet
+        if: env.CLAUDE_TOKEN_PRESENT != 'true'
+        run: |
+          {
+            echo "## Claude on-call is not configured yet"
+            echo
+            echo "An @claude mention was received, but the repository has no Claude credential, so nothing ran. To enable the on-call agent:"
+            echo
+            echo '1. On your machine, with a Claude Pro or Max subscription, run `claude setup-token` and copy the token.'
+            echo '2. Repository → Settings → Secrets and variables → Actions → New repository secret → name `CLAUDE_CODE_OAUTH_TOKEN`, value = that token. Alternative: `ANTHROPIC_API_KEY` from the Anthropic Console (billed per token).'
+            echo '3. Mention `@claude` again, or re-run this workflow run.'
+            echo
+            echo 'Details: `OPERATIONS.md` → Runtimes → GitHub Actions → Enabling Claude on-call.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Claude on-call is not configured yet::Add the CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) repository secret — see the step summary."
+
+      # The toolchain behind the allowed project commands, at the versions CI and SecureGate CI use
+      # (pnpm 10 + Node 22 for FullStackHub, Temurin 21 for SecureGate's ./mvnw; the runner's
+      # Python 3.12 matches the services' python:3.12-slim images). Set up only when the agent runs.
+      - uses: pnpm/action-setup@v4
+        if: env.CLAUDE_TOKEN_PRESENT == 'true'
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        if: env.CLAUDE_TOKEN_PRESENT == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: FullStackHub/pnpm-lock.yaml
+
+      - uses: actions/setup-java@v4
+        if: env.CLAUDE_TOKEN_PRESENT == 'true'
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # claude_args: the action runs Claude with Bash disabled except for what --allowedTools
+      # grants (it merges several --allowedTools flags, so its own tools stay). The action already
+      # grants Read/Glob/Grep, file edits inside the workspace (acceptEdits), `git add`/`git commit`
+      # and a push wrapper that only accepts `git push origin <branch>`. The list below is the
+      # repo's safe recurring commands (see .claude/settings.example.json): the FullStackHub pnpm
+      # scripts, SecureGate's ./mvnw, pytest, the .claude/scripts helpers (they start PostgreSQL
+      # and the API and run every check from the repo root) and read-only git. Never add
+      # Bash(git *) here: it would bypass the push wrapper (pushes to main, --force, other remotes).
+      - name: Run Claude Code
+        if: env.CLAUDE_TOKEN_PRESENT == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          additional_permissions: |
+            actions: read
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Bash(pnpm *),Bash(./mvnw *),Bash(pytest *),Bash(python -m pytest *),Bash(python3 -m pytest *),Bash(.venv/bin/python -m pytest *),Bash(.claude/scripts/*),Bash(git status),Bash(git status *),Bash(git diff *),Bash(git log *)"

@@ -141,3 +141,24 @@ the Next.js web as the only public process and PostgreSQL on Railway's managed d
 walkthrough in [`../DEPLOY.md`](../DEPLOY.md). Local dev is
 unchanged — `docker compose` (Postgres + the Python services' `services/*/Dockerfile`) plus `pnpm dev`.
 Notification env vars (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see `apps/api/.env.example`.
+
+## Autonomous maintenance
+
+Shipping Hub is maintained around the clock by Claude Code agents; a human reviews and merges every
+PR. **CI** (lint, format:check, typecheck, Vitest) runs on every push to `main` and every PR,
+**Uptime patrol** probes the live app every 30 minutes and opens an `incident` issue when it is
+unhealthy, **SecureGate CI** runs the black-box suite nightly and on PRs, and Dependabot opens
+weekly grouped dependency PRs for npm and pip (label `dependencies`).
+
+- Shifts covering this project ([`../.claude/shifts/`](../.claude/shifts)): **nightly maintenance**
+  (daily 08:40 UTC — every check plus the Karate API suite against a locally started stack, at most
+  one `chore(agents): nightly maintenance <date>` PR), **weekly security review** (Mondays 10:20 UTC —
+  `pnpm audit`, `pip-audit`, helmet/CORS/rate-limit/JWT/cookie review) and **SRE patrol** (every 6 h —
+  incidents and red pipelines).
+- Agents: the project subagents in [`.claude/agents/`](./.claude/agents) (`frontend-dev`,
+  `backend-dev`, `python-services`, `code-reviewer`, `test-runner`) and the repo-wide ones in
+  [`../.claude/agents/`](../.claude/agents) (`sre-patrol`, `repo-steward`, `qa-regression`,
+  `security-auditor`, `docs-keeper`). The helper scripts in [`../.claude/scripts/`](../.claude/scripts)
+  start PostgreSQL 16 and the API without Docker and run every check with one summary table.
+- Operations manual (roster, shifts, runtimes, guardrails, incident flow):
+  [`../OPERATIONS.md`](../OPERATIONS.md) · live-interview runbook: [`../DEMO.md`](../DEMO.md).

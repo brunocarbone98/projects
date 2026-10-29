@@ -1,0 +1,8 @@
+[
+  { "name": "agent", "color": "7057ff", "description": "Work by or for the Claude Code agents" },
+  { "name": "incident", "color": "b60205", "description": "Production incident opened by the Uptime patrol" },
+  { "name": "dependencies", "color": "0366d6", "description": "Dependency updates (Dependabot, weekly security bumps)" },
+  { "name": "security", "color": "d93f0b", "description": "Security findings and fixes" },
+  { "name": "maintenance", "color": "c5def5", "description": "Nightly maintenance" },
+  { "name": "bug", "color": "d73a4a", "description": "Something is broken" }
+]

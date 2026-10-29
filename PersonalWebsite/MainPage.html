@@ -139,7 +139,7 @@
             to { background-position: 0% center; }
         }
 
-        /* Rotating greeting in 8 languages: it slides up and fades out; the next one enters and takes its place */
+        /* Rotating greeting in 4 languages: it slides up and fades out; the next one enters and takes its place */
         .hero h1 .greeting {
             display: block;
             font-size: 0.6em;
@@ -231,14 +231,25 @@
             letter-spacing: -0.5px; margin-top: 56px; display: flex; align-items: center; gap: 10px;
         }
         .exp-heading .emoji { font-size: 1.35rem; }
-        .exp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px; }
+        .exp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; margin-top: 24px; }
         .exp-card .exp-date {
             font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent);
             letter-spacing: 0.3px; margin-bottom: 10px;
         }
         .exp-card h4 { font-family: var(--font-display); font-weight: 600; font-size: 1.1rem; margin-bottom: 3px; }
         .exp-card .exp-company { color: var(--accent-2); font-size: 0.9rem; font-weight: 500; margin-bottom: 14px; }
-        .exp-card p { color: var(--text-dim); font-size: 0.92rem; line-height: 1.55; }
+        /* Compact bullet list inside each experience card */
+        .exp-card .exp-points { list-style: none; margin: 0; padding: 0; }
+        .exp-card .exp-points li {
+            position: relative; padding-left: 16px; margin-bottom: 9px;
+            color: var(--text-dim); font-size: 0.92rem; line-height: 1.5;
+        }
+        .exp-card .exp-points li:last-child { margin-bottom: 0; }
+        .exp-card .exp-points li::before {
+            content: ''; position: absolute; left: 0; top: 0.6em;
+            width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
+        }
+        .exp-card .exp-points li strong { display: inline; color: var(--text); font-weight: 600; }
 
         /* ===== SKILLS ===== */
         .skills-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 24px; }
@@ -261,7 +272,7 @@
         .pill:hover { color: var(--text); border-color: var(--accent-2); transform: translateY(-2px); }
 
         /* ===== PROJECTS ===== */
-        .projects-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 28px; }
+        .projects-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 28px; }
         .project {
             background: var(--surface); border: 1px solid var(--border);
             border-radius: var(--radius); padding: 30px; transition: all 0.3s;
@@ -282,6 +293,22 @@
             font-family: var(--font-mono);
             font-size: 0.78rem; color: var(--accent-2);
             background: rgba(34, 211, 238, 0.08); padding: 4px 10px; border-radius: 6px;
+        }
+        /* Status line under each project card: maintained around the clock by agents */
+        .project-ops {
+            display: flex; align-items: flex-start; gap: 9px;
+            font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.45;
+            color: var(--text-dim); margin-bottom: 18px;
+        }
+        .project-ops .dot {
+            flex: none; width: 7px; height: 7px; border-radius: 50%; margin-top: 0.4em;
+            background: var(--accent); box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.6);
+            animation: opsPulse 2.2s ease-out infinite;
+        }
+        @keyframes opsPulse {
+            0%   { box-shadow: 0 0 0 0 rgba(167, 139, 250, 0.6); }
+            70%  { box-shadow: 0 0 0 7px rgba(167, 139, 250, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(167, 139, 250, 0); }
         }
         .projects-cta { margin-top: 44px; text-align: center; }
 
@@ -325,6 +352,7 @@
                 transition-duration: 0.01ms !important;
                 scroll-behavior: auto !important;
             }
+            .project-ops .dot { animation: none; box-shadow: none; }
         }
     </style>
 </head>
@@ -375,11 +403,16 @@
         </div>
         <div class="about-intro reveal">
             <p>
-                Hi! I'm Bruno, a developer and QA Automation Engineer based in Panama.
-                My journey in technology began with cybersecurity: studying it gave me
-                a much deeper awareness of its importance, and I started applying those
-                principles in my daily life. Later, in my first job as a QA Engineer,
-                I had my first real exposure to programming, and I haven't stopped since.
+                Hi! I'm Bruno, a Software Engineer, QA Automation Engineer and Systems Analyst
+                based in Panama, with a double degree in Management Information Systems and
+                Cybersecurity. Over 4+ years I've designed automated test architectures,
+                coordinated projects under Agile methodologies and built secure CI/CD pipelines,
+                and I specialise in software diagnostics, real-time data auditing, environment
+                virtualisation and complex incident resolution. My journey in technology began
+                with cybersecurity: studying it gave me a much deeper awareness of its importance,
+                and I started applying those principles in my daily life. Later, in my first job
+                as a QA Engineer, I had my first real exposure to programming, and I haven't
+                stopped since.
             </p>
             <p>
                 I move between full-stack development and test automation, and I feel a
@@ -410,10 +443,10 @@
             <div class="hl-card reveal">
                 <h3><span class="emoji">🏅</span> <span>Certifications</span></h3>
                 <ul>
-                    <li>IBM Cybersecurity Analyst</li>
-                    <li>Google Cybersecurity</li>
-                    <li>Google Project Management</li>
-                    <li>AWS Cloud Essentials</li>
+                    <li><strong>AWS Cloud Essentials</strong>Amazon Web Services (AWS) · Aug 2025</li>
+                    <li><strong>Google Cybersecurity</strong>Google · Aug 2024</li>
+                    <li><strong>IBM Cybersecurity Analyst</strong>IBM · Feb 2024</li>
+                    <li><strong>Google Project Management</strong>Google</li>
                 </ul>
             </div>
 
@@ -433,30 +466,35 @@
         <div class="exp-grid">
             <div class="hl-card exp-card reveal">
                 <div class="exp-date">Sep 2025 — Present</div>
-                <h4>Technical Support Specialist</h4>
-                <div class="exp-company">Alorica</div>
-                <p>
-                    Diagnosed and resolved complex technical incidents, account discrepancies and
-                    service changes through real-time data and systems auditing. De-escalated
-                    high-pressure critical situations, and identified and reported suspicious
-                    activity and fraud under strict corporate security protocols. Onboarded key
-                    users and triaged high-complexity incidents for accurate escalation to
-                    engineering, exceeding KPIs and SLAs with enterprise ticketing and monitoring tools.
-                </p>
+                <h4>Tech Operations &amp; Systems Support Specialist</h4>
+                <div class="exp-company">Multinational Technology Services Enterprise</div>
+                <ul class="exp-points">
+                    <li><strong>Technical Diagnostics &amp; Analysis:</strong> Perform root cause analysis and complex system troubleshooting by conducting real-time SQL database queries and server log analysis.</li>
+                    <li><strong>Cybersecurity &amp; Risk Mitigation:</strong> Identify, analyze, and report anomalous system activity and potential fraud attempts adhering to enterprise data security protocols.</li>
+                    <li><strong>SLA Management &amp; Triage:</strong> Evaluate and prioritize high-severity software incidents for L3 engineering escalation, consistently achieving a &gt;98% SLA compliance rate.</li>
+                    <li><strong>Process Optimization:</strong> Develop utility scripts and leverage Microsoft 365 / Google Workspace tools to streamline ticket triage and technical documentation.</li>
+                </ul>
+            </div>
+            <div class="hl-card exp-card reveal">
+                <div class="exp-date">Jan 2024 — Aug 2025</div>
+                <h4>Independent Software &amp; Automation Consultant</h4>
+                <div class="exp-company">Freelance Software Engineering &amp; IT Consulting</div>
+                <ul class="exp-points">
+                    <li><strong>Full-Stack Development &amp; Architecture:</strong> Architected custom web solutions using Next.js/React, TypeScript, Node.js, and Python (FastAPI/Flask) backed by PostgreSQL and MySQL databases.</li>
+                    <li><strong>AI Integration &amp; Automation Scripts:</strong> Developed automated data pipelines, web scrapers, and technical utility bots integrating LLM APIs (OpenAI/Claude) and Linux/Docker environments.</li>
+                    <li><strong>Software Quality Assurance:</strong> Executed end-to-end QA strategies for independent clients, automating regression suites and REST API tests using Selenium, Postman, and GitHub Actions.</li>
+                </ul>
             </div>
             <div class="hl-card exp-card reveal">
                 <div class="exp-date">Jan 2020 — Dec 2023</div>
-                <h4>QA Automation Engineer</h4>
+                <h4>QA Automation &amp; Test Engineer</h4>
                 <div class="exp-company">Equifax</div>
-                <p>
-                    Designed and maintained E2E automated test suites with Selenium WebDriver (Java)
-                    under the Page Object Model, cutting regression time by 40%. Validated REST
-                    integrations with Postman and REST Assured, applied BDD with Cucumber, and
-                    integrated functional and security testing (SAST with SonarQube) into CI/CD
-                    pipelines (Jenkins, Travis CI). Ran the test infrastructure on AWS (EC2-based
-                    Selenium Grid for parallel execution, S3 for artifacts) and managed the defect
-                    lifecycle in Jira under Agile/Scrum with GitHub/Bitbucket.
-                </p>
+                <ul class="exp-points">
+                    <li><strong>Automated Testing Architecture:</strong> Designed and maintained E2E automated regression suites with Selenium WebDriver in Java using Page Object Model (POM), reducing regression execution time by 40%.</li>
+                    <li><strong>API Testing &amp; BDD:</strong> Validated web service integrations through automated REST API testing using REST Assured and Postman/Newman, writing Gherkin feature files in Cucumber.</li>
+                    <li><strong>Continuous Integration &amp; Cloud:</strong> Integrated functional test suites into Jenkins and Travis CI pipelines; managed AWS testing environments utilizing S3 storage and IAM policies.</li>
+                    <li><strong>Code Security &amp; Agile Delivery:</strong> Conducted static application security testing (SAST) with SonarQube to identify vulnerabilities; managed defects and backlog items in Jira under Scrum frameworks.</li>
+                </ul>
             </div>
         </div>
     </div>
@@ -472,54 +510,99 @@
         </div>
         <div class="skills-grid">
             <div class="skill-cat reveal">
-                <h3><span class="emoji">🎨</span> Frontend</h3>
+                <h3><span class="emoji">💻</span> Programming Languages &amp; Frameworks</h3>
                 <div class="pills">
-                    <span class="pill">Next.js</span>
-                    <span class="pill">React</span>
+                    <span class="pill">Java</span>
                     <span class="pill">TypeScript</span>
-                    <span class="pill">JavaScript</span>
-                    <span class="pill">Tailwind CSS</span>
-                </div>
-            </div>
-            <div class="skill-cat reveal">
-                <h3><span class="emoji">⚙️</span> Backend & APIs</h3>
-                <div class="pills">
-                    <span class="pill">Java (Spring Boot)</span>
-                    <span class="pill">Node.js</span>
-                    <span class="pill">Express</span>
                     <span class="pill">Python</span>
+                    <span class="pill">SQL</span>
+                    <span class="pill">C#</span>
+                    <span class="pill">Spring Boot</span>
+                    <span class="pill">Node.js/Express</span>
+                    <span class="pill">Next.js/React</span>
                     <span class="pill">FastAPI</span>
-                    <span class="pill">Prisma</span>
-                    <span class="pill">REST APIs</span>
-                    <span class="pill">PostgreSQL</span>
                 </div>
             </div>
             <div class="skill-cat reveal">
-                <h3><span class="emoji">🧪</span> QA & Automation</h3>
+                <h3><span class="emoji">🧪</span> Software QA &amp; Automation</h3>
                 <div class="pills">
-                    <span class="pill">Selenium</span>
-                    <span class="pill">Karate</span>
-                    <span class="pill">Serenity BDD</span>
-                    <span class="pill">Screenplay</span>
-                    <span class="pill">Cucumber (BDD)</span>
-                    <span class="pill">Gherkin</span>
+                    <span class="pill">Selenium WebDriver</span>
+                    <span class="pill">Karate Framework</span>
+                    <span class="pill">Serenity BDD (Screenplay)</span>
+                    <span class="pill">Cucumber/Gherkin</span>
                     <span class="pill">REST Assured</span>
-                    <span class="pill">Postman</span>
-                    <span class="pill">Page Object Model</span>
+                    <span class="pill">Postman/Newman</span>
+                    <span class="pill">JUnit</span>
+                    <span class="pill">Cypress</span>
+                    <span class="pill">Playwright</span>
+                    <span class="pill">Page Object Model (POM)</span>
                 </div>
             </div>
             <div class="skill-cat reveal">
-                <h3><span class="emoji">☁️</span> DevOps, Cloud & Tools</h3>
+                <h3><span class="emoji">☁️</span> Cloud &amp; CI/CD</h3>
                 <div class="pills">
-                    <span class="pill">Docker</span>
-                    <span class="pill">AWS</span>
-                    <span class="pill">Railway</span>
-                    <span class="pill">Jenkins</span>
+                    <span class="pill">AWS (S3, IAM, CloudWatch, Serverless)</span>
+                    <span class="pill">Google Cloud Platform (GCP) — working knowledge</span>
+                    <span class="pill">Microsoft Azure — working knowledge</span>
                     <span class="pill">GitHub Actions</span>
+                    <span class="pill">Jenkins</span>
                     <span class="pill">Travis CI</span>
-                    <span class="pill">Git</span>
+                    <span class="pill">Git/GitHub/Bitbucket</span>
+                </div>
+            </div>
+            <div class="skill-cat reveal">
+                <h3><span class="emoji">🐧</span> Systems, Virtualization &amp; Infrastructure</h3>
+                <div class="pills">
+                    <span class="pill">Linux (Ubuntu, Debian, RedHat)</span>
+                    <span class="pill">Server Administration</span>
+                    <span class="pill">Virtual Machines (VirtualBox, VMware)</span>
+                    <span class="pill">Docker</span>
+                    <span class="pill">Shell Scripting (Bash)</span>
+                </div>
+            </div>
+            <div class="skill-cat reveal">
+                <h3><span class="emoji">🔐</span> Data Analytics &amp; Cybersecurity</h3>
+                <div class="pills">
+                    <span class="pill">SQL (PostgreSQL, MySQL)</span>
+                    <span class="pill">Data Auditing</span>
+                    <span class="pill">PowerBI</span>
+                    <span class="pill">Tableau</span>
+                    <span class="pill">Corporate Cybersecurity Standards</span>
+                    <span class="pill">SAST (SonarQube)</span>
+                    <span class="pill">Vulnerability Mitigation</span>
+                    <span class="pill">Fraud Prevention</span>
+                </div>
+            </div>
+            <div class="skill-cat reveal">
+                <h3><span class="emoji">🤖</span> AI Tools &amp; Developer Productivity</h3>
+                <div class="pills">
+                    <span class="pill">LLM Integration (OpenAI API, Claude)</span>
+                    <span class="pill">AI Coding Assistants (GitHub Copilot)</span>
+                    <span class="pill">AI-driven Workflow Automation</span>
+                </div>
+            </div>
+            <div class="skill-cat reveal">
+                <h3><span class="emoji">📋</span> Project Management &amp; Methodologies</h3>
+                <div class="pills">
+                    <span class="pill">Agile/Scrum</span>
+                    <span class="pill">BDD</span>
+                    <span class="pill">SDLC Management</span>
                     <span class="pill">Jira</span>
-                    <span class="pill">SonarQube</span>
+                    <span class="pill">Trello</span>
+                    <span class="pill">Productivity Tools (Microsoft 365, Google Workspace)</span>
+                    <span class="pill">Sprint Planning</span>
+                    <span class="pill">Risk Management</span>
+                </div>
+            </div>
+            <div class="skill-cat reveal">
+                <h3><span class="emoji">🤝</span> Operations &amp; Soft Skills</h3>
+                <div class="pills">
+                    <span class="pill">Interpersonal Relations</span>
+                    <span class="pill">Cross-functional Collaboration</span>
+                    <span class="pill">Effective Technical Communication</span>
+                    <span class="pill">Time Management</span>
+                    <span class="pill">Negotiation</span>
+                    <span class="pill">Critical Thinking &amp; Complex Problem Solving</span>
                 </div>
             </div>
         </div>
@@ -546,6 +629,7 @@
                     CI, which stands up the API, web app and a headless browser, with Serenity living
                     documentation and a SonarQube quality gate.
                 </p>
+                <div class="project-ops"><span class="dot"></span>Maintained 24/7 by Claude Code agents — uptime patrol, nightly QA regression, dependency updates</div>
                 <div class="tech-tags">
                     <span>Java</span>
                     <span>Karate</span>
@@ -568,6 +652,7 @@
                     microservices for pricing and PDF labels. Deployed live as a single container
                     on Railway.
                 </p>
+                <div class="project-ops"><span class="dot"></span>Maintained 24/7 by Claude Code agents — uptime patrol, nightly QA regression, dependency updates</div>
                 <div class="tech-tags">
                     <span>Next.js</span>
                     <span>TypeScript</span>
@@ -622,7 +707,7 @@
 </footer>
 
 <script>
-    // ====== ROTATING GREETING IN 8 LANGUAGES ======
+    // ====== ROTATING GREETING IN 4 LANGUAGES ======
     // 10 s cycle per greeting: 8 s visible + 0.5 s exit + 1 s pause + 0.5 s enter
     const NAME = '<span class="grad">Bruno Carbone</span>';
     const greetings = [
@@ -738,7 +823,7 @@
     sections.forEach(s => navObserver.observe(s));
 
     // Typing animation in hero
-    const roles = ['Full-Stack Developer.', 'QA Automation Engineer.', 'Passionate about cybersecurity.', 'Problem solver.', 'Always learning.', 'Driven by technology and humanity.'];
+    const roles = ['Software Engineer.', 'QA Automation Engineer.', 'Systems Analyst.', 'Passionate about cybersecurity.', 'Problem solver.', 'Always learning.', 'Driven by technology and humanity.'];
     let roleIndex = 0, charIndex = 0, deleting = false;
     const typedEl = document.getElementById('typed');
     function type() {

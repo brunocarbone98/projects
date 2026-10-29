@@ -1,0 +1,59 @@
+name: Sync labels
+
+# Keeps the labels the agents rely on (agent, incident, dependencies, security, maintenance, bug)
+# in sync with .github/labels.json. Idempotent: creates missing labels and updates the colour or
+# description of existing ones; it never deletes a label. Run it by hand from the Actions tab
+# (workflow_dispatch) the first time, then it runs whenever labels.json changes on main.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/labels.json"
+      - ".github/workflows/labels.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    name: Create or update the repository labels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Sync labels from .github/labels.json
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const wanted = JSON.parse(fs.readFileSync(".github/labels.json", "utf8"));
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.issues.listLabelsForRepo, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+            for (const label of wanted) {
+              const found = existing.find((l) => l.name.toLowerCase() === label.name.toLowerCase());
+              if (!found) {
+                await github.rest.issues.createLabel({ owner, repo, ...label });
+                core.info(`created ${label.name}`);
+              } else if (found.color !== label.color || (found.description || "") !== label.description) {
+                await github.rest.issues.updateLabel({
+                  owner,
+                  repo,
+                  name: found.name,
+                  new_name: label.name,
+                  color: label.color,
+                  description: label.description,
+                });
+                core.info(`updated ${label.name}`);
+              } else {
+                core.info(`ok ${label.name}`);
+              }
+            }
+            core.summary.addHeading("Labels synced").addList(wanted.map((l) => l.name)).write();

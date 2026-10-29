@@ -161,3 +161,25 @@ Seven phases (0–6), from a smoke test to a full Karate API + Serenity/Screenpl
 a quality gate and published reports — see [`ROADMAP.md`](./ROADMAP.md). The system under test is
 [`../FullStackHub`](../FullStackHub); the pipeline (a GitHub Actions workflow) lives at the repo root
 `/.github/workflows/securegate-ci.yml`.
+
+## Autonomous maintenance
+
+SecureGate is maintained around the clock by Claude Code agents; a human reviews and merges every PR.
+**SecureGate CI** runs the full suite (Karate API + Serenity/Screenplay UI with Chrome + Newman) nightly
+at 06:00 UTC and on PRs touching `SecureGate/**` or `FullStackHub/**`, and uploads the Serenity, Karate
+and surefire reports as the `securegate-reports` artifact.
+
+- Shifts covering this project ([`../.claude/shifts/`](../.claude/shifts)): **nightly maintenance**
+  (daily 08:40 UTC) starts a local Shipping Hub with the [`../.claude/scripts/`](../.claude/scripts)
+  helpers (`local-postgres.sh` + `local-api.sh`) and runs the Karate API suite (`./mvnw -q verify`),
+  reading `target/surefire-reports/*.xml` and `target/karate-reports/karate-summary-json.txt` —
+  `tests="0"` means the suite was skipped (no reachable stack) and is never reported as a pass;
+  **SRE patrol** (every 6 h) triages red SecureGate CI runs; the **weekly security review** (Mondays
+  10:20 UTC) checks Maven dependency updates. The Selenium UI suite needs Chrome and runs only in
+  SecureGate CI.
+- Agents: the project subagents in [`.claude/agents/`](./.claude/agents) (`api-test-engineer`,
+  `ui-test-engineer`, `bdd-engineer`, `devsecops`, `code-reviewer`, `test-runner`) and the repo-wide
+  `qa-regression`, `sre-patrol`, `repo-steward`, `security-auditor` and `docs-keeper` in
+  [`../.claude/agents/`](../.claude/agents).
+- Operations manual (roster, shifts, runtimes, guardrails, incident flow):
+  [`../OPERATIONS.md`](../OPERATIONS.md) · live-interview runbook: [`../DEMO.md`](../DEMO.md).

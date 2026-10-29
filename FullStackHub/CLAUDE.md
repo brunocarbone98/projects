@@ -42,8 +42,17 @@ International parcel shipping & tracking platform (UPS/FedEx style) with a bilin
 
 ## Subagents (`.claude/agents/`)
 
-- `frontend-dev` — tasks in `apps/web` (Next.js, Tailwind, next-intl, SEO).
-- `backend-dev` — tasks in `apps/api` (Express, Prisma, state machine, ledger).
-- `python-services` — tasks in `services/` (FastAPI, pricing, labels).
-- `code-reviewer` — review the diff after implementing features (read-only).
-- `test-runner` — run test suites and report only the failures.
+- `frontend-dev` — tasks in `apps/web` (Next.js 15 App Router, Tailwind v4, next-intl es/en, SEO); done when lint, format:check and typecheck pass and both message files have the new keys.
+- `backend-dev` — tasks in `apps/api` (Express 5, Prisma, state machine, ledger, auth); every endpoint gets a Vitest + Supertest integration test.
+- `python-services` — tasks in `services/pricing` and `services/labels` (FastAPI, Pydantic, pytest in each service's `.venv`).
+- `code-reviewer` — reviews the diff (read-only): secrets, Zod at the edges, append-only tables, state transitions, idempotency, i18n keys in both message files, Prettier, no `any`.
+- `test-runner` — runs Vitest (`pnpm test`, needs PostgreSQL → `../.claude/scripts/local-postgres.sh`) and pytest for both services; reports only failures (`model: haiku`). There is no Playwright suite — browser E2E lives in `../SecureGate`.
+
+Repo-wide agents live in `/.claude/agents/` (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`) and work from the repository root.
+
+## Autonomous maintenance
+
+- Shipping Hub is maintained around the clock by Claude Code agents; humans review and merge every PR. **CI** runs lint, format:check, typecheck and Vitest on every push to `main` and every PR; **Uptime patrol** probes the live app every 30 minutes and opens an `incident` issue when it is unhealthy; **SecureGate CI** runs the black-box suite nightly and on PRs.
+- Shifts covering this project (`/.claude/shifts/`): **nightly maintenance** (08:40 UTC — every check plus the Karate API suite against a local stack, at most one small `chore(agents)` PR), **weekly security review** (Mondays — `pnpm audit`, `pip-audit`, helmet/CORS/rate-limit/cookie review) and **SRE patrol** (every 6 h — incidents and red pipelines).
+- Helper scripts (`/.claude/scripts/`): `local-postgres.sh` (PostgreSQL 16 on 127.0.0.1:5432, `shipping`/`shipping`, `shipping_hub` + `shipping_hub_test`), `local-api.sh` (migrate + seed + API on :4000), `run-checks.sh` (every check, one summary table).
+- Operations manual, roster and guardrails: [`../OPERATIONS.md`](../OPERATIONS.md).
