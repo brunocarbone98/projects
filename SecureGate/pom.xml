@@ -17,8 +17,8 @@
 
     <!-- Test stack versions. JUnit is pinned to the version Serenity 5.3.10 is built on (JUnit 6),
          whose platform Cucumber 7.34.2 also requires (DiscoveryIssueReporter). -->
-    <junit.version>6.0.3</junit.version>
-    <serenity.version>5.3.10</serenity.version>
+    <junit.version>6.1.3</junit.version>
+    <serenity.version>5.4.1</serenity.version>
     <!-- Must match the Cucumber that Serenity 5.3.10 is built against (its SerenityReporter plugs
          into Cucumber's plugin SPI), otherwise the BDD reports break. -->
     <cucumber.version>7.34.2</cucumber.version>
@@ -26,7 +26,7 @@
     <slf4j.version>2.0.16</slf4j.version>
 
     <!-- Plugin versions -->
-    <surefire.version>3.5.2</surefire.version>
+    <surefire.version>3.6.1</surefire.version>
 
     <!-- The suite tests a RUNNING Shipping Hub. Default target is a local instance
          (API on :4000, web on :3000). Selected with -Denv=local|live. -->
@@ -113,7 +113,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.13.0</version>
+        <version>3.16.0</version>
       </plugin>
 
       <!-- The whole suite is integration-level (it drives a running Shipping Hub) but is wired on
