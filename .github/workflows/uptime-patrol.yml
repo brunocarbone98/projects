@@ -18,7 +18,7 @@ name: Uptime patrol
 
 on:
   schedule:
-    - cron: "*/30 * * * *" # every 30 minutes
+    - cron: "17,47 * * * *" # every 30 minutes, at :17 and :47 — GitHub delays or drops schedules that fire on the hour or half hour
   workflow_dispatch:
 
 permissions:
