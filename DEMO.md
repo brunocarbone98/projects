@@ -69,7 +69,7 @@ Say: "Everything you see is one container on Railway — Next.js web, Express AP
 
 ### Act 4 — autonomous maintenance (3:00)
 
-1. **Actions tab** (tab 9): `Uptime patrol` runs every 30 minutes — open the latest run and its step summary (endpoint · status · time · result).
+1. **Actions tab** (tab 9): `Uptime patrol` — click **Run workflow** (about 10 seconds) or open the run you dispatched in the pre-flight, and show its step summary (endpoint · status · time · result). It is scheduled every 30 minutes, but GitHub runs schedules best-effort — a few runs a day here, hours late — so do not promise a run every half hour; the Claude shifts run on Anthropic's scheduler and have fired on the minute.
 2. **Agent PRs** (tab 10): `label:agent` — the nightly maintenance PR with its check-results table, Dependabot PRs with the shift's verdict comment. "Agents open PRs; I merge."
 3. **Ask the on-call agent** (tab 11): pick the "Ask the on-call agent" template; the body already starts with `@claude ` — ask something small and concrete, for example `@claude summarise the latest SecureGate CI run and list any skipped scenarios`. Submit, switch to tab 9: the `Claude on-call` run starts within seconds and the agent answers in a comment on the issue.
 4. **The configuration** (tab 12): `.claude/agents/` — five root agents (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`); `.claude/shifts/` — three shift prompts (a shift is a Markdown file, reviewed like code); `.claude/scripts/` — the local-stack helpers the shifts use.
@@ -92,6 +92,7 @@ Close with the story: "The last commit was in July. After 60 days without activi
 - **Railway is down** — the incident issue *is* the demo: open `label:incident`, show the probe table, the SRE patrol diagnosis comment and, after recovery, the auto-close comment. Restart from Railway (the service → Deployments → Restart) while you talk; `DEPLOY.md` → Monitoring & incidents has the steps.
 - **CI is red** — show how an agent triages it: open the failing run and its logs, then explain the SRE patrol decision rule (a flaky or broken test or workflow → fix PR; anything else → an issue), or comment `@claude why did this run fail?` on the PR and let Claude on-call do it live.
 - **No internet** — walk through `FullStackHub/screenshots/` (landing, tracking, quote, dashboard, wallet, shipments, the Railway deployment, the database schema and users) and the README diagram from a local clone.
+- **The Actions tab shows only a few Uptime patrol runs a day** — GitHub runs `schedule` triggers best-effort and in this repository they start hours late (the SecureGate nightly set for 06:00 UTC has run between 10:23 and 12:03 UTC). It is GitHub's scheduler, not the monitor: **Run workflow** probes immediately, and a missing run is unobserved time, never a verdict on the app.
 - **The Uptime patrol shows `🛡️ challenged` rows** — Railway's edge bot protection ("Checking your browser…", server `railway-hikari`) answered the monitor, not the app; the run stays green with a warning and no incident is opened. Show the live app in the browser, then the run summary: a monitor that cannot see is reported as *unobserved*, never as *healthy* — that honesty is the point. The decision to let monitors through lives in Railway's service settings.
 - **`@claude` does not react** — open the `Claude on-call` run: if it printed the setup notice, the token secret is missing; show the notice itself ("this is the one thing that needs a human") and move on.
 
@@ -125,7 +126,7 @@ claude -p "$(cat .claude/shifts/sre-patrol.md)"         # run a shift by hand
 gh workflow run "Uptime patrol"                         # or the Run workflow button in Actions
 ```
 
-**Numbers** — 28 Karate API scenarios + 1 opt-in `@ratelimit`; 6 Serenity UI scenarios; pytest: pricing 41, labels 13; uptime probe every 30 min; SRE patrol every 6 h; nightly maintenance 08:40 UTC; weekly security review Mondays 10:20 UTC.
+**Numbers** — 28 Karate API scenarios + 1 opt-in `@ratelimit`; 6 Serenity UI scenarios; pytest: pricing 41, labels 13; uptime probe scheduled every 30 min (GitHub runs it best-effort); SRE patrol every 6 h; nightly maintenance 08:40 UTC; weekly security review Mondays 10:20 UTC.
 
 ## Guion rápido (ES)
 
@@ -135,7 +136,7 @@ gh workflow run "Uptime patrol"                         # or the Run workflow bu
 - Billetera: libro de doble entrada, el saldo es la suma de asientos; la idempotencia hace seguros los dobles clics y los reintentos.
 - Calidad: SecureGate prueba la plataforma como caja negra — 28 escenarios Karate de API, 6 escenarios de UI con Serenity Screenplay, colección Postman/Newman — en GitHub Actions en cada PR y cada noche.
 - Screenplay en vez de Page Objects: Targets, Tasks y Questions; sin selectores en los step definitions; esperas explícitas, nunca `Thread.sleep`.
-- Mantenimiento autónomo: agentes de Claude Code mantienen el repositorio 24/7 — patrulla de disponibilidad cada 30 min, patrulla SRE cada 6 h, mantenimiento nocturno, revisión de seguridad semanal, Dependabot y un agente de guardia al que se le escribe `@claude`.
+- Mantenimiento autónomo: agentes de Claude Code mantienen el repositorio 24/7 — patrulla de disponibilidad programada cada 30 min (GitHub la ejecuta a su ritmo; también se lanza a mano), patrulla SRE cada 6 h, mantenimiento nocturno, revisión de seguridad semanal, Dependabot y un agente de guardia al que se le escribe `@claude`.
 - Límites (guardrails): nunca a `main`, un PR pequeño por turno, nada de PRs vacíos, reportes veraces (saltado no es aprobado), decisiones de esquema/dinero/auth/deploy van a un issue; un humano revisa y fusiona todo.
 - La historia: el último commit fue en julio; a los 60 días sin actividad GitHub desactivó el nightly de SecureGate (última ejecución 2026-09-10) y nadie lo notó; ahora los agentes generan actividad y el silencio se convierte en issue o PR.
 - Si algo falla: la caída de Railway es la demo (issue de incidente → diagnóstico → cierre automático); CI en rojo muestra cómo triagea un agente; sin internet, capturas en `FullStackHub/screenshots/`.
