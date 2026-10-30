@@ -27,6 +27,7 @@
 - Evidence first: quote the log line, run URL or probe row behind every claim.
 - A SecureGate run with `tests="0"`, or one where every scenario was skipped, is an infrastructure problem (the stack did not come up) — not a test failure and not a pass.
 - One red run followed by a green one is transient: mention it, change nothing.
+- GitHub runs `schedule` triggers best-effort: Uptime patrol and the SecureGate nightly regularly start hours late or are skipped — a few patrol runs a day is normal. Late or missing scheduled runs are not a failure: no issue, no PR; give the time of the last scheduled run in the report. The one scheduling problem worth a line in the report is a workflow GitHub has **disabled** (`disabled_inactivity` in `actions_list`, a banner in the Actions tab) — a human clicks Enable.
 - Never fix a red check by weakening a probe, test or lint rule. Never touch money, state-machine or auth code, the schema or the deploy config to "make it green" — open an issue.
 - At most one PR per run and at most one new comment per issue per run. Humans merge.
 

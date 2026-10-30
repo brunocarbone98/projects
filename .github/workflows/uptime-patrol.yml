@@ -1,8 +1,10 @@
 name: Uptime patrol
 
-# Probes the live Shipping Hub every 30 minutes (and on demand from the Actions tab). The probe
-# logic lives in .github/scripts/uptime-probe.sh so it can be run and tested locally; the
-# repository is checked out (one commit, no secrets) only to run that script.
+# Probes the live Shipping Hub on a 30-minute schedule (:17 and :47) and on demand from the
+# Actions tab. GitHub runs `schedule` triggers best-effort: in this repository they have landed
+# hours late and only a few times a day, so a sparse run history is not a failure — "Run workflow"
+# probes at once. The probe logic lives in .github/scripts/uptime-probe.sh so it can be run and
+# tested locally; the repository is checked out (one commit, no secrets) only to run that script.
 #
 #   Unhealthy run  -> the job fails (the README badge turns red) and the incident issue
 #                     "🚨 Production incident: Shipping Hub is unhealthy" (label `incident`) is
@@ -18,7 +20,7 @@ name: Uptime patrol
 
 on:
   schedule:
-    - cron: "17,47 * * * *" # every 30 minutes, at :17 and :47 — GitHub delays or drops schedules that fire on the hour or half hour
+    - cron: "17,47 * * * *" # every 30 minutes, off the hour and half hour (GitHub's busiest slots); still best-effort, see above
   workflow_dispatch:
 
 permissions:
