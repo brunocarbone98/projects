@@ -110,7 +110,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 | --- | --- | --- |
 | `.github/workflows/ci.yml` | `CI` | push to `main`; every pull request; `workflow_dispatch` |
 | `.github/workflows/securegate-ci.yml` | `SecureGate CI` | PRs touching `SecureGate/**` or `FullStackHub/**`; pushes to `main` touching `SecureGate/**`; nightly `0 6 * * *` UTC; `workflow_dispatch` |
-| `.github/workflows/uptime-patrol.yml` | `Uptime patrol` | `*/30 * * * *` (every 30 minutes); `workflow_dispatch` |
+| `.github/workflows/uptime-patrol.yml` | `Uptime patrol` | `17,47 * * * *` (every 30 minutes); `workflow_dispatch` |
 | `.github/workflows/claude.yml` | `Claude on-call` | `issue_comment` created, `pull_request_review_comment` created, `pull_request_review` submitted, `issues` opened — only when the text contains `@claude` |
 | `.github/workflows/labels.yml` | `Sync labels` | `workflow_dispatch`; push to `main` touching `.github/labels.json` or the workflow itself — creates or updates the six labels from `.github/labels.json`, never deletes one |
 | `.github/dependabot.yml` | Dependabot | weekly Mondays 04:00 America/Panama (npm, pip, Maven — grouped minor/patch, at most 5 open PRs each); GitHub Actions monthly, grouped |
