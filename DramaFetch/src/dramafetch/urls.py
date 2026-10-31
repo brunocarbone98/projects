@@ -37,6 +37,9 @@ def parse_input(text: str) -> SeriesRef | VideoRef:
     candidate = text.strip().strip("<>").strip()
     if not candidate:
         raise UnsupportedUrlError("Paste a TikTok short-drama URL (…/shortdrama/episode/<id>/<n>).")
+    # People paste addresses without the scheme ("www.tiktok.com/shortdrama/…"): accept them.
+    if re.match(r"^(?:www\.|m\.|vm\.|vt\.)?tiktok\.com/", candidate, re.IGNORECASE):
+        candidate = "https://" + candidate
     if BARE_ID_RE.match(candidate):
         return SeriesRef(series_id=candidate, episode_hint=None, source_url=candidate)
     if (m := SERIES_EPISODE_RE.match(candidate)) is not None:
