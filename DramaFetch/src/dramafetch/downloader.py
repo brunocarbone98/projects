@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import importlib
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.manifest import episode_stem
 from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode
 
@@ -32,6 +34,9 @@ _SECRET_RE = re.compile(
     r"|passport_csrf_token|odin_tt|tt_csrf_token)\b\s*[:=]\s*[^\s;,&]+",
     re.IGNORECASE,
 )
+# "429" only as a whole token: yt-dlp prefixes TikTok errors with the 19-digit video id, and about
+# 1.6 % of those ids contain the digits 429 somewhere.
+_RATE_LIMIT_RE = re.compile(r"\b429\b|too many requests|rate limit")
 
 
 def curl_cffi_available() -> bool:
@@ -72,6 +77,38 @@ def existing_episode_file(out_dir: Path, episode: Episode) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def output_template(out_dir: Path, episode: Episode) -> str:
+    """yt-dlp ``outtmpl`` for the episode: ``<out_dir>/<episode stem>.%(ext)s``.
+
+    Everything except the final ``%(ext)s`` is literal text that TikTok partly controls (the series
+    name in ``out_dir``, the episode title in the stem), so its percent signs are doubled: yt-dlp
+    expands ``%(name)s`` sequences in the template, and an unescaped ``%(cookies)s`` in a title
+    would otherwise put the session cookies into the file name.
+    """
+    return str(out_dir / episode_stem(episode)).replace("%", "%%") + ".%(ext)s"
+
+
+def cookies_file_problem(cookies_file: Path | None) -> str | None:
+    """Why ``cookies_file`` must not be handed to yt-dlp, or None when it is fine to use.
+
+    yt-dlp reports every malformed cookies.txt line as a WARNING that quotes the line, value
+    included; DramaFetch promises never to print cookie values, so such a file is refused with the
+    line numbers only. A missing or unreadable file is left to yt-dlp (its error names the path).
+    """
+    if cookies_file is None or not cookies_file.is_file():
+        return None
+    try:
+        problems = cookie_file_problems(cookies_file)
+    except OSError:
+        return None
+    if not problems:
+        return None
+    return (
+        f"cookies file {cookies_file.name} has malformed lines ({'; '.join(problems)}); "
+        "yt-dlp would print them, cookie values included: fix or re-export the file"
+    )
 
 
 def locked_result(episode: Episode) -> DownloadResult:
@@ -123,7 +160,11 @@ class YtDlpDownloader:
             "format": H264_FORMAT if options.prefer_h264 else BEST_FORMAT,
             "http_headers": {"Referer": TIKTOK_REFERER},
             "restrictfilenames": False,
-            "windowsfilenames": True,
+            # The generated parts of the path are already Windows-safe (`safe_filename`). On Windows
+            # yt-dlp sanitizes paths anyway; on Linux/macOS `windowsfilenames: True` would run the
+            # Windows rules over the WHOLE outtmpl and move a legal `--out` such as `videos:tiktok`
+            # or `My Videos.` to a sibling directory DramaFetch never looks at.
+            "windowsfilenames": sys.platform == "win32",
             "overwrites": options.overwrite,
             "sleep_interval_requests": 1,
         }
@@ -158,8 +199,10 @@ class YtDlpDownloader:
                 status=DownloadStatus.DRY_RUN,
                 message=f"would download {episode.page_url}",
             )
-        outtmpl = str(out_dir / (episode_stem(episode) + ".%(ext)s"))
-        params = self.build_options(episode, options, outtmpl)
+        problem = cookies_file_problem(options.cookies_file)
+        if problem is not None:
+            return DownloadResult(episode=episode, status=DownloadStatus.FAILED, message=problem)
+        params = self.build_options(episode, options, output_template(out_dir, episode))
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             with self._ydl_factory(params) as ydl:
@@ -198,7 +241,7 @@ class YtDlpDownloader:
             for marker in ("requiring login", "login required", "log in", "logged-in", "logged in")
         ):
             return DownloadStatus.FAILED_LOGIN
-        if any(marker in text for marker in ("429", "too many requests", "rate limit")):
+        if _RATE_LIMIT_RE.search(text):
             return DownloadStatus.FAILED_RATE_LIMITED
         if any(
             marker in text

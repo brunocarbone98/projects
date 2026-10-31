@@ -38,7 +38,14 @@ def _episode(number, title="Title"):
         ("...", "untitled"),
         ("ctrl\x00\x1fchars\x7f", "ctrlchars"),
         ("CON", "CON_"),
-        ("com1.txt", "com1.txt_"),
+        # Windows reserves a device name followed by any extension too, so the `_` goes on the
+        # device-name segment, not at the end of the name.
+        ("com1.txt", "com1_.txt"),
+        ("Aux. Stories", "Aux_. Stories"),
+        ("nul.mp4", "nul_.mp4"),
+        ("COM1 .txt", "COM1_.txt"),
+        ("CONOUT$", "CONOUT$_"),
+        ("console.txt", "console.txt"),  # not a device name
         (
             "The Billionaire's Secret Heiress | Episode 1",
             "The Billionaire's Secret Heiress Episode 1",
@@ -48,6 +55,20 @@ def _episode(number, title="Title"):
 )
 def test_safe_filename(raw, expected):
     assert safe_filename(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw", ["CON", "con", "com1.txt", "Aux. Stories", "nul.mp4", "LPT9.tar.gz", "CONIN$", "prn."]
+)
+def test_safe_filename_results_are_not_reserved_on_windows(raw):
+    import ntpath
+
+    isreserved = getattr(ntpath, "isreserved", None)  # Python 3.13+: Microsoft's rules
+    if isreserved is None:
+        pytest.skip("ntpath.isreserved needs Python 3.13")
+    assert isreserved(raw)
+    assert not isreserved(safe_filename(raw))
+    assert not isreserved(series_dir(Path("o"), Series("123", raw, [])).name)
 
 
 def test_safe_filename_truncates_then_strips():

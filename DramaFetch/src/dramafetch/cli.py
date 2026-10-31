@@ -15,8 +15,10 @@ Exit codes: 0 ok · 2 usage/unsupported URL/some episode failed · 3 login requi
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import platform
+import re
 import shutil
 import sys
 import time
@@ -26,12 +28,14 @@ from pathlib import Path
 from typing import Any
 
 from dramafetch import __version__, engine
+from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.downloader import YtDlpDownloader, curl_cffi_available
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
     DramaFetchError,
     LoginRequiredError,
+    RateLimitedError,
     UnsupportedUrlError,
 )
 from dramafetch.manifest import series_dir
@@ -83,6 +87,10 @@ LEGAL_NOTICE = (
 
 _MARKS = {"ok": "✓", "fail": "✗", "skip": "–"}  # noqa: RUF001 - the en dash is the spec's "n/a" mark
 _ASCII_MARKS = {"ok": "OK", "fail": "X", "skip": "-"}
+# Text TikTok controls (titles, series names, yt-dlp messages) is printed without C0/C1 control
+# characters, DEL and the Unicode line/bidirectional controls: an escape sequence in a title could
+# otherwise erase the "locked" column or retitle the terminal.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 
 
 # --------------------------------------------------------------------------- argument parsing
@@ -289,6 +297,9 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     port = getattr(args, "port", None)
     if port is not None and not 0 <= port <= 65535:
         parser.error("--port must be between 0 and 65535")
+    host = getattr(args, "host", None)
+    if host is not None and not host.strip().strip("[]").strip():
+        parser.error("--host must name an address (127.0.0.1 keeps the UI private to this machine)")
     page_count = getattr(args, "page_count", None)
     if page_count is not None and page_count < 1:
         parser.error("--page-count must be at least 1")
@@ -364,7 +375,8 @@ def _cmd_info(args: argparse.Namespace) -> int:
     if args.as_json:
         data = engine.series_to_dict(series)
         data["output_dir"] = str(target_dir)
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        # A non-UTF-8 stdout (Windows pipes default to cp1252) gets \uXXXX escapes: exact JSON.
+        print(json.dumps(data, indent=2, ensure_ascii=not _stream_is_utf8(sys.stdout)))
         return EXIT_OK
     _print_series_table(series, target_dir)
     return EXIT_OK
@@ -391,7 +403,10 @@ def _cmd_download(args: argparse.Namespace) -> int:
         return EXIT_OK
     target_dir = series_dir(options.out_dir, series)
     print(
-        f"{series.display_name} [{series.series_id}]: {len(selected)} episode(s) -> {target_dir}",
+        _printable(
+            f"{series.display_name} [{series.series_id}]: {len(selected)} episode(s) -> "
+            f"{target_dir}"
+        ),
         flush=True,
     )
     results = engine.download_series(
@@ -423,10 +438,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         browser_path=args.browser_path,
         cookies_file=args.cookies,
     )
-    lines = format_doctor(checks)
+    # A stdout that cannot encode the check marks (a Windows pipe in cp1252) gets ASCII ones.
+    lines = format_doctor(checks, ascii_marks=not _stream_is_utf8(sys.stdout))
     try:
         print("\n".join(lines))
-    except UnicodeEncodeError:  # a terminal without UTF-8: fall back to ASCII marks
+    except UnicodeEncodeError:  # an exotic encoding that cannot even take the ASCII marks' text
         print("\n".join(format_doctor(checks, ascii_marks=True)))
     return EXIT_OK
 
@@ -436,30 +452,81 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     discovery_options = _discovery_options(args)
     download_options = _download_options(args)
-    if args.host.strip() in WILDCARD_HOSTS:
+    host = args.host.strip()
+    if host.strip("[]") in WILDCARD_HOSTS:
         _stderr(
             f"warning: --host {args.host} exposes the UI, which has no authentication, to every "
             "network this machine is on"
         )
+    try:
+        server = run_server(
+            host=host,
+            port=args.port,
+            out_dir=download_options.out_dir,
+            discovery_options=discovery_options,
+            download_options=download_options,
+            serve_forever=False,
+        )
+    except (OSError, ValueError) as exc:  # port in use, unknown host, unsupported address family
+        _stderr(f"error: cannot start the web UI on {args.host}:{args.port}: {exc}")
+        return EXIT_ERROR
+    bound_host, bound_port = str(server.server_address[0]), int(server.server_address[1])
+    shown_host = f"[{bound_host}]" if ":" in bound_host else bound_host
+    # Announced only after the bind succeeded, with the port actually bound (--port 0 picks one).
     _stderr(
-        f"DramaFetch web UI on http://{args.host}:{args.port}/ — downloads go to "
+        f"DramaFetch web UI on http://{shown_host}:{bound_port}/ — downloads go to "
         f"{download_options.out_dir} (Ctrl+C to stop)"
     )
-    run_server(
-        host=args.host,
-        port=args.port,
-        out_dir=download_options.out_dir,
-        discovery_options=discovery_options,
-        download_options=download_options,
-    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return EXIT_OK
 
 
 # --------------------------------------------------------------------------- output helpers
 
 
+def _printable(text: str) -> str:
+    """``text`` without control characters (see ``_CONTROL_CHARS_RE``); safe for one terminal
+    line. Applied to everything TikTok or yt-dlp may have written: titles, names, messages."""
+    return _CONTROL_CHARS_RE.sub("", text)
+
+
+def _stream_is_utf8(stream: Any) -> bool:
+    """Whether the text stream encodes UTF-8 (so any title can be written to it as is)."""
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return False
+    try:
+        return codecs.lookup(encoding).name == "utf-8"
+    except LookupError:
+        return False
+
+
+def _tolerate_encoding_errors(stream: Any) -> None:
+    """Make a non-UTF-8 text stream escape what it cannot encode instead of raising.
+
+    TikTok titles are frequently CJK while a redirected or piped stdout on Windows defaults to the
+    ANSI code page (cp1252), so without this every ``info``/``download``/``video`` run with such a
+    title would die with UnicodeEncodeError. ``backslashreplace`` keeps the information
+    (``\\u9738``) rather than printing ``?``; streams without ``reconfigure`` are left alone.
+    """
+    if _stream_is_utf8(stream):
+        return
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(errors="backslashreplace")
+    except (ValueError, TypeError, OSError):  # a closed or exotic stream: nothing to be done
+        return
+
+
 def _stderr(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    print("\n".join(_printable(line) for line in message.split("\n")), file=sys.stderr, flush=True)
 
 
 def _format_duration(seconds: int | None) -> str:
@@ -477,33 +544,37 @@ def _truncate(text: str, width: int) -> str:
 def _print_series_table(series: Series, target_dir: Path) -> None:
     episodes = sorted(series.episodes, key=lambda episode: episode.number)
     count = len(episodes)
-    header = f"Series: {series.display_name} [{series.series_id}] — {count} episode"
+    header = f"Series: {_printable(series.display_name)} [{series.series_id}] — {count} episode"
     header += "s listed" if count != 1 else " listed"
     if series.total_hint is not None:
         header += f" (TikTok announces {series.total_hint})"
     print(header)
-    print(f"Output: {target_dir}")
+    print(f"Output: {_printable(str(target_dir))}")
     print()
+    titles = {episode.item_id: _printable(episode.title) for episode in episodes}
     id_width = max(7, max((len(episode.item_id) for episode in episodes), default=7))
-    title_width = min(50, max(5, max((len(episode.title) for episode in episodes), default=5)))
+    title_width = min(50, max(5, max((len(title) for title in titles.values()), default=5)))
     print(f"{'#':>4}  {'item id':<{id_width}}  {'duration':>8}  {'title':<{title_width}}  status")
     for episode in episodes:
         status = "free" if not episode.locked else "locked: " + "; ".join(episode.lock_hints)
         print(
-            f"{episode.number:>4}  {episode.item_id:<{id_width}}  "
+            f"{episode.number:>4}  {_printable(episode.item_id):<{id_width}}  "
             f"{_format_duration(episode.duration_s):>8}  "
-            f"{_truncate(episode.title, title_width):<{title_width}}  {status}"
+            f"{_truncate(titles[episode.item_id], title_width):<{title_width}}  "
+            f"{_printable(status)}"
         )
     if series.warnings:
         print()
         print("Warnings:")
         for warning in series.warnings:
-            print(f"  - {warning}")
+            print(f"  - {_printable(warning)}")
 
 
 def _print_result(result: DownloadResult) -> None:
     detail = str(result.path) if result.path is not None else result.message
-    print(f"E{result.episode.number:02d}  {result.status.value:<22} {detail}", flush=True)
+    print(
+        _printable(f"E{result.episode.number:02d}  {result.status.value:<22} {detail}"), flush=True
+    )
 
 
 def _summary_line(results: list[DownloadResult]) -> str:
@@ -647,6 +718,7 @@ def _check_cookies(cookies_file: Path | None) -> DoctorCheck:
     try:
         stat = cookies_file.stat()
         tiktok_lines, names = _scan_cookie_names(cookies_file)
+        problems = cookie_file_problems(cookies_file)
     except OSError as exc:
         return DoctorCheck("cookies", "fail", f"{cookies_file} unreadable: {exc.strerror}")
     age_days = max(0.0, (time.time() - stat.st_mtime) / 86400)
@@ -654,6 +726,15 @@ def _check_cookies(cookies_file: Path | None) -> DoctorCheck:
         f"{cookies_file.name}: {stat.st_size} bytes, {age_days:.1f} days old, "
         f"{tiktok_lines} tiktok.com cookie line(s)"
     )
+    if problems:
+        # Line numbers only: yt-dlp would skip these lines with a warning that quotes them whole,
+        # cookie values included, so DramaFetch refuses to pass such a file on until it is fixed.
+        return DoctorCheck(
+            "cookies",
+            "fail",
+            f"{detail}; malformed ({'; '.join(problems)}): yt-dlp would print those lines, "
+            "cookie values included — fix or re-export the file",
+        )
     if tiktok_lines == 0:
         return DoctorCheck("cookies", "fail", detail + "; no tiktok.com cookies in the file")
     if not names:
@@ -707,6 +788,8 @@ def _system_exit_code(exc: SystemExit) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI; returns the exit code instead of raising SystemExit."""
+    _tolerate_encoding_errors(sys.stdout)
+    _tolerate_encoding_errors(sys.stderr)
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -725,6 +808,9 @@ def main(argv: list[str] | None = None) -> int:
     except ChallengeError as exc:
         _stderr(f"error: {exc}\n{CHALLENGE_HELP}")
         return EXIT_DISCOVERY
+    except RateLimitedError as exc:
+        _stderr(f"error: {exc}")
+        return EXIT_RATE_LIMITED
     except DiscoveryError as exc:
         _stderr(f"error: {exc}")
         return EXIT_DISCOVERY

@@ -63,7 +63,7 @@
   .hint { margin: 8px 0 0; }
   form { display: flex; flex-wrap: wrap; gap: 8px; }
   label { font-weight: 600; width: 100%; }
-  input[type="url"] {
+  input#url {
     flex: 1 1 240px;
     min-width: 0;
     padding: 10px 12px;
@@ -150,7 +150,9 @@
     <h2 id="resolve-title">1. Series</h2>
     <form id="resolve-form" autocomplete="off">
       <label for="url">Series URL</label>
-      <input id="url" name="url" type="url" required inputmode="url" spellcheck="false"
+      <!-- type="text", not "url": the server accepts a bare series id and scheme-less
+           addresses, which the browser's URL validation would reject before any request. -->
+      <input id="url" name="url" type="text" required inputmode="url" spellcheck="false"
              placeholder="https://www.tiktok.com/shortdrama/episode/7675706520839033876/8">
       <button type="submit" id="resolve-btn" class="primary">Resolve</button>
     </form>

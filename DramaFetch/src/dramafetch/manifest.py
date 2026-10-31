@@ -37,6 +37,8 @@ _WINDOWS_RESERVED_NAMES = frozenset(
         "PRN",
         "AUX",
         "NUL",
+        "CONIN$",
+        "CONOUT$",
         *(f"COM{i}" for i in range(1, 10)),
         *(f"LPT{i}" for i in range(1, 10)),
     }
@@ -48,7 +50,9 @@ def safe_filename(text: str, max_len: int = 80) -> str:
 
     Path separators and the Windows-reserved characters ``<>:"/\\|?*`` become spaces, control
     characters are dropped, whitespace is collapsed, trailing dots and spaces are removed (also
-    after truncating to ``max_len``), and Windows device names (``CON``, ``COM1``...) get a ``_``.
+    after truncating to ``max_len``), and a Windows device name (``CON``, ``COM1``...) gets a ``_``
+    appended to the device-name segment itself: Windows reserves ``com1.txt`` and ``Aux. Stories``
+    as much as ``COM1``, so ``com1_.txt`` and ``Aux_. Stories`` are the usable forms.
     """
     cleaned = _CONTROL_CHARS_RE.sub("", text)
     cleaned = _RESERVED_CHARS_RE.sub(" ", cleaned)
@@ -58,8 +62,9 @@ def safe_filename(text: str, max_len: int = 80) -> str:
     cleaned = cleaned.rstrip(" .")
     if not cleaned:
         return "untitled"
-    if cleaned.split(".")[0].upper() in _WINDOWS_RESERVED_NAMES:
-        cleaned += "_"
+    head, dot, tail = cleaned.partition(".")
+    if head.rstrip().upper() in _WINDOWS_RESERVED_NAMES:
+        cleaned = f"{head.rstrip()}_{dot}{tail}"
     return cleaned
 
 

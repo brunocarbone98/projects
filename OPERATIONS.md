@@ -1,6 +1,6 @@
 # OPERATIONS.md — Autonomous maintenance
 
-The operations manual for this repository: who does the work (the agent roster), when (the shifts), where (GitHub Actions and Claude Code cloud), under which rules (the guardrails), and how a human watches, audits and intervenes. The headline is literal — the three projects are maintained around the clock by Claude Code agents — and so is the last word: a human reviews and merges everything.
+The operations manual for this repository: who does the work (the agent roster), when (the shifts), where (GitHub Actions and Claude Code cloud), under which rules (the guardrails), and how a human watches, audits and intervenes. The headline is literal — the four projects are maintained around the clock by Claude Code agents — and so is the last word: a human reviews and merges everything.
 
 ## 1. Why
 

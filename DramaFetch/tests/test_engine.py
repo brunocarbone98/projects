@@ -100,10 +100,19 @@ def test_select_episodes(spec, expected):
     assert [e.number for e in engine.select_episodes(series, spec)] == expected
 
 
-@pytest.mark.parametrize("spec", ["3-1", "0", "a", "1-2-3", ",", "--", "1-a", "0-5", "1 2"])
+@pytest.mark.parametrize(
+    "spec",
+    ["3-1", "0", "a", "1-2-3", ",", "--", "1-a", "0-5", "1 2", "1-99999999999", "10001", "10001-"],
+)
 def test_invalid_specs_raise_value_error(spec):
     with pytest.raises(ValueError, match="invalid episode spec"):
         engine.select_episodes(make_series(), spec)
+
+
+def test_episode_numbers_are_bounded():
+    assert engine.parse_episode_spec(f"1-{engine.MAX_EPISODE_NUMBER}") == [(1, 10_000)]
+    with pytest.raises(ValueError, match="above 10000 are not accepted \\(use an open range"):
+        engine.parse_episode_spec(f"5-{engine.MAX_EPISODE_NUMBER + 1}")
 
 
 def test_missing_from_selection_and_range_formatting():
@@ -117,10 +126,28 @@ def test_missing_from_selection_and_range_formatting():
     assert engine.missing_from_selection(sparse, "1-3") == [(2, 2)]
     assert engine.missing_from_selection(sparse, "2-") == [(2, 2), (4, 4)]
     assert engine.missing_from_selection(sparse, "1-1000") == [(2, 2), (4, 4), (6, 1000)]
+    assert engine.missing_from_selection(sparse, "4-6,2,6-8") == [(2, 2), (4, 4), (6, 8)]
     assert engine.missing_from_selection(Series(SERIES_ID, None, []), "1-3") == [(1, 3)]
     assert engine.compress_ranges([1, 2, 3, 7, 9, 10]) == [(1, 3), (7, 7), (9, 10)]
     assert engine.compress_ranges([]) == []
+    assert engine.merge_ranges([(7, 9), (1, 3), (4, 5), (8, 12), (20, 20)]) == [
+        (1, 5),
+        (7, 12),
+        (20, 20),
+    ]
+    assert engine.merge_ranges([]) == []
     assert engine.format_ranges([(1, 3), (7, 7), (9, 10)]) == "1-3, 7, 9-10"
+
+
+def test_missing_from_selection_cost_does_not_depend_on_the_range_width():
+    """Gaps are ranges, never materialised numbers: a hostile EpisodeNumber in the payload (or the
+    widest allowed spec) must not cost seconds and gigabytes before the download starts."""
+    hostile = make_series(numbers=(1, 2, 3, 10**12))
+    assert engine.missing_from_selection(hostile, "1-") == [(4, 10**12 - 1)]
+    assert engine.missing_from_selection(hostile, "2-5,7") == [(4, 5), (7, 7)]
+    assert engine.missing_from_selection(make_series(), f"1-{engine.MAX_EPISODE_NUMBER}") == [
+        (6, engine.MAX_EPISODE_NUMBER)
+    ]
 
 
 # --------------------------------------------------------------------------- download_series
@@ -375,6 +402,53 @@ def test_other_failures_do_not_stop_the_run(tmp_path):
     assert [r.status.value for r in results] == ["failed-unavailable", "failed", "done"]
     assert [call[0] for call in downloader.calls] == [1, 2, 3]
     assert engine.exit_code(results) == 2
+
+
+def test_malformed_cookies_file_fails_network_episodes_up_front_without_pauses(tmp_path):
+    """yt-dlp would quote a malformed cookies.txt line, value included; the engine checks the file
+    once, fails every episode that would have needed the network and never sleeps or downloads."""
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".tiktok.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tSECRET_SESSION\n"
+        ".tiktok.com\tTRUE\t/\tTRUE\t1893456000\tttwid\tSECRET_TTWID\textra\n",
+        encoding="utf-8",
+    )
+    series = make_series(numbers=(1, 2, 3), locked=(3,))
+    downloader = FakeDownloader()
+    sleeps = []
+    results = engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, cookies_file=cookies),
+        downloader=downloader,
+        sleep=sleeps.append,
+    )
+    assert [r.status for r in results] == [
+        DownloadStatus.FAILED,
+        DownloadStatus.FAILED,
+        DownloadStatus.SKIPPED_LOCKED,
+    ]
+    assert "line 3: 8 fields (expected 7)" in results[0].message
+    assert "SECRET" not in results[0].message
+    assert sleeps == []
+    assert [n for n, _ in downloader.calls] == [
+        3
+    ]  # only the locked skip went through the downloader
+    assert engine.exit_code(results) == 2
+    # a dry run never opens the cookies file, so it is not refused
+    dry = engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, cookies_file=cookies, dry_run=True),
+        downloader=downloader,
+        sleep=sleeps.append,
+    )
+    assert [r.status for r in dry] == [
+        DownloadStatus.DRY_RUN,
+        DownloadStatus.DRY_RUN,
+        DownloadStatus.SKIPPED_LOCKED,
+    ]
 
 
 def test_download_series_with_an_injected_manifest_and_empty_selection(tmp_path):

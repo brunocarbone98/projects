@@ -13,8 +13,13 @@ from typing import Any
 
 import pytest
 
-from dramafetch.discovery.browser import AUTOMATION_FLAG, FETCH_JS, PlaywrightDiscovery
-from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError
+from dramafetch.discovery.browser import (
+    AUTOMATION_FLAG,
+    FETCH_JS,
+    SCROLL_JS,
+    PlaywrightDiscovery,
+)
+from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError
 from dramafetch.models import DiscoveryOptions, SeriesRef
 
 from .fake_tiktok import SERIES_ID, SERIES_NAME, TOTAL_EPISODES, FakeTikTok
@@ -143,6 +148,40 @@ class TestWithChromium:
             ("3", False),
             ("3", True),
         ]
+
+    def test_falls_back_to_scrolling_when_the_in_page_page_is_empty(self) -> None:
+        """A well-formed but empty page for our re-signed request is not the end of the list."""
+        with FakeTikTok(lazy_empty=True) as server:
+            series = PlaywrightDiscovery().discover(SeriesRef(SERIES_ID), _options(server))
+            requests = server.item_list_requests
+        _assert_full_series(series)
+        assert any("no new episodes although TikTok reported more" in w for w in series.warnings)
+        assert [(r.query["cursor"], r.from_scroll) for r in requests] == [
+            ("0", False),
+            ("3", False),
+            ("3", True),
+        ]
+
+    def test_a_stalled_pagination_fetch_is_bounded_by_the_timeout(self) -> None:
+        """`--timeout` bounds every in-page page fetch, not only the first page."""
+        with FakeTikTok(lazy=True, slow_pagination_s=30.0) as server:
+            started = time.monotonic()
+            series = PlaywrightDiscovery().discover(
+                SeriesRef(SERIES_ID), _options(server, timeout_s=2.0)
+            )
+            elapsed = time.monotonic() - started
+        _assert_full_series(series)  # the page's own scroll handler is not delayed
+        assert elapsed < 12, elapsed  # 2 s abort + 4 quiet scroll rounds of 0.3 s + browser time
+        assert any("scrolled the page instead" in w for w in series.warnings)
+
+    def test_http_429_on_pagination_stops_discovery_as_rate_limited(self) -> None:
+        with (
+            FakeTikTok(rate_limit_pagination=True) as server,
+            pytest.raises(RateLimitedError, match="30-60 minutes"),
+        ):
+            PlaywrightDiscovery().discover(SeriesRef(SERIES_ID), _options(server))
+        # the page's own request and our one refused fetch: no scrolling, no further requests
+        assert [r.query["cursor"] for r in server.item_list_requests] == ["0", "3"]
 
 
 # --- browser-free checks with a fake Playwright -------------------------------------------------
@@ -316,21 +355,15 @@ def test_login_url_after_navigation_is_login_required() -> None:
     assert browser.closed
 
 
-def test_captured_payload_is_paged_with_the_captured_url(item_list_pages) -> None:
-    first_url = (
-        "https://www.tiktok.com/api/drama/episode/item_list/?aid=1988&count=30&cursor=0"
-        f"&dramaID={SERIES_ID}&msToken=abc&X-Bogus=DFSz"
-    )
-    browser = _FakeBrowser(
-        responses=[
-            _FakeResponse(
-                "https://www.tiktok.com/api/drama/detail/?dramaID=1",
-                {"dramaInfo": {"dramaName": "N", "totalEpisode": 5}},
-            ),
-            _FakeResponse(first_url, item_list_pages[0]),
-        ]
-    )
-    browser.fetch_results = [item_list_pages[1]]
+FIRST_PAGE_URL = (
+    "https://www.tiktok.com/api/drama/episode/item_list/?aid=1988&count=30&cursor=0"
+    f"&dramaID={SERIES_ID}&msToken=abc&X-Bogus=DFSz"
+)
+
+
+def _discover_with_fake_browser(
+    browser: _FakeBrowser, **overrides: Any
+) -> tuple[Any, list[_FakePage]]:
     pages: list[_FakePage] = []
     original_new_page = _FakeContext.new_page
 
@@ -342,19 +375,79 @@ def test_captured_payload_is_paged_with_the_captured_url(item_list_pages) -> Non
     _FakeContext.new_page = tracking_new_page  # type: ignore[method-assign]
     try:
         series = PlaywrightDiscovery(playwright_factory=lambda: _FakePlaywright(browser)).discover(
-            SeriesRef(SERIES_ID), _fake_options()
+            SeriesRef(SERIES_ID), _fake_options(**overrides)
         )
     finally:
         _FakeContext.new_page = original_new_page  # type: ignore[method-assign]
+    return series, pages
+
+
+def _first_page_browser(item_list_pages: list[dict[str, Any]]) -> _FakeBrowser:
+    return _FakeBrowser(
+        responses=[
+            _FakeResponse(
+                "https://www.tiktok.com/api/drama/detail/?dramaID=1",
+                {"dramaInfo": {"dramaName": "N", "totalEpisode": 5}},
+            ),
+            _FakeResponse(FIRST_PAGE_URL, item_list_pages[0]),
+        ]
+    )
+
+
+@pytest.mark.parametrize("list_key", ["itemList", "item_list"])
+def test_captured_payload_is_paged_with_the_captured_url(item_list_pages, list_key: str) -> None:
+    browser = _first_page_browser(item_list_pages)
+    second = json.loads(json.dumps(item_list_pages[1]).replace('"itemList"', f'"{list_key}"'))
+    browser.fetch_results = [second]  # the in-page fetch must accept both spellings, like catalog
+
+    series, pages = _discover_with_fake_browser(browser)
 
     assert series.numbers == [1, 2, 3, 4, 5]
     assert series.name == "N" and series.total_hint == 5
+    assert not any("scrolled" in w for w in series.warnings)
     fetches = [arg for expression, arg in pages[0].evaluated if expression == FETCH_JS]
     assert fetches == [
-        "https://www.tiktok.com/api/drama/episode/item_list/?aid=1988&count=10&cursor=3"
-        f"&dramaID={SERIES_ID}&msToken=abc&X-Bogus=DFSz"
+        [
+            "https://www.tiktok.com/api/drama/episode/item_list/?aid=1988&count=10&cursor=3"
+            f"&dramaID={SERIES_ID}&msToken=abc&X-Bogus=DFSz",
+            300,  # --timeout bounds every in-page fetch too (0.3 s here), not only the first page
+        ]
     ]
     assert browser.closed
+
+
+def test_an_empty_in_page_page_triggers_the_scroll_fallback(item_list_pages) -> None:
+    browser = _first_page_browser(item_list_pages)
+    browser.fetch_results = [{"itemList": [], "hasMore": False, "cursor": 3, "statusCode": 0}]
+
+    series, pages = _discover_with_fake_browser(browser)
+
+    assert series.numbers == [1, 2, 3]  # the fake page loads nothing more when scrolled
+    assert any(
+        "no new episodes although TikTok reported more; scrolled" in w for w in series.warnings
+    )
+    assert any(expression == SCROLL_JS for expression, _ in pages[0].evaluated)
+    assert "TikTok announces 5 episodes, 3 listed" in series.warnings
+
+
+def test_http_429_from_the_in_page_fetch_is_rate_limited(item_list_pages) -> None:
+    browser = _first_page_browser(item_list_pages)
+    browser.fetch_results = [{"__dramafetch_status": 429, "__dramafetch_text": "Too Many Requests"}]
+
+    with pytest.raises(RateLimitedError, match="HTTP 429"):
+        _discover_with_fake_browser(browser)
+    assert browser.closed
+
+
+def test_a_timed_out_in_page_fetch_takes_the_fallback_path(item_list_pages) -> None:
+    browser = _first_page_browser(item_list_pages)
+    browser.fetch_results = [{"__dramafetch_status": 0, "__dramafetch_text": "AbortError"}]
+
+    series, pages = _discover_with_fake_browser(browser)
+
+    assert series.numbers == [1, 2, 3]
+    assert any("returned no episode list; scrolled" in w for w in series.warnings)
+    assert any(expression == SCROLL_JS for expression, _ in pages[0].evaluated)
 
 
 def test_playwright_failures_become_one_line_discovery_errors() -> None:

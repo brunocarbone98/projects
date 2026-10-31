@@ -9,7 +9,10 @@ Routes (all GET):
   /api/drama/episode/item_list/  JSON built from the two fixtures (cursor 0 -> page 1, 3 -> page 2);
                                  empty for unknown `dramaID`, or when `require_login` and no cookie;
                                  with `lazy`, later pages are served only to the page's own scroll
-                                 handler (header `X-Requested-By: scroll`)
+                                 handler (header `X-Requested-By: scroll`); `lazy_empty` answers
+                                 DramaFetch's own pagination fetch with a well-formed EMPTY page
+                                 instead; `slow_pagination_s` delays that fetch (until shutdown at
+                                 the latest); `rate_limit_pagination` answers it with HTTP 429
   /api/drama/detail/             the series name and total
   /login                         a login page
 The request log keeps method, path and query plus two booleans; never headers or cookie values.
@@ -108,6 +111,16 @@ class FakeOptions:
     require_login: bool = False
     challenge: bool = False
     lazy: bool = False  # later pages only via the page's own scroll handler (scroll fallback)
+    # The three below shape the answer to DramaFetch's OWN pagination fetch (cursor != 0, not from
+    # the page's scroll handler); with `lazy` or `lazy_empty` the page's scroll handler serves the
+    # real later pages, as TikTok's own web app does.
+    lazy_empty: bool = False  # a well-formed but empty page: {"itemList": [], "hasMore": false}
+    slow_pagination_s: float = 0.0  # hold the answer this long (released early at shutdown)
+    rate_limit_pagination: bool = False  # HTTP 429 with a JSON body
+
+    @property
+    def page_scrolls(self) -> bool:
+        return self.lazy or self.lazy_empty
 
 
 @dataclass(frozen=True)
@@ -127,10 +140,15 @@ class FakeTikTokServer(ThreadingHTTPServer):
         self.options = options
         self.requests: list[RequestRecord] = []
         self.lock = threading.Lock()
+        self.release = threading.Event()  # set at shutdown: wakes handlers sleeping on purpose
 
     def record(self, record: RequestRecord) -> None:
         with self.lock:
             self.requests.append(record)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A client that gave up (the browser aborted a deliberately slow answer) is not an error
+        worth a traceback in the test output."""
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -153,10 +171,20 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.OK, CHALLENGE_PAGE.encode(), "text/html; charset=utf-8")
             else:
                 page = PAGE_TEMPLATE.replace("__SERIES_ID__", match.group("id"))
-                page = page.replace("__LAZY__", "true" if options.lazy else "false")
+                page = page.replace("__LAZY__", "true" if options.page_scrolls else "false")
                 self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
         elif parts.path == "/api/drama/episode/item_list/":
-            self._json(self._item_list(options, query, logged_in, from_scroll))
+            ours = (query.get("cursor", "0") or "0") != "0" and not from_scroll
+            if ours and options.slow_pagination_s > 0:
+                server.release.wait(options.slow_pagination_s)
+            if ours and options.rate_limit_pagination:
+                self._send(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    b'{"statusCode": 429, "statusMsg": "too many requests"}',
+                    "application/json",
+                )
+            else:
+                self._json(self._item_list(options, query, logged_in, from_scroll))
         elif parts.path == "/api/drama/detail/":
             self._json({"dramaInfo": {"dramaName": SERIES_NAME, "totalEpisode": TOTAL_EPISODES}})
         elif parts.path.startswith("/login"):
@@ -173,6 +201,8 @@ class _Handler(BaseHTTPRequestHandler):
             return {"itemList": [], "hasMore": False, "statusCode": 0}
         if query.get("dramaID") != options.series_id:
             return {"itemList": [], "hasMore": False, "cursor": 0, "statusCode": 0}
+        if options.lazy_empty and cursor != "0" and not from_scroll:
+            return {"itemList": [], "hasMore": False, "cursor": cursor, "statusCode": 0}
         if options.lazy and cursor != "0" and not from_scroll:
             return {"statusCode": 10201, "statusMsg": "pagination is only served to the page"}
         page = PAGES.get(cursor)
@@ -224,6 +254,7 @@ class FakeTikTok:
 
     def __exit__(self, *exc_info: object) -> None:
         assert self._server is not None and self._thread is not None
+        self._server.release.set()
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)

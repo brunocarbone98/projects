@@ -15,7 +15,12 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from dramafetch.downloader import YtDlpDownloader, existing_episode_file, locked_result
+from dramafetch.downloader import (
+    YtDlpDownloader,
+    cookies_file_problem,
+    existing_episode_file,
+    locked_result,
+)
 from dramafetch.manifest import Manifest, manifest_path, series_dir
 from dramafetch.models import (
     Discovery,
@@ -35,6 +40,10 @@ EXIT_LOGIN_REQUIRED = 3
 EXIT_RATE_LIMITED = 5
 
 _SPEC_TOKEN_RE = re.compile(r"^(?P<lo>\d+)?(?P<dash>-)?(?P<hi>\d+)?$")
+#: Largest episode number an ``--episodes`` spec may name; short dramas have at most a few hundred
+#: episodes (the series URL itself allows four digits), and the bound keeps a typo such as
+#: ``1-99999999999`` from being taken seriously.
+MAX_EPISODE_NUMBER = 10_000
 _NO_NETWORK_STATUSES = frozenset(
     {DownloadStatus.SKIPPED_EXISTS, DownloadStatus.SKIPPED_LOCKED, DownloadStatus.DRY_RUN}
 )
@@ -90,6 +99,11 @@ def parse_episode_spec(spec: str | None) -> list[Interval] | None:
             raise ValueError(f"invalid episode spec {token!r}: episodes start at 1")
         if high is not None and high < low:
             raise ValueError(f"invalid episode spec {token!r}: the range end is before its start")
+        if max(low, high or 0) > MAX_EPISODE_NUMBER:
+            raise ValueError(
+                f"invalid episode spec {token!r}: episode numbers above {MAX_EPISODE_NUMBER} are "
+                'not accepted (use an open range like "10-" or "all" for everything)'
+            )
         intervals.append((low, high))
     if not intervals:
         raise ValueError(f"invalid episode spec {spec!r}: nothing selected")
@@ -114,14 +128,16 @@ def missing_from_selection(series: Series, spec: str | None) -> list[tuple[int, 
     """Requested episode numbers the series does not list, as inclusive ranges (for messages).
 
     Open-ended ranges stop at the last listed episode, so ``"10-"`` on a 5-episode series requests
-    nothing that can be missing.
+    nothing that can be missing. The gaps are computed as ranges, never as individual numbers, so
+    the cost depends on how many episodes are listed, not on how wide the spec (or a hostile
+    episode number in the payload) is.
     """
     intervals = parse_episode_spec(spec)
     if intervals is None:
         return []
     present = sorted(set(series.numbers))
     last = present[-1] if present else 0
-    missing: set[int] = set()
+    gaps: list[tuple[int, int]] = []
     for low, high in intervals:
         top = last if high is None else high
         if top < low:
@@ -133,11 +149,23 @@ def missing_from_selection(series: Series, spec: str | None) -> list[tuple[int, 
             if number > top:
                 break
             if number > cursor:
-                missing.update(range(cursor, number))
+                gaps.append((cursor, number - 1))
             cursor = number + 1
         if cursor <= top:
-            missing.update(range(cursor, top + 1))
-    return compress_ranges(sorted(missing))
+            gaps.append((cursor, top))
+    return merge_ranges(gaps)
+
+
+def merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Sort inclusive ranges and merge the ones that overlap or touch: ``[(7, 9), (1, 3), (4, 5)]``
+    -> ``[(1, 5), (7, 9)]``."""
+    merged: list[tuple[int, int]] = []
+    for low, high in sorted(ranges):
+        if merged and low <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    return merged
 
 
 def compress_ranges(numbers: list[int]) -> list[tuple[int, int]]:
@@ -176,7 +204,9 @@ def download_series(
     NETWORK attempts only (not after skips, dry runs or the last episode). Every result is recorded
     in the manifest and passed to ``on_result``. A FAILED_LOGIN or FAILED_RATE_LIMITED result stops
     the run: the remaining episodes that would have needed the network get the same status with the
-    message ``"stopped: <reason>"`` without contacting TikTok.
+    message ``"stopped: <reason>"`` without contacting TikTok. A cookies file yt-dlp would complain
+    about (see :func:`dramafetch.downloader.cookies_file_problem`) is checked once up front: every
+    episode that would have needed the network is FAILED with that message, with no pauses.
     """
     target_dir = series_dir(options.out_dir, series)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -187,6 +217,7 @@ def download_series(
     if rng is None:
         rng = random.Random()
     episode_options = replace(options, out_dir=target_dir)
+    cookie_problem = None if options.dry_run else cookies_file_problem(options.cookies_file)
     ordered = sorted(episodes, key=lambda episode: episode.number)
     results: list[DownloadResult] = []
 
@@ -210,6 +241,13 @@ def download_series(
             )
             continue
         needs_network = _needs_network(episode, episode_options)
+        if needs_network and cookie_problem is not None:
+            emit(
+                DownloadResult(
+                    episode=episode, status=DownloadStatus.FAILED, message=cookie_problem
+                )
+            )
+            continue
         if needs_network and previous_used_network:
             sleep(rng.uniform(options.delay_min_s, options.delay_max_s))
         result = downloader.download(episode, episode_options)

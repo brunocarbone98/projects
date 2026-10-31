@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -17,7 +18,12 @@ from typing import Any
 
 import pytest
 
-from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError
+from dramafetch.errors import (
+    ChallengeError,
+    DiscoveryError,
+    LoginRequiredError,
+    RateLimitedError,
+)
 from dramafetch.models import (
     DiscoveryOptions,
     DownloadOptions,
@@ -28,7 +34,7 @@ from dramafetch.models import (
     SeriesRef,
 )
 from dramafetch.web.jobs import JobManager, redact_secrets, result_to_dict
-from dramafetch.web.server import MAX_BODY_BYTES, run_server
+from dramafetch.web.server import MAX_BODY_BYTES, normalize_host, run_server
 
 SERIES_ID = "7699393770256782354"
 SERIES_NAME = "The Billionaire's Secret Heiress"
@@ -188,6 +194,10 @@ def test_index_page_is_served(harness: Harness) -> None:
     assert 'name="viewport"' in body
     assert "prefers-color-scheme: dark" in body
     assert "<script src=" not in body and "https://cdn" not in body  # no CDN, everything inline
+    # A `type="url"` field would make the browser reject a bare series id or a scheme-less address
+    # before the request is sent, although /api/resolve accepts both: the server is the validator.
+    assert 'id="url" name="url" type="text" required' in body
+    assert 'type="url"' not in body
 
 
 def test_security_headers(harness: Harness) -> None:
@@ -291,6 +301,15 @@ def test_resolve_challenge_is_503_with_headful_hint(make_harness: Callable[..., 
     status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
     assert status == 503
     assert "--headful" in data["hint"]
+
+
+def test_resolve_rate_limited_is_429_with_a_wait_hint(make_harness: Callable[..., Harness]) -> None:
+    harness = make_harness(FakeDiscovery(RateLimitedError("TikTok is rate-limiting (HTTP 429)")))
+    status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 429
+    assert data["error"] == "TikTok is rate-limiting (HTTP 429)"
+    assert data["kind"] == "RateLimitedError"
+    assert "30-60 minutes" in data["hint"]
 
 
 def test_resolve_discovery_error_is_502(make_harness: Callable[..., Harness]) -> None:
@@ -420,6 +439,38 @@ def test_doctor_reports_the_cli_facts(harness: Harness) -> None:
 def test_run_server_refuses_an_empty_host(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="explicit host"):
         run_server("", 0, tmp_path, DiscoveryOptions(), DownloadOptions(), serve_forever=False)
+    with pytest.raises(ValueError, match="explicit host"):
+        run_server("[ ]", 0, tmp_path, DiscoveryOptions(), DownloadOptions(), serve_forever=False)
+
+
+def test_normalize_host_strips_ipv6_brackets() -> None:
+    assert normalize_host(" 127.0.0.1 ") == "127.0.0.1"
+    assert normalize_host("[::1]") == "::1"
+    assert normalize_host("::") == "::"
+    assert normalize_host("localhost") == "localhost"
+    with pytest.raises(ValueError, match="explicit host"):
+        normalize_host("[]")
+
+
+def test_bracketed_ipv6_host_binds_and_is_allowed_by_the_host_guard(tmp_path: Path) -> None:
+    try:
+        probe = socket.socket(socket.AF_INET6)
+        probe.bind(("::1", 0))
+        probe.close()
+    except OSError:
+        pytest.skip("no IPv6 loopback on this machine")
+    server = run_server(
+        "[::1]", 0, tmp_path, DiscoveryOptions(), DownloadOptions(), serve_forever=False
+    )
+    try:
+        assert server.server_address[0] == "::1"
+        assert server.bound_host == "::1"  # type: ignore[attr-defined]
+        port = server.server_address[1]
+        assert server.host_allowed(f"[::1]:{port}")  # type: ignore[attr-defined]
+        assert server.host_allowed("localhost")  # type: ignore[attr-defined]
+        assert not server.host_allowed("evil.example")  # type: ignore[attr-defined]
+    finally:
+        server.server_close()
 
 
 def test_run_server_fixes_the_output_directory(tmp_path: Path) -> None:

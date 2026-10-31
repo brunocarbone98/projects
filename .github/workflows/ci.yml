@@ -6,7 +6,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# The monorepo lives in FullStackHub/; run all commands there.
+# Default working directory for the FullStackHub jobs; the dramafetch job overrides it with DramaFetch/.
 defaults:
   run:
     working-directory: FullStackHub

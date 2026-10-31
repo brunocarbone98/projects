@@ -5,7 +5,7 @@ Rules for agents working in `DramaFetch/`. The repo-wide rules in `../AGENTS.md`
 ## Scope — what this tool is and is not
 
 - DramaFetch downloads TikTok short-drama episodes that the user's own account can already watch, a whole series at a time, for personal offline viewing. That is the whole product. The legal notice in `README.md` is part of the contract: keep it verbatim in the README and in `web/static/index.html`.
-- Never implement anything that unlocks paid episodes, bypasses a paywall, DRM or access controls, fakes entitlement, rotates proxies or hides automation beyond a normal Chrome user agent. Locked episodes are listed with their hints and skipped; `--include-locked` only _tries_ them.
+- Never implement anything that unlocks paid episodes, bypasses a paywall, DRM or access controls, fakes entitlement, rotates proxies or hides automation beyond three deliberate, documented measures: a Chrome user agent without `Headless` (`static.chrome_user_agent`), curl_cffi's Chrome TLS impersonation (`impersonate="chrome"` in `static.py` and yt-dlp's `impersonate` in `downloader.py`) and Chromium's `--disable-blink-features=AutomationControlled` launch flag (`browser.AUTOMATION_FLAG`, pinned by `tests/integration/test_browser_discovery.py`). No proxies, no stealth plugins, nothing else; dropping the flag is a one-constant human decision, not an agent's. Locked episodes are listed with their hints and skipped; `--include-locked` only _tries_ them.
 - Cookies are a key to the user's account: never print, log, dump, assert on or send cookie values anywhere but TikTok. Diagnostics (`doctor`, `--dump-raw`, error messages, job snapshots) may show cookie **names**, counts and ages only.
 - Be polite to TikTok by design: one download at a time, randomized 3–7 s pauses between episodes, 0.8 s between list pages, a full stop on HTTP 429. Never add parallelism.
 - The cloud sandbox and CI cannot reach tiktok.com — never try. Everything network-facing is thin, injectable and tested against `tests/fixtures/` or `tests/integration/fake_tiktok.py`.
@@ -18,9 +18,9 @@ Rules for agents working in `DramaFetch/`. The repo-wide rules in `../AGENTS.md`
 | `errors.py` | Exception hierarchy; each class maps to one CLI exit code |
 | `urls.py` | Parse pasted text into `SeriesRef` / `VideoRef`, build page URLs; its docstring holds the verified URL facts |
 | `catalog.py` | Pure functions over TikTok's `item_list` / `detail` payloads: find lists, lock hints, episodes, merge, warnings |
-| `discovery/` | `browser.py` (Playwright: open the series page, capture `/api/drama/episode/item_list/`, paginate), `static.py` (embedded page JSON), `cookies.py` (Netscape `cookies.txt` → Playwright cookies, names-only report), `__init__.py` (`choose_discovery`: `auto` = static, then browser) |
+| `discovery/` | `browser.py` (Playwright: open the series page, capture `/api/drama/episode/item_list/`, paginate), `static.py` (embedded page JSON), `cookies.py` (Netscape `cookies.txt` → Playwright cookies, names-only report, malformed lines by line number), `__init__.py` (`choose_discovery`: `auto` = static, then browser) |
 | `manifest.py` | `dramafetch.json` per series directory: resumable runs, safe file names, the series/episode naming |
-| `downloader.py` | `YtDlpDownloader`: builds yt-dlp options, classifies errors, never raises per episode |
+| `downloader.py` | `YtDlpDownloader`: builds yt-dlp options (`%`-escaped output template), classifies errors, refuses a cookies file with malformed lines (yt-dlp would print them), never raises per episode |
 | `engine.py` | The seam both front ends use: `resolve`, `select_episodes`, `download_series`, `summarize`, `exit_code` |
 | `cli.py` | argparse front end: `info`, `download`, `video`, `doctor`, `serve`; `doctor_as_dicts` feeds the web UI |
 | `web/` | stdlib `http.server` UI: `server.py` (routes, limits, `run_server`), `jobs.py` (`JobManager`: one job at a time, polled snapshots), `static/index.html` (vanilla JS, no CDN) |
@@ -60,6 +60,6 @@ CI runs the same sequence in the `dramafetch` job of `../.github/workflows/ci.ym
 
 The verified facts — the series URL shape, "the long number is the series id (`dramaID`)", `/api/drama/episode/item_list/`, `/api/drama/detail/`, "a logged-in session is required", yt-dlp issue #17725 — are written down in `urls.py` (module docstring) and `README.md` → "How it works", and encoded in `catalog.py` (field names, lock heuristics) and `discovery/browser.py` (URL substrings, pagination parameters). When TikTok changes something:
 
-1. On a real machine run `dramafetch info URL --cookies cookies.txt --dump-raw raw/`; it writes `item_list_<n>.json`, `detail.json` and `page_url.txt` (never cookies).
+1. On a real machine run `dramafetch info URL --cookies cookies.txt --strategy browser --dump-raw raw/`; it writes `item_list_<n>.json`, `detail.json` and `page_url.txt` (never cookies). With `--strategy auto` or `static` the embedded page JSON lands in `hydration_<n>.json` instead, and `item_list_<n>.json`/`detail.json` appear only if the browser had to run.
 2. Compare them with `tests/fixtures/item_list_page*.json`; update the fixtures to the new shape (anonymise ids) and adjust `catalog.py` / `discovery/` until `pytest` passes again.
 3. Update the facts in `urls.py`, `README.md` and this file in the same PR, with the date they were verified.

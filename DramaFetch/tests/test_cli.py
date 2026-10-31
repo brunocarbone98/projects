@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import socket
 import sys
 import time
 import types
@@ -14,7 +16,12 @@ import pytest
 from dramafetch import __version__, cli
 from dramafetch.catalog import catalog_warnings
 from dramafetch.downloader import locked_result
-from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError
+from dramafetch.errors import (
+    ChallengeError,
+    DiscoveryError,
+    LoginRequiredError,
+    RateLimitedError,
+)
 from dramafetch.manifest import MANIFEST_FILENAME
 from dramafetch.models import DownloadResult, DownloadStatus, Episode, Series
 
@@ -256,7 +263,10 @@ def test_version_help_and_no_command(capsys):
         ["download", SERIES_URL, "--retries", "-2"],
         ["download", SERIES_URL, "--extractor-args", "nonsense"],
         ["download", SERIES_URL, "--extractor-args", ""],
+        ["download", SERIES_URL, "--episodes", "1-99999999999"],
         ["serve", "--port", "70000"],
+        ["serve", "--host", ""],
+        ["serve", "--host", "[]"],
         ["info", SERIES_URL, "--strategy", "magic"],
         ["info", SERIES_URL, "--page-count", "0"],
         ["info", SERIES_URL, "--max-pages", "0"],
@@ -384,6 +394,7 @@ def test_info_with_a_video_url_points_to_the_video_command(fake_discovery, capsy
         (LoginRequiredError("TikTok redirected to /login"), 3, "--cookies"),
         (ChallengeError("Verify to continue"), 4, "--headful"),
         (DiscoveryError("no episode list within 45 s"), 4, "no episode list"),
+        (RateLimitedError("TikTok is rate-limiting this address (HTTP 429): wait"), 5, "wait"),
     ],
 )
 def test_discovery_errors_map_to_exit_codes(fake_discovery, capsys, error, code, hint):
@@ -392,6 +403,89 @@ def test_discovery_errors_map_to_exit_codes(fake_discovery, capsys, error, code,
     err = capsys.readouterr().err
     assert str(error) in err
     assert hint in err
+
+
+def _cjk_series():
+    episode = Episode(
+        number=1,
+        item_id="7699400000000000001",
+        title="霸道总裁的秘密 | 第1集",
+        series_id=SERIES_ID,
+        series_name="霸道总裁",
+        author="muffindrama_us",
+    )
+    return Series(series_id=SERIES_ID, name="霸道总裁", episodes=[episode], total_hint=1)
+
+
+def _cp1252_stdout(monkeypatch):
+    """Install a stdout that cannot encode CJK — a redirected or piped stdout on Windows (cp1252).
+
+    Installed from the test body on purpose: pytest re-installs its own capture stream when the
+    call phase starts, so a fixture-time replacement would be undone.
+    """
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    def text() -> str:
+        stream.flush()
+        return stream.buffer.getvalue().decode("cp1252")
+
+    return text
+
+
+def test_non_utf8_stdout_survives_cjk_titles(
+    fake_discovery, fake_downloader, tmp_path, monkeypatch
+):
+    fake_discovery.series = _cjk_series()
+    read_stdout = _cp1252_stdout(monkeypatch)
+    assert cli.main(["info", SERIES_ID, "--out", str(tmp_path)]) == 0
+    out = read_stdout()
+    assert f"[{SERIES_ID}]" in out and "7699400000000000001" in out
+    assert "\\u9738" in out  # backslashreplace keeps the information instead of raising
+
+    assert cli.main(["info", SERIES_ID, "--json", "--out", str(tmp_path)]) == 0
+    combined = read_stdout()  # the table from the first run, then the JSON document
+    data = json.loads(combined[combined.index("{") :])
+    assert data["name"] == "霸道总裁"  # exact JSON through \uXXXX escapes
+    assert data["episodes"][0]["title"] == "霸道总裁的秘密 | 第1集"
+
+    code = cli.main(
+        ["download", SERIES_ID, "--out", str(tmp_path), "--delay-min", "0", "--delay-max", "0"]
+    )
+    assert code == 0
+    assert "E01  done" in read_stdout()
+
+
+def test_doctor_uses_ascii_marks_on_a_non_utf8_stdout(monkeypatch):
+    read_stdout = _cp1252_stdout(monkeypatch)
+    assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
+    lines = read_stdout().strip().splitlines()
+    assert len(lines) == 7
+    assert all(line.split(" ", 1)[0] in {"OK", "X", "-"} for line in lines)
+
+
+def test_control_characters_from_tiktok_text_are_not_printed(capsys, tmp_path):
+    episode = Episode(
+        number=1,
+        item_id="7699400000000000001",
+        title="Ep 1\x1b[2K\x1b[1A\x1b]0;owned\x07 free",
+        series_id=SERIES_ID,
+        lock_hints=("isFree=false",),
+    )
+    series = Series(SERIES_ID, "N\x1b[31m", [episode], warnings=["odd\x9bthing"])
+    cli._print_series_table(series, tmp_path / "N\x1b[31m [1]")
+    cli._print_result(DownloadResult(episode, DownloadStatus.FAILED, None, "boom\x1b[2K‮"))
+    cli._stderr("warning: first\x1b[2K line\nsecond line")
+    captured = capsys.readouterr()
+    for text in (captured.out, captured.err):
+        assert "\x1b" not in text and "\x07" not in text and "\x9b" not in text
+        assert "‮" not in text
+    assert "Series: N[31m [" in captured.out
+    assert "Ep 1[2K[1A]0;owned free  locked: isFree=false" in captured.out
+    assert "  - oddthing" in captured.out
+    assert "E01  failed                 boom[2K" in captured.out
+    assert captured.err == "warning: first[2K line\nsecond line\n"  # newlines survive on stderr
+    assert cli._printable("plain – text") == "plain – text"  # noqa: RUF001
 
 
 def test_unsupported_url_exits_2(capsys):
@@ -623,7 +717,7 @@ def test_doctor_cookies_report_names_only(tmp_path, capsys):
         ".tiktok.com\tTRUE\t/\tTRUE\t9999999999\tsid_tt\tSECRETSIDVALUE\n"
         ".tiktok.com\tTRUE\t/\tFALSE\t9999999999\tttwid\tSECRETTTWID\n"
         ".example.com\tTRUE\t/\tFALSE\t0\tsessionid\tNOTTIKTOK\n"
-        "garbage line\n",
+        "# a trailing comment\n",
         encoding="utf-8",
     )
     assert cli.main(["doctor", "--cookies", str(cookies), "--browser-channel", "chrome"]) == 0
@@ -638,6 +732,27 @@ def test_doctor_cookies_report_names_only(tmp_path, capsys):
     checks = cli.doctor_as_dicts(cookies_file=cookies, browser_channel="chrome")
     assert checks[6]["state"] == "ok"
     assert not any("SECRET" in json.dumps(check) for check in checks)
+
+
+def test_doctor_flags_malformed_cookie_lines_by_number_only(tmp_path, capsys):
+    """yt-dlp would skip such lines with a WARNING that quotes them, cookie values included."""
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.tiktok.com\tTRUE\t/\tTRUE\t9999999999\tsessionid\tSECRETSESSIONVALUE\n"
+        ".tiktok.com\tTRUE\t/\tFALSE\t9999999999\tttwid\tSECRETTTWID\textra_field\n"
+        "garbage line with SECRETGARBAGE\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["doctor", "--cookies", str(cookies), "--browser-channel", "chrome"]) == 0
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if "cookies:" in ln)
+    assert line.startswith("✗ cookies: cookies.txt:")
+    assert "malformed (line 3: 8 fields (expected 7); line 4: 1 fields (expected 7))" in line
+    assert "yt-dlp would print those lines" in line
+    for secret in ("SECRETSESSIONVALUE", "SECRETTTWID", "SECRETGARBAGE", "extra_field"):
+        assert secret not in out
+    assert cli.doctor_checks(browser_channel="chrome", cookies_file=cookies)[6].state == "fail"
 
 
 def test_doctor_cookies_without_session_or_missing(tmp_path):
@@ -667,12 +782,30 @@ def test_doctor_cookies_without_session_or_missing(tmp_path):
 # --------------------------------------------------------------------------- serve
 
 
+class _StubServer:
+    """What a fake `run_server(..., serve_forever=False)` hands back to the CLI."""
+
+    def __init__(self, host, port):
+        self.server_address = (host, port or 8765)
+        self.served = False
+        self.closed = False
+
+    def serve_forever(self):
+        self.served = True
+
+    def server_close(self):
+        self.closed = True
+
+
 def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     calls = []
+    servers = []
     module = types.ModuleType("dramafetch.web.server")
 
     def run_server(**kwargs):
         calls.append(kwargs)
+        servers.append(_StubServer(kwargs["host"], kwargs["port"]))
+        return servers[-1]
 
     module.run_server = run_server
     monkeypatch.setitem(sys.modules, "dramafetch.web.server", module)
@@ -699,15 +832,64 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 9000
     assert kwargs["out_dir"] == tmp_path
+    assert kwargs["serve_forever"] is False  # the CLI serves itself, after announcing the bind
     assert kwargs["discovery_options"].cookies_file == Path("c.txt")
     assert kwargs["discovery_options"].strategy == "browser"
     assert kwargs["download_options"].out_dir == tmp_path
     assert kwargs["download_options"].cookies_file == Path("c.txt")
     assert kwargs["download_options"].delay_min_s == 1.0
     assert kwargs["download_options"].impersonate is False
+    assert servers[0].served and servers[0].closed
     err = capsys.readouterr().err
     assert "http://127.0.0.1:9000/" in err
     assert "warning" not in err  # the private default needs no warning
     assert cli.main(["serve", "--host", "0.0.0.0"]) == 0
     assert calls[1]["host"] == "0.0.0.0"
     assert "warning: --host 0.0.0.0 exposes the UI" in capsys.readouterr().err
+
+
+def test_serve_reports_a_busy_port_instead_of_a_traceback(tmp_path, capsys):
+    taken = socket.socket()
+    try:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        port = taken.getsockname()[1]
+        code = cli.main(["serve", "--port", str(port), "--out", str(tmp_path)])
+    finally:
+        taken.close()
+    assert code == 1
+    err = capsys.readouterr().err
+    assert f"error: cannot start the web UI on 127.0.0.1:{port}:" in err
+    assert "Traceback" not in err
+    assert "web UI on http://" not in err  # no banner before a successful bind
+
+
+def test_serve_announces_the_port_it_bound_and_stops_on_ctrl_c(monkeypatch, tmp_path, capsys):
+    from dramafetch.web import server as web_server
+
+    def interrupted(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(web_server.DramaFetchServer, "serve_forever", interrupted)
+    assert cli.main(["serve", "--port", "0", "--out", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert "DramaFetch web UI on http://127.0.0.1:" in err
+    assert "http://127.0.0.1:0/" not in err  # the real port, not the requested 0
+    assert "interrupted: results so far" not in err  # Ctrl+C is the normal way to stop `serve`
+
+
+def test_serve_accepts_a_bracketed_ipv6_host(monkeypatch, tmp_path, capsys):
+    try:
+        probe = socket.socket(socket.AF_INET6)
+        probe.bind(("::1", 0))
+        probe.close()
+    except OSError:
+        pytest.skip("no IPv6 loopback on this machine")
+    from dramafetch.web import server as web_server
+
+    def interrupted(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(web_server.DramaFetchServer, "serve_forever", interrupted)
+    assert cli.main(["serve", "--host", "[::1]", "--port", "0", "--out", str(tmp_path)]) == 0
+    assert "DramaFetch web UI on http://[::1]:" in capsys.readouterr().err

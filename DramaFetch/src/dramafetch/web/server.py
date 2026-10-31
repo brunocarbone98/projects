@@ -38,6 +38,7 @@ from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
     LoginRequiredError,
+    RateLimitedError,
     UnsupportedUrlError,
 )
 from dramafetch.models import (
@@ -71,6 +72,10 @@ LOGIN_HINT = (
 CHALLENGE_HINT = (
     "TikTok wants a human check: restart with --headful, solve it in the window that opens and "
     "try again"
+)
+RATE_LIMIT_HINT = (
+    "TikTok is rate-limiting this address: wait 30-60 minutes before resolving or downloading "
+    "again, and never run two instances at once"
 )
 VIDEO_URL_MESSAGE = (
     "That is a single video: paste a series URL (…/shortdrama/episode/<series id>/<episode>) or "
@@ -169,7 +174,7 @@ class DramaFetchServer(ThreadingHTTPServer):
             name = name.split("]", 1)[0] + "]"
         elif name.count(":") == 1:
             name = name.rsplit(":", 1)[0]
-        return name in _LOCAL_HOSTS or name == self.bound_host.lower()
+        return name in _LOCAL_HOSTS or name.strip("[]") == self.bound_host.lower()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         log.debug("error while handling a request from %s", client_address, exc_info=True)
@@ -269,6 +274,13 @@ class _Handler(BaseHTTPRequestHandler):
                 str(exc),
                 kind=type(exc).__name__,
                 hint=CHALLENGE_HINT,
+            ) from exc
+        except RateLimitedError as exc:
+            raise HttpError(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                str(exc),
+                kind=type(exc).__name__,
+                hint=RATE_LIMIT_HINT,
             ) from exc
         except DiscoveryError as exc:
             raise HttpError(HTTPStatus.BAD_GATEWAY, str(exc), kind=type(exc).__name__) from exc
@@ -379,6 +391,17 @@ class _Handler(BaseHTTPRequestHandler):
         log.info("%s %s", self.address_string(), format % args)
 
 
+def normalize_host(host: str) -> str:
+    """The host as the socket layer wants it: trimmed, IPv6 brackets removed (``[::1]`` -> ``::1``);
+    an empty host raises ``ValueError`` (the server never guesses an interface)."""
+    cleaned = (host or "").strip()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1].strip()
+    if not cleaned:
+        raise ValueError("pass an explicit host; 127.0.0.1 keeps the UI private to this machine")
+    return cleaned
+
+
 def run_server(
     host: str,
     port: int,
@@ -398,9 +421,7 @@ def run_server(
     ``server.serve_forever()`` in a thread and ``server.shutdown()`` later (``port=0`` picks a free
     port; read it from ``server.server_address``).
     """
-    if not host or not host.strip():
-        raise ValueError("pass an explicit host; 127.0.0.1 keeps the UI private to this machine")
-    host = host.strip()
+    host = normalize_host(host)
     if host in _WILDCARD_HOSTS:
         log.warning(
             "binding to %s exposes the UI (it has no authentication) to every network you are on",

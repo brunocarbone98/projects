@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dramafetch.discovery.browser import PlaywrightDiscovery
 from dramafetch.discovery.static import PARTIAL_WARNING, StaticHtmlDiscovery
-from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError
+from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError
 from dramafetch.models import Discovery, DiscoveryOptions, Series, SeriesRef
 
 __all__ = ["AutoDiscovery", "PlaywrightDiscovery", "StaticHtmlDiscovery", "choose_discovery"]
@@ -22,10 +22,11 @@ STRATEGIES = ("auto", "browser", "static")
 class AutoDiscovery:
     """Static first, browser when static fails or saw only the first embedded page.
 
-    `LoginRequiredError` and `ChallengeError` from the static strategy propagate (a browser without
-    cookies would hit the same wall); any other `DiscoveryError` is recorded in `Series.warnings`
-    and the browser takes over. A partial static result is completed with the browser when it can
-    be, and returned as is (with its warnings) when the browser fails too.
+    `LoginRequiredError`, `ChallengeError` and `RateLimitedError` from the static strategy propagate
+    (a browser without cookies would hit the same wall, and after an HTTP 429 the only polite move
+    is to stop, not to knock again with a browser); any other `DiscoveryError` is recorded in
+    `Series.warnings` and the browser takes over. A partial static result is completed with the
+    browser when it can be, and returned as is (with its warnings) when the browser fails too.
     """
 
     def __init__(self, static: Discovery | None = None, browser: Discovery | None = None) -> None:
@@ -35,7 +36,7 @@ class AutoDiscovery:
     def discover(self, ref: SeriesRef, options: DiscoveryOptions) -> Series:
         try:
             series = self._static.discover(ref, options)
-        except (LoginRequiredError, ChallengeError):
+        except (LoginRequiredError, ChallengeError, RateLimitedError):
             raise
         except DiscoveryError as exc:
             fallback = self._browser.discover(ref, options)

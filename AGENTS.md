@@ -9,7 +9,7 @@ Instructions for any coding agent — Claude Code, Codex, Cursor, Copilot — wo
 - `DramaFetch/` — **DramaFetch**, a TikTok short-drama series downloader for personal offline viewing: Python 3.11+, Playwright discovers the episode list, yt-dlp downloads each episode, a stdlib `http.server` web UI; locked (paid) episodes are listed and skipped, never unlocked.
 - `PersonalWebsite/` — static two-page portfolio (`MainPage.html`, `Portfolio.html`, `favicon.svg`), vanilla HTML/CSS/JS, served by GitHub Pages.
 
-Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `DramaFetch/CLAUDE.md` (rules, commands, subagents) — read the one for the folder you change before you start. Deployment: `DEPLOY.md`. Agents, shifts and incidents: `OPERATIONS.md`. Never edit `FullStackHub/ROADMAP.md` or `SecureGate/ROADMAP.md`.
+Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `DramaFetch/CLAUDE.md` (rules and commands; the first two also define subagents) — read the one for the folder you change before you start. Deployment: `DEPLOY.md`. Agents, shifts and incidents: `OPERATIONS.md`. Never edit `FullStackHub/ROADMAP.md` or `SecureGate/ROADMAP.md`.
 
 ## Conventions
 
@@ -18,7 +18,7 @@ Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `
 - Strict TypeScript everywhere; `any` is forbidden; validate external input with Zod at the edge; shared contracts live in `packages/shared` and are never duplicated.
 - Prettier (printWidth 100) is mandatory for every `.ts/.tsx/.md/.json/.yml` under `FullStackHub/`: `pnpm --dir FullStackHub exec prettier --write <files>`. Ignored on purpose: `ROADMAP.md`, `pnpm-lock.yaml`, `apps/web/src/lib/world-coastlines.ts`.
 - Python services: type hints everywhere, Pydantic models are the contract, tests with pytest in each service's `.venv`.
-- DramaFetch: Python 3.11+ with type hints everywhere; `ruff check`, `ruff format --check` and `mypy --strict` must pass (`DramaFetch/pyproject.toml`, rules never loosened); pytest runs against fixtures and the local fake TikTok server — nothing reaches tiktok.com from a sandbox or CI; parsing is pure functions, the network layer is thin and injectable, no runtime dependencies beyond yt-dlp and Playwright; never log cookie values, never bypass paywalls, DRM or anti-bot checks.
+- DramaFetch: Python 3.11+ with type hints everywhere; `ruff check`, `ruff format --check` and `mypy --strict` must pass (`DramaFetch/pyproject.toml`, rules never loosened); pytest runs against fixtures and the local fake TikTok server — nothing reaches tiktok.com from a sandbox or CI; parsing is pure functions, the network layer is thin and injectable, no runtime dependencies beyond yt-dlp and Playwright; never log cookie values, never bypass paywalls, DRM or anti-bot checks (the only automation-related settings are a Chrome user agent without `Headless`, curl_cffi's Chrome TLS impersonation and Chromium's `--disable-blink-features=AutomationControlled` launch flag, listed in `DramaFetch/CLAUDE.md`; no proxies, no stealth plugins).
 - SecureGate: black-box only (public API and UI, never source or database); Screenplay for UI with no selectors in step definitions; Karate for API with `match` contracts; explicit waits only, never `Thread.sleep`.
 
 ## Commands
@@ -35,7 +35,7 @@ Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `
 | SecureGate | `./mvnw verify -Dsg.ratelimit=true` | Includes the opt-in `@ratelimit` scenario |
 | SecureGate | `cd postman && npx newman run SecureGate.postman_collection.json -e SecureGate.local.postman_environment.json` | The Postman collection, headless |
 | DramaFetch | `cd DramaFetch && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy && .venv/bin/pytest` | The definition-of-done checks (`python -m venv .venv && .venv/bin/pip install -e ".[impersonate,dev]"` once); unit tests use fixtures and a local fake TikTok server, never TikTok |
-| DramaFetch | `cd DramaFetch && .venv/bin/pytest -m integration` | Drives a real Chromium against the fake TikTok server; skipped without a browser (`playwright install chromium`, or `DRAMAFETCH_CHROMIUM=<path>`) |
+| DramaFetch | `cd DramaFetch && .venv/bin/pytest -m integration` | Drives a real Chromium against the fake TikTok server; skipped (not passed) unless `DRAMAFETCH_CHROMIUM=<path to a Chromium binary>` is set or `/opt/pw-browsers/chromium` exists — after `playwright install chromium`, point it at `p.chromium.executable_path` the way CI does |
 | Repo | `.claude/scripts/local-postgres.sh` | Throwaway PostgreSQL 16 on 127.0.0.1:5432 (`shipping`/`shipping`; `shipping_hub` + `shipping_hub_test`); idempotent; reuses a running cluster; Docker fallback |
 | Repo | `.claude/scripts/local-api.sh` | Migrate + seed + start the API on :4000 in the background, wait for `/health`, print the PID file path |
 | Repo | `.claude/scripts/run-checks.sh` | FullStackHub lint/format:check/typecheck/test + both pytest suites; one summary table; exit 1 on any failure |

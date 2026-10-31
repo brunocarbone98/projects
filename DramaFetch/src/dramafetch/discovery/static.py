@@ -20,8 +20,9 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 from urllib.parse import urlsplit
 
 from dramafetch.catalog import (
@@ -33,7 +34,7 @@ from dramafetch.catalog import (
     parse_item_list_payload,
 )
 from dramafetch.discovery.cookies import cookie_header, load_netscape_cookies
-from dramafetch.errors import DiscoveryError, DramaFetchError, LoginRequiredError
+from dramafetch.errors import DiscoveryError, DramaFetchError, LoginRequiredError, RateLimitedError
 from dramafetch.models import DiscoveryOptions, Series, SeriesRef
 from dramafetch.urls import series_page_url
 
@@ -143,8 +144,11 @@ def cookie_domain_filter(base_url: str) -> str:
 
 
 def default_fetch(url: str, headers: dict[str, str]) -> tuple[str, str]:
-    """GET `url` following redirects: curl_cffi with Chrome's TLS fingerprint when installed,
-    plain urllib otherwise. Returns `(final_url, body)`; HTTP errors become `DiscoveryError`."""
+    """GET `url` following same-site redirects: curl_cffi with Chrome's TLS fingerprint when
+    installed, plain urllib otherwise. Returns `(final_url, body)`; HTTP errors become
+    `DiscoveryError` (429: `RateLimitedError`). The `Cookie` header is for TikTok only, so a
+    redirect that leaves the site of `url` (or drops from https to http) is refused, not
+    followed."""
     try:
         from curl_cffi import requests as curl_requests
     except ImportError:
@@ -161,25 +165,64 @@ def default_fetch(url: str, headers: dict[str, str]) -> tuple[str, str]:
         raise DiscoveryError(f"could not fetch the series page: {_describe(exc)}") from exc
     status = int(response.status_code)
     if status == 429:
-        raise DiscoveryError(RATE_LIMIT_MESSAGE)
+        raise RateLimitedError(RATE_LIMIT_MESSAGE)
     if status >= 400:
         raise DiscoveryError(f"TikTok answered HTTP {status} for the series page")
-    return str(response.url), str(response.text)
+    final_url = str(response.url)
+    ensure_same_site(url, final_url)
+    return final_url, str(response.text)
 
 
 def _urllib_fetch(url: str, headers: dict[str, str]) -> tuple[str, str]:
     request = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_SameSiteRedirectHandler(url))
     try:
-        with urllib.request.urlopen(request, timeout=STATIC_TIMEOUT_S) as response:
+        with opener.open(request, timeout=STATIC_TIMEOUT_S) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             body = response.read().decode(charset, errors="replace")
             return str(response.geturl()), body
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
-            raise DiscoveryError(RATE_LIMIT_MESSAGE) from exc
+            raise RateLimitedError(RATE_LIMIT_MESSAGE) from exc
         raise DiscoveryError(f"TikTok answered HTTP {exc.code} for the series page") from exc
     except OSError as exc:  # URLError, timeouts, DNS and connection failures
         raise DiscoveryError(f"could not fetch the series page: {_describe(exc)}") from exc
+
+
+def ensure_same_site(original_url: str, target_url: str) -> None:
+    """Raise `DiscoveryError` when `target_url` is outside the site of `original_url` (the cookie
+    domain of its host, e.g. `tiktok.com` for `www.tiktok.com`) or downgrades https to http."""
+    original, target = urlsplit(original_url), urlsplit(target_url)
+    site = cookie_domain_filter(original_url)
+    host = (target.hostname or "").lower()
+    same_site = host == site or host.endswith("." + site)
+    downgrade = original.scheme.lower() == "https" and target.scheme.lower() != "https"
+    if not same_site or downgrade:
+        raise DiscoveryError(
+            f"the series page redirected off-site to {safe_url(target_url)}; not following it "
+            "(cookies are only ever sent to TikTok)"
+        )
+
+
+class _SameSiteRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib forwards every request header, `Cookie` included, to a redirect target on any host;
+    this handler follows only same-site, non-downgrading redirects (see `ensure_same_site`)."""
+
+    def __init__(self, original_url: str) -> None:
+        super().__init__()
+        self._original_url = original_url
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        ensure_same_site(self._original_url, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def extract_hydration_json(html: str) -> list[Any]:

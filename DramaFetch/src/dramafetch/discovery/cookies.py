@@ -106,6 +106,34 @@ def describe_cookies(path: Path, domain_filter: str = "tiktok.com") -> CookieRep
     )
 
 
+def cookie_file_problems(path: Path) -> list[str]:
+    """Lines of a cookies.txt that yt-dlp would reject, described by LINE NUMBER only.
+
+    yt-dlp skips a malformed line (not exactly seven tab-separated fields, or a non-numeric expiry)
+    with a WARNING that quotes the whole line — cookie value included — on stderr, which
+    ``quiet``/``no_warnings`` do not silence. DramaFetch therefore checks the file first and refuses
+    to hand such a file to yt-dlp; this function says where the problem is without ever repeating
+    the line. Comments, blank lines and the ``#HttpOnly_`` prefix follow yt-dlp's rules.
+    """
+    problems: list[str] = []
+    for number, raw_line in enumerate(
+        path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
+        line = raw_line.rstrip("\r\n")
+        if line.startswith(HTTPONLY_PREFIX):
+            line = line[len(HTTPONLY_PREFIX) :]
+        if line.startswith("#") or not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != _FIELD_COUNT:
+            problems.append(f"line {number}: {len(fields)} fields (expected {_FIELD_COUNT})")
+            continue
+        expires = fields[4].strip()
+        if expires and not expires.isdigit():
+            problems.append(f"line {number}: the expiry field is not a whole number")
+    return problems
+
+
 def _read_entries(path: Path) -> list[_Entry]:
     entries: list[_Entry] = []
     for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():

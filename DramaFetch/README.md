@@ -6,7 +6,7 @@ DramaFetch downloads the episodes of a TikTok short drama that your own TikTok a
 
 > **Legal notice.** DramaFetch is for personal, offline viewing of episodes that your own TikTok account can already watch. It does not unlock paid episodes and does not bypass DRM or access controls; locked episodes are listed and skipped. Downloading may breach TikTok's Terms of Service, and the videos belong to their creators and studios — you are responsible for how you use this tool.
 
-> **Built without access to TikTok.** This tool was written in a sandbox that cannot reach tiktok.com. Every network-facing piece is thin and injectable, tested against recorded payload fixtures and a local fake TikTok server — never against TikTok itself. The first real run is the real test: start with `dramafetch doctor`, then `dramafetch info URL --cookies cookies.txt --dump-raw raw/`, and read [Troubleshooting](#troubleshooting) if the episode list looks wrong.
+> **Built without access to TikTok.** This tool was written in a sandbox that cannot reach tiktok.com. Every network-facing piece is thin and injectable, tested against hand-written payload fixtures that follow the documented `item_list` shape and a local fake TikTok server — never against TikTok itself. The first real run is the real test: start with `dramafetch doctor`, then `dramafetch info URL --cookies cookies.txt --dump-raw raw/`, and read [Troubleshooting](#troubleshooting) if the episode list looks wrong.
 
 ## How it works
 
@@ -40,7 +40,7 @@ dramafetch doctor                     # … or skip it and use the Chrome/Edge y
 2. Export the site's cookies in Netscape `cookies.txt` format with a browser extension such as "Get cookies.txt LOCALLY" (Chrome/Edge) or "cookies.txt" (Firefox). Export only tiktok.com.
 3. Save the file where you run DramaFetch (`cookies.txt` is gitignored here) and pass `--cookies cookies.txt` to every command.
 
-The file is a key to your TikTok account: keep it private, never share or commit it, and expect it to expire after some weeks — when discovery starts failing with login errors, export a fresh one. `dramafetch doctor --cookies cookies.txt` reports its age, how many `.tiktok.com` lines it has and whether a session cookie (`sessionid` / `sid_tt`) is present — names only, never values. For the download step yt-dlp can alternatively read cookies straight from a browser profile with `--cookies-from-browser chrome`; the discovery step still needs the file.
+The file is a key to your TikTok account: keep it private, never share or commit it, and expect it to expire after some weeks — when discovery starts failing with login errors, export a fresh one. `dramafetch doctor --cookies cookies.txt` reports its age, how many `.tiktok.com` lines it has and whether a session cookie (`sessionid` / `sid_tt`) is present — names only, never values. It also flags malformed lines (not seven tab-separated fields, or a non-numeric expiry) by line number: yt-dlp would skip such a line with a warning that quotes it whole, cookie value included, so `download` and `video` refuse a file with malformed lines until it is fixed or re-exported. For the download step yt-dlp can alternatively read cookies straight from a browser profile with `--cookies-from-browser chrome`; the discovery step still needs the file.
 
 ## Usage
 
@@ -63,7 +63,7 @@ dramafetch serve --cookies cookies.txt                    # the web UI on http:/
 | --- | --- | --- |
 | `--cookies FILE` | all | Netscape `cookies.txt` from your logged-in browser (never printed) |
 | `--out DIR` | info, download, video, serve | Output directory (default `./downloads`); each series gets its own subfolder, `info` only prints it |
-| `--episodes SPEC` | download | Which episodes: `1-5`, `8`, `10-` (to the last), comma-separated; default all. Numbers the series does not list are reported and ignored |
+| `--episodes SPEC` | download | Which episodes: `1-5`, `8`, `10-` (to the last), comma-separated; default all; numbers above 10000 are rejected. Numbers the series does not list are reported and ignored |
 | `--delay-min S` / `--delay-max S` | download, serve | Random pause between episodes (default 3–7 s) |
 | `--include-locked` | download, serve | Also _try_ episodes that look locked — they usually have no formats; nothing is unlocked |
 | `--overwrite` | download, video, serve | Re-download files that exist (ignores the manifest) |
@@ -77,7 +77,7 @@ dramafetch serve --cookies cookies.txt                    # the web UI on http:/
 | `--browser-path PATH` | info, download, serve, doctor | An explicit browser binary (CI, sandboxes) |
 | `--headful` | info, download, serve | Show the browser window — lets you pass a captcha or log in |
 | `--dump-raw DIR` | info, download, serve | Write every raw API payload there (`item_list_<n>.json`, `detail.json`, `page_url.txt`; the static strategy writes the embedded page JSON as `hydration_<n>.json`; never cookies) — review them before sharing, then attach them to a bug report |
-| `--timeout S` | info, download, serve | How long to wait for the first episode list (default 45 s) |
+| `--timeout S` | info, download, serve | How long to wait for the first episode list, and for each further page of it (default 45 s) |
 | `--host`, `--port` | serve | Bind address and port (default `127.0.0.1`, `8765`); only pass `--host 0.0.0.0` on a network you trust — the UI has no login |
 | `--version` | — | Print the version |
 
@@ -104,14 +104,14 @@ Per-episode statuses: `done` · `skipped-exists` · `skipped-locked` · `dry-run
 | 2 | Usage error, unsupported URL, or at least one episode failed |
 | 3 | TikTok wants a login: export fresh cookies and pass `--cookies` |
 | 4 | Discovery failed: a captcha / "verify you are human" page (try `--headful`) or no episode list arrived |
-| 5 | Rate limited (HTTP 429): wait 30–60 minutes before trying again |
+| 5 | Rate limited (HTTP 429) while listing or downloading episodes: wait 30–60 minutes before trying again (no other strategy is tried after a 429) |
 | 130 | Interrupted with Ctrl+C — the manifest is saved, run again to resume |
 
 ### Web UI
 
 `dramafetch serve [--host 127.0.0.1] [--port 8765] [--out DIR] --cookies cookies.txt` starts a single-page UI — stdlib `http.server`, vanilla JS, no CDN, works on a phone-sized screen, follows your light/dark preference. Paste the URL → **Resolve** → tick episodes (locked ones are unticked and marked with their hints) → **Download selected** → a progress table polled every 2 s, plus a **Doctor** panel and the legal notice. Resolving runs synchronously inside the request and takes 10–40 s while Chromium opens TikTok; the page says so while it waits. The output directory is fixed by `--out` on the command line — the page cannot choose paths. Jobs run one at a time; more are queued. The server binds to `127.0.0.1` unless you pass `--host`, requires `Content-Type: application/json` on every POST and only answers requests whose `Host` header names the bound host or localhost; it has no authentication, so do not expose it.
 
-JSON API, for scripts: `POST /api/resolve {"url"}` → the series and its episodes; `POST /api/download {"url", "episodes": "1-5" | null, "include_locked": bool}` → `202 {"job_id"}`; `GET /api/jobs/<id>` → `{state: queued|running|done|error, results: [{number, title, status, message, path}], …}`; `GET /api/doctor`. Bodies are capped at 64 KiB; errors are `{"error", "kind", "hint"?}` with a 4xx/5xx status.
+JSON API, for scripts: `POST /api/resolve {"url"}` → the series and its episodes; `POST /api/download {"url", "episodes": "1-5" | null, "include_locked": bool}` → `202 {"job_id"}`; `GET /api/jobs/<id>` → `{state: queued|running|done|error, results: [{number, title, status, message, path}], …}`; `GET /api/doctor`. Bodies are capped at 64 KiB; errors are `{"error", "kind", "hint"?}` with a 4xx/5xx status (401 login needed, 429 TikTok rate limit, 502 discovery failed, 503 captcha).
 
 ## Troubleshooting
 
@@ -120,6 +120,7 @@ JSON API, for scripts: `POST /api/resolve {"url"}` → the series and its episod
 | `No video formats found` (status `failed-unavailable`) | Not logged in, the episode is locked, or it is not available in your region → check that `info` says `free`, refresh `cookies.txt`; `--include-locked` only confirms that a locked episode fails |
 | Discovery ends on `/login`, exit 3 | TikTok wants a session → export `cookies.txt` from the logged-in browser and pass `--cookies`; cookies also expire, export again |
 | HTTP 429 / `failed-rate-limited`, exit 5 | Too many requests → wait 30–60 min, keep (or raise) the default delays, never run two instances |
+| `cookies file … has malformed lines (line N: …)`, status `failed` | A line of `cookies.txt` is not seven tab-separated fields (or has a non-numeric expiry); yt-dlp would print it, value included → delete or fix that line, or export the file again |
 | Captcha / "Verify to continue", exit 4 | TikTok's bot check → run with `--headful`, solve it in the window, retry |
 | `Unsupported URL` from plain `yt-dlp` | yt-dlp does not know `/shortdrama/` pages (yt-dlp/yt-dlp#17725) — that is why this tool exists; use `dramafetch download` |
 | "no episode list within N s" | The page did not load the list → `--timeout 90`, `--headful` to watch, `--strategy browser`; then `--dump-raw raw/` and open an issue with the files |
@@ -143,7 +144,7 @@ pytest -m integration                                      # a real Chromium aga
 PYTHONPATH=src python -m dramafetch doctor                 # run the CLI from the checkout without installing
 ```
 
-The integration test needs a Chromium binary: `playwright install chromium`, or `DRAMAFETCH_CHROMIUM=/path/to/chrome` (the cloud sandbox has `/opt/pw-browsers/chromium`). CI runs all of this in the `dramafetch` job of [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml). Rules for agents and the module map: [`CLAUDE.md`](./CLAUDE.md).
+`pytest -m integration` runs only when `DRAMAFETCH_CHROMIUM` points at a Chromium binary or `/opt/pw-browsers/chromium` exists (the cloud sandbox); after `playwright install chromium`, export it the way CI does: `DRAMAFETCH_CHROMIUM="$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"`. Without it the browser tests are skipped, not passed. CI runs all of this in the `dramafetch` job of [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml). Rules for agents and the module map: [`CLAUDE.md`](./CLAUDE.md).
 
 Hidden flags on `info`, `download` and `serve`, for tests and diagnostics (not in `--help`): `--base-url URL` points discovery at another host such as the fake TikTok server, `--page-count N` (default 30) and `--max-pages N` (default 60) bound the `item_list` pagination, `--page-delay S` (default 0.8) is the pause between pages. To drive the CLI against the fake server from a checkout: start `tests/integration/fake_tiktok.py`'s `FakeTikTok` in a Python shell, then `PYTHONPATH=src python -m dramafetch info 7699393770256782354 --strategy browser --base-url http://127.0.0.1:<port> --browser-path /opt/pw-browsers/chromium --page-count 10`.
 

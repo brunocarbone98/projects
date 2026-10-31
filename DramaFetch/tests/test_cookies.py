@@ -10,6 +10,7 @@ import pytest
 from dramafetch.discovery.cookies import (
     SESSION_COOKIE_NAMES,
     CookieReport,
+    cookie_file_problems,
     cookie_header,
     describe_cookies,
     load_netscape_cookies,
@@ -158,6 +159,39 @@ def test_load_rejects_files_without_cookie_lines(tmp_path: Path) -> None:
         load_netscape_cookies(_write(tmp_path, ["# Netscape HTTP Cookie File", "", "# nothing"]))
     with pytest.raises(FileNotFoundError):
         load_netscape_cookies(tmp_path / "missing.txt")
+
+
+def test_cookie_file_problems_names_line_numbers_never_content(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        [
+            "# Netscape HTTP Cookie File",
+            "",
+            _line(".tiktok.com", "TRUE", "/", "TRUE", FAR_FUTURE, "sessionid", "SECRET-1"),
+            _line(".tiktok.com", "TRUE", "/", "TRUE", FAR_FUTURE, "ttwid", "SECRET-2") + "\textra",
+            _line(".tiktok.com", "TRUE", "/", "TRUE", f"{FAR_FUTURE}.5", "msToken", "SECRET-3"),
+            "domain TRUE / TRUE 0 spaces SECRET-4",  # whitespace instead of tabs: 1 field
+            f".tiktok.com\tTRUE\t/\tFALSE\t{FAR_FUTURE}\tsixfields",
+            _line(".tiktok.com", "TRUE", "/", "TRUE", "", "blank_expiry", "x", http_only=True),
+        ],
+    )
+    problems = cookie_file_problems(path)
+    assert problems == [
+        "line 4: 8 fields (expected 7)",
+        "line 5: the expiry field is not a whole number",
+        "line 6: 1 fields (expected 7)",
+        "line 7: 6 fields (expected 7)",
+    ]
+    assert "SECRET" not in " ".join(problems)
+    clean = _write(
+        tmp_path,
+        [
+            "# Netscape HTTP Cookie File",
+            _line(".tiktok.com", "TRUE", "/", "TRUE", FAR_FUTURE, "sessionid", "v", http_only=True),
+            _line(".tiktok.com", "TRUE", "/", "TRUE", 0, "tt_csrf_token", ""),
+        ],
+    )
+    assert cookie_file_problems(clean) == []
 
 
 def test_windows_line_endings_and_odd_expiry_values(tmp_path: Path) -> None:

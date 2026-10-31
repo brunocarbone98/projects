@@ -28,6 +28,7 @@ from urllib.parse import quote, urlsplit
 from dramafetch.catalog import (
     PagePayload,
     catalog_warnings,
+    find_item_lists,
     merge_episodes,
     parse_detail_payload,
     parse_item_list_payload,
@@ -42,7 +43,13 @@ from dramafetch.discovery.static import (
     safe_url,
     write_dump,
 )
-from dramafetch.errors import ChallengeError, DiscoveryError, DramaFetchError, LoginRequiredError
+from dramafetch.errors import (
+    ChallengeError,
+    DiscoveryError,
+    DramaFetchError,
+    LoginRequiredError,
+    RateLimitedError,
+)
 from dramafetch.models import DiscoveryOptions, Series, SeriesRef
 from dramafetch.urls import series_page_url
 
@@ -60,14 +67,30 @@ CHALLENGE_CHECK_INTERVAL_S = 2.0
 DETAIL_GRACE_S = 2.0
 SCROLL_ROUNDS_WITHOUT_NEWS = 4
 SCROLL_WHEEL_PX = 1500
-_MAX_DEPTH = 12
+RATE_LIMIT_MESSAGE = (
+    "TikTok is rate-limiting this address (HTTP 429 on the episode list): wait 30-60 minutes "
+    "before trying again"
+)
 
 # Re-issues an item_list request from inside the page: same cookies, same signature parameters.
-FETCH_JS = (
-    "async (u) => { const r = await fetch(u, {credentials: 'include'}); const t = await r.text(); "
-    'try { return JSON.parse(t) } catch { return {"__dramafetch_status": r.status, '
-    '"__dramafetch_text": t.slice(0, 200)} } }'
-)
+# Called as `page.evaluate(FETCH_JS, [url, timeout_ms])`. A non-2xx answer (whatever its body) and
+# a non-JSON body come back as a `__dramafetch_status` marker, so a 429 is recognised even with a
+# JSON body; the timeout aborts a stalled request (marker with status 0) so that `--timeout` bounds
+# every page, not only the first, and the failure takes the fallback path instead of hanging.
+FETCH_JS = """async ([u, ms]) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    const r = await fetch(u, {credentials: 'include', signal: controller.signal});
+    const t = await r.text();
+    if (!r.ok) { return {"__dramafetch_status": r.status, "__dramafetch_text": t.slice(0, 200)} }
+    try { return JSON.parse(t) } catch {
+      return {"__dramafetch_status": r.status, "__dramafetch_text": t.slice(0, 200)}
+    }
+  } catch (e) {
+    return {"__dramafetch_status": 0, "__dramafetch_text": String((e && e.name) || e).slice(0, 200)}
+  } finally { clearTimeout(timer); }
+}"""
 # Scrolls the episode list (or the first scrollable ancestor of an episode link) and the window.
 SCROLL_JS = """() => {
   let el = document.querySelector('[data-testid="short-drama-detail"]');
@@ -273,7 +296,7 @@ class PlaywrightDiscovery:
                 template, {"cursor": str(cursor), "count": str(options.page_count)}
             )
             _pause(page, options.page_delay_s)
-            payload = self._fetch_in_page(page, next_url)
+            payload = self._fetch_in_page(page, next_url, options.timeout_s)
             if payload is None:
                 capture.warnings.append(
                     "in-page pagination fetch returned no episode list; scrolled the page instead"
@@ -282,26 +305,35 @@ class PlaywrightDiscovery:
                 return
             previous_cursor = cursor
             current, new = capture.ingest(next_url, payload)
-            capture.drain()
-            if new == 0 and current.has_more:
+            new += capture.drain()
+            if new == 0:
+                # The previous page said hasMore, yet the re-issued request added nothing: TikTok
+                # may answer a re-signed request with an empty list. Let the page itself load the
+                # rest the way a user's scrolling would (bounded by SCROLL_ROUNDS_WITHOUT_NEWS).
                 capture.warnings.append(
-                    "pagination stopped: TikTok kept reporting more episodes but returned none "
-                    "that were new"
+                    "in-page pagination returned no new episodes although TikTok reported more; "
+                    "scrolled the page instead"
                 )
+                self._scroll_for_more(page, options, capture)
                 return
 
-    def _fetch_in_page(self, page: Page, url: str) -> Any | None:
+    def _fetch_in_page(self, page: Page, url: str, timeout_s: float) -> Any | None:
+        """The payload of an item_list request issued from inside the page, or None when the
+        answer is unusable (the caller then scrolls); HTTP 429 stops discovery altogether."""
+        timeout_ms = max(1, int(timeout_s * 1000))
         try:
-            payload = page.evaluate(FETCH_JS, url)
+            payload = page.evaluate(FETCH_JS, [url, timeout_ms])
         except Exception as exc:
             log.debug("in-page fetch failed: %s", _one_line(exc))
             return None
         if not isinstance(payload, dict) or "__dramafetch_status" in payload:
             status = payload.get("__dramafetch_status") if isinstance(payload, dict) else None
+            if status == 429:
+                raise RateLimitedError(RATE_LIMIT_MESSAGE)
             log.debug("in-page fetch did not return JSON (HTTP status %s)", status)
             return None
         if not _has_item_list(payload):
-            log.debug("in-page fetch returned JSON without an itemList")
+            log.debug("in-page fetch returned JSON without an item list")
             return None
         return payload
 
@@ -430,16 +462,9 @@ def _json_or_none(response: Response) -> Any | None:
         return None
 
 
-def _has_item_list(payload: Any, depth: int = 0) -> bool:
-    if depth > _MAX_DEPTH:
-        return False
-    if isinstance(payload, dict):
-        if isinstance(payload.get("itemList"), list):
-            return True
-        return any(_has_item_list(value, depth + 1) for value in payload.values())
-    if isinstance(payload, list):
-        return any(_has_item_list(value, depth + 1) for value in payload)
-    return False
+def _has_item_list(payload: Any) -> bool:
+    """Same definition of "an item list" as the parser (``itemList`` or ``item_list``, nested)."""
+    return bool(find_item_lists(payload))
 
 
 def _with_query_params(url: str, params: dict[str, str]) -> str:

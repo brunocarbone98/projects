@@ -21,6 +21,11 @@ class ChallengeError(DiscoveryError):
     """TikTok showed a captcha / 'verify you are human' page instead of the series."""
 
 
+class RateLimitedError(DiscoveryError):
+    """TikTok answered HTTP 429 while the series was being resolved: wait 30-60 minutes, do not
+    retry with another strategy (every retry counts against the same address)."""
+
+
 class EpisodeDownloadError(DramaFetchError):
     """One episode could not be downloaded; carries a DownloadStatus-compatible `kind`."""
 

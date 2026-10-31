@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +23,11 @@ from dramafetch.discovery.static import (
     DEFAULT_CHROME_MAJOR,
     PARTIAL_WARNING,
     RATE_LIMIT_MESSAGE,
+    _urllib_fetch,
     chrome_user_agent,
     cookie_domain_filter,
+    default_fetch,
+    ensure_same_site,
     extract_hydration_json,
     is_login_url,
     looks_like_challenge,
@@ -29,7 +35,12 @@ from dramafetch.discovery.static import (
     redact_tokens,
     safe_url,
 )
-from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError
+from dramafetch.errors import (
+    ChallengeError,
+    DiscoveryError,
+    LoginRequiredError,
+    RateLimitedError,
+)
 from dramafetch.models import DiscoveryOptions, Episode, Series, SeriesRef
 
 SERIES_ID = "7699393770256782354"
@@ -222,10 +233,115 @@ def test_fetch_failures_are_wrapped_without_the_headers(tmp_path: Path) -> None:
 
 
 def test_discovery_errors_from_the_fetch_pass_through() -> None:
-    fetch = FakeFetch(error=DiscoveryError(RATE_LIMIT_MESSAGE))
-    with pytest.raises(DiscoveryError, match="429") as info:
+    fetch = FakeFetch(error=RateLimitedError(RATE_LIMIT_MESSAGE))
+    with pytest.raises(RateLimitedError, match="429") as info:
         StaticHtmlDiscovery(fetch=fetch).discover(SeriesRef(SERIES_ID), DiscoveryOptions())
     assert str(info.value) == RATE_LIMIT_MESSAGE
+
+
+# --- the real fetchers against local servers (no network beyond 127.0.0.1) ----------------------
+
+
+class _Route:
+    def __init__(self, status: int, body: bytes = b"", location: str | None = None) -> None:
+        self.status, self.body, self.location = status, body, location
+
+
+class _LocalServer:
+    """`with _LocalServer({"/page": _Route(302, location=...)}) as server:` records the Cookie
+    header of every request (test-only values) and answers from the routes."""
+
+    def __init__(self, routes: dict[str, _Route]) -> None:
+        self.routes = routes
+        self.cookies_seen: list[str | None] = []
+        self.paths_seen: list[str] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                outer.paths_seen.append(self.path)
+                outer.cookies_seen.append(self.headers.get("Cookie"))
+                route = outer.routes.get(self.path.split("?")[0], _Route(404, b"not found"))
+                self.send_response(route.status)
+                if route.location:
+                    self.send_header("Location", route.location)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(route.body)))
+                self.end_headers()
+                self.wfile.write(route.body)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> _LocalServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+
+@pytest.fixture(params=[_urllib_fetch, default_fetch], ids=["urllib", "default_fetch"])
+def real_fetch(request: pytest.FixtureRequest) -> Iterator[Any]:
+    pytest.importorskip("curl_cffi") if request.param is default_fetch else None
+    yield request.param
+
+
+def test_cookies_never_follow_a_redirect_to_another_host(real_fetch: Any) -> None:
+    with _LocalServer({"/landing": _Route(200, b"<html>other site</html>")}) as other:
+        location = f"http://localhost:{other.port}/landing"  # a different hostname
+        with _LocalServer({"/page": _Route(302, location=location)}) as origin:
+            headers = {"User-Agent": "x", "Cookie": f"sessionid={SECRET}"}
+            with pytest.raises(DiscoveryError, match="redirected off-site") as info:
+                real_fetch(f"http://127.0.0.1:{origin.port}/page", headers)
+        assert SECRET not in str(info.value)
+        assert f"localhost:{other.port}/landing" in str(info.value)
+        assert origin.cookies_seen == [f"sessionid={SECRET}"]
+        assert SECRET not in " ".join(c or "" for c in other.cookies_seen)  # never reached it
+
+
+def test_same_site_redirects_are_followed_with_the_cookie(real_fetch: Any) -> None:
+    routes = {"/page": _Route(302, location="/landing"), "/landing": _Route(200, b"<p>ok</p>")}
+    with _LocalServer(routes) as server:
+        final_url, body = real_fetch(
+            f"http://127.0.0.1:{server.port}/page", {"User-Agent": "x", "Cookie": "sessionid=v"}
+        )
+    assert final_url == f"http://127.0.0.1:{server.port}/landing"
+    assert body == "<p>ok</p>"
+    assert server.paths_seen == ["/page", "/landing"]
+    assert server.cookies_seen == ["sessionid=v", "sessionid=v"]
+
+
+def test_http_429_is_a_rate_limited_error(real_fetch: Any) -> None:
+    with _LocalServer({"/page": _Route(429, b"slow down")}) as server:
+        with pytest.raises(RateLimitedError, match="30-60 minutes"):
+            real_fetch(f"http://127.0.0.1:{server.port}/page", {"User-Agent": "x"})
+        with pytest.raises(DiscoveryError, match="HTTP 404") as info:
+            real_fetch(f"http://127.0.0.1:{server.port}/nope", {"User-Agent": "x"})
+    assert not isinstance(info.value, RateLimitedError)
+
+
+def test_ensure_same_site_rules() -> None:
+    ensure_same_site("https://www.tiktok.com/a", "https://www.tiktok.com/login?x=1")
+    # the same registrable domain counts as the same site
+    ensure_same_site("https://m.tiktok.com/a", "https://www.tiktok.com/b")
+    ensure_same_site("http://127.0.0.1:9/a", "http://127.0.0.1:9/b")
+    for target in (
+        "https://tiktokcdn.com/a",
+        "https://evil.example/tiktok.com",
+        "http://www.tiktok.com/a",  # https -> http downgrade
+        "https://nottiktok.com/a",
+    ):
+        with pytest.raises(DiscoveryError, match="off-site"):
+            ensure_same_site("https://www.tiktok.com/a?msToken=secret", target + "?msToken=t")
 
 
 def test_dump_dir_receives_redacted_hydration_and_page_url(tmp_path: Path, item_list_pages) -> None:
@@ -302,7 +418,10 @@ def test_auto_uses_the_browser_when_static_fails_and_records_why() -> None:
     assert series.warnings[1] == "1 episode looks locked"
 
 
-@pytest.mark.parametrize("error", [LoginRequiredError("log in"), ChallengeError("captcha")])
+@pytest.mark.parametrize(
+    "error",
+    [LoginRequiredError("log in"), ChallengeError("captcha"), RateLimitedError("HTTP 429")],
+)
 def test_auto_propagates_login_and_challenge_errors_without_a_browser(error: Exception) -> None:
     browser = RecordingDiscovery(result=_series([1]))
     with pytest.raises(type(error)):
