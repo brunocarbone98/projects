@@ -57,6 +57,8 @@ EXIT_INTERRUPTED = 130
 DEFAULT_OUT_DIR = "downloads"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+# Only an explicit --host can name one of these; the web UI has no authentication, so say so.
+WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "[::]"})
 SESSION_COOKIE_NAMES = frozenset({"sessionid", "sid_tt"})
 BROWSER_INSTALL_HINT = (
     "run `playwright install chromium`, or pass --browser-channel chrome (uses your installed "
@@ -192,6 +194,16 @@ def _add_discovery_flags(parser: argparse.ArgumentParser) -> None:
         "--timeout", type=float, default=DiscoveryOptions.timeout_s, metavar="S", help="seconds"
     )
     group.add_argument("--base-url", default=DiscoveryOptions.base_url, help=argparse.SUPPRESS)
+    # Pagination knobs, hidden like --base-url: tests and diagnostics point them at the fake server.
+    group.add_argument(
+        "--page-count", type=int, default=DiscoveryOptions.page_count, help=argparse.SUPPRESS
+    )
+    group.add_argument(
+        "--max-pages", type=int, default=DiscoveryOptions.max_pages, help=argparse.SUPPRESS
+    )
+    group.add_argument(
+        "--page-delay", type=float, default=DiscoveryOptions.page_delay_s, help=argparse.SUPPRESS
+    )
 
 
 def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> None:
@@ -277,6 +289,15 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     port = getattr(args, "port", None)
     if port is not None and not 0 <= port <= 65535:
         parser.error("--port must be between 0 and 65535")
+    page_count = getattr(args, "page_count", None)
+    if page_count is not None and page_count < 1:
+        parser.error("--page-count must be at least 1")
+    max_pages = getattr(args, "max_pages", None)
+    if max_pages is not None and max_pages < 1:
+        parser.error("--max-pages must be at least 1")
+    page_delay = getattr(args, "page_delay", None)
+    if page_delay is not None and page_delay < 0:
+        parser.error("--page-delay must not be negative")
     raw_extractor_args = getattr(args, "extractor_args", None)
     args.extractor_args_parsed = None
     if raw_extractor_args:
@@ -299,7 +320,10 @@ def _discovery_options(args: argparse.Namespace) -> DiscoveryOptions:
         executable_path=args.browser_path,
         headful=args.headful,
         base_url=args.base_url,
+        page_count=args.page_count,
+        max_pages=args.max_pages,
         timeout_s=args.timeout,
+        page_delay_s=args.page_delay,
         dump_dir=args.dump_raw,
         strategy=args.strategy,
     )
@@ -412,6 +436,11 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     discovery_options = _discovery_options(args)
     download_options = _download_options(args)
+    if args.host.strip() in WILDCARD_HOSTS:
+        _stderr(
+            f"warning: --host {args.host} exposes the UI, which has no authentication, to every "
+            "network this machine is on"
+        )
     _stderr(
         f"DramaFetch web UI on http://{args.host}:{args.port}/ — downloads go to "
         f"{download_options.out_dir} (Ctrl+C to stop)"

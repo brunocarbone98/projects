@@ -8,6 +8,7 @@ For Claude Code sessions opened at the repository root. `AGENTS.md` (imported ab
 
 - Working inside `FullStackHub/` → read `FullStackHub/CLAUDE.md` first (Shipping Hub rules, commands, subagents).
 - Working inside `SecureGate/` → read `SecureGate/CLAUDE.md` first (black-box QA rules, Karate and Screenplay conventions, subagents).
+- Working inside `DramaFetch/` → read `DramaFetch/CLAUDE.md` first (scope and legal limits, module map, ruff/mypy/pytest commands, where the TikTok facts live).
 - `PersonalWebsite/` has no CLAUDE.md — keep it dependency-free vanilla HTML/CSS/JS (`MainPage.html`, `Portfolio.html`, `favicon.svg`).
 - Never edit `FullStackHub/ROADMAP.md` or `SecureGate/ROADMAP.md` (frozen plans, prettier-ignored).
 
@@ -32,6 +33,7 @@ The full command list is in `AGENTS.md` → Commands. Repo-level helpers (`set -
 | --- | --- |
 | `FullStackHub/` | `.claude/scripts/run-checks.sh` green (equivalent to `pnpm lint && pnpm format:check && pnpm typecheck && pnpm test` plus `pytest` in each service `.venv`); the Prettier hook left no diff; i18n keys exist in both `messages/*.json` |
 | `SecureGate/` | `./mvnw -q verify` against a running stack with `tests` greater than 0 in `target/surefire-reports/*.xml`; UI changes are verified by SecureGate CI, the only runtime with Chrome |
+| `DramaFetch/` | `cd DramaFetch && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy && .venv/bin/pytest` green, plus `.venv/bin/pytest -m integration` when a Chromium is available (`/opt/pw-browsers/chromium` in the cloud sandbox, otherwise `DRAMAFETCH_CHROMIUM=<path>`); no test ever reaches tiktok.com |
 | `PersonalWebsite/` | Both pages open from `file://` with zero console errors at desktop and phone widths; no new dependencies |
 
 ## Roster
@@ -64,7 +66,7 @@ Guardrails: the eight rules in `AGENTS.md` → Guardrails apply to every session
 
 ## Autonomous runs (cloud sessions)
 
-- Network: the cloud environment reaches npm, PyPI, Maven Central, GitHub (api/raw/web) and code.claude.com, but not `railway.app`, `github.io`, `shields.io` or the Chrome-for-Testing downloads. Therefore live-app probes and the Selenium UI suite run only in GitHub Actions; Vitest, pytest and the Karate API suite run in the cloud against a locally started stack.
+- Network: the cloud environment reaches npm, PyPI, Maven Central, GitHub (api/raw/web) and code.claude.com, but not `railway.app`, `github.io`, `shields.io`, `tiktok.com` or the Chrome-for-Testing downloads. Therefore live-app probes and the Selenium UI suite run only in GitHub Actions; Vitest, pytest and the Karate API suite run in the cloud against a locally started stack, and DramaFetch is tested only against its fixtures and local fake TikTok server (Chromium for its integration test: `/opt/pw-browsers/chromium`).
 - Start PostgreSQL with `.claude/scripts/local-postgres.sh` (PostgreSQL 16 binaries in `/usr/lib/postgresql/16/bin`; as root it switches to the `postgres` user; no Docker daemon), then `.claude/scripts/local-api.sh` for the API on :4000. Vitest reads `apps/api/.env.test` (database `shipping_hub_test`).
 - SecureGate skips, it does not fail, when nothing answers on `http://localhost:4000`: `./mvnw -q verify` exits 0 and `SecureGate/target/surefire-reports/TEST-com.securegate.api.ApiKarateTest.xml` reports `tests="0"`. Always read the `tests`/`skipped` counts there and in `SecureGate/target/karate-reports/karate-summary-json.txt`; `tests="0"` means "did not run", never "passed".
 - Demo accounts (`ana@example.com`, `admin@shippinghub.test`, password `Password123!`) are for local and CI stacks only — never run write operations against production.

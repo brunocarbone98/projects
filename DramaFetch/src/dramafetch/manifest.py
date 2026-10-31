@@ -16,12 +16,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from dramafetch.models import DownloadResult, Episode, Series
+from dramafetch.models import DownloadResult, DownloadStatus, Episode, Series
 
 log = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = "dramafetch.json"
 MANIFEST_VERSION = 1
+# Results that mean "nothing was attempted"; they never overwrite the memory of a finished download.
+_NON_ATTEMPT_STATUSES = frozenset(
+    {DownloadStatus.SKIPPED_EXISTS, DownloadStatus.SKIPPED_LOCKED, DownloadStatus.DRY_RUN}
+)
 
 _RESERVED_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
 # C0 controls except \t \n \v \f \r (those are whitespace and become spaces), plus DEL.
@@ -156,7 +160,14 @@ class Manifest:
         return self.done_path(number) is not None
 
     def record(self, result: DownloadResult) -> None:
-        """Store one result (replacing any earlier entry for the number) and save immediately."""
+        """Store one result (replacing any earlier entry for the number) and save immediately.
+
+        Exception: a skip or a dry run never downgrades a ``done`` entry whose file still exists.
+        Resumed runs report those episodes as ``skipped-exists``, and the manifest must keep
+        remembering that they were downloaded, or the third run would forget the first.
+        """
+        if result.status in _NON_ATTEMPT_STATUSES and self.is_done(result.episode.number):
+            return
         recorded_path: str | None = None
         if result.path is not None:
             recorded_path = _relative_or_absolute(result.path, self.path.parent)

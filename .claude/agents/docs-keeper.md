@@ -16,6 +16,7 @@ You are **docs-keeper** for `brunocarbone98/projects`. You work from the reposit
 | UI scenario count: 6 | Grep count of `^\s*Scenario` in `SecureGate/src/test/resources/features/ui/*.feature` |
 | FullStackHub commands | `scripts` in `FullStackHub/package.json`, `apps/api/package.json`, `apps/web/package.json`, `packages/shared/package.json` |
 | SecureGate commands and versions | `SecureGate/pom.xml` (`karate.version`, `serenity.version`, `cucumber.version`, the `ui` profile, `-Dsg.ratelimit`) |
+| DramaFetch commands, flags, exit codes, module map | `DramaFetch/pyproject.toml` (extras, `[project.scripts]`, pytest markers) and `DramaFetch/src/dramafetch/cli.py` (subcommands, flags, exit codes) — `DramaFetch/README.md` and `DramaFetch/CLAUDE.md` must match |
 | Workflow names, triggers, crons | `.github/workflows/*.yml` (`name:`, `on:`): `CI`, `SecureGate CI` (nightly `0 6 * * *`), `Uptime patrol` (`17,47 * * * *`), `Claude on-call` |
 | Shift names and crons | `.claude/shifts/*.md`: `sre-patrol` `28 */6 * * *`, `nightly-maintenance` `40 8 * * *`, `weekly-security-review` `20 10 * * 1` |
 | Agent names, tools, models, colors | frontmatter of `.claude/agents/*.md`, `FullStackHub/.claude/agents/*.md`, `SecureGate/.claude/agents/*.md` |

@@ -216,6 +216,46 @@ def test_manifest_done_episodes_are_skipped_without_network(tmp_path):
     assert [call[0] for call in overwrite.calls] == [1, 2, 3]
 
 
+def test_resumed_runs_keep_remembering_what_was_downloaded(tmp_path):
+    series = make_series(numbers=(1, 2, 3))
+    options = DownloadOptions(out_dir=tmp_path)
+    first = FakeDownloader()
+    engine.download_series(
+        series, series.episodes[:2], options, downloader=first, sleep=lambda s: None
+    )
+    assert [call[0] for call in first.calls] == [1, 2]
+
+    # second run: 1 and 2 come from the manifest, only 3 is downloaded ...
+    second = FakeDownloader()
+    results = engine.download_series(
+        series, series.episodes, options, downloader=second, sleep=lambda s: None
+    )
+    assert [r.status.value for r in results] == ["skipped-exists", "skipped-exists", "done"]
+    assert [call[0] for call in second.calls] == [3]
+    # ... and recording those skips did not make the manifest forget the first run
+    manifest = Manifest.load(series_dir(tmp_path, series) / MANIFEST_FILENAME, SERIES_ID, NAME)
+    assert {n: e.status for n, e in manifest.entries.items()} == {1: "done", 2: "done", 3: "done"}
+
+    # third run (and a dry run): nothing reaches the downloader, the manifest stays "done"
+    third = FakeDownloader()
+    results = engine.download_series(
+        series, series.episodes, options, downloader=third, sleep=lambda s: None
+    )
+    assert [r.status.value for r in results] == ["skipped-exists"] * 3
+    assert third.calls == []
+    dry = FakeDownloader()
+    engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, dry_run=True),
+        downloader=dry,
+        sleep=lambda s: None,
+    )
+    assert dry.calls == []
+    manifest = Manifest.load(series_dir(tmp_path, series) / MANIFEST_FILENAME, SERIES_ID, NAME)
+    assert all(manifest.is_done(n) for n in (1, 2, 3))
+
+
 def test_existing_file_on_disk_is_not_a_network_attempt(tmp_path):
     series = make_series(numbers=(1, 2, 3))
     target = series_dir(tmp_path, series)

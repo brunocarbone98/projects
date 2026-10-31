@@ -125,6 +125,7 @@ def test_parser_info_defaults_and_flags(tmp_path):
     assert args.dump_raw is None
     assert args.timeout == 45.0
     assert args.base_url == "https://www.tiktok.com"
+    assert (args.page_count, args.max_pages, args.page_delay) == (30, 60, 0.8)
     args = parser.parse_args(
         [
             "info",
@@ -145,6 +146,12 @@ def test_parser_info_defaults_and_flags(tmp_path):
             "5",
             "--base-url",
             "http://127.0.0.1:1",
+            "--page-count",
+            "10",
+            "--max-pages",
+            "2",
+            "--page-delay",
+            "0.1",
         ]
     )
     assert args.as_json is True
@@ -156,7 +163,10 @@ def test_parser_info_defaults_and_flags(tmp_path):
     assert args.dump_raw == tmp_path
     assert args.timeout == 5.0
     assert args.base_url == "http://127.0.0.1:1"
-    assert "--base-url" not in parser.format_help()  # hidden, for tests
+    assert (args.page_count, args.max_pages, args.page_delay) == (10, 2, 0.1)
+    help_text = parser.format_help()
+    for hidden in ("--base-url", "--page-count", "--max-pages", "--page-delay"):
+        assert hidden not in help_text  # hidden: for tests and diagnostics against the fake server
 
 
 def test_parser_download_flags():
@@ -248,6 +258,9 @@ def test_version_help_and_no_command(capsys):
         ["download", SERIES_URL, "--extractor-args", ""],
         ["serve", "--port", "70000"],
         ["info", SERIES_URL, "--strategy", "magic"],
+        ["info", SERIES_URL, "--page-count", "0"],
+        ["info", SERIES_URL, "--max-pages", "0"],
+        ["download", SERIES_URL, "--page-delay", "-0.5"],
     ],
 )
 def test_usage_errors_exit_2_before_any_network(argv, capsys, fake_discovery):
@@ -297,6 +310,12 @@ def test_info_table(fake_discovery, tmp_path, capsys):
             "chrome",
             "--base-url",
             "http://127.0.0.1:1",
+            "--page-count",
+            "10",
+            "--max-pages",
+            "3",
+            "--page-delay",
+            "0",
         ]
     )
     assert code == 0
@@ -320,6 +339,15 @@ def test_info_table(fake_discovery, tmp_path, capsys):
     assert options.headful is True
     assert options.browser_channel == "chrome"
     assert options.base_url == "http://127.0.0.1:1"
+    assert (options.page_count, options.max_pages, options.page_delay_s) == (10, 3, 0.0)
+
+
+def test_info_defaults_reach_discovery_options(fake_discovery, tmp_path, capsys):
+    assert cli.main(["info", SERIES_URL, "--out", str(tmp_path)]) == 0
+    ((_, options),) = fake_discovery.calls
+    assert (options.page_count, options.max_pages, options.page_delay_s) == (30, 60, 0.8)
+    assert options.timeout_s == 45.0
+    assert options.base_url == "https://www.tiktok.com"
 
 
 def test_info_json(fake_discovery, tmp_path, capsys):
@@ -677,6 +705,9 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert kwargs["download_options"].cookies_file == Path("c.txt")
     assert kwargs["download_options"].delay_min_s == 1.0
     assert kwargs["download_options"].impersonate is False
-    assert "http://127.0.0.1:9000/" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "http://127.0.0.1:9000/" in err
+    assert "warning" not in err  # the private default needs no warning
     assert cli.main(["serve", "--host", "0.0.0.0"]) == 0
     assert calls[1]["host"] == "0.0.0.0"
+    assert "warning: --host 0.0.0.0 exposes the UI" in capsys.readouterr().err

@@ -2,10 +2,13 @@
 list from the `/api/drama/episode/item_list/` responses the page itself requests, then page through
 the rest by re-issuing that request from inside the page (same cookies, same signature params).
 
-Nothing here hides automation beyond a normal Chrome user agent, unlocks anything or touches DRM:
-the browser only does what the user's own browser does when they scroll the episode list. Cookies
-loaded from `cookies_file` go to the browser context and nowhere else; messages, logs and dumps
-carry payloads and token-free URLs only.
+Nothing here unlocks anything or touches DRM: the browser only does what the user's own browser
+does when they scroll the episode list. The only automation-related settings are a normal Chrome
+user agent (Playwright's default says "HeadlessChrome") and Chromium's
+`--disable-blink-features=AutomationControlled` launch flag (`AUTOMATION_FLAG`), which makes
+`navigator.webdriver` read false as it does in a normal Chrome; drop that one constant to run with
+the flag announced. Cookies loaded from `cookies_file` go to the browser context and nowhere else;
+messages, logs and dumps carry payloads and token-free URLs only.
 """
 
 from __future__ import annotations

@@ -148,6 +148,33 @@ def test_record_replaces_the_previous_entry(tmp_path):
     assert Manifest.load(tmp_path / MANIFEST_FILENAME, "1", None).is_done(3)
 
 
+def test_skips_and_dry_runs_never_downgrade_a_done_entry(tmp_path):
+    path = tmp_path / MANIFEST_FILENAME
+    manifest = Manifest(path, "1", None)
+    video = tmp_path / "E01 - Title.mp4"
+    video.write_bytes(b"x")
+    manifest.record(DownloadResult(_episode(1), DownloadStatus.DONE, video, "saved"))
+    done_entry = manifest.entries[1]
+    for status in (
+        DownloadStatus.SKIPPED_EXISTS,
+        DownloadStatus.SKIPPED_LOCKED,
+        DownloadStatus.DRY_RUN,
+    ):
+        manifest.record(DownloadResult(_episode(1), status, video, "a later run"))
+        assert manifest.entries[1] == done_entry  # untouched, including updated_at
+        assert manifest.is_done(1)
+    assert Manifest.load(path, "1", None).is_done(1)  # and the file on disk says so too
+    # a real attempt does replace it ...
+    manifest.record(DownloadResult(_episode(1), DownloadStatus.FAILED, None, "boom"))
+    assert manifest.entries[1].status == "failed"
+    assert not manifest.is_done(1)
+    # ... and so does a skip once the downloaded file is gone (the done entry was stale)
+    manifest.record(DownloadResult(_episode(1), DownloadStatus.DONE, video, "saved again"))
+    video.unlink()
+    manifest.record(DownloadResult(_episode(1), DownloadStatus.DRY_RUN, None, "would download"))
+    assert manifest.entries[1].status == "dry-run"
+
+
 def test_absolute_path_outside_the_series_dir_is_kept(tmp_path):
     other = tmp_path / "elsewhere" / "E01 - x.mp4"
     other.parent.mkdir()

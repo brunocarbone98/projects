@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>DramaFetch</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --text: #1b1f24;
+    --muted: #5b6470;
+    --border: #d9dee5;
+    --accent: #0a66c2;
+    --accent-text: #ffffff;
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --bad: #b42318;
+    --soft: #eef2f6;
+    --focus: #0a66c2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216;
+      --card: #171b21;
+      --text: #e6e9ee;
+      --muted: #9aa4b2;
+      --border: #2a313b;
+      --accent: #58a6ff;
+      --accent-text: #0b1220;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --soft: #1f252d;
+      --focus: #58a6ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+  }
+  header, main, footer { width: 100%; max-width: 920px; margin: 0 auto; padding: 0 12px; }
+  header { padding-top: 20px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 10px; }
+  .tagline { margin: 0 0 16px; color: var(--muted); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 0 0 16px;
+  }
+  .hidden { display: none; }
+  .hint, .muted { color: var(--muted); font-size: 0.92rem; }
+  .hint { margin: 8px 0 0; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; }
+  label { font-weight: 600; width: 100%; }
+  input[type="url"] {
+    flex: 1 1 240px;
+    min-width: 0;
+    padding: 10px 12px;
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  button {
+    font: inherit;
+    font-weight: 600;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--soft);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  button:disabled { opacity: 0.55; cursor: progress; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .status { margin: 10px 0 0; min-height: 1.2em; }
+  .status.error { color: var(--bad); }
+  .status.ok { color: var(--ok); }
+  .status .hint-text { display: block; color: var(--muted); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+  .toolbar button { padding: 6px 10px; font-weight: 500; }
+  .meta { margin: 0 0 8px; }
+  .meta code { font-size: 0.88rem; word-break: break-all; }
+  code { background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+  ul.warnings { margin: 0 0 8px; padding-left: 20px; color: var(--warn); }
+  ul.warnings:empty { display: none; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+  td.num { white-space: nowrap; }
+  tr.locked td { color: var(--muted); }
+  .badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .badge.free, .badge.done { color: var(--ok); border-color: var(--ok); }
+  .badge.locked, .badge.skipped { color: var(--warn); border-color: var(--warn); }
+  .badge.failed { color: var(--bad); border-color: var(--bad); }
+  .badge.running { color: var(--accent); border-color: var(--accent); }
+  .hints { display: block; font-size: 0.82rem; color: var(--muted); word-break: break-word; }
+  .path { font-size: 0.82rem; color: var(--muted); word-break: break-all; }
+  progress { width: 100%; height: 10px; margin: 8px 0 12px; accent-color: var(--accent); }
+  ul.doctor { list-style: none; padding: 0; margin: 10px 0 0; }
+  ul.doctor li { padding: 4px 0; border-bottom: 1px solid var(--border); word-break: break-word; }
+  ul.doctor .mark { display: inline-block; width: 1.4em; font-weight: 700; }
+  .mark.ok { color: var(--ok); }
+  .mark.fail { color: var(--bad); }
+  .mark.skip { color: var(--muted); }
+  footer { padding: 8px 12px 28px; }
+  .legal { font-size: 0.88rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 12px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  a { color: var(--accent); }
+  @media (max-width: 480px) {
+    .card { padding: 12px; }
+    table.stack thead { display: none; }
+    table.stack tr { display: block; padding: 6px 0; border-bottom: 1px solid var(--border); }
+    table.stack td { display: flex; gap: 10px; border: 0; padding: 3px 0; }
+    table.stack td::before { content: attr(data-label); flex: 0 0 5.5em; color: var(--muted); font-size: 0.82rem; }
+    table.stack td.select::before { content: ""; flex: 0 0 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>DramaFetch</h1>
+  <p class="tagline">Download the TikTok short-drama episodes your account can already watch, a whole series at a time, for personal offline viewing.</p>
+</header>
+
+<main>
+  <section class="card" id="resolve-card" aria-labelledby="resolve-title">
+    <h2 id="resolve-title">1. Series</h2>
+    <form id="resolve-form" autocomplete="off">
+      <label for="url">Series URL</label>
+      <input id="url" name="url" type="url" required inputmode="url" spellcheck="false"
+             placeholder="https://www.tiktok.com/shortdrama/episode/7675706520839033876/8">
+      <button type="submit" id="resolve-btn" class="primary">Resolve</button>
+    </form>
+    <p class="hint">The long number is the series id; the trailing number is only the episode you were watching. Resolving opens TikTok in a browser on this machine and usually takes 10–40 s.</p>
+    <p id="resolve-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card hidden" id="series-card" aria-labelledby="series-title">
+    <h2 id="series-title">2. Episodes</h2>
+    <p class="meta" id="series-meta"></p>
+    <p class="meta muted" id="series-dir"></p>
+    <ul class="warnings" id="series-warnings" aria-label="Warnings"></ul>
+    <div class="toolbar">
+      <button type="button" id="select-free">Select all free</button>
+      <button type="button" id="select-none">Select none</button>
+      <span class="muted" id="selection-count"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="stack" id="episodes">
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr-only">Select</span></th>
+            <th scope="col">#</th>
+            <th scope="col">Title</th>
+            <th scope="col">Length</th>
+            <th scope="col">Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="toolbar">
+      <button type="button" id="download-btn" class="primary">Download selected</button>
+      <span class="muted">Locked episodes are skipped unless you tick them; they usually have no downloadable formats.</span>
+    </div>
+    <p id="download-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card hidden" id="job-card" aria-labelledby="job-title">
+    <h2 id="job-title">3. Progress</h2>
+    <p class="meta" id="job-meta"></p>
+    <progress id="job-progress" max="1" value="0" aria-label="Download progress"></progress>
+    <div class="table-wrap">
+      <table class="stack" id="job-results">
+        <thead>
+          <tr>
+            <th scope="col">#</th>
+            <th scope="col">Title</th>
+            <th scope="col">Status</th>
+            <th scope="col">Detail</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="doctor-card" aria-labelledby="doctor-title">
+    <h2 id="doctor-title">Doctor</h2>
+    <p class="hint" style="margin-top:0">Checks Python, yt-dlp, curl_cffi, Playwright, the browser, ffmpeg and the cookies file (cookie names only, never values).</p>
+    <div class="toolbar">
+      <button type="button" id="doctor-btn">Run doctor</button>
+      <span class="muted" id="doctor-status" role="status" aria-live="polite"></span>
+    </div>
+    <ul class="doctor" id="doctor-list"></ul>
+  </section>
+</main>
+
+<footer>
+  <p class="legal">DramaFetch is for personal, offline viewing of episodes that your own TikTok account can already watch. It does not unlock paid episodes and does not bypass DRM or access controls; locked episodes are listed and skipped. Downloading may breach TikTok's Terms of Service, and the videos belong to their creators and studios — you are responsible for how you use this tool.</p>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  var POLL_MS = 2000;
+  var state = { series: null, jobId: null, pollTimer: null };
+
+  function $(id) { return document.getElementById(id); }
+
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (key) {
+        if (key === 'text') { node.textContent = attrs[key]; }
+        else if (key === 'className') { node.className = attrs[key]; }
+        else { node.setAttribute(key, attrs[key]); }
+      });
+    }
+    (children || []).forEach(function (child) {
+      node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+    });
+    return node;
+  }
+
+  function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+
+  function setStatus(node, text, kind, hint) {
+    clear(node);
+    node.className = 'status' + (kind ? ' ' + kind : '');
+    if (text) { node.appendChild(document.createTextNode(text)); }
+    if (hint) { node.appendChild(el('span', { className: 'hint-text', text: hint })); }
+  }
+
+  function api(method, path, body) {
+    var init = { method: method, headers: {}, cache: 'no-store' };
+    if (body !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body);
+    }
+    return fetch(path, init).then(function (response) {
+      return response.text().then(function (text) {
+        var data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+        if (!response.ok) {
+          var error = new Error((data && data.error) || ('HTTP ' + response.status));
+          error.hint = data && data.hint;
+          throw error;
+        }
+        return data;
+      });
+    });
+  }
+
+  function formatDuration(seconds) {
+    if (seconds === null || seconds === undefined) { return '–'; }
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  // [1,2,3,5,7,8] -> "1-3,5,7-8" (the server accepts the same spec as `--episodes`).
+  function compressRanges(numbers) {
+    var sorted = numbers.slice().sort(function (a, b) { return a - b; });
+    var parts = [];
+    var i = 0;
+    while (i < sorted.length) {
+      var start = sorted[i];
+      var end = start;
+      while (i + 1 < sorted.length && sorted[i + 1] === end + 1) { end = sorted[++i]; }
+      parts.push(start === end ? String(start) : start + '-' + end);
+      i++;
+    }
+    return parts.join(',');
+  }
+
+  function badgeClass(status) {
+    if (status === 'done') { return 'done'; }
+    if (status.indexOf('failed') === 0) { return 'failed'; }
+    if (status === 'running') { return 'running'; }
+    return 'skipped';
+  }
+
+  // ---------------------------------------------------------------- resolve
+
+  function renderSeries(series) {
+    state.series = series;
+    var meta = $('series-meta');
+    clear(meta);
+    meta.appendChild(el('strong', { text: series.display_name || ('series ' + series.series_id) }));
+    var count = series.episodes.length + ' episode' + (series.episodes.length === 1 ? '' : 's') + ' listed';
+    if (series.total_hint) { count += ' (TikTok announces ' + series.total_hint + ')'; }
+    meta.appendChild(document.createTextNode(' — ' + count + ' — series id '));
+    meta.appendChild(el('code', { text: series.series_id }));
+
+    var dir = $('series-dir');
+    clear(dir);
+    dir.appendChild(document.createTextNode('Files go to '));
+    dir.appendChild(el('code', { text: series.series_dir }));
+    dir.appendChild(document.createTextNode(' on the machine running the server (fixed with --out).'));
+
+    var warnings = $('series-warnings');
+    clear(warnings);
+    series.warnings.forEach(function (text) { warnings.appendChild(el('li', { text: text })); });
+
+    var tbody = $('episodes').getElementsByTagName('tbody')[0];
+    clear(tbody);
+    series.episodes.forEach(function (episode) {
+      var id = 'ep-' + episode.number;
+      var checkbox = el('input', { type: 'checkbox', id: id, 'data-number': String(episode.number) });
+      if (episode.locked) { checkbox.setAttribute('data-locked', '1'); } else { checkbox.checked = true; }
+      checkbox.addEventListener('change', updateSelectionCount);
+      var statusCell = el('td', { 'data-label': 'Status' });
+      statusCell.appendChild(el('span', { className: 'badge ' + (episode.locked ? 'locked' : 'free'), text: episode.locked ? 'locked' : 'free' }));
+      if (episode.locked && episode.lock_hints.length) {
+        statusCell.appendChild(el('span', { className: 'hints', text: episode.lock_hints.join(', ') }));
+      }
+      var titleCell = el('td', { 'data-label': 'Title' });
+      titleCell.appendChild(el('label', { 'for': id, text: episode.title, style: 'font-weight:400;width:auto' }));
+      var row = el('tr', { className: episode.locked ? 'locked' : '' }, [
+        el('td', { className: 'select', 'data-label': 'Select' }, [checkbox]),
+        el('td', { className: 'num', 'data-label': '#', text: String(episode.number) }),
+        titleCell,
+        el('td', { className: 'num', 'data-label': 'Length', text: formatDuration(episode.duration_s) }),
+        statusCell
+      ]);
+      tbody.appendChild(row);
+    });
+    $('series-card').classList.remove('hidden');
+    setStatus($('download-status'), '');
+    updateSelectionCount();
+  }
+
+  function checkboxes() {
+    return Array.prototype.slice.call($('episodes').querySelectorAll('input[type="checkbox"]'));
+  }
+
+  function selected() {
+    return checkboxes().filter(function (box) { return box.checked; });
+  }
+
+  function updateSelectionCount() {
+    var boxes = selected();
+    var lockedCount = boxes.filter(function (box) { return box.getAttribute('data-locked') === '1'; }).length;
+    var text = boxes.length + ' of ' + checkboxes().length + ' selected';
+    if (lockedCount) { text += ' (' + lockedCount + ' locked: will be tried, usually fails)'; }
+    $('selection-count').textContent = text;
+    $('download-btn').disabled = boxes.length === 0;
+  }
+
+  $('resolve-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var url = $('url').value.trim();
+    if (!url) { return; }
+    var button = $('resolve-btn');
+    button.disabled = true;
+    $('series-card').classList.add('hidden');
+    setStatus($('resolve-status'), 'Resolving… a browser is opening TikTok; this usually takes 10–40 s.');
+    api('POST', '/api/resolve', { url: url }).then(function (series) {
+      setStatus($('resolve-status'), 'Resolved.', 'ok');
+      renderSeries(series);
+    }).catch(function (error) {
+      setStatus($('resolve-status'), error.message, 'error', error.hint);
+    }).then(function () { button.disabled = false; });
+  });
+
+  $('select-free').addEventListener('click', function () {
+    checkboxes().forEach(function (box) { box.checked = box.getAttribute('data-locked') !== '1'; });
+    updateSelectionCount();
+  });
+  $('select-none').addEventListener('click', function () {
+    checkboxes().forEach(function (box) { box.checked = false; });
+    updateSelectionCount();
+  });
+
+  // ---------------------------------------------------------------- download + progress
+
+  $('download-btn').addEventListener('click', function () {
+    var boxes = selected();
+    if (!boxes.length || !state.series) { return; }
+    var numbers = boxes.map(function (box) { return parseInt(box.getAttribute('data-number'), 10); });
+    var includeLocked = boxes.some(function (box) { return box.getAttribute('data-locked') === '1'; });
+    var button = $('download-btn');
+    button.disabled = true;
+    setStatus($('download-status'), 'Starting… the series is resolved again before the job is queued.');
+    api('POST', '/api/download', {
+      url: $('url').value.trim(),
+      episodes: compressRanges(numbers),
+      include_locked: includeLocked
+    }).then(function (job) {
+      setStatus($('download-status'), 'Job ' + job.job_id.slice(0, 8) + ' queued: ' + job.total + ' episode' + (job.total === 1 ? '' : 's') + '.', 'ok');
+      startPolling(job.job_id);
+    }).catch(function (error) {
+      setStatus($('download-status'), error.message, 'error', error.hint);
+    }).then(function () { button.disabled = false; updateSelectionCount(); });
+  });
+
+  function startPolling(jobId) {
+    state.jobId = jobId;
+    if (state.pollTimer) { clearTimeout(state.pollTimer); }
+    $('job-card').classList.remove('hidden');
+    poll();
+  }
+
+  function poll() {
+    if (!state.jobId) { return; }
+    api('GET', '/api/jobs/' + encodeURIComponent(state.jobId)).then(function (job) {
+      renderJob(job);
+      if (job.state === 'queued' || job.state === 'running') {
+        state.pollTimer = setTimeout(poll, POLL_MS);
+      }
+    }).catch(function (error) {
+      $('job-meta').textContent = 'Lost the job: ' + error.message;
+      state.pollTimer = setTimeout(poll, POLL_MS * 2);
+    });
+  }
+
+  function renderJob(job) {
+    var meta = $('job-meta');
+    clear(meta);
+    meta.appendChild(el('span', { className: 'badge ' + (job.state === 'error' ? 'failed' : job.state === 'done' ? 'done' : 'running'), text: job.state }));
+    meta.appendChild(document.createTextNode(' ' + (job.series_name || job.series_id) + ' — ' + job.results.length + ' / ' + job.total + ' episodes processed'));
+    if (job.state === 'queued') { meta.appendChild(document.createTextNode(' (waiting for the previous job to finish)')); }
+    if (job.error) { meta.appendChild(el('span', { className: 'hints', text: 'Job error: ' + job.error })); }
+    var progress = $('job-progress');
+    progress.max = Math.max(job.total, 1);
+    progress.value = job.results.length;
+
+    var tbody = $('job-results').getElementsByTagName('tbody')[0];
+    clear(tbody);
+    job.results.forEach(function (row) {
+      var detail = el('td', { 'data-label': 'Detail' });
+      if (row.path) { detail.appendChild(el('span', { className: 'path', text: row.path })); }
+      if (row.message) { detail.appendChild(el('span', { className: 'hints', text: row.message })); }
+      tbody.appendChild(el('tr', null, [
+        el('td', { className: 'num', 'data-label': '#', text: String(row.number) }),
+        el('td', { 'data-label': 'Title', text: row.title }),
+        el('td', { 'data-label': 'Status' }, [el('span', { className: 'badge ' + badgeClass(row.status), text: row.status })]),
+        detail
+      ]));
+    });
+  }
+
+  // ---------------------------------------------------------------- doctor
+
+  var MARKS = { ok: '✓', fail: '✗', skip: '–' };
+
+  $('doctor-btn').addEventListener('click', function () {
+    var button = $('doctor-btn');
+    button.disabled = true;
+    $('doctor-status').textContent = 'Checking…';
+    api('GET', '/api/doctor').then(function (report) {
+      var list = $('doctor-list');
+      clear(list);
+      report.checks.forEach(function (check) {
+        list.appendChild(el('li', null, [
+          el('span', { className: 'mark ' + check.state, text: MARKS[check.state] || '?' }),
+          el('strong', { text: check.name + ': ' }),
+          check.detail
+        ]));
+      });
+      list.appendChild(el('li', null, [
+        el('span', { className: 'mark skip', text: '–' }),
+        el('strong', { text: 'downloads: ' }),
+        el('code', { text: report.out_dir })
+      ]));
+      $('doctor-status').textContent = 'DramaFetch ' + report.version;
+    }).catch(function (error) {
+      $('doctor-status').textContent = error.message;
+    }).then(function () { button.disabled = false; });
+  });
+})();
+</script>
+</body>
+</html>

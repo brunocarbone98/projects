@@ -6,9 +6,10 @@ Instructions for any coding agent — Claude Code, Codex, Cursor, Copilot — wo
 
 - `FullStackHub/` — **Shipping Hub**, a bilingual (es/en) parcel shipping & tracking platform: Next.js 16 web (`apps/web`), Express 5 + Prisma API (`apps/api`, the only layer touching PostgreSQL), two stateless FastAPI services (`services/pricing`, `services/labels`), shared Zod contracts (`packages/shared`); pnpm 10 workspaces + Turborepo. Live on Railway as one container (root `Dockerfile`, `start.sh`, `railway.json`).
 - `SecureGate/` — the black-box QA & security suite for Shipping Hub: Java 21, Maven (`./mvnw`), Karate API features, Serenity BDD + Screenplay over Selenium for UI, Cucumber, a Postman/Newman collection, a token-gated SonarQube gate.
+- `DramaFetch/` — **DramaFetch**, a TikTok short-drama series downloader for personal offline viewing: Python 3.11+, Playwright discovers the episode list, yt-dlp downloads each episode, a stdlib `http.server` web UI; locked (paid) episodes are listed and skipped, never unlocked.
 - `PersonalWebsite/` — static two-page portfolio (`MainPage.html`, `Portfolio.html`, `favicon.svg`), vanilla HTML/CSS/JS, served by GitHub Pages.
 
-Per-project instructions: `FullStackHub/CLAUDE.md` and `SecureGate/CLAUDE.md` (rules, commands, subagents) — read the one for the folder you change before you start. Deployment: `DEPLOY.md`. Agents, shifts and incidents: `OPERATIONS.md`. Never edit `FullStackHub/ROADMAP.md` or `SecureGate/ROADMAP.md`.
+Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `DramaFetch/CLAUDE.md` (rules, commands, subagents) — read the one for the folder you change before you start. Deployment: `DEPLOY.md`. Agents, shifts and incidents: `OPERATIONS.md`. Never edit `FullStackHub/ROADMAP.md` or `SecureGate/ROADMAP.md`.
 
 ## Conventions
 
@@ -17,6 +18,7 @@ Per-project instructions: `FullStackHub/CLAUDE.md` and `SecureGate/CLAUDE.md` (r
 - Strict TypeScript everywhere; `any` is forbidden; validate external input with Zod at the edge; shared contracts live in `packages/shared` and are never duplicated.
 - Prettier (printWidth 100) is mandatory for every `.ts/.tsx/.md/.json/.yml` under `FullStackHub/`: `pnpm --dir FullStackHub exec prettier --write <files>`. Ignored on purpose: `ROADMAP.md`, `pnpm-lock.yaml`, `apps/web/src/lib/world-coastlines.ts`.
 - Python services: type hints everywhere, Pydantic models are the contract, tests with pytest in each service's `.venv`.
+- DramaFetch: Python 3.11+ with type hints everywhere; `ruff check`, `ruff format --check` and `mypy --strict` must pass (`DramaFetch/pyproject.toml`, rules never loosened); pytest runs against fixtures and the local fake TikTok server — nothing reaches tiktok.com from a sandbox or CI; parsing is pure functions, the network layer is thin and injectable, no runtime dependencies beyond yt-dlp and Playwright; never log cookie values, never bypass paywalls, DRM or anti-bot checks.
 - SecureGate: black-box only (public API and UI, never source or database); Screenplay for UI with no selectors in step definitions; Karate for API with `match` contracts; explicit waits only, never `Thread.sleep`.
 
 ## Commands
@@ -32,6 +34,8 @@ Per-project instructions: `FullStackHub/CLAUDE.md` and `SecureGate/CLAUDE.md` (r
 | SecureGate | `./mvnw verify -Pui -Dheadless.mode=true` | Adds the 6 Serenity/Screenplay UI scenarios; needs the web on :3000 and Chrome (CI has both) |
 | SecureGate | `./mvnw verify -Dsg.ratelimit=true` | Includes the opt-in `@ratelimit` scenario |
 | SecureGate | `cd postman && npx newman run SecureGate.postman_collection.json -e SecureGate.local.postman_environment.json` | The Postman collection, headless |
+| DramaFetch | `cd DramaFetch && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy && .venv/bin/pytest` | The definition-of-done checks (`python -m venv .venv && .venv/bin/pip install -e ".[impersonate,dev]"` once); unit tests use fixtures and a local fake TikTok server, never TikTok |
+| DramaFetch | `cd DramaFetch && .venv/bin/pytest -m integration` | Drives a real Chromium against the fake TikTok server; skipped without a browser (`playwright install chromium`, or `DRAMAFETCH_CHROMIUM=<path>`) |
 | Repo | `.claude/scripts/local-postgres.sh` | Throwaway PostgreSQL 16 on 127.0.0.1:5432 (`shipping`/`shipping`; `shipping_hub` + `shipping_hub_test`); idempotent; reuses a running cluster; Docker fallback |
 | Repo | `.claude/scripts/local-api.sh` | Migrate + seed + start the API on :4000 in the background, wait for `/health`, print the PID file path |
 | Repo | `.claude/scripts/run-checks.sh` | FullStackHub lint/format:check/typecheck/test + both pytest suites; one summary table; exit 1 on any failure |
@@ -39,7 +43,7 @@ Per-project instructions: `FullStackHub/CLAUDE.md` and `SecureGate/CLAUDE.md` (r
 
 ## Definition of done
 
-1. The relevant checks above ran and are green, with real output or counts in the PR. A SecureGate run whose `target/surefire-reports/*.xml` says `tests="0"` did not run — say so.
+1. The relevant checks above ran and are green, with real output or counts in the PR. A SecureGate run whose `target/surefire-reports/*.xml` says `tests="0"` did not run — say so. For `DramaFetch/`, green means `ruff check`, `ruff format --check`, `mypy` and `pytest` all pass (plus `pytest -m integration` when a Chromium is available).
 2. Prettier left no diff under `FullStackHub/`; no lint rule loosened, no test skipped, no `any` added.
 3. Documentation that states what you changed — README, the CLAUDE.md files, `OPERATIONS.md`, counts, commands, links — is updated in the same PR.
 4. The PR follows `.github/pull_request_template.md`: Summary · Changes · How I verified · Risks & rollback · `Opened by:`.
