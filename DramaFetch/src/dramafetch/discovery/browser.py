@@ -3,12 +3,12 @@ list from the `/api/drama/episode/item_list/` responses the page itself requests
 the rest by re-issuing that request from inside the page (same cookies, same signature params).
 
 Nothing here unlocks anything or touches DRM: the browser only does what the user's own browser
-does when they scroll the episode list. The only automation-related settings are a normal Chrome
-user agent (Playwright's default says "HeadlessChrome") and Chromium's
-`--disable-blink-features=AutomationControlled` launch flag (`AUTOMATION_FLAG`), which makes
-`navigator.webdriver` read false as it does in a normal Chrome; drop that one constant to run with
-the flag announced. Cookies loaded from `cookies_file` go to the browser context and nowhere else;
-messages, logs and dumps carry payloads and token-free URLs only.
+does when they scroll the episode list. The only automation-related setting is a normal Chrome
+user agent (Playwright's default says "HeadlessChrome"); Chromium is launched with its default
+flags, so `navigator.webdriver` stays true — nothing hides that this is automation. If TikTok asks
+for a verification, run with `--headful` and pass it yourself. Cookies loaded from `cookies_file`
+go to the browser context and nowhere else; messages, logs and dumps carry payloads and token-free
+URLs only.
 """
 
 from __future__ import annotations
@@ -60,7 +60,6 @@ log = logging.getLogger(__name__)
 
 ITEM_LIST_MARKER = "/api/drama/episode/item_list"
 DETAIL_MARKER = "/api/drama/detail"
-AUTOMATION_FLAG = "--disable-blink-features=AutomationControlled"
 VIEWPORT: ViewportSize = {"width": 1280, "height": 900}
 POLL_INTERVAL_S = 0.25
 CHALLENGE_CHECK_INTERVAL_S = 2.0
@@ -201,7 +200,7 @@ class PlaywrightDiscovery:
     # -- steps -----------------------------------------------------------------------------------
 
     def _launch(self, playwright: Any, options: DiscoveryOptions) -> Browser:
-        kwargs: dict[str, Any] = {"headless": not options.headful, "args": [AUTOMATION_FLAG]}
+        kwargs: dict[str, Any] = {"headless": not options.headful}
         if options.executable_path is not None:
             kwargs["executable_path"] = str(options.executable_path)
         elif options.browser_channel:

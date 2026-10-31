@@ -108,8 +108,24 @@ class DownloadOptions:
     cookies_file: Path | None = None
     # yt-dlp's --cookies-from-browser (chrome, firefox, edge, ...)
     cookies_from_browser: str | None = None
-    delay_min_s: float = 3.0  # randomized pause between episodes
-    delay_max_s: float = 7.0
+    # Pacing — the anti-bot protection is behaving like one person watching, so these are not
+    # knobs to turn down: one download at a time, a random pause between episodes, a longer rest
+    # every few episodes, and a full stop at the first sign of blocking.
+    delay_min_s: float = 4.0  # randomized pause between episodes (seconds)
+    delay_max_s: float = 9.0
+    # "fixed" uses delay_min/max; "human" waits about as long as the previous episode lasts.
+    pace: str = "fixed"
+    rest_every: int = 10  # after this many downloads, take a longer rest (0 disables)
+    rest_min_s: float = 60.0
+    rest_max_s: float = 120.0
+    max_consecutive_failures: int = 3  # stop the run after N failures in a row (0 disables)
+    # Engine: "yt-dlp" (default; downloads each episode's page) or "browser" (fetches the play
+    # URLs the episode list already carries, inside the same browser session — fewer requests).
+    engine: str = "yt-dlp"
+    browser_channel: str | None = None  # browser engine: Playwright channel ("chrome", ...)
+    browser_executable: Path | None = None  # browser engine: explicit Chromium binary
+    browser_headful: bool = False
+    base_url: str = TIKTOK_BASE_URL  # browser engine refreshes expired play URLs from here (tests)
     impersonate: bool = True  # yt-dlp + curl_cffi browser impersonation when installed
     prefer_h264: bool = True
     retries: int = 3
@@ -127,6 +143,7 @@ class DownloadStatus(StrEnum):
     FAILED_LOGIN = "failed-login-required"
     FAILED_UNAVAILABLE = "failed-unavailable"  # locked, region-restricted, removed or private
     FAILED_RATE_LIMITED = "failed-rate-limited"
+    FAILED_BLOCKED = "failed-blocked"  # HTTP 403 / access denied: stop and wait, do not retry
     FAILED = "failed"
 
     @property

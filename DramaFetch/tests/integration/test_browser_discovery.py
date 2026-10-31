@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from dramafetch.discovery.browser import (
-    AUTOMATION_FLAG,
     FETCH_JS,
     SCROLL_JS,
     PlaywrightDiscovery,
@@ -312,7 +311,8 @@ def test_timeout_without_cookies_is_login_required_and_the_browser_is_closed() -
     assert browser.closed and all(c.closed for c in browser.contexts)
     assert playwright.launch_kwargs["headless"] is True
     assert playwright.launch_kwargs["executable_path"] == "/fake/chromium"
-    assert AUTOMATION_FLAG in playwright.launch_kwargs["args"]
+    # Nothing hides the automation: Chromium runs with its default flags.
+    assert not any("AutomationControlled" in a for a in playwright.launch_kwargs.get("args", []))
     assert browser.visited[0] == (
         f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/4",
         "domcontentloaded",
