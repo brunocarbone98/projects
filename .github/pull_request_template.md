@@ -32,6 +32,11 @@ Tick what you ran and paste the real results. Failing is failing (with the outpu
 
 - [ ] Opened `MainPage.html` and `Portfolio.html` in a browser at desktop and mobile widths: no console errors, no broken requests
 
+**DramaFetch** (from `DramaFetch/`, in its `.venv`)
+
+- [ ] `.venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy && .venv/bin/pytest` — unit tests against the fixtures and the local fake TikTok server; nothing reaches tiktok.com
+- [ ] `DRAMAFETCH_CHROMIUM=<path to a Chromium binary> .venv/bin/pytest -m integration` — a real Chromium against the fake server; skipped (not passed) when no Chromium is available
+
 **Not applicable**
 
 - [ ] Docs or configuration only — say which checks you still ran (for example `pnpm format:check` for anything under `FullStackHub/`)
