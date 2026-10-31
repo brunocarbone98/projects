@@ -230,7 +230,7 @@ def test_manifest_done_episodes_are_skipped_without_network(tmp_path):
     assert results[1].path == done_file
     assert "manifest" in results[1].message
     assert [call[0] for call in downloader.calls] == [1, 3]  # 2 never touched the downloader
-    assert sleeps == [5.0]  # between the two network attempts (default 3-7 -> midpoint 5)
+    assert sleeps == [6.5]  # between the two network attempts (default 4-9 -> midpoint 6.5)
 
     overwrite = FakeDownloader()
     engine.download_series(
@@ -354,7 +354,7 @@ def test_early_stop_on_login_marks_the_rest_without_network(tmp_path):
     )
     assert results[3].message.startswith("stopped: ")
     assert [call[0] for call in downloader.calls] == [1, 2]
-    assert sleeps == [5.0]
+    assert sleeps == [6.5]  # default 4-9 s -> midpoint
     manifest = json.loads((series_dir(tmp_path, series) / MANIFEST_FILENAME).read_text("utf-8"))
     assert manifest["episodes"]["4"]["status"] == "failed-login-required"
     assert manifest["episodes"]["5"]["status"] == "skipped-locked"

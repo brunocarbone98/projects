@@ -212,7 +212,7 @@ def test_parser_download_flags():
     assert args.retries == 9
     defaults = cli.build_parser().parse_args(["download", SERIES_URL])
     assert defaults.episodes is None
-    assert (defaults.delay_min, defaults.delay_max) == (3.0, 7.0)
+    assert (defaults.delay_min, defaults.delay_max) == (4.0, 9.0)
     assert defaults.extractor_args is None
     assert defaults.retries == 3
 

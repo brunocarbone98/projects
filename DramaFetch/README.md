@@ -64,7 +64,7 @@ dramafetch serve --cookies cookies.txt                    # the web UI on http:/
 | `--cookies FILE` | all | Netscape `cookies.txt` from your logged-in browser (never printed) |
 | `--out DIR` | info, download, video, serve | Output directory (default `./downloads`); each series gets its own subfolder, `info` only prints it |
 | `--episodes SPEC` | download | Which episodes: `1-5`, `8`, `10-` (to the last), comma-separated; default all; numbers above 10000 are rejected. Numbers the series does not list are reported and ignored |
-| `--delay-min S` / `--delay-max S` | download, serve | Random pause between episodes (default 3–7 s) |
+| `--delay-min S` / `--delay-max S` | download, serve | Random pause between episodes (default 4–9 s) |
 | `--include-locked` | download, serve | Also _try_ episodes that look locked — they usually have no formats; nothing is unlocked |
 | `--overwrite` | download, video, serve | Re-download files that exist (ignores the manifest) |
 | `--dry-run` | download, video, serve | List what would happen, touch nothing |
