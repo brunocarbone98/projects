@@ -24,10 +24,18 @@ MANIFEST_FILENAME = "dramafetch.json"
 MANIFEST_VERSION = 1
 
 _RESERVED_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# C0 controls except \t \n \v \f \r (those are whitespace and become spaces), plus DEL.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 _WHITESPACE_RE = re.compile(r"\s+")
 _WINDOWS_RESERVED_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
 )
 
 
@@ -116,7 +124,7 @@ class Manifest:
         return manifest
 
     def save(self) -> None:
-        """Atomic write: temp file in the same directory, then ``replace``. Sorted keys, indent 2."""
+        """Atomic write (temp file in the same directory, then ``replace``); sorted keys."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
             "version": MANIFEST_VERSION,
@@ -136,7 +144,7 @@ class Manifest:
         return path if path.is_absolute() else self.path.parent / path
 
     def done_path(self, number: int) -> Path | None:
-        """The downloaded file of an episode when the manifest says done and the file still exists."""
+        """The episode's file when the manifest says done and the file still exists."""
         entry = self.entries.get(number)
         if entry is None or entry.status != "done" or not entry.path:
             return None
@@ -175,7 +183,9 @@ def _relative_or_absolute(path: Path, base: Path) -> str:
         return str(path)
 
 
-def _parse_manifest(text: str, series_id: str) -> tuple[str | None, dict[int, ManifestEntry]] | None:
+def _parse_manifest(
+    text: str, series_id: str
+) -> tuple[str | None, dict[int, ManifestEntry]] | None:
     try:
         data = json.loads(text)
     except ValueError:

@@ -339,7 +339,7 @@ def _as_flag(value: Any) -> bool:
 
 
 def merge_episodes(pages: Iterable[Iterable[Episode]]) -> list[Episode]:
-    """Combine pages: dedupe by item id, then by episode number (first seen wins), sort by number."""
+    """Combine pages: dedupe by item id, then by number (first seen wins); sort by number."""
     by_item: dict[str, Episode] = {}
     for page in pages:
         for episode in page:
