@@ -8,14 +8,18 @@ from pathlib import Path
 import pytest
 
 from dramafetch.downloader import (
+    BLOCKED_MESSAGE,
     H264_FORMAT,
+    MAX_RETRIES,
     YtDlpDownloader,
     cookies_file_problem,
     curl_cffi_available,
+    describe_failure,
     existing_episode_file,
     impersonate_target,
     is_partial_file,
     output_template,
+    redact_secrets,
     sanitize_error,
 )
 from dramafetch.manifest import episode_stem
@@ -83,15 +87,15 @@ def test_build_options_full(tmp_path):
         out_dir=tmp_path,
         cookies_file=tmp_path / "cookies.txt",
         cookies_from_browser="chrome",
-        retries=7,
+        retries=2,
         overwrite=True,
         extractor_args={"tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}},
     )
     params = YtDlpDownloader(lambda p: None).build_options(EPISODE, options, "/tmp/x.%(ext)s")
     assert params["outtmpl"] == "/tmp/x.%(ext)s"
     assert params["noplaylist"] is True
-    assert params["retries"] == 7
-    assert params["fragment_retries"] == 7
+    assert params["retries"] == 2
+    assert params["fragment_retries"] == 2
     assert params["quiet"] is True
     assert params["no_warnings"] is True
     assert params["noprogress"] is True
@@ -114,6 +118,20 @@ def test_build_options_full(tmp_path):
 
     assert isinstance(params["impersonate"], ImpersonateTarget)
     assert params["impersonate"].client == "chrome"
+
+
+def test_retries_stay_modest_whatever_the_options_say():
+    """After a refusal every retry is one more request against the same address: yt-dlp never
+    gets more than MAX_RETRIES (3), and always sleeps a second between its own requests."""
+    assert MAX_RETRIES == 3
+    downloader = YtDlpDownloader(lambda p: None)
+    params = downloader.build_options(EPISODE, DownloadOptions(retries=7), "o.%(ext)s")
+    assert params["retries"] == 3 and params["fragment_retries"] == 3
+    assert params["sleep_interval_requests"] == 1
+    params = downloader.build_options(EPISODE, DownloadOptions(), "o.%(ext)s")
+    assert params["retries"] == 3 and params["fragment_retries"] == 3
+    params = downloader.build_options(EPISODE, DownloadOptions(retries=0), "o.%(ext)s")
+    assert params["retries"] == 0 and params["fragment_retries"] == 0
 
 
 def test_build_options_minimal_without_cookies_and_h264():
@@ -300,12 +318,60 @@ def test_non_zero_return_code_is_a_failure(tmp_path):
         ("The video has been removed", DownloadStatus.FAILED_UNAVAILABLE),
         ("This content is geo-restricted", DownloadStatus.FAILED_UNAVAILABLE),
         ("not available in your country", DownloadStatus.FAILED_UNAVAILABLE),
-        ("Unable to download webpage: HTTP Error 403: Forbidden", DownloadStatus.FAILED),
+        # HTTP 403 is TikTok's protection saying no: its own status, and the run stops
+        ("Unable to download webpage: HTTP Error 403: Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("ERROR: [TikTok] 7699400000000000003: HTTP Error 403", DownloadStatus.FAILED_BLOCKED),
+        ("HTTP Error 403: Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("403 Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("Access Denied", DownloadStatus.FAILED_BLOCKED),
+        ("<h1>access denied</h1> you don't have permission", DownloadStatus.FAILED_BLOCKED),
+        # login wording wins over a 403, and a 429 wins over "forbidden"
+        ("HTTP Error 403: Forbidden; log in to continue", DownloadStatus.FAILED_LOGIN),
+        ("HTTP Error 429: Too Many Requests (forbidden)", DownloadStatus.FAILED_RATE_LIMITED),
+        # "403" inside a video id, or without the HTTP wording, is not a block
+        (
+            "ERROR: [TikTok] 7403000000000000001: Video not available",
+            DownloadStatus.FAILED_UNAVAILABLE,
+        ),
+        ("ERROR: [TikTok] 7312000000000403001: Unable to extract", DownloadStatus.FAILED),
+        ("Permission denied: '/downloads/E03.mp4'", DownloadStatus.FAILED),
         ("", DownloadStatus.FAILED),
     ],
 )
 def test_classify_error(message, status):
     assert YtDlpDownloader.classify_error(message) is status
+
+
+def test_describe_failure_prefixes_blocked_results_only():
+    assert BLOCKED_MESSAGE == (
+        "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again"
+    )
+    text = "HTTP Error 403: Forbidden"
+    assert describe_failure(DownloadStatus.FAILED_BLOCKED, text) == f"{BLOCKED_MESSAGE}: {text}"
+    assert describe_failure(DownloadStatus.FAILED_BLOCKED, "") == BLOCKED_MESSAGE
+    for status in (
+        DownloadStatus.FAILED,
+        DownloadStatus.FAILED_LOGIN,
+        DownloadStatus.FAILED_RATE_LIMITED,
+        DownloadStatus.FAILED_UNAVAILABLE,
+    ):
+        assert describe_failure(status, text) == text
+
+
+def test_a_403_from_yt_dlp_is_a_blocked_result_with_advice(tmp_path):
+    from yt_dlp.utils import DownloadError
+
+    factory, log = make_factory(
+        error=DownloadError("ERROR: Unable to download webpage: HTTP Error 403: Forbidden")
+    )
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED_BLOCKED
+    assert result.status.ok is False
+    assert result.message.startswith("blocked (HTTP 403): TikTok refused the request; wait 30-60")
+    assert result.message.endswith(": ERROR: Unable to download webpage: HTTP Error 403: Forbidden")
+    assert result.path is None
+    assert len(log) == 1  # one attempt; the engine stops the run, nothing here retries
 
 
 @pytest.mark.parametrize(
@@ -394,6 +460,28 @@ def test_sanitize_error_keeps_harmless_mentions_of_cookies():
     assert sanitize_error(text) == text
     assert sanitize_error("   \n\n  ") == "unknown error"
     assert sanitize_error("sid_tt: abc123; done") == "sid_tt=<redacted>; done"
+
+
+def test_redact_secrets_covers_every_line_and_url_query_strings():
+    """Playwright quotes the whole failed request below the first line of its message — the signed
+    URL and the cookie header — so the redaction runs over all of it, not only the kept line."""
+    text = (
+        "APIRequestContext.get: Timeout 120000ms exceeded.\n"
+        "Call log:\n"
+        "  - → GET https://v16-webapp-prime.tiktok.com/video/tos/x/?expire=1&signature=SIGTOKEN"
+        "&tk=tt_chain_token\n"
+        "    - Referer: https://www.tiktok.com/\n"
+        "    - cookie: sessionid=SECRETSESSION\n"
+    )
+    redacted = redact_secrets(text)
+    assert "SIGTOKEN" not in redacted and "SECRETSESSION" not in redacted
+    assert "GET https://v16-webapp-prime.tiktok.com/video/tos/x/\n" in redacted
+    assert "Referer: https://www.tiktok.com/\n" in redacted  # a plain URL is left alone
+    assert "cookie=<redacted>" in redacted
+    assert sanitize_error(text) == "APIRequestContext.get: Timeout 120000ms exceeded."
+    assert sanitize_error("\n   \n sid_guard: abc; sessionid=def\n") == (
+        "sid_guard=<redacted>; sessionid=<redacted>"
+    )
 
 
 # --------------------------------------------------------------------------- helpers

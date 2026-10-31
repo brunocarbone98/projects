@@ -15,14 +15,27 @@ Routes (all GET):
                                  the latest); `rate_limit_pagination` answers it with HTTP 429
   /api/drama/detail/             the series name and total
   /login                         a login page
-The request log keeps method, path and query plus two booleans; never headers or cookie values.
+  /cdn/<item_id>/<n>.mp4         the fake video CDN. Every `https://v16-webapp-prime.tiktok.com/...`
+                                 play URL inside an item_list payload is rewritten to
+                                 `{base}/cdn/{item_id}/{n}.mp4?expire=<now + media_ttl_s>` (`n`:
+                                 order of first appearance within the item). Answers 200
+                                 `video/mp4` with 128 KiB of deterministic bytes behind a plausible
+                                 MP4 header, 403 when `expire` is in the past (or, with
+                                 `require_login`, without the session cookie) and 429 when the
+                                 server was started with `cdn_rate_limit`. `expired_media_first`
+                                 makes the FIRST item_list response carry already-expired URLs and
+                                 the later ones fresh URLs, to exercise the download engine's
+                                 refresh.
+The request log keeps method, path and query plus three booleans; never headers or cookie values.
 """
 
 from __future__ import annotations
 
 import json
+import random
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -40,6 +53,11 @@ PAGES = {
     "3": json.loads((FIXTURES / "item_list_page2.json").read_text(encoding="utf-8")),
 }
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
+CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
+MEDIA_URL_PREFIX = "https://v16-webapp-prime.tiktok.com/"
+MP4_HEADER = b"\x00\x00\x00\x18ftypmp42"
+MEDIA_SIZE = 128 * 1024
+EXPIRED_MEDIA_OFFSET_S = 10  # `expired_media_first` dates the first list's URLs this far back
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Fake TikTok short drama</title>
@@ -117,6 +135,10 @@ class FakeOptions:
     lazy_empty: bool = False  # a well-formed but empty page: {"itemList": [], "hasMore": false}
     slow_pagination_s: float = 0.0  # hold the answer this long (released early at shutdown)
     rate_limit_pagination: bool = False  # HTTP 429 with a JSON body
+    # The fake CDN (browser download engine).
+    media_ttl_s: int = 3600  # `expire` of the rewritten play URLs, seconds from now
+    expired_media_first: bool = False  # the FIRST item_list served carries expire=now-10
+    cdn_rate_limit: bool = False  # every /cdn/ request answers HTTP 429
 
     @property
     def page_scrolls(self) -> bool:
@@ -129,6 +151,7 @@ class RequestRecord:
     query: dict[str, str] = field(default_factory=dict)
     logged_in: bool = False  # a `sessionid` cookie was present (its value is never stored)
     from_scroll: bool = False  # carried the page's `X-Requested-By: scroll` header
+    with_referer: bool = False  # carried the download engine's `Referer: <base>/` header
 
 
 class FakeTikTokServer(ThreadingHTTPServer):
@@ -139,8 +162,13 @@ class FakeTikTokServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _Handler)
         self.options = options
         self.requests: list[RequestRecord] = []
+        self.media_lists_served = 0  # item_list responses that carried (rewritten) play URLs
         self.lock = threading.Lock()
         self.release = threading.Event()  # set at shutdown: wakes handlers sleeping on purpose
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.server_address[1]}"
 
     def record(self, record: RequestRecord) -> None:
         with self.lock:
@@ -162,7 +190,8 @@ class _Handler(BaseHTTPRequestHandler):
         }
         logged_in = self._has_session_cookie()
         from_scroll = self.headers.get("X-Requested-By") == "scroll"
-        server.record(RequestRecord(parts.path, query, logged_in, from_scroll))
+        with_referer = self.headers.get("Referer") == server.base_url + "/"
+        server.record(RequestRecord(parts.path, query, logged_in, from_scroll, with_referer))
 
         if (match := SERIES_PATH_RE.match(parts.path)) is not None:
             if options.require_login and not logged_in:
@@ -184,7 +213,10 @@ class _Handler(BaseHTTPRequestHandler):
                     "application/json",
                 )
             else:
-                self._json(self._item_list(options, query, logged_in, from_scroll))
+                payload = self._item_list(options, query, logged_in, from_scroll)
+                self._json(self._with_media_urls(server, payload))
+        elif (match := CDN_PATH_RE.match(parts.path)) is not None:
+            self._media(options, query, logged_in, match.group("id"), match.group("n"))
         elif parts.path == "/api/drama/detail/":
             self._json({"dramaInfo": {"dramaName": SERIES_NAME, "totalEpisode": TOTAL_EPISODES}})
         elif parts.path.startswith("/login"):
@@ -210,6 +242,42 @@ class _Handler(BaseHTTPRequestHandler):
             return {"itemList": [], "hasMore": False, "cursor": cursor, "statusCode": 0}
         return page
 
+    @staticmethod
+    def _with_media_urls(server: FakeTikTokServer, payload: dict[str, Any]) -> dict[str, Any]:
+        """The payload with its TikTok play URLs pointing at this server's CDN (see the module
+        docstring); the FIRST list served gets expired URLs when `expired_media_first`."""
+        options = server.options
+        now = int(time.time())
+        with server.lock:
+            first = server.media_lists_served == 0
+            if options.expired_media_first and first:
+                expire = now - EXPIRED_MEDIA_OFFSET_S
+            else:
+                expire = now + options.media_ttl_s
+            rewritten, count = rewrite_media_urls(payload, server.base_url, expire)
+            if count:
+                server.media_lists_served += 1
+        assert isinstance(rewritten, dict)
+        return rewritten
+
+    def _media(
+        self, options: FakeOptions, query: dict[str, str], logged_in: bool, item_id: str, index: str
+    ) -> None:
+        if options.cdn_rate_limit:
+            self._send(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                b'{"statusCode": 429, "statusMsg": "too many requests"}',
+                "application/json",
+            )
+        elif options.require_login and not logged_in:
+            self._send(
+                HTTPStatus.FORBIDDEN, b"<html><body>Access Denied</body></html>", "text/html"
+            )
+        elif not query.get("expire", "").isdigit() or int(query["expire"]) < int(time.time()):
+            self._send(HTTPStatus.FORBIDDEN, b"url expired", "text/plain")
+        else:
+            self._send(HTTPStatus.OK, media_bytes(item_id, index), "video/mp4")
+
     def _has_session_cookie(self) -> bool:
         jar: SimpleCookie = SimpleCookie()
         jar.load(self.headers.get("Cookie", ""))
@@ -234,6 +302,37 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         """Silence the default access log (it would echo request lines into the test output)."""
+
+
+def rewrite_media_urls(node: Any, base: str, expire: int) -> tuple[Any, int]:
+    """A copy of an item_list payload with every `https://v16-webapp-prime.tiktok.com/...` string
+    replaced by `{base}/cdn/{item_id}/{index}.mp4?expire={expire}`, plus the number of distinct
+    URLs rewritten. An item is a dict holding `video` or `dramaInfo`; `index` is the order of first
+    appearance within the item, so a URL an item lists twice stays one URL."""
+    rewritten = 0
+
+    def walk(value: Any, item_id: str, indexes: dict[str, int]) -> Any:
+        nonlocal rewritten
+        if isinstance(value, dict):
+            if "video" in value or "dramaInfo" in value:
+                item_id, indexes = str(value.get("id") or item_id), {}
+            return {key: walk(inner, item_id, indexes) for key, inner in value.items()}
+        if isinstance(value, list):
+            return [walk(inner, item_id, indexes) for inner in value]
+        if isinstance(value, str) and value.startswith(MEDIA_URL_PREFIX):
+            if value not in indexes:
+                indexes[value] = len(indexes)
+                rewritten += 1
+            return f"{base}/cdn/{item_id}/{indexes[value]}.mp4?expire={expire}"
+        return value
+
+    return walk(node, "0", {}), rewritten
+
+
+def media_bytes(item_id: str, index: str) -> bytes:
+    """128 KiB that start like an MP4 file (`ftypmp42`) and are the same on every call."""
+    filler = random.Random(f"{item_id}/{index}").randbytes(MEDIA_SIZE - len(MP4_HEADER))
+    return MP4_HEADER + filler
 
 
 class FakeTikTok:
@@ -262,7 +361,7 @@ class FakeTikTok:
     @property
     def base_url(self) -> str:
         assert self._server is not None
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return self._server.base_url
 
     @property
     def requests(self) -> list[RequestRecord]:
@@ -273,3 +372,11 @@ class FakeTikTok:
     @property
     def item_list_requests(self) -> list[RequestRecord]:
         return [r for r in self.requests if r.path == "/api/drama/episode/item_list/"]
+
+    @property
+    def series_page_requests(self) -> list[RequestRecord]:
+        return [r for r in self.requests if SERIES_PATH_RE.match(r.path)]
+
+    @property
+    def media_requests(self) -> list[RequestRecord]:
+        return [r for r in self.requests if CDN_PATH_RE.match(r.path)]

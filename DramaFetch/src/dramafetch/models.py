@@ -120,7 +120,8 @@ class DownloadOptions:
     rest_max_s: float = 120.0
     max_consecutive_failures: int = 3  # stop the run after N failures in a row (0 disables)
     # Engine: "yt-dlp" (default; downloads each episode's page) or "browser" (fetches the play
-    # URLs the episode list already carries, inside the same browser session — fewer requests).
+    # URLs the episode list already carries, inside one browser session of its own — fewer
+    # requests).
     engine: str = "yt-dlp"
     browser_channel: str | None = None  # browser engine: Playwright channel ("chrome", ...)
     browser_executable: Path | None = None  # browser engine: explicit Chromium binary

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from dramafetch.discovery.cookies import cookie_file_problems
+from dramafetch.discovery.static import redact_tokens, safe_url
 from dramafetch.manifest import episode_stem
 from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode
 
@@ -27,6 +28,14 @@ TIKTOK_REFERER = "https://www.tiktok.com/"
 H264_FORMAT = "best[vcodec^=h264]/best[vcodec=avc1]/best"
 BEST_FORMAT = "best"
 MAX_MESSAGE_LEN = 300
+#: yt-dlp retries per download are capped here whatever ``DownloadOptions.retries`` says: after a
+#: refusal every retry is one more request against the same address, which is what trips TikTok's
+#: protection. The CLI rejects larger values up front.
+MAX_RETRIES = 3
+#: Prefix of the message of a FAILED_BLOCKED result (HTTP 403 / forbidden / access denied).
+BLOCKED_MESSAGE = (
+    "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again"
+)
 
 _PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
 _SECRET_RE = re.compile(
@@ -34,9 +43,14 @@ _SECRET_RE = re.compile(
     r"|passport_csrf_token|odin_tt|tt_csrf_token)\b\s*[:=]\s*[^\s;,&]+",
     re.IGNORECASE,
 )
+#: ``http(s)`` URLs inside free text: a signed play URL's query string is a token.
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 # "429" only as a whole token: yt-dlp prefixes TikTok errors with the 19-digit video id, and about
 # 1.6 % of those ids contain the digits 429 somewhere.
 _RATE_LIMIT_RE = re.compile(r"\b429\b|too many requests|rate limit")
+# HTTP 403 and its wordings. A 403 from TikTok is the protection saying no, not a missing video:
+# the run must stop and wait, so it gets its own status rather than FAILED/FAILED_UNAVAILABLE.
+_BLOCKED_RE = re.compile(r"http error 403|\b403\b\s*:?\s*forbidden|\bforbidden\b|access denied")
 
 
 def curl_cffi_available() -> bool:
@@ -120,14 +134,33 @@ def locked_result(episode: Episode) -> DownloadResult:
     )
 
 
+def redact_secrets(text: str) -> str:
+    """``text`` with every cookie-like or token-like value blanked and every URL cut back to its
+    host and path, on every line — not only the one a message ends up keeping. A failed Playwright
+    request, for one, quotes the whole request below its first line: the signed play URL and the
+    ``cookie`` header."""
+    text = _URL_RE.sub(lambda match: safe_url(match.group(0)), text)
+    text = redact_tokens(text)
+    return _SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+
+
 def sanitize_error(message: str) -> str:
-    """First line of an error, cookie-like tokens redacted, truncated to 300 characters."""
-    lines = [line.strip() for line in message.strip().splitlines() if line.strip()]
+    """First non-empty line of an error after :func:`redact_secrets` ran over all of it, truncated
+    to 300 characters."""
+    redacted = redact_secrets(message)
+    lines = [line.strip() for line in redacted.strip().splitlines() if line.strip()]
     first = lines[0] if lines else "unknown error"
-    first = _SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", first)
     if len(first) > MAX_MESSAGE_LEN:
         first = first[: MAX_MESSAGE_LEN - 1] + "…"
     return first
+
+
+def describe_failure(status: DownloadStatus, message: str) -> str:
+    """The user-facing message for a classified failure: a FAILED_BLOCKED result is prefixed with
+    :data:`BLOCKED_MESSAGE` (what happened and what to do), the others keep yt-dlp's words."""
+    if status is DownloadStatus.FAILED_BLOCKED:
+        return f"{BLOCKED_MESSAGE}: {message}" if message else BLOCKED_MESSAGE
+    return message
 
 
 def _default_ydl_factory(params: dict[str, Any]) -> Any:
@@ -145,13 +178,17 @@ class YtDlpDownloader:
     def build_options(
         self, episode: Episode, options: DownloadOptions, outtmpl: str
     ) -> dict[str, Any]:
-        """yt-dlp params for one episode (the episode itself only influences ``outtmpl``)."""
+        """yt-dlp params for one episode (the episode itself only influences ``outtmpl``).
+
+        ``retries``/``fragment_retries`` never exceed :data:`MAX_RETRIES` and yt-dlp sleeps one
+        second between its own requests (``sleep_interval_requests``): fewer, slower requests.
+        """
         del episode  # the caller already folded the episode into outtmpl
         params: dict[str, Any] = {
             "outtmpl": outtmpl,
             "noplaylist": True,
-            "retries": options.retries,
-            "fragment_retries": options.retries,
+            "retries": min(options.retries, MAX_RETRIES),
+            "fragment_retries": min(options.retries, MAX_RETRIES),
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
@@ -209,8 +246,9 @@ class YtDlpDownloader:
                 retcode = ydl.download([episode.page_url])
         except Exception as exc:
             message = sanitize_error(str(exc) or exc.__class__.__name__)
+            status = self.classify_error(message)
             return DownloadResult(
-                episode=episode, status=self.classify_error(message), message=message
+                episode=episode, status=status, message=describe_failure(status, message)
             )
         if retcode not in (0, None):
             return DownloadResult(
@@ -234,7 +272,12 @@ class YtDlpDownloader:
 
     @staticmethod
     def classify_error(message: str) -> DownloadStatus:
-        """Map a yt-dlp error message to the closest DownloadStatus (case-insensitive)."""
+        """Map a yt-dlp error message to the closest DownloadStatus (case-insensitive).
+
+        Login wording wins, then HTTP 429 (``\\b429\\b``, "too many requests", "rate limit"),
+        then HTTP 403 ("HTTP Error 403", "forbidden", "access denied" -> FAILED_BLOCKED), then
+        the "unavailable" family; anything else is a plain FAILED.
+        """
         text = message.lower()
         if any(
             marker in text
@@ -243,6 +286,8 @@ class YtDlpDownloader:
             return DownloadStatus.FAILED_LOGIN
         if _RATE_LIMIT_RE.search(text):
             return DownloadStatus.FAILED_RATE_LIMITED
+        if _BLOCKED_RE.search(text):
+            return DownloadStatus.FAILED_BLOCKED
         if any(
             marker in text
             for marker in (

@@ -6,10 +6,14 @@ watch, a whole series at a time, for personal offline viewing. The series URL is
 ``info``/``download`` first resolve the episode list (TikTok's ``/api/drama/episode/item_list/``)
 and then hand each episode's ordinary ``/@user/video/<id>`` page to yt-dlp. A logged-in session
 (``--cookies cookies.txt``) is normally required; cookie values are never printed. Locked (paid)
-episodes are listed and skipped — nothing here unlocks or bypasses anything.
+episodes are listed and skipped — nothing here unlocks or bypasses anything. Downloads are paced
+like one person watching (see ``engine``): the pauses, rests and early stops are printed on stderr
+as they happen, so stdout stays a clean list of results.
 
 Exit codes: 0 ok · 2 usage/unsupported URL/some episode failed · 3 login required ·
-4 discovery failed (captcha: try ``--headful``) · 5 rate limited (wait 30-60 min) · 130 interrupted.
+4 discovery failed (captcha: try ``--headful``; an HTTP error for the series page) · 5 blocked
+(HTTP 403, or a captcha met while ``--engine browser`` refreshed the list) or rate limited
+(HTTP 429): wait 30-60 min, then run again to resume · 130 interrupted.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from typing import Any
 
 from dramafetch import __version__, engine
 from dramafetch.discovery.cookies import cookie_file_problems
-from dramafetch.downloader import YtDlpDownloader, curl_cffi_available
+from dramafetch.downloader import MAX_RETRIES, curl_cffi_available
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -59,6 +63,8 @@ EXIT_RATE_LIMITED = 5
 EXIT_INTERRUPTED = 130
 
 DEFAULT_OUT_DIR = "downloads"
+PACES = engine.PACES
+ENGINES = engine.ENGINES
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 # Only an explicit --host can name one of these; the web UI has no authentication, so say so.
@@ -217,17 +223,20 @@ def _add_discovery_flags(parser: argparse.ArgumentParser) -> None:
 def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> None:
     group = parser.add_argument_group("download")
     if series:
-        group.add_argument(
-            "--delay-min", type=float, default=DownloadOptions.delay_min_s, metavar="S"
-        )
-        group.add_argument(
-            "--delay-max", type=float, default=DownloadOptions.delay_max_s, metavar="S"
-        )
+        _add_pacing_flags(parser)
         group.add_argument(
             "--include-locked",
             action="store_true",
             help="also try episodes that look locked (they usually have no formats)",
         )
+    group.add_argument(
+        "--engine",
+        choices=ENGINES,
+        default=DownloadOptions.engine,
+        help="yt-dlp (default) downloads each episode's page; browser fetches the play URLs the "
+        "episode list already carries, inside one browser session of its own (about half the "
+        "requests; series only, uses the discovery browser flags and --cookies)",
+    )
     group.add_argument("--overwrite", action="store_true", help="re-download existing files")
     group.add_argument("--dry-run", action="store_true", help="list what would be downloaded")
     group.add_argument(
@@ -239,7 +248,14 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
         default=None,
         help="yt-dlp --cookies-from-browser (chrome, firefox, edge, ...)",
     )
-    group.add_argument("--retries", type=int, default=DownloadOptions.retries, metavar="N")
+    group.add_argument(
+        "--retries",
+        type=int,
+        default=DownloadOptions.retries,
+        metavar="N",
+        help=f"yt-dlp retries per download (default and maximum {MAX_RETRIES}; lower it to give "
+        "up sooner)",
+    )
     group.add_argument(
         "--extractor-args",
         metavar="KEY=VAL",
@@ -247,6 +263,68 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
         default=None,
         help="yt-dlp extractor args, e.g. tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com "
         "(the tiktok: prefix is the default; repeatable)",
+    )
+
+
+def _add_pacing_flags(parser: argparse.ArgumentParser) -> None:
+    """The anti-bot pacing: one download at a time, pauses, rests, early stops (see README)."""
+    group = parser.add_argument_group(
+        "pacing (behave like one person watching; the defaults are a floor, raise them for long "
+        "series)"
+    )
+    group.add_argument(
+        "--delay-min",
+        type=float,
+        default=DownloadOptions.delay_min_s,
+        metavar="S",
+        help="random pause between episodes, lower bound "
+        f"(default {DownloadOptions.delay_min_s:g})",
+    )
+    group.add_argument(
+        "--delay-max",
+        type=float,
+        default=DownloadOptions.delay_max_s,
+        metavar="S",
+        help="random pause between episodes, upper bound "
+        f"(default {DownloadOptions.delay_max_s:g})",
+    )
+    group.add_argument(
+        "--pace",
+        choices=PACES,
+        default=DownloadOptions.pace,
+        help="fixed (default): a random --delay-min..--delay-max pause; human: about as long as "
+        f"the previous episode lasted (at least --delay-min, plus 0-{engine.HUMAN_JITTER_S:g} s, "
+        f"at most {engine.MAX_HUMAN_PAUSE_S:g} s)",
+    )
+    group.add_argument(
+        "--rest-every",
+        type=int,
+        default=DownloadOptions.rest_every,
+        metavar="N",
+        help="take a longer rest after every N downloads, failed attempts included "
+        f"(default {DownloadOptions.rest_every}; 0 disables)",
+    )
+    group.add_argument(
+        "--rest-min",
+        type=float,
+        default=DownloadOptions.rest_min_s,
+        metavar="S",
+        help=f"rest length, lower bound (default {DownloadOptions.rest_min_s:g})",
+    )
+    group.add_argument(
+        "--rest-max",
+        type=float,
+        default=DownloadOptions.rest_max_s,
+        metavar="S",
+        help=f"rest length, upper bound (default {DownloadOptions.rest_max_s:g})",
+    )
+    group.add_argument(
+        "--max-consecutive-failures",
+        type=int,
+        default=DownloadOptions.max_consecutive_failures,
+        metavar="N",
+        help="stop the run after N failures in a row "
+        f"(default {DownloadOptions.max_consecutive_failures}; 0 disables)",
     )
 
 
@@ -291,9 +369,35 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
             parser.error("--delay-min/--delay-max must not be negative")
         if delay_max < delay_min:
             parser.error("--delay-max must be >= --delay-min")
+    rest_min = getattr(args, "rest_min", None)
+    rest_max = getattr(args, "rest_max", None)
+    if rest_min is not None and rest_max is not None:
+        if rest_min < 0 or rest_max < 0:
+            parser.error("--rest-min/--rest-max must not be negative")
+        if rest_max < rest_min:
+            parser.error("--rest-max must be >= --rest-min")
+    rest_every = getattr(args, "rest_every", None)
+    if rest_every is not None and rest_every < 0:
+        parser.error("--rest-every must not be negative (0 disables the long rests)")
+    max_failures = getattr(args, "max_consecutive_failures", None)
+    if max_failures is not None and max_failures < 0:
+        parser.error("--max-consecutive-failures must not be negative (0 disables the stop)")
     retries = getattr(args, "retries", None)
-    if retries is not None and retries < 0:
-        parser.error("--retries must not be negative")
+    if retries is not None and not 0 <= retries <= MAX_RETRIES:
+        parser.error(
+            f"--retries must be between 0 and {MAX_RETRIES}: after a refusal every retry is one "
+            "more request against the same address"
+        )
+    if getattr(args, "command", None) == "video" and getattr(args, "engine", None) == "browser":
+        parser.error(
+            "--engine browser works on a series (it reuses the play URLs from the episode list); "
+            "a single video is downloaded by the default yt-dlp engine"
+        )
+    if getattr(args, "engine", None) == "browser" and getattr(args, "cookies_from_browser", None):
+        parser.error(
+            "--engine browser reads cookies from --cookies FILE only; --cookies-from-browser is a "
+            "yt-dlp option (drop it, or use the default engine)"
+        )
     port = getattr(args, "port", None)
     if port is not None and not 0 <= port <= 65535:
         parser.error("--port must be between 0 and 65535")
@@ -341,12 +445,31 @@ def _discovery_options(args: argparse.Namespace) -> DiscoveryOptions:
 
 
 def _download_options(args: argparse.Namespace) -> DownloadOptions:
+    """``DownloadOptions`` from the parsed flags. With ``--engine browser`` the discovery browser
+    flags (``--browser-channel``, ``--browser-path``, ``--headful``, ``--base-url``) are copied
+    over, so the download engine's own Chromium is launched and set up like the discovery's."""
+    engine_name = getattr(args, "engine", DownloadOptions.engine)
+    browser = engine_name == "browser"
     return DownloadOptions(
         out_dir=Path(args.out),
         cookies_file=args.cookies,
         cookies_from_browser=args.cookies_from_browser,
         delay_min_s=getattr(args, "delay_min", DownloadOptions.delay_min_s),
         delay_max_s=getattr(args, "delay_max", DownloadOptions.delay_max_s),
+        pace=getattr(args, "pace", DownloadOptions.pace),
+        rest_every=getattr(args, "rest_every", DownloadOptions.rest_every),
+        rest_min_s=getattr(args, "rest_min", DownloadOptions.rest_min_s),
+        rest_max_s=getattr(args, "rest_max", DownloadOptions.rest_max_s),
+        max_consecutive_failures=getattr(
+            args, "max_consecutive_failures", DownloadOptions.max_consecutive_failures
+        ),
+        engine=engine_name,
+        browser_channel=getattr(args, "browser_channel", None) if browser else None,
+        browser_executable=getattr(args, "browser_path", None) if browser else None,
+        browser_headful=bool(getattr(args, "headful", False)) if browser else False,
+        base_url=getattr(args, "base_url", DownloadOptions.base_url)
+        if browser
+        else DownloadOptions.base_url,
         impersonate=not args.no_impersonate,
         retries=args.retries,
         overwrite=args.overwrite,
@@ -409,8 +532,11 @@ def _cmd_download(args: argparse.Namespace) -> int:
         ),
         flush=True,
     )
+    if len(selected) > 1 and not options.dry_run:
+        _stderr(f"  pace: {describe_pacing(options)}")
+    printer = _RunPrinter()
     results = engine.download_series(
-        series, selected, options, downloader=YtDlpDownloader(), on_result=_print_result
+        series, selected, options, on_result=printer.result, on_pause=printer.pause
     )
     print(_summary_line(results), flush=True)
     return engine.exit_code(results)
@@ -427,7 +553,11 @@ def _cmd_video(args: argparse.Namespace) -> int:
         number=0, item_id=ref.item_id, title=ref.item_id, series_id="", author=ref.author
     )
     options.out_dir.mkdir(parents=True, exist_ok=True)
-    result = YtDlpDownloader().download(episode, options)
+    downloader = engine.make_downloader(options)
+    try:
+        result = downloader.download(episode, options)
+    finally:
+        engine.close_downloader(downloader)
     _print_result(result)
     return engine.exit_code([result])
 
@@ -438,6 +568,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         browser_path=args.browser_path,
         cookies_file=args.cookies,
     )
+    # The pacing defaults, as information (neither ok nor fail): the web UI's doctor omits them.
+    checks.append(DoctorCheck("pace", "skip", describe_pacing()))
     # A stdout that cannot encode the check marks (a Windows pipe in cp1252) gets ASCII ones.
     lines = format_doctor(checks, ascii_marks=not _stream_is_utf8(sys.stdout))
     try:
@@ -582,6 +714,65 @@ def _summary_line(results: list[DownloadResult]) -> str:
     if not counts:
         return "Summary: nothing to do"
     return "Summary: " + ", ".join(f"{count} {status}" for status, count in counts.items())
+
+
+def _format_seconds(seconds: float) -> str:
+    return f"{seconds:.0f} s" if seconds >= 1 else f"{seconds:.1f} s"
+
+
+class _RunPrinter:
+    """Prints one line per result on stdout and, on stderr, every pause as it happens and the
+    reason the run stopped early (once), so that a quiet terminal is never a stuck one."""
+
+    def __init__(self) -> None:
+        self._downloads = 0
+        self._stopped = False
+
+    def result(self, result: DownloadResult) -> None:
+        _print_result(result)
+        stopped = result.message.startswith(engine.STOPPED_PREFIX)
+        if result.status not in engine.NO_NETWORK_STATUSES and not stopped:
+            self._downloads += 1
+        if stopped and not self._stopped:
+            self._stopped = True
+            _stderr(f"  … {result.message}")
+
+    def pause(self, kind: str, seconds: float) -> None:
+        if kind == "rest":
+            _stderr(f"  … resting {_format_seconds(seconds)} after {self._downloads} downloads")
+        else:
+            _stderr(f"  … pausing {_format_seconds(seconds)}")
+
+
+def describe_pacing(options: DownloadOptions | None = None) -> str:
+    """One line with the pacing in force (the defaults when ``options`` is None), e.g.
+    ``4-9 s between episodes, 60-120 s rest every 10; stop after 3 failures / 403 / 429`` (the
+    ranges are printed with an en dash, as in the README)."""
+    pacing = options if options is not None else DownloadOptions()
+    if pacing.pace == "human":
+        between = (
+            f"human pace (about one episode's length, at least {pacing.delay_min_s:g} s) "
+            "between episodes"
+        )
+    else:
+        between = f"{_describe_range(pacing.delay_min_s, pacing.delay_max_s)} s between episodes"
+    if pacing.rest_every > 0:
+        rest = (
+            f"{_describe_range(pacing.rest_min_s, pacing.rest_max_s)} s rest every "
+            f"{pacing.rest_every}"
+        )
+    else:
+        rest = "no long rests"
+    if pacing.max_consecutive_failures > 0:
+        noun = "failure" if pacing.max_consecutive_failures == 1 else "failures"
+        stop = f"stop after {pacing.max_consecutive_failures} {noun} / 403 / 429"
+    else:
+        stop = "stop on 403 / 429"
+    return f"{between}, {rest}; {stop}"
+
+
+def _describe_range(low: float, high: float) -> str:
+    return f"{low:g}" if low == high else f"{low:g}–{high:g}"  # noqa: RUF001 - a range, as in the README
 
 
 # --------------------------------------------------------------------------- doctor

@@ -178,12 +178,7 @@ class PlaywrightDiscovery:
                 try:
                     context = self._new_context(browser, options, capture)
                     try:
-                        page = context.new_page()
-                        page.on("response", capture.on_response)
-                        self._open_series_page(page, ref, options, capture)
-                        self._paginate(page, options, capture)
-                        self._await_detail(page, capture)
-                        capture.page_url = safe_url(page.url)
+                        self._capture_series(context.new_page(), ref, options, capture)
                     finally:
                         context.close()
                 finally:
@@ -196,6 +191,38 @@ class PlaywrightDiscovery:
             if options.dump_dir is not None:
                 _dump(options.dump_dir, capture)
         return _build_series(ref, options, capture)
+
+    def discover_in_page(self, page: Page, ref: SeriesRef, options: DiscoveryOptions) -> Series:
+        """Resolve a series through a page the caller already opened, in the caller's browser.
+
+        The browser download engine refreshes expired play URLs this way, inside the session that
+        is downloading, instead of launching a second browser. The page's context supplies the
+        cookies and the user agent, so ``options.cookies_file`` only shapes the error messages and
+        the browser/channel/headful settings are the caller's. Everything else — waiting for the
+        episode list, login and challenge detection, pagination, ``dump_dir``, the errors — is
+        exactly :meth:`discover`. The page is left open for the caller to close.
+        """
+        capture = _Capture(series_id=ref.series_id)
+        try:
+            self._capture_series(page, ref, options, capture)
+        except DramaFetchError:
+            raise
+        except Exception as exc:
+            raise _wrap(exc) from exc
+        finally:
+            if options.dump_dir is not None:
+                _dump(options.dump_dir, capture)
+        return _build_series(ref, options, capture)
+
+    def _capture_series(
+        self, page: Page, ref: SeriesRef, options: DiscoveryOptions, capture: _Capture
+    ) -> None:
+        """Open the series page and page through its episode list, filling ``capture``."""
+        page.on("response", capture.on_response)
+        self._open_series_page(page, ref, options, capture)
+        self._paginate(page, options, capture)
+        self._await_detail(page, capture)
+        capture.page_url = safe_url(page.url)
 
     # -- steps -----------------------------------------------------------------------------------
 

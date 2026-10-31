@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import socket
@@ -13,7 +14,7 @@ from typing import ClassVar
 
 import pytest
 
-from dramafetch import __version__, cli
+from dramafetch import __version__, cli, engine
 from dramafetch.catalog import catalog_warnings
 from dramafetch.downloader import locked_result
 from dramafetch.errors import (
@@ -23,7 +24,7 @@ from dramafetch.errors import (
     RateLimitedError,
 )
 from dramafetch.manifest import MANIFEST_FILENAME
-from dramafetch.models import DownloadResult, DownloadStatus, Episode, Series
+from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode, Series
 
 SERIES_ID = "7699393770256782354"
 NAME = "The Billionaire's Secret Heiress"
@@ -80,7 +81,8 @@ def fake_discovery(monkeypatch):
 
 
 class FakeDownloader:
-    """Replaces cli.YtDlpDownloader: no network, creates files, outcomes per episode number."""
+    """Replaces engine.YtDlpDownloader (what engine.make_downloader builds for the default engine):
+    no network, creates files, outcomes per episode number."""
 
     outcomes: ClassVar[dict[int, DownloadStatus]] = {}
     instances: ClassVar[list[FakeDownloader]] = []
@@ -110,8 +112,53 @@ class FakeDownloader:
 def fake_downloader(monkeypatch):
     FakeDownloader.outcomes = {}
     FakeDownloader.instances = []
-    monkeypatch.setattr(cli, "YtDlpDownloader", FakeDownloader)
+    monkeypatch.setattr(engine, "YtDlpDownloader", FakeDownloader)
     return FakeDownloader
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Makes the CLI's engine.download_series call use an instant sleep (the pauses are still
+    computed and announced through on_pause, so their printing can be tested)."""
+    real = engine.download_series
+
+    def instant(*args, **kwargs):
+        kwargs.setdefault("sleep", lambda seconds: None)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "download_series", instant)
+
+
+class FakeBrowserDownloader:
+    """What a fake `dramafetch.downloader_browser` module hands out: counts close() calls."""
+
+    instances: ClassVar[list[FakeBrowserDownloader]] = []
+
+    def __init__(self):
+        self.calls = []
+        self.closed = 0
+        FakeBrowserDownloader.instances.append(self)
+
+    def download(self, episode, options):
+        self.calls.append((episode, options))
+        if episode.locked and not options.include_locked:
+            return locked_result(episode)
+        options.out_dir.mkdir(parents=True, exist_ok=True)
+        path = options.out_dir / f"E{episode.number:02d} - browser.mp4"
+        path.write_bytes(b"v")
+        return DownloadResult(episode, DownloadStatus.DONE, path, "saved 0.1 MiB")
+
+    def close(self):
+        self.closed += 1
+
+
+@pytest.fixture
+def fake_browser_engine(monkeypatch):
+    FakeBrowserDownloader.instances = []
+    module = types.ModuleType("dramafetch.downloader_browser")
+    module.BrowserDownloader = FakeBrowserDownloader
+    monkeypatch.setitem(sys.modules, "dramafetch.downloader_browser", module)
+    return FakeBrowserDownloader
 
 
 # --------------------------------------------------------------------------- parsing
@@ -200,7 +247,19 @@ def test_parser_download_flags():
             "--extractor-args",
             "foo=bar",
             "--retries",
-            "9",
+            "2",
+            "--pace",
+            "human",
+            "--rest-every",
+            "5",
+            "--rest-min",
+            "10",
+            "--rest-max",
+            "20",
+            "--max-consecutive-failures",
+            "2",
+            "--engine",
+            "browser",
         ]
     )
     assert args.episodes == "1-5,8"
@@ -209,12 +268,39 @@ def test_parser_download_flags():
     assert args.include_locked and args.overwrite and args.dry_run and args.no_impersonate
     assert args.cookies_from_browser == "firefox"
     assert args.extractor_args == ["tiktok:api_hostname=api22.tiktokv.com", "foo=bar"]
-    assert args.retries == 9
+    assert args.retries == 2
+    assert args.pace == "human"
+    assert (args.rest_every, args.rest_min, args.rest_max) == (5, 10.0, 20.0)
+    assert args.max_consecutive_failures == 2
+    assert args.engine == "browser"
     defaults = cli.build_parser().parse_args(["download", SERIES_URL])
     assert defaults.episodes is None
     assert (defaults.delay_min, defaults.delay_max) == (4.0, 9.0)
     assert defaults.extractor_args is None
     assert defaults.retries == 3
+    # the pacing defaults come from DownloadOptions, the single source of truth
+    assert defaults.pace == DownloadOptions.pace == "fixed"
+    assert (defaults.rest_every, defaults.rest_min, defaults.rest_max) == (10, 60.0, 120.0)
+    assert defaults.max_consecutive_failures == DownloadOptions.max_consecutive_failures == 3
+    assert defaults.engine == DownloadOptions.engine == "yt-dlp"
+    for flag in (
+        "--pace",
+        "--rest-every",
+        "--rest-min",
+        "--rest-max",
+        "--max-consecutive-failures",
+    ):
+        assert flag in _subcommand_help("download") and flag in _subcommand_help("serve")
+        assert flag not in _subcommand_help("video")  # one file: nothing to pace
+    assert "--engine {yt-dlp,browser}" in _subcommand_help("video")
+
+
+def _subcommand_help(command: str) -> str:
+    parser = cli.build_parser()
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return subparsers.choices[command].format_help()
 
 
 def test_parser_video_doctor_serve():
@@ -227,6 +313,8 @@ def test_parser_video_doctor_serve():
     assert video.cookies == Path("c.txt")
     assert not hasattr(video, "episodes")
     assert not hasattr(video, "delay_min")
+    assert not hasattr(video, "pace") and not hasattr(video, "rest_every")
+    assert video.engine == "yt-dlp"  # the engine flag exists; `browser` is refused by _validate
     doctor = parser.parse_args(["doctor", "--cookies", "c.txt", "--browser-channel", "chrome"])
     assert doctor.command == "doctor"
     assert doctor.cookies == Path("c.txt")
@@ -271,12 +359,44 @@ def test_version_help_and_no_command(capsys):
         ["info", SERIES_URL, "--page-count", "0"],
         ["info", SERIES_URL, "--max-pages", "0"],
         ["download", SERIES_URL, "--page-delay", "-0.5"],
+        # pacing: ordering and sign are checked before any network, like the delays
+        ["download", SERIES_URL, "--rest-min", "90", "--rest-max", "60"],
+        ["download", SERIES_URL, "--rest-min", "-1"],
+        ["download", SERIES_URL, "--rest-max", "-1"],
+        ["download", SERIES_URL, "--rest-every", "-1"],
+        ["download", SERIES_URL, "--max-consecutive-failures", "-1"],
+        ["download", SERIES_URL, "--pace", "fast"],
+        ["download", SERIES_URL, "--engine", "wget"],
+        ["download", SERIES_URL, "--retries", "4"],  # more retries only knock again
+        ["serve", "--rest-min", "5", "--rest-max", "1"],
+        ["video", VIDEO_URL, "--engine", "browser"],  # the browser engine needs a series
+        # the browser engine never reads --cookies-from-browser (a yt-dlp option): say so
+        ["download", SERIES_URL, "--engine", "browser", "--cookies-from-browser", "chrome"],
+        ["serve", "--engine", "browser", "--cookies-from-browser", "firefox"],
     ],
 )
-def test_usage_errors_exit_2_before_any_network(argv, capsys, fake_discovery):
+def test_usage_errors_exit_2_before_any_network(argv, capsys, fake_discovery, fake_downloader):
     assert cli.main(argv) == 2
     assert fake_discovery.calls == []
+    assert fake_downloader.instances == []
     assert capsys.readouterr().err  # argparse explained the problem
+
+
+def test_usage_error_messages_say_what_to_do(capsys):
+    assert cli.main(["download", SERIES_URL, "--retries", "4"]) == 2
+    assert "--retries must be between 0 and 3" in capsys.readouterr().err
+    assert cli.main(["video", VIDEO_URL, "--engine", "browser"]) == 2
+    err = capsys.readouterr().err
+    assert "--engine browser works on a series" in err and "yt-dlp" in err
+    argv = ["download", SERIES_URL, "--engine", "browser", "--cookies-from-browser", "chrome"]
+    assert cli.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "--engine browser reads cookies from --cookies FILE only" in err
+    assert "--cookies-from-browser is a yt-dlp option" in err
+    assert cli.main(["download", SERIES_URL, "--rest-every", "-1"]) == 2
+    assert "0 disables" in capsys.readouterr().err
+    assert cli.main(["download", SERIES_URL, "--rest-min", "90", "--rest-max", "60"]) == 2
+    assert "--rest-max must be >= --rest-min" in capsys.readouterr().err
 
 
 def test_parse_extractor_args():
@@ -460,8 +580,9 @@ def test_doctor_uses_ascii_marks_on_a_non_utf8_stdout(monkeypatch):
     read_stdout = _cp1252_stdout(monkeypatch)
     assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
     lines = read_stdout().strip().splitlines()
-    assert len(lines) == 7
+    assert len(lines) == 8
     assert all(line.split(" ", 1)[0] in {"OK", "X", "-"} for line in lines)
+    assert lines[7].startswith("- pace: 4")
 
 
 def test_control_characters_from_tiktok_text_are_not_printed(capsys, tmp_path):
@@ -582,6 +703,16 @@ def test_download_empty_series_exits_4(fake_discovery, fake_downloader, tmp_path
         ),
         ({3: DownloadStatus.FAILED}, 2, "Summary: 2 done, 1 skipped-locked, 1 failed"),
         ({2: DownloadStatus.FAILED_UNAVAILABLE}, 2, "1 failed-unavailable"),
+        ({2: DownloadStatus.FAILED_BLOCKED}, 5, "1 done, 1 skipped-locked, 2 failed-blocked"),
+        (
+            {
+                1: DownloadStatus.FAILED,
+                2: DownloadStatus.FAILED_UNAVAILABLE,
+                3: DownloadStatus.FAILED,
+            },
+            2,
+            "Summary: 1 skipped-locked, 1 failed-unavailable, 2 failed",
+        ),
     ],
 )
 def test_download_exit_codes(
@@ -595,6 +726,8 @@ def test_download_exit_codes(
     if code == 3:
         assert "3 failed-login-required" in out
         assert "stopped: episode 1 failed-login-required" in out
+    if DownloadStatus.FAILED_BLOCKED in outcomes.values():
+        assert "E03  failed-blocked         stopped: episode 2 failed-blocked" in out
 
 
 def test_download_dry_run_and_flags_reach_the_downloader(
@@ -641,6 +774,212 @@ def test_download_dry_run_and_flags_reach_the_downloader(
     assert sorted(p.name for p in target.iterdir()) == [MANIFEST_FILENAME]
 
 
+def test_download_announces_the_pace_and_prints_pauses_on_stderr(
+    fake_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    """Episodes 1-3 are network attempts (5 is locked): a 7 s pace before the 2nd and, with
+    --rest-every 2, a 95 s rest before the 3rd. stdout keeps the result lines only."""
+    code = cli.main(
+        [
+            "download",
+            SERIES_URL,
+            "--out",
+            str(tmp_path),
+            "--delay-min",
+            "7",
+            "--delay-max",
+            "7",
+            "--rest-every",
+            "2",
+            "--rest-min",
+            "95",
+            "--rest-max",
+            "95",
+        ]
+    )
+    assert code == 0
+    captured = capsys.readouterr()
+    err = captured.err.splitlines()
+    assert (
+        "  pace: 7 s between episodes, 95 s rest every 2; stop after 3 failures / 403 / 429" in err
+    )
+    assert err.count("  … pausing 7 s") == 1
+    assert err.count("  … resting 95 s after 2 downloads") == 1
+    assert err.index("  … pausing 7 s") < err.index("  … resting 95 s after 2 downloads")
+    for word in ("pausing", "resting", "pace:"):
+        assert word not in captured.out
+    assert [line[:12] for line in captured.out.splitlines()[1:5]] == [
+        "E01  done   ",
+        "E02  done   ",
+        "E03  done   ",
+        "E05  skipped",
+    ]
+
+
+def test_download_human_pace_dry_run_prints_no_pauses(
+    fake_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    code = cli.main(
+        ["download", SERIES_URL, "--out", str(tmp_path), "--pace", "human", "--dry-run"]
+    )
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "pausing" not in captured.err and "resting" not in captured.err
+    assert "pace:" not in captured.err  # a dry run never pauses, so nothing to announce
+    assert "Summary: 1 skipped-locked, 3 dry-run" in captured.out
+    (downloader,) = fake_downloader.instances
+    assert downloader.calls[0][1].pace == "human"
+
+
+def test_download_one_episode_never_pauses(
+    fake_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    assert cli.main(["download", SERIES_URL, "--out", str(tmp_path), "--episodes", "1"]) == 0
+    captured = capsys.readouterr()
+    assert "pausing" not in captured.err and "pace:" not in captured.err
+    assert "Summary: 1 done" in captured.out
+
+
+def test_download_prints_the_stop_reason_once_on_stderr(
+    fake_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    fake_downloader.outcomes = {1: DownloadStatus.FAILED_BLOCKED}
+    assert cli.main(["download", SERIES_URL, "--out", str(tmp_path)]) == 5
+    captured = capsys.readouterr()
+    stop_line = "  … stopped: episode 1 failed-blocked: failed-blocked from fake"
+    assert captured.err.splitlines().count(stop_line) == 1
+    assert captured.out.count("stopped: episode 1 failed-blocked") == 2  # episodes 2 and 3
+    assert "Summary: 1 skipped-locked, 3 failed-blocked" in captured.out
+    (downloader,) = fake_downloader.instances
+    assert [episode.number for episode, _ in downloader.calls] == [1]  # nothing after the stop
+
+    fake_downloader.outcomes = {1: DownloadStatus.FAILED, 2: DownloadStatus.FAILED_UNAVAILABLE}
+    code = cli.main(
+        ["download", SERIES_URL, "--out", str(tmp_path), "--max-consecutive-failures", "2"]
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    stop_line = "  … stopped: 2 consecutive failures (last: failed-unavailable from fake)"
+    assert captured.err.splitlines().count(stop_line) == 1
+    assert "stop after 2 failures / 403 / 429" in captured.err
+    assert "E03  failed                 stopped: 2 consecutive failures" in captured.out
+    assert "Summary: 1 skipped-locked, 1 failed-unavailable, 2 failed" in captured.out
+
+
+def test_download_engine_browser_gets_the_browser_flags_and_is_closed(
+    fake_discovery, fake_browser_engine, tmp_path, capsys
+):
+    code = cli.main(
+        [
+            "download",
+            SERIES_URL,
+            "--out",
+            str(tmp_path),
+            "--engine",
+            "browser",
+            "--strategy",
+            "browser",
+            "--browser-channel",
+            "chrome",
+            "--browser-path",
+            "/opt/chromium",
+            "--headful",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--cookies",
+            "c.txt",
+            "--delay-min",
+            "0",
+            "--delay-max",
+            "0",
+        ]
+    )
+    assert code == 0
+    (browser,) = fake_browser_engine.instances
+    assert [episode.number for episode, _ in browser.calls] == [1, 2, 3, 5]
+    _, options = browser.calls[0]
+    assert options.engine == "browser"
+    assert options.browser_channel == "chrome"
+    assert options.browser_executable == Path("/opt/chromium")
+    assert options.browser_headful is True
+    assert options.base_url == "http://127.0.0.1:1"
+    assert options.cookies_file == Path("c.txt")
+    assert options.out_dir == tmp_path / f"{NAME} [{SERIES_ID}]"
+    assert browser.closed == 1  # the engine closed the browser at the end of the run
+    ((_, discovery_options),) = fake_discovery.calls
+    assert discovery_options.browser_channel == "chrome"  # the same browser flags, both steps
+    assert discovery_options.executable_path == Path("/opt/chromium")
+    out = capsys.readouterr().out
+    assert "Summary: 3 done, 1 skipped-locked" in out
+    assert sorted(p.name for p in (tmp_path / f"{NAME} [{SERIES_ID}]").glob("*.mp4")) == [
+        "E01 - browser.mp4",
+        "E02 - browser.mp4",
+        "E03 - browser.mp4",
+    ]
+
+
+def test_default_engine_leaves_the_browser_fields_unset(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    code = cli.main(
+        [
+            "download",
+            SERIES_URL,
+            "--out",
+            str(tmp_path),
+            "--browser-channel",
+            "chrome",
+            "--headful",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--dry-run",
+        ]
+    )
+    assert code == 0
+    (downloader,) = fake_downloader.instances
+    _, options = downloader.calls[0]
+    assert options.engine == "yt-dlp"
+    assert options.browser_channel is None and options.browser_executable is None
+    assert options.browser_headful is False
+    assert options.base_url == "https://www.tiktok.com"
+    assert options.pace == "fixed"
+    assert (options.rest_every, options.rest_min_s, options.rest_max_s) == (10, 60.0, 120.0)
+    assert options.max_consecutive_failures == 3
+
+
+def test_download_pacing_flags_reach_the_options(fake_discovery, fake_downloader, tmp_path):
+    code = cli.main(
+        [
+            "download",
+            SERIES_URL,
+            "--out",
+            str(tmp_path),
+            "--dry-run",
+            "--pace",
+            "human",
+            "--rest-every",
+            "0",
+            "--rest-min",
+            "5",
+            "--rest-max",
+            "6",
+            "--max-consecutive-failures",
+            "0",
+            "--delay-min",
+            "1",
+            "--delay-max",
+            "2",
+        ]
+    )
+    assert code == 0
+    (downloader,) = fake_downloader.instances
+    _, options = downloader.calls[0]
+    assert options.pace == "human"
+    assert (options.rest_every, options.rest_min_s, options.rest_max_s) == (0, 5.0, 6.0)
+    assert options.max_consecutive_failures == 0
+    assert (options.delay_min_s, options.delay_max_s) == (1.0, 2.0)
+
+
 # --------------------------------------------------------------------------- video
 
 
@@ -662,8 +1001,26 @@ def test_video_downloads_directly_into_out_dir(fake_downloader, tmp_path, capsys
 def test_video_failure_exit_code_and_series_url_rejection(fake_downloader, tmp_path, capsys):
     fake_downloader.outcomes = {0: DownloadStatus.FAILED_LOGIN}
     assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 3
+    fake_downloader.outcomes = {0: DownloadStatus.FAILED_BLOCKED}
+    assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 5
     assert cli.main(["video", SERIES_URL, "--out", str(tmp_path)]) == 2
     assert "dramafetch download" in capsys.readouterr().err
+
+
+def test_video_builds_the_downloader_through_the_engine_and_closes_it(monkeypatch, tmp_path):
+    closed = []
+
+    class Closing(FakeDownloader):
+        def close(self):
+            closed.append(True)
+
+    FakeDownloader.outcomes = {}
+    FakeDownloader.instances = []
+    monkeypatch.setattr(engine, "YtDlpDownloader", Closing)
+    assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path), "--engine", "yt-dlp"]) == 0
+    assert closed == [True]
+    (downloader,) = FakeDownloader.instances
+    assert downloader.calls[0][1].engine == "yt-dlp"
 
 
 # --------------------------------------------------------------------------- doctor
@@ -672,10 +1029,24 @@ def test_video_failure_exit_code_and_series_url_rejection(fake_downloader, tmp_p
 def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     assert cli.main(["doctor"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 7
+    assert len(lines) == 8
     assert all(line[0] in "✓✗–" for line in lines)  # noqa: RUF001
     names = [line.split(" ", 1)[1].split(":")[0] for line in lines]
-    assert names == ["python", "yt-dlp", "curl_cffi", "playwright", "browser", "ffmpeg", "cookies"]
+    assert names == [
+        "python",
+        "yt-dlp",
+        "curl_cffi",
+        "playwright",
+        "browser",
+        "ffmpeg",
+        "cookies",
+        "pace",
+    ]
+    # the pacing defaults, in one line, so a user knows what to expect before the first run
+    assert lines[7] == (
+        "– pace: 4–9 s between episodes, 60–120 s rest every 10; "  # noqa: RUF001
+        "stop after 3 failures / 403 / 429"
+    )
     assert lines[0].startswith("✓ python: Python 3.")
     assert lines[1].startswith("✓ yt-dlp: yt-dlp 20")
     assert lines[2].startswith("✓ curl_cffi")
@@ -687,6 +1058,33 @@ def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     else:
         assert "Playwright Chromium at" in browser
     assert lines[6].startswith("– cookies: no --cookies given")  # noqa: RUF001
+    # the web UI's /api/doctor keeps the seven checks only (see test_web)
+    assert [check["name"] for check in cli.doctor_as_dicts(browser_channel="chrome")] == names[:7]
+
+
+def test_describe_pacing():
+    defaults = "4–9 s between episodes, 60–120 s rest every 10; stop after 3 failures / 403 / 429"  # noqa: RUF001
+    assert cli.describe_pacing() == defaults
+    assert cli.describe_pacing(DownloadOptions()) == defaults
+    assert cli.describe_pacing(
+        DownloadOptions(pace="human", delay_min_s=5.0, rest_every=0, max_consecutive_failures=0)
+    ) == (
+        "human pace (about one episode's length, at least 5 s) between episodes, no long rests; "
+        "stop on 403 / 429"
+    )
+    assert (
+        cli.describe_pacing(
+            DownloadOptions(
+                delay_min_s=2.5,
+                delay_max_s=2.5,
+                rest_every=4,
+                rest_min_s=30.0,
+                rest_max_s=45.0,
+                max_consecutive_failures=1,
+            )
+        )
+        == "2.5 s between episodes, 30–45 s rest every 4; stop after 1 failure / 403 / 429"  # noqa: RUF001
+    )
 
 
 def test_doctor_browser_flags(tmp_path):
@@ -825,6 +1223,20 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
             "--delay-max",
             "2",
             "--no-impersonate",
+            "--pace",
+            "human",
+            "--rest-every",
+            "5",
+            "--rest-min",
+            "10",
+            "--rest-max",
+            "20",
+            "--max-consecutive-failures",
+            "2",
+            "--engine",
+            "browser",
+            "--browser-channel",
+            "msedge",
         ]
     )
     assert code == 0
@@ -835,10 +1247,18 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert kwargs["serve_forever"] is False  # the CLI serves itself, after announcing the bind
     assert kwargs["discovery_options"].cookies_file == Path("c.txt")
     assert kwargs["discovery_options"].strategy == "browser"
-    assert kwargs["download_options"].out_dir == tmp_path
-    assert kwargs["download_options"].cookies_file == Path("c.txt")
-    assert kwargs["download_options"].delay_min_s == 1.0
-    assert kwargs["download_options"].impersonate is False
+    download_options = kwargs["download_options"]
+    assert download_options.out_dir == tmp_path
+    assert download_options.cookies_file == Path("c.txt")
+    assert download_options.delay_min_s == 1.0
+    assert download_options.impersonate is False
+    # the same pacing and engine options as `download`, so the web UI paces like the CLI
+    assert download_options.pace == "human"
+    assert (download_options.rest_every, download_options.rest_min_s) == (5, 10.0)
+    assert download_options.rest_max_s == 20.0
+    assert download_options.max_consecutive_failures == 2
+    assert download_options.engine == "browser"
+    assert download_options.browser_channel == "msedge"
     assert servers[0].served and servers[0].closed
     err = capsys.readouterr().err
     assert "http://127.0.0.1:9000/" in err

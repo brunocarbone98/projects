@@ -17,6 +17,10 @@ TikTok facts this module encodes (verified October 2026):
   skipped; nothing here unlocks, buys or bypasses anything.
 - ``GET /api/drama/detail/`` carries the series name and announced total; its exact shape is
   unknown, so :func:`parse_detail_payload` is best-effort.
+- Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
+  codec and bitrate, plus ``video.playAddr``), valid until their ``expire`` query parameter.
+  :func:`play_url_candidates` orders them and :func:`url_expiry` reads the expiry; the browser
+  download engine fetches them directly instead of loading each episode's page.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from dramafetch.models import Episode
 
@@ -436,3 +441,80 @@ def _first_positive_int(container: dict[str, Any], keys: tuple[str, ...]) -> int
         if found is not None and found > 0:
             return found
     return None
+
+
+# --------------------------------------------------------------------------------- play URLs
+
+_H264_CODEC_RE = re.compile(r"h\.?264|avc", re.IGNORECASE)
+_URL_LIST_KEYS = ("UrlList", "urlList", "url_list")
+_MAX_URL_LIST_DEPTH = 3
+
+
+def play_url_candidates(item: dict[str, Any]) -> list[str]:
+    """Direct play URLs of an item, best first and de-duplicated; never raises on junk.
+
+    Order: the ``video.bitrateInfo`` entries whose ``CodecType`` is H.264/AVC (case-insensitive) by
+    ``Bitrate`` descending, every URL of their ``PlayAddr.UrlList``; then the other codecs the same
+    way; then ``video.playAddr`` (a string, or a dict with a ``UrlList``). Only ``http(s)`` strings
+    are kept, and a URL listed twice appears once, at its first position. The item may be wrapped
+    in ``{"itemStruct": {...}}``. This is what the browser download engine fetches.
+    """
+    video = _field(item, "video") if isinstance(item, dict) else None
+    if not isinstance(video, dict):
+        return []
+    h264: list[tuple[int, int, list[str]]] = []
+    others: list[tuple[int, int, list[str]]] = []
+    bitrate_info = video.get("bitrateInfo")
+    if isinstance(bitrate_info, list):
+        for index, entry in enumerate(bitrate_info):
+            if not isinstance(entry, dict):
+                continue
+            urls = _play_urls(entry.get("PlayAddr"), 0)
+            if not urls:
+                continue
+            codec = entry.get("CodecType")
+            bucket = h264 if isinstance(codec, str) and _H264_CODEC_RE.search(codec) else others
+            bucket.append((-(_as_int(entry.get("Bitrate")) or 0), index, urls))
+    ordered: list[str] = []
+    for bucket in (h264, others):
+        for _, _, urls in sorted(bucket, key=lambda entry: entry[:2]):
+            ordered.extend(urls)
+    ordered.extend(_play_urls(video.get("playAddr"), 0))
+    return list(dict.fromkeys(ordered))
+
+
+def _play_urls(value: Any, depth: int) -> list[str]:
+    """The http(s) URLs of a play address: a string, a list of them or a dict with ``UrlList``."""
+    if depth > _MAX_URL_LIST_DEPTH:
+        return []
+    if isinstance(value, dict):
+        for key in _URL_LIST_KEYS:
+            if key in value:
+                return _play_urls(value[key], depth + 1)
+        return []
+    if isinstance(value, list):
+        return [url for entry in value for url in _play_urls(entry, depth + 1)]
+    if isinstance(value, str):
+        url = value.strip()
+        return [url] if url.lower().startswith(("http://", "https://")) else []
+    return []
+
+
+def url_expiry(url: str) -> int | None:
+    """The integer ``expire`` query parameter of a signed CDN URL (seconds since the epoch; TikTok's
+    play URLs carry one), or None when it is absent or not a whole number."""
+    if not isinstance(url, str):
+        return None
+    try:
+        values = parse_qs(urlsplit(url).query, keep_blank_values=True).get("expire")
+    except ValueError:
+        return None
+    if not values:
+        return None
+    text = values[0].strip()
+    if not text.lstrip("-").isdigit():
+        return None
+    try:
+        return int(text)
+    except ValueError:  # more digits than int() accepts
+        return None

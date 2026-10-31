@@ -1,4 +1,5 @@
-"""engine: episode selection, deterministic download_series, early stop, exit codes, resolve."""
+"""engine: episode selection, deterministic download_series, pacing, early stops, engines, exit
+codes, resolve."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import random
 import sys
 import types
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -27,7 +29,7 @@ SERIES_ID = "7699393770256782354"
 NAME = "The Billionaire's Secret Heiress"
 
 
-def _episode(number, hints=()):
+def _episode(number, hints=(), duration=None):
     return Episode(
         number=number,
         item_id=f"76994000000000000{number:02d}",
@@ -35,12 +37,16 @@ def _episode(number, hints=()):
         series_id=SERIES_ID,
         series_name=NAME,
         author="muffindrama_us",
+        duration_s=duration,
         lock_hints=tuple(hints),
     )
 
 
-def make_series(numbers=(1, 2, 3, 4, 5), locked=(), name=NAME, total=None):
-    episodes = [_episode(n, ("isFree=false",) if n in locked else ()) for n in numbers]
+def make_series(numbers=(1, 2, 3, 4, 5), locked=(), name=NAME, total=None, durations=None):
+    durations = durations or {}
+    episodes = [
+        _episode(n, ("isFree=false",) if n in locked else (), durations.get(n)) for n in numbers
+    ]
     return Series(series_id=SERIES_ID, name=name, episodes=episodes, total_hint=total)
 
 
@@ -66,9 +72,40 @@ class FakeDownloader:
         return DownloadResult(episode, status, message=f"{status.value} happened")
 
 
+class ClosingDownloader(FakeDownloader):
+    """A downloader that holds a resource (like the browser engine) and counts its close() calls."""
+
+    def __init__(self, outcomes=None, *, close_error=None):
+        super().__init__(outcomes)
+        self.closed = 0
+        self.close_error = close_error
+
+    def close(self):
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
 class FixedRandom(random.Random):
     def uniform(self, a, b):
         return (a + b) / 2
+
+
+def _run(series, options, downloader=None, **kwargs):
+    """download_series over every episode of `series` with a fake sleep, the midpoint rng and
+    recorders for sleeps and pauses; returns (results, sleeps, pauses)."""
+    sleeps, pauses = [], []
+    results = engine.download_series(
+        series,
+        series.episodes,
+        options,
+        downloader=downloader if downloader is not None else FakeDownloader(),
+        sleep=sleeps.append,
+        rng=FixedRandom(),
+        on_pause=lambda kind, seconds: pauses.append((kind, seconds)),
+        **kwargs,
+    )
+    return results, sleeps, pauses
 
 
 # --------------------------------------------------------------------------- selection
@@ -487,6 +524,414 @@ def test_default_downloader_is_yt_dlp_but_dry_run_needs_no_network(tmp_path):
     assert [r.status.value for r in results] == ["dry-run", "dry-run"]
 
 
+# --------------------------------------------------------------------------- pacing
+
+
+def test_rest_comes_after_the_tenth_network_attempt_not_after_skips(tmp_path):
+    """14 episodes, 3 and 7 locked: 12 network attempts. The pause before the 11th attempt (episode
+    13) is the rest; skips neither pause nor count."""
+    series = make_series(numbers=range(1, 15), locked=(3, 7))
+    options = DownloadOptions(
+        out_dir=tmp_path, delay_min_s=1.0, delay_max_s=1.0, rest_min_s=60.0, rest_max_s=120.0
+    )
+    results, sleeps, pauses = _run(series, options)
+    assert engine.summarize(results) == {"done": 12, "skipped-locked": 2}
+    assert sleeps == [1.0] * 9 + [90.0] + [1.0]
+    assert pauses == [("pace", 1.0)] * 9 + [("rest", 90.0)] + [("pace", 1.0)]
+    assert [kind for kind, _ in pauses].count("rest") == 1
+
+
+def test_rest_every_counts_network_attempts_including_failures(tmp_path):
+    series = make_series(numbers=range(1, 8))
+    downloader = FakeDownloader({2: DownloadStatus.FAILED_UNAVAILABLE, 5: DownloadStatus.FAILED})
+    options = DownloadOptions(
+        out_dir=tmp_path,
+        delay_min_s=2.0,
+        delay_max_s=2.0,
+        rest_every=3,
+        rest_min_s=10.0,
+        rest_max_s=20.0,
+        max_consecutive_failures=0,
+    )
+    _, sleeps, pauses = _run(series, options, downloader)
+    # attempts 1-7: rests before the 4th and the 7th attempt (after 3 and 6 attempts)
+    assert sleeps == [2.0, 2.0, 15.0, 2.0, 2.0, 15.0]
+    assert [kind for kind, _ in pauses] == ["pace", "pace", "rest", "pace", "pace", "rest"]
+
+
+def test_rest_every_zero_disables_the_rests(tmp_path):
+    series = make_series(numbers=range(1, 13))
+    options = DownloadOptions(out_dir=tmp_path, delay_min_s=1.0, delay_max_s=1.0, rest_every=0)
+    _, sleeps, pauses = _run(series, options)
+    assert sleeps == [1.0] * 11
+    assert all(kind == "pace" for kind, _ in pauses)
+
+
+def test_human_pace_waits_about_as_long_as_the_previous_episode(tmp_path):
+    """max(delay_min, previous duration) + uniform(0, 3) (midpoint 1.5 here), capped at 300 s; an
+    episode without a duration falls back to delay_min; the rest still takes precedence."""
+    series = make_series(numbers=(1, 2, 3, 4, 5), durations={1: 100, 2: 400, 4: 10})
+    options = DownloadOptions(
+        out_dir=tmp_path, pace="human", delay_min_s=4.0, delay_max_s=9.0, rest_every=0
+    )
+    _, sleeps, pauses = _run(series, options)
+    assert sleeps == [101.5, 300.0, 5.5, 11.5]
+    assert pauses == [("pace", 101.5), ("pace", 300.0), ("pace", 5.5), ("pace", 11.5)]
+    assert engine.MAX_HUMAN_PAUSE_S == 300.0 and engine.HUMAN_JITTER_S == 3.0
+
+    rested = DownloadOptions(
+        out_dir=tmp_path,
+        pace="human",
+        overwrite=True,
+        rest_every=2,
+        rest_min_s=50.0,
+        rest_max_s=70.0,
+    )
+    _, sleeps, pauses = _run(series, rested)
+    assert sleeps == [101.5, 60.0, 5.5, 60.0]
+    assert [kind for kind, _ in pauses] == ["pace", "rest", "pace", "rest"]
+
+
+def test_human_pace_skips_do_not_change_which_episode_was_watched_last(tmp_path):
+    series = make_series(numbers=(1, 2, 3), locked=(2,), durations={1: 50, 2: 999})
+    options = DownloadOptions(out_dir=tmp_path, pace="human", delay_min_s=4.0, rest_every=0)
+    _, sleeps, _ = _run(series, options)
+    assert sleeps == [51.5]  # episode 1 was the last one watched; the locked 2 does not count
+
+
+def test_zero_pauses_are_neither_announced_nor_slept(tmp_path):
+    series = make_series(numbers=(1, 2, 3))
+    options = DownloadOptions(out_dir=tmp_path, delay_min_s=0.0, delay_max_s=0.0, rest_every=0)
+    results, sleeps, pauses = _run(series, options)
+    assert [r.status.value for r in results] == ["done"] * 3
+    assert sleeps == [] and pauses == []
+
+
+def test_on_pause_is_optional_and_called_before_sleep(tmp_path):
+    series = make_series(numbers=(1, 2))
+    order = []
+    engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, delay_min_s=1.0, delay_max_s=1.0),
+        downloader=FakeDownloader(),
+        sleep=lambda s: order.append(("sleep", s)),
+        rng=FixedRandom(),
+        on_pause=lambda kind, s: order.append((kind, s)),
+    )
+    assert order == [("pace", 1.0), ("sleep", 1.0)]
+    engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, overwrite=True),
+        downloader=FakeDownloader(),
+        sleep=lambda s: None,
+    )  # no on_pause: fine
+
+
+@pytest.mark.parametrize(
+    ("options", "match"),
+    [
+        (DownloadOptions(delay_min_s=5.0, delay_max_s=4.0), "delay_max_s .* >= delay_min_s"),
+        (DownloadOptions(delay_min_s=-1.0), "delay_min_s/delay_max_s must not be negative"),
+        (DownloadOptions(rest_min_s=200.0, rest_max_s=100.0), "rest_max_s .* >= rest_min_s"),
+        (DownloadOptions(rest_max_s=-1.0), "rest_min_s/rest_max_s must not be negative"),
+        (DownloadOptions(pace="fast"), "unknown pace 'fast'"),
+    ],
+)
+def test_inconsistent_pacing_is_refused_before_anything_is_written(tmp_path, options, match):
+    series = make_series(numbers=(1, 2))
+    options = DownloadOptions(**{**options.__dict__, "out_dir": tmp_path})
+    with pytest.raises(ValueError, match=match):
+        engine.validate_pacing(options)
+    downloader = FakeDownloader()
+    with pytest.raises(ValueError, match=match):
+        engine.download_series(series, series.episodes, options, downloader=downloader)
+    assert downloader.calls == []
+    assert not series_dir(tmp_path, series).exists()
+    engine.validate_pacing(DownloadOptions())  # the defaults are consistent
+    engine.validate_pacing(DownloadOptions(delay_min_s=0.0, delay_max_s=0.0, rest_every=0))
+
+
+# --------------------------------------------------------------------------- early stops
+
+
+def test_consecutive_failures_stop_the_run_without_further_network(tmp_path):
+    """FAILED and FAILED_UNAVAILABLE count; the locked skip in between neither counts nor resets;
+    the third failure in a row stops the run and the rest is FAILED "stopped: …" untouched."""
+    series = make_series(numbers=range(1, 8), locked=(3,))
+    downloader = FakeDownloader(
+        {1: DownloadStatus.FAILED, 2: DownloadStatus.FAILED_UNAVAILABLE, 4: DownloadStatus.FAILED}
+    )
+    results, sleeps, _ = _run(series, DownloadOptions(out_dir=tmp_path), downloader)
+    assert [r.status.value for r in results] == [
+        "failed",
+        "failed-unavailable",
+        "skipped-locked",
+        "failed",
+        "failed",
+        "failed",
+        "failed",
+    ]
+    assert results[4].message == "stopped: 3 consecutive failures (last: failed happened)"
+    assert results[5].message == results[6].message == results[4].message
+    assert [call[0] for call in downloader.calls] == [1, 2, 3, 4]  # 5-7 never reached a downloader
+    assert sleeps == [6.5, 6.5]  # between the three network attempts only
+    assert engine.exit_code(results) == 2
+    manifest = json.loads((series_dir(tmp_path, series) / MANIFEST_FILENAME).read_text("utf-8"))
+    assert manifest["episodes"]["7"]["status"] == "failed"
+    assert manifest["episodes"]["7"]["message"].startswith("stopped: 3 consecutive failures")
+
+
+def test_a_success_resets_the_failure_streak(tmp_path):
+    series = make_series(numbers=range(1, 7))
+    downloader = FakeDownloader(
+        {
+            1: DownloadStatus.FAILED,
+            2: DownloadStatus.FAILED,
+            4: DownloadStatus.FAILED_UNAVAILABLE,
+            5: DownloadStatus.FAILED,
+        }
+    )
+    results, _, _ = _run(series, DownloadOptions(out_dir=tmp_path), downloader)
+    assert [r.status.value for r in results] == [
+        "failed",
+        "failed",
+        "done",
+        "failed-unavailable",
+        "failed",
+        "done",
+    ]
+    assert [call[0] for call in downloader.calls] == [1, 2, 3, 4, 5, 6]
+    assert not any(r.message.startswith("stopped") for r in results)
+
+
+def test_max_consecutive_failures_zero_never_stops_and_one_stops_at_once(tmp_path):
+    series = make_series(numbers=range(1, 6))
+    downloader = FakeDownloader(dict.fromkeys(range(1, 6), DownloadStatus.FAILED))
+    results, _, _ = _run(
+        series, DownloadOptions(out_dir=tmp_path, max_consecutive_failures=0), downloader
+    )
+    assert [r.status.value for r in results] == ["failed"] * 5
+    assert [call[0] for call in downloader.calls] == [1, 2, 3, 4, 5]
+
+    downloader = FakeDownloader({1: DownloadStatus.FAILED_UNAVAILABLE})
+    results, _, _ = _run(
+        series,
+        DownloadOptions(out_dir=tmp_path, overwrite=True, max_consecutive_failures=1),
+        downloader,
+    )
+    assert [r.status.value for r in results] == ["failed-unavailable"] + ["failed"] * 4
+    assert results[1].message == (
+        "stopped: 1 consecutive failures (last: failed-unavailable happened)"
+    )
+    assert [call[0] for call in downloader.calls] == [1]
+
+
+def test_failure_stop_keeps_done_and_locked_episodes_as_skips(tmp_path):
+    series = make_series(numbers=(1, 2, 3, 4, 5, 6), locked=(5,))
+    target = series_dir(tmp_path, series)
+    target.mkdir(parents=True)
+    done_file = target / "E04 - earlier.mp4"
+    done_file.write_bytes(b"v")
+    Manifest(target / MANIFEST_FILENAME, SERIES_ID, NAME).record(
+        DownloadResult(series.episodes[3], DownloadStatus.DONE, done_file, "saved")
+    )
+    downloader = FakeDownloader(dict.fromkeys((1, 2, 3), DownloadStatus.FAILED))
+    results, _, _ = _run(series, DownloadOptions(out_dir=tmp_path), downloader)
+    assert [r.status.value for r in results] == [
+        "failed",
+        "failed",
+        "failed",
+        "skipped-exists",
+        "skipped-locked",
+        "failed",
+    ]
+    assert results[3].path == done_file
+    assert results[5].message.startswith("stopped: 3 consecutive failures")
+
+
+def test_failure_stop_skips_an_episode_whose_file_is_already_on_disk(tmp_path):
+    """A remaining episode whose file exists but is not in the manifest (deleted, rebuilt) would
+    not have needed the network, so the stop leaves it skipped-exists, not failed — in the results,
+    the summary and the manifest."""
+    series = make_series(numbers=(1, 2, 3, 4, 5))
+    target = series_dir(tmp_path, series)
+    target.mkdir(parents=True)
+    on_disk = target / f"E05 - {NAME} Episode 5.mp4"  # matches episode_stem(ep 5)
+    on_disk.write_bytes(b"v")
+    downloader = FakeDownloader(dict.fromkeys((1, 2, 3), DownloadStatus.FAILED))
+
+    results, _, _ = _run(series, DownloadOptions(out_dir=tmp_path), downloader)
+
+    assert [r.status.value for r in results] == [
+        "failed",
+        "failed",
+        "failed",
+        "failed",
+        "skipped-exists",
+    ]
+    assert results[3].message.startswith("stopped: 3 consecutive failures")
+    assert results[4].path == on_disk
+    assert results[4].message == f"already exists: {on_disk.name}"
+    assert [call[0] for call in downloader.calls] == [1, 2, 3]
+    assert engine.summarize(results) == {"skipped-exists": 1, "failed": 4}
+    manifest = json.loads((target / MANIFEST_FILENAME).read_text("utf-8"))
+    assert manifest["episodes"]["5"]["status"] == "skipped-exists"
+
+    # --overwrite ignores the file on disk, as the download itself would have
+    downloader = FakeDownloader(dict.fromkeys((1, 2, 3), DownloadStatus.FAILED))
+    results, _, _ = _run(series, DownloadOptions(out_dir=tmp_path, overwrite=True), downloader)
+    assert [r.status.value for r in results] == ["failed"] * 5
+    assert results[4].message.startswith("stopped: ")
+
+
+def test_cookie_problem_failures_are_not_a_failure_streak(tmp_path):
+    """The up-front cookies-file refusal fails every network episode without a request; it must
+    not read as "3 consecutive failures" (the messages name the real cause)."""
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        ".tiktok.com\tTRUE\t/\tTRUE\t1893456000\tttwid\tSECRET\textra\n", encoding="utf-8"
+    )
+    series = make_series(numbers=range(1, 6))
+    results, sleeps, _ = _run(series, DownloadOptions(out_dir=tmp_path, cookies_file=cookies))
+    assert [r.status.value for r in results] == ["failed"] * 5
+    assert all("malformed lines" in r.message for r in results)
+    assert not any(r.message.startswith("stopped") for r in results)
+    assert sleeps == []
+
+
+def test_blocked_stops_the_run_like_a_rate_limit_and_exits_5(tmp_path):
+    series = make_series(numbers=(1, 2, 3, 4, 5), locked=(5,))
+    downloader = FakeDownloader({2: DownloadStatus.FAILED_BLOCKED})
+    results, sleeps, _ = _run(series, DownloadOptions(out_dir=tmp_path), downloader)
+    assert [r.status.value for r in results] == [
+        "done",
+        "failed-blocked",
+        "failed-blocked",
+        "failed-blocked",
+        "skipped-locked",
+    ]
+    assert results[2].message == "stopped: episode 2 failed-blocked: failed-blocked happened"
+    assert results[3].message == results[2].message
+    assert [call[0] for call in downloader.calls] == [1, 2]
+    assert sleeps == [6.5]
+    assert engine.exit_code(results) == 5
+    assert engine.summarize(results) == {"done": 1, "skipped-locked": 1, "failed-blocked": 3}
+    manifest = json.loads((series_dir(tmp_path, series) / MANIFEST_FILENAME).read_text("utf-8"))
+    assert manifest["episodes"]["4"]["status"] == "failed-blocked"
+    assert manifest["episodes"]["5"]["status"] == "skipped-locked"
+
+
+# --------------------------------------------------------------------------- engines & close()
+
+
+class FakeBrowserDownloader(ClosingDownloader):
+    """What a fake `dramafetch.downloader_browser` module hands out."""
+
+    instances: ClassVar[list[FakeBrowserDownloader]] = []
+
+    def __init__(self):
+        super().__init__()
+        FakeBrowserDownloader.instances.append(self)
+
+
+@pytest.fixture
+def fake_browser_module(monkeypatch):
+    FakeBrowserDownloader.instances = []
+    module = types.ModuleType("dramafetch.downloader_browser")
+    module.BrowserDownloader = FakeBrowserDownloader
+    monkeypatch.setitem(sys.modules, "dramafetch.downloader_browser", module)
+    return module
+
+
+def test_make_downloader_knows_both_engines(fake_browser_module):
+    from dramafetch.downloader import YtDlpDownloader
+
+    assert isinstance(engine.make_downloader(DownloadOptions()), YtDlpDownloader)
+    assert isinstance(engine.make_downloader(DownloadOptions(engine="yt-dlp")), YtDlpDownloader)
+    browser = engine.make_downloader(DownloadOptions(engine="browser"))
+    assert isinstance(browser, FakeBrowserDownloader)
+    assert FakeBrowserDownloader.instances == [browser]
+    with pytest.raises(ValueError, match="unknown download engine 'wget'"):
+        engine.make_downloader(DownloadOptions(engine="wget"))
+    with pytest.raises(ValueError, match="unknown download engine"):
+        engine.make_downloader(DownloadOptions(engine=""))
+    assert engine.ENGINES == ("yt-dlp", "browser")
+
+
+def test_download_series_builds_the_browser_engine_and_closes_it(tmp_path, fake_browser_module):
+    series = make_series(numbers=(1, 2, 3), locked=(3,))
+    results = engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, engine="browser", delay_min_s=0, delay_max_s=0),
+    )
+    assert [r.status.value for r in results] == ["done", "done", "skipped-locked"]
+    (browser,) = FakeBrowserDownloader.instances
+    assert [call[0] for call in browser.calls] == [1, 2, 3]
+    assert browser.closed == 1
+
+
+def test_an_injected_downloader_with_close_is_closed_even_when_it_raises(tmp_path):
+    series = make_series(numbers=(1, 2))
+    no_sleep = {"sleep": lambda s: None}
+    downloader = ClosingDownloader()
+    engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path),
+        downloader=downloader,
+        **no_sleep,
+    )
+    assert downloader.closed == 1
+
+    class Exploding(ClosingDownloader):
+        def download(self, episode, options):
+            raise RuntimeError("browser crashed")
+
+    exploding = Exploding()
+    with pytest.raises(RuntimeError, match="browser crashed"):
+        engine.download_series(
+            series,
+            series.episodes,
+            DownloadOptions(out_dir=tmp_path, overwrite=True),
+            downloader=exploding,
+            **no_sleep,
+        )
+    assert exploding.closed == 1
+
+    # a downloader without close() is fine, and a close() that fails does not hide the results
+    plain = FakeDownloader()
+    engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, overwrite=True),
+        downloader=plain,
+        **no_sleep,
+    )
+    noisy = ClosingDownloader(close_error=OSError("sessionid=SECRET already gone"))
+    results = engine.download_series(
+        series,
+        series.episodes,
+        DownloadOptions(out_dir=tmp_path, overwrite=True),
+        downloader=noisy,
+        **no_sleep,
+    )
+    assert [r.status.value for r in results] == ["done", "done"]
+    assert noisy.closed == 1
+
+
+def test_close_downloader_logs_a_redacted_warning(caplog):
+    noisy = ClosingDownloader(close_error=RuntimeError("Cookie: sessionid=SECRET123; boom"))
+    with caplog.at_level("WARNING", logger="dramafetch.engine"):
+        engine.close_downloader(noisy)
+    assert noisy.closed == 1
+    assert "closing the downloader failed" in caplog.text
+    assert "SECRET123" not in caplog.text
+    engine.close_downloader(FakeDownloader())  # nothing to close
+
+
 # --------------------------------------------------------------------------- summaries
 
 
@@ -511,6 +956,15 @@ def test_summarize_and_exit_codes():
         DownloadResult(ep, DownloadStatus.FAILED_LOGIN),
     ]
     assert engine.exit_code(both) == 3
+    blocked = [
+        DownloadResult(ep, DownloadStatus.DONE),
+        DownloadResult(ep, DownloadStatus.FAILED_BLOCKED),
+    ]
+    assert engine.exit_code(blocked) == 5 == engine.EXIT_RATE_LIMITED  # blocked or rate limited
+    assert engine.exit_code([*blocked, DownloadResult(ep, DownloadStatus.FAILED_LOGIN)]) == 3
+    assert engine.summarize(blocked) == {"done": 1, "failed-blocked": 1}
+    assert engine.result_to_dict(blocked[1])["status"] == "failed-blocked"
+    assert DownloadStatus.FAILED_BLOCKED.ok is False
 
 
 def test_json_views():

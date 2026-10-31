@@ -13,6 +13,8 @@ from dramafetch.catalog import (
     merge_episodes,
     parse_detail_payload,
     parse_item_list_payload,
+    play_url_candidates,
+    url_expiry,
 )
 from dramafetch.models import Episode
 
@@ -357,3 +359,103 @@ def test_parse_detail_payload_shapes():
     # name from one container, total from another
     split = {"drama": {"dramaName": "Split"}, "detail": {"totalEpisode": 40}}
     assert parse_detail_payload(split) == ("Split", 40)
+
+
+# --------------------------------------------------------------------------- play URLs
+
+CDN = "https://v16-webapp-prime.tiktok.com/video/tos/useast2a"
+
+
+def _entry(codec, bitrate, *urls):
+    return {"Bitrate": bitrate, "CodecType": codec, "PlayAddr": {"UrlList": list(urls)}}
+
+
+def test_play_url_candidates_on_the_fixtures(item_list_pages):
+    page1 = item_list_pages[0]["itemList"]
+    # episode 1 lists the same URL under bitrateInfo and playAddr: one candidate
+    assert play_url_candidates(page1[0]) == [f"{CDN}/abc/?a=1988&expire=1761200000"]
+    assert play_url_candidates(page1[1]) == [f"{CDN}/def/"]
+    assert play_url_candidates(page1[2]) == []  # the trailer has an empty playAddr
+    locked = item_list_pages[1]["data"]["itemList"][2]
+    assert play_url_candidates(locked) == []
+    assert play_url_candidates(item_list_pages[1]["data"]["itemList"][1]) == [f"{CDN}/jkl/"]
+
+
+def test_play_url_candidates_order_h264_by_bitrate_then_other_codecs_then_play_addr():
+    item = {
+        "video": {
+            "playAddr": {"UrlList": ["https://c/play", "https://c/h264-hi"]},
+            "bitrateInfo": [
+                _entry("h265", 2_000_000, "https://c/h265-hi"),
+                _entry("h264", 500_000, "https://c/h264-lo", "https://c/h264-lo-b"),
+                _entry("bytevc1", 3_000_000, "https://c/bytevc1"),
+                _entry("AVC1", 1_000_000, "https://c/h264-hi"),
+                _entry("H.264", "1500000", "https://c/h264-str"),  # numeric string bitrate
+                _entry("h264", 1_000_000, "https://c/h264-hi"),  # repeated URL: first position
+            ],
+        }
+    }
+    assert play_url_candidates(item) == [
+        "https://c/h264-str",
+        "https://c/h264-hi",
+        "https://c/h264-lo",
+        "https://c/h264-lo-b",
+        "https://c/bytevc1",
+        "https://c/h265-hi",
+        "https://c/play",
+    ]
+    # a plain string playAddr, and the itemStruct wrapper
+    assert play_url_candidates({"video": {"playAddr": " https://c/w "}}) == ["https://c/w"]
+    wrapped = {"itemStruct": {"video": {"playAddr": "https://c/w", "bitrateInfo": []}}}
+    assert play_url_candidates(wrapped) == ["https://c/w"]
+
+
+def test_play_url_candidates_never_raises_on_junk():
+    for junk in (None, "x", 1, [], {}, {"video": None}, {"video": "s"}, {"video": {}}):
+        assert play_url_candidates(junk) == []
+    assert play_url_candidates({"video": {"bitrateInfo": "no", "playAddr": 7}}) == []
+    messy = {
+        "video": {
+            "bitrateInfo": [
+                1,
+                "x",
+                None,
+                {"PlayAddr": 5},
+                {"PlayAddr": {"UrlList": "https://c/not-a-list"}},  # a string list: one URL
+                {"PlayAddr": {"UrlList": [1, None, "ftp://x", "nope", " https://c/ok "]}},
+                {"Bitrate": "high", "CodecType": None, "PlayAddr": {"UrlList": ["https://c/q"]}},
+                {"Bitrate": True, "CodecType": 3, "PlayAddr": {"url_list": ["https://c/r"]}},
+            ],
+            "playAddr": ["https://c/list-addr", 3, ["https://c/nested"]],
+        }
+    }
+    assert play_url_candidates(messy) == [
+        "https://c/not-a-list",
+        "https://c/ok",
+        "https://c/q",
+        "https://c/r",
+        "https://c/list-addr",
+        "https://c/nested",
+    ]
+    deep = "https://c/deep"
+    for _ in range(10):
+        deep = [deep]
+    assert play_url_candidates({"video": {"playAddr": deep}}) == []  # depth-limited
+
+
+def test_url_expiry():
+    assert url_expiry(f"{CDN}/abc/?a=1988&expire=1761200000") == 1761200000
+    assert url_expiry("https://v/x/?expire=0") == 0
+    assert url_expiry("https://v/x/?expire=-5") == -5
+    assert url_expiry("https://v/x/?expire=12&expire=99") == 12
+    assert url_expiry("https://v/x/?expire=%2B7") is None  # a decoded "+7" is not a number
+    assert url_expiry("https://v/x/?expire=+7") == 7  # parse_qs decodes "+" as a space
+    assert url_expiry("https://v/x/") is None
+    assert url_expiry("https://v/x/?expire=") is None
+    assert url_expiry("https://v/x/?expire=abc") is None
+    assert url_expiry("https://v/x/?expire=1.5") is None
+    assert url_expiry("https://v/x/?x-expires=5") is None
+    assert url_expiry("") is None
+    assert url_expiry("http://[::1/?expire=1") is None  # not even a URL
+    assert url_expiry("https://v/x/?expire=" + "9" * 5000) is None  # too long for int()
+    assert url_expiry(None) is None
