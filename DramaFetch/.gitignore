@@ -1,0 +1,13 @@
+# DramaFetch — Python tool. The venv, caches and everything downloaded stay local.
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+downloads/
+.dramafetch/
+cookies.txt
+*.cookies.txt
