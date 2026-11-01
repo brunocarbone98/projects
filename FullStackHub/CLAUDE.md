@@ -48,7 +48,7 @@ International parcel shipping & tracking platform (UPS/FedEx style) with a bilin
 - `code-reviewer` — reviews the diff (read-only): secrets, Zod at the edges, append-only tables, state transitions, idempotency, i18n keys in both message files, Prettier, no `any`.
 - `test-runner` — runs Vitest (`pnpm test`, needs PostgreSQL → `../.claude/scripts/local-postgres.sh`) and pytest for both services; reports only failures (`model: haiku`). There is no Playwright suite — browser E2E lives in `../SecureGate`.
 
-Repo-wide agents live in `/.claude/agents/` (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`) and work from the repository root.
+Repo-wide agents live in `/.claude/agents/` (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`, and DramaFetch's `download-guardian` and `vuln-sentinel`) and work from the repository root.
 
 ## Autonomous maintenance
 

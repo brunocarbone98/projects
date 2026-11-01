@@ -56,8 +56,8 @@ updates:
 
   # DramaFetch — the floors in pyproject.toml (yt-dlp, playwright, mutagen; the extras curl_cffi,
   # pytest, ruff, mypy). `increase` raises a floor to the new release, so a TikTok fix in yt-dlp
-  # reaches every install; the nightly shift's download-guardian tries each bump against the fake
-  # TikTok before its verdict.
+  # reaches every install; CI's dramafetch job runs each bump against the fake TikTok
+  # (pytest -m integration), and the nightly shift's verdict reads that CI run.
   - package-ecosystem: pip
     directory: /DramaFetch
     schedule:

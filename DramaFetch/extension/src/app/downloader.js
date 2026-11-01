@@ -6,17 +6,20 @@
  *
  * The item_list payload TikTok served to the user's own session already carries every episode's
  * signed play URLs; this module fetches them directly, one GET at a time and at most
- * {@link MAX_GETS_PER_EPISODE} requested URLs per episode (an in-run re-discovery included), with
+ * {@link MAX_GETS_PER_EPISODE} candidate URLs per episode (an in-run re-discovery included), with
  * the session's cookies (`credentials: "include"` — the extension never reads them), `Referer:
  * https://www.tiktok.com/` and no `Origin`, which a declarativeNetRequest SESSION rule scoped to
  * the extension's own requests sees to ({@link applyRefererRule}; what `downloader_browser`'s
  * Playwright request and yt-dlp send). A URL whose host the manifest does not cover is never
- * requested. A redirect is followed only to a target `onBeforeRedirect` named and the manifest
- * covers (the test origin in test mode), never from https down to http, never in a loop, at most
- * five hops, each requested the same way so the rule applies to it too (`./redirects.js`; the
- * hops are no further candidates: the budget counts requested URLs, as Python's `tried` does);
- * any other redirect counts like a refused URL — the next candidate is tried. The body is judged
- * in memory, in this order:
+ * requested, yet counts in the budget like a refused URL (Python's `tried` holds every candidate
+ * it reached). A redirect is followed only to a target `onBeforeRedirect` named and the manifest
+ * covers (the test origin in test mode), never from https down to http, at most five hops, each
+ * requested the same way so the rule applies to it too (`./redirects.js`; the hops are no further
+ * candidates: the budget counts the candidate URLs, as Python's `tried` does); a redirect to any
+ * other target counts like a refused URL — the next candidate is tried —, while a loop, a sixth
+ * hop or a request that throws fails the episode at once (`download failed: …`, no next mirror, no
+ * fresh list), where Playwright's request raises in Python. The body is judged in memory, in this
+ * order:
  * the transfer (a body shorter or longer than an identity-encoded `Content-Length`, or cut off →
  * `failed`, no next mirror), the content (`lib/mp4.bodyProblem` → next URL), encrypted tracks
  * (`lib/mp4.drmProblem` → `failed-unavailable` with `DRM_MESSAGE`, nothing saved, no other
@@ -109,7 +112,8 @@ const MAX_MESSAGE_LEN = 300;
  *
  * @typedef {object} Attempt Why one candidate URL gave no video (`_Attempt`; host names only).
  * @property {string} reason
- * @property {boolean} unavailable a denied status, a non-video body, a host not allowed
+ * @property {boolean} unavailable a denied status, a non-video body, a host (or a redirect target)
+ *   not allowed: the next candidate, then a fresh list
  * @property {boolean} [incomplete] a truncated transfer
  */
 
@@ -746,11 +750,13 @@ export class Downloader {
     for (const url of candidates) {
       if (tried.size >= MAX_GETS_PER_EPISODE) break;
       const host = hostOf(url);
+      tried.add(url); // the hops of its redirects are no further candidates
       if (!hostCovered(url, this.config.hostPatterns)) {
+        // never requested, yet counted like Python's `tried` (which requests every candidate):
+        // the budget, the fresh-list condition and `cacheSpent` see the same set
         last = { reason: `${host} is not a host this extension may contact`, unavailable: true };
-        continue; // never requested, so not counted either
+        continue;
       }
-      tried.add(url); // a requested URL: the hops of its redirects are no further candidates
       this.config.onStatus?.(`E${String(episode.number).padStart(2, "0")}: ${host}`);
       /** @type {Response} */
       let response;
@@ -762,12 +768,19 @@ export class Downloader {
           allowed: (target) => this.redirectAllowed(target),
         }));
       } catch (error) {
-        // a redirect not followed counts like a denied URL: the next candidate (this URL is spent)
-        last =
-          error instanceof RedirectRefused
-            ? { reason: error.message, unavailable: true }
-            : { reason: `no response (${oneLine(error)}) from ${host}`, unavailable: true };
-        continue;
+        if (error instanceof RedirectRefused && error.kind === "target") {
+          // a redirect to a target the extension may not request counts like a denied URL: the
+          // next candidate (this URL is spent)
+          last = { reason: error.message, unavailable: true };
+          continue;
+        }
+        // a redirect loop, more than MAX_REDIRECTS hops, or a fetch that threw: where Playwright's
+        // request raises in `_try_candidates` — FAILED at once, no next mirror, no fresh list
+        last = {
+          reason: error instanceof RedirectRefused ? error.message : `no response (${oneLine(error)}) from ${host}`,
+          unavailable: false,
+        };
+        break;
       }
       const status = response.status;
       if (status === 429) {

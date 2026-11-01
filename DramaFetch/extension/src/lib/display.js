@@ -277,6 +277,26 @@ function plural(count, one, many) {
 }
 
 /**
+ * `TikTok announces N episodes, M listed` (the list's warning, an incomplete line's group), each
+ * count with its own number: `TikTok anuncia 1 episodio, 2 listados`.
+ * @param {string} total digits
+ * @param {string} listed digits
+ * @returns {string}
+ */
+function announcedEs(total, listed) {
+  return `TikTok anuncia ${total} ${plural(total, "episodio", "episodios")}, ${listed} ${plural(listed, "listado", "listados")}`;
+}
+
+/**
+ * `(N min left)` in Spanish: `falta 1 min`, `faltan 5 min`.
+ * @param {string} minutes digits
+ * @returns {string}
+ */
+function minutesLeftEs(minutes) {
+  return `${plural(minutes, "falta", "faltan")} ${minutes} min`;
+}
+
+/**
  * Lock hints (`isLocked=True; no play address`): the payload's own `key=value` hints are data;
  * only the extension's own hint, {@link NO_PLAY_ADDRESS}, is translated.
  * @param {string} hints
@@ -493,7 +513,7 @@ function lineGroupEs(group) {
       : `faltan los episodios ${match[2]} en la lista de TikTok`;
   }
   match = /^TikTok announces (\d+) episodes, (\d+) listed$/.exec(group);
-  if (match !== null) return `TikTok anuncia ${match[1]} episodios, ${match[2]} listados`;
+  if (match !== null) return announcedEs(String(match[1]), String(match[2]));
   if (group === "no episodes listed") return "no se listó ningún episodio";
   return null;
 }
@@ -697,10 +717,13 @@ const RULES = [
     /^TikTok refused a request at (\d{2}:\d{2}) \((.*)\); DramaFetch waits until (\d{2}:\d{2}) \((\d+) min left\) before contacting TikTok again — (.*)$/s,
     (m, inner) =>
       `TikTok rechazó una solicitud a las ${m[1]} (${inner(String(m[2]))}); DramaFetch espera hasta las ${m[3]} ` +
-      `(faltan ${m[4]} min) antes de volver a contactar a TikTok — ${inner(String(m[5]))}`,
+      `(${minutesLeftEs(String(m[4]))}) antes de volver a contactar a TikTok — ${inner(String(m[5]))}`,
   ],
   [/^cooldown until (\d{2}:\d{2})$/, (m) => `espera obligatoria hasta las ${m[1]}`],
-  [/^until (\d{2}:\d{2}) \((\d+) min left\): (.*)$/s, (m, inner) => `hasta las ${m[1]} (faltan ${m[2]} min): ${inner(String(m[3]))}`],
+  [
+    /^until (\d{2}:\d{2}) \((\d+) min left\): (.*)$/s,
+    (m, inner) => `hasta las ${m[1]} (${minutesLeftEs(String(m[2]))}): ${inner(String(m[3]))}`,
+  ],
   // the report line (report.reportLine) and the stops (pacing.afterResult)
   [/^(?:complete, nothing to do|complete|incomplete): /, (m, inner) => reportLineEs(String(m.input), inner)],
   [
@@ -856,7 +879,7 @@ const RULES = [
   [/^episode (-?\d+) missing \(gap\)$/, (m) => `falta el episodio ${m[1]} (hay un hueco)`],
   [/^episodes (-?\d+)-(-?\d+) missing \(gap\)$/, (m) => `faltan los episodios ${m[1]}-${m[2]} (hay un hueco)`],
   [/^duplicate episode number (-?\d+)$/, (m) => `número de episodio repetido: ${m[1]}`],
-  [/^TikTok announces (\d+) episodes, (\d+) listed$/, (m) => `TikTok anuncia ${m[1]} episodios, ${m[2]} listados`],
+  [/^TikTok announces (\d+) episodes, (\d+) listed$/, (m) => announcedEs(String(m[1]), String(m[2]))],
   [/^(\d+) episodes look locked$/, (m) => `${m[1]} episodios parecen bloqueados`],
   [
     /^no episode list within (\S+) s \(page: (.*)\): if this Chrome is not logged in to TikTok, log in in a normal tab and try again$/s,

@@ -53,7 +53,7 @@ Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../
 - `code-reviewer` — reviews test code (read-only): `Thread.sleep`/implicit waits, status-only assertions, order dependence, selectors outside Targets, leaked secrets, naming.
 - `test-runner` — runs `./mvnw -q verify` (API) or `-Pui -Dheadless.mode=true` (UI, CI only), reads `target/surefire-reports/*.xml` and the Karate summary; `tests="0"` / all skipped = the stack was down, reported as such (`model: haiku`).
 
-Repo-wide agents live in `/.claude/agents/` (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`) and work from the repository root.
+Repo-wide agents live in `/.claude/agents/` (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`, and DramaFetch's `download-guardian` and `vuln-sentinel`) and work from the repository root.
 
 ## Autonomous maintenance
 

@@ -21,7 +21,8 @@ worst series' code (5 > 3 > 4 > 2 > 0).
 
 Exit codes: 0 ok · 2 usage/unsupported URL/some episode failed · 3 login required ·
 4 discovery failed (captcha: try ``--headful``; an HTTP error for the series page) · 5 blocked
-(HTTP 403, or a captcha met while ``--engine browser`` refreshed the list) or rate limited
+(HTTP 403, a JS challenge the default engine met on a video page — never answered —, or a captcha
+met while ``--engine browser`` refreshed the list) or rate limited
 (HTTP 429): wait 30-60 min, then run again to resume — and, with the same code, a refusal of
 ``info``/``download``/``video`` to contact TikTok at all while the global cooldown that such a
 block starts is in force (``dramafetch.cooldown``; no flag skips it, deleting its file does) ·

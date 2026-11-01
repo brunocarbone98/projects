@@ -27,6 +27,7 @@ import {
   RedirectRefused,
   RedirectTracker,
   fetchFollowing,
+  initPageRedirects,
   pageRedirects,
 } from "../src/app/redirects.js";
 
@@ -291,7 +292,7 @@ test("a lookup waits for an event that has not arrived yet, and gives up after i
   assert.equal(subject.waiting.size, 0);
 });
 
-test("the page's tracker listens to onBeforeRedirect for the manifest's hosts only, observing", () => {
+test("the page's tracker listens to onBeforeRedirect for the manifest's hosts in its own tab only, observing", () => {
   /** @type {unknown[][]} */
   const listeners = [];
   const fake = fakeChrome({
@@ -305,18 +306,56 @@ test("the page's tracker listens to onBeforeRedirect for the manifest's hosts on
     },
   });
   try {
-    const page = pageRedirects();
+    assert.equal(pageRedirects(), null); // until the page knows its tab: no redirect followed
+    assert.equal(initPageRedirects(undefined), null); // a tab it cannot name: no listener at all
+    assert.equal(listeners.length, 0);
+    const page = initPageRedirects(7);
     assert.ok(page !== null);
-    assert.equal(pageRedirects(), page); // one per page
+    assert.equal(pageRedirects(), page);
+    assert.equal(initPageRedirects(7), page); // one per page
     assert.equal(listeners.length, 1);
     const [listener, filter, ...rest] = /** @type {unknown[]} */ (listeners[0]);
-    assert.deepEqual(filter, { urls: HOSTS, types: ["xmlhttprequest", "other"] });
+    // the DramaFetch tab only: Chrome never hands it a redirect of the user's TikTok tabs
+    assert.deepEqual(filter, { urls: HOSTS, types: ["xmlhttprequest", "other"], tabId: 7 });
     assert.deepEqual(rest, []); // no "blocking", no "extraHeaders": observation only
     assert.equal(listener, page.listener);
     assert.equal(page.initiator, EXTENSION_ORIGIN);
   } finally {
     fake.restore();
   }
+});
+
+test("a late event of an earlier request of a URL never answers a later request of it", async () => {
+  let clock = 1_000_000;
+  const subject = new RedirectTracker({ initiator: EXTENSION_ORIGIN, waitMs: 50, now: () => clock });
+  const url = "https://v16.tiktok.com/a.mp4";
+  // request 1 redirects to b at 1_000_010; its event comes later than its lookup waited
+  subject.expect(url);
+  clock += 10;
+  const first = subject.take(url);
+  clock += 60;
+  assert.equal(await first, null); // given up on: refused, the next candidate
+  // request 2 of the same URL goes out; request 1's event arrives during its wait
+  subject.expect(url);
+  const second = subject.take(url);
+  subject.record({ url, redirectUrl: "https://v19.tiktokcdn.com/b.mp4", initiator: EXTENSION_ORIGIN, timeStamp: 1_000_010 });
+  clock += 20;
+  subject.record({ url, redirectUrl: "https://v19.tiktokcdn.com/d.mp4", initiator: EXTENSION_ORIGIN, timeStamp: clock });
+  assert.equal(await second, "https://v19.tiktokcdn.com/d.mp4"); // its own redirect, not request 1's
+  assert.equal(subject.targets.size, 0); // nothing stale left behind
+  // a late event of request 2, after request 3 went out, is dropped too; request 3's own counts
+  clock += 1_000;
+  subject.expect(url);
+  subject.record({ url, redirectUrl: "https://v19.tiktokcdn.com/d.mp4", initiator: EXTENSION_ORIGIN, timeStamp: clock - 1_000 });
+  assert.equal(subject.targets.size, 0);
+  subject.record({ url, redirectUrl: "https://v19.tiktokcdn.com/e.mp4", initiator: EXTENSION_ORIGIN, timeStamp: clock - 5 });
+  assert.equal(await subject.take(url), "https://v19.tiktokcdn.com/e.mp4"); // within the clocks' slack
+  // an event without a time stamp is not judged; the requests' stamps stay bounded
+  subject.expect(url);
+  subject.record({ url, redirectUrl: "https://v19.tiktokcdn.com/f.mp4", initiator: EXTENSION_ORIGIN });
+  assert.equal(await subject.take(url), "https://v19.tiktokcdn.com/f.mp4");
+  for (let n = 0; n < 100; n += 1) subject.expect(`${url}?n=${n}`);
+  assert.equal(subject.expectedAt.size, MAX_TRACKED_REDIRECTS);
 });
 
 // ---------------------------------------------------------------------- following redirects
@@ -372,7 +411,7 @@ test("the budget counts requested URLs, not the hops of their redirects", async 
   assert.equal(subject.refreshes, 0); // the budget is spent: no fresh list either
 });
 
-test("a redirect is refused — the next URL — when its target is unknown, uncovered, a downgrade or a loop", async () => {
+test("a redirect is refused — the next URL — when its target is unknown, uncovered or a downgrade", async () => {
   const redirects = tracker();
   const good = "https://v9.tiktok.com/good.mp4";
   /**
@@ -409,19 +448,12 @@ test("a redirect is refused — the next URL — when its target is unknown, unc
   assert.ok(!away.log.some((url) => url.includes("example.com")));
 
   const downgrade = { "https://v1.tiktok.com/a.mp4": { to: "http://v2.tiktok.com/b.mp4?sig=secret" } };
+  assert.deepEqual(await refusal(downgrade, "https://v1.tiktok.com/a.mp4"), ["https://v1.tiktok.com/a.mp4", good]);
   const down = await reasonOf(downgrade, "https://v1.tiktok.com/a.mp4");
   assert.equal(down.message, `${UNAVAILABLE_MESSAGE} (a redirect from v1.tiktok.com down to http on v2.tiktok.com, not followed)`);
   assert.deepEqual(down.log, ["https://v1.tiktok.com/a.mp4"]);
-
-  const loop = {
-    "https://v1.tiktok.com/a.mp4": { to: "https://v2.tiktok.com/b.mp4" },
-    "https://v2.tiktok.com/b.mp4": { to: "https://v1.tiktok.com/a.mp4" },
-  };
-  const looped = await reasonOf(loop, "https://v1.tiktok.com/a.mp4");
-  assert.equal(looped.message, `${UNAVAILABLE_MESSAGE} (a redirect loop at v2.tiktok.com, not followed)`);
-  assert.deepEqual(looped.log, ["https://v1.tiktok.com/a.mp4", "https://v2.tiktok.com/b.mp4"]);
   // no message names a path or a query: the hosts only
-  for (const message of [away.message, down.message, looped.message]) assert.ok(!/secret|sig=|token|\.mp4/.test(message), message);
+  for (const message of [away.message, down.message]) assert.ok(!/secret|sig=|token|\.mp4/.test(message), message);
 
   // without a tracker (where chrome.webRequest does not exist) no redirect is ever followed
   const blind = network({ "https://v1.tiktok.com/a.mp4": { to: "https://v2.tiktok.com/b.mp4" }, "https://v2.tiktok.com/b.mp4": videoResponse }, null);
@@ -464,6 +496,68 @@ test("five redirects are followed, a sixth is refused", async () => {
   );
   assert.equal(six.log.length, 6); // the sixth target is never requested
   assert.equal(redirects.targets.size, 0); // its event was claimed all the same
+});
+
+test("a redirect loop, a sixth hop or a request that throws fails the episode at once: no next URL, no fresh list", async () => {
+  const redirects = tracker();
+  const good = "https://v9.tiktok.com/good.mp4";
+  const hops = (/** @type {number} */ n) => `https://h${n}.tiktokcdn.com/v.mp4`;
+  /** @type {Record<string, Route>} */
+  const routes = {
+    // a loop: A -> B -> A
+    "https://v1.tiktok.com/a.mp4": { to: "https://v2.tiktok.com/b.mp4" },
+    "https://v2.tiktok.com/b.mp4": { to: "https://v1.tiktok.com/a.mp4" },
+    [good]: videoResponse,
+    // "https://v3.tiktok.com/gone.mp4" has no route: the request throws ("Failed to fetch")
+  };
+  for (let n = 0; n <= MAX_REDIRECTS; n += 1) routes[hops(n)] = { to: hops(n + 1) }; // six hops and more
+  const net = network(routes, redirects);
+  let listings = 0;
+  const { subject, saved } = downloader({
+    fetch: net.fetchFn,
+    redirects,
+    thumbnail: "none",
+    // a fresh list repeating the same signed URLs (they stay the same until they expire)
+    rediscover: async () => {
+      listings += 1;
+      return series([episode(1, ["https://v1.tiktok.com/a.mp4", good])]);
+    },
+  });
+  // Python: Playwright's request raises ("Max redirect count exceeded", a network error) and
+  // `_try_candidates` re-raises it: FAILED, no next mirror, no `_refresh`
+  const looped = await subject.download(episode(1, ["https://v1.tiktok.com/a.mp4", good]), CONTEXT);
+  assert.equal(looped.status, "failed");
+  assert.equal(looped.message, "download failed: a redirect loop at v2.tiktok.com, not followed");
+  assert.deepEqual(net.log, ["https://v1.tiktok.com/a.mp4", "https://v2.tiktok.com/b.mp4"]); // never the good one
+
+  net.log.length = 0;
+  const chained = await subject.download(episode(2, [hops(0), good]), CONTEXT);
+  assert.equal(chained.status, "failed");
+  assert.equal(chained.message, "download failed: more than 5 redirects from h0.tiktokcdn.com, not followed");
+  assert.deepEqual(net.log, [0, 1, 2, 3, 4, 5].map(hops)); // the sixth target never, nor the next URL
+
+  net.log.length = 0;
+  const thrown = await subject.download(episode(3, ["https://v3.tiktok.com/gone.mp4", good]), CONTEXT);
+  assert.equal(thrown.status, "failed");
+  assert.equal(thrown.message, "download failed: no response (Failed to fetch) from v3.tiktok.com");
+  assert.deepEqual(net.log, ["https://v3.tiktok.com/gone.mp4"]);
+
+  assert.equal(listings, 0); // the series was never listed again
+  assert.equal(subject.refreshes, 0);
+  assert.deepEqual(saved, []);
+  // the refusals say why, so the downloader can tell them from a target it may not request
+  await assert.rejects(
+    fetchFollowing("https://v1.tiktok.com/a.mp4", { fetch: net.fetchFn, init: { redirect: "manual" }, redirects, allowed: () => true }),
+    (error) => error instanceof RedirectRefused && error.kind === "loop",
+  );
+  await assert.rejects(
+    fetchFollowing(hops(0), { fetch: net.fetchFn, init: { redirect: "manual" }, redirects, allowed: () => true }),
+    (error) => error instanceof RedirectRefused && error.kind === "limit",
+  );
+  await assert.rejects(
+    fetchFollowing("https://v1.tiktok.com/a.mp4", { fetch: net.fetchFn, init: { redirect: "manual" }, redirects, allowed: () => false }),
+    (error) => error instanceof RedirectRefused && error.kind === "target",
+  );
 });
 
 test("in test mode a redirect is followed on the test origin only", async () => {
@@ -644,6 +738,33 @@ test("a re-discovery that failed is not tried again for that series in the run",
   assert.equal(calls, 1);
   assert.equal(subject.refreshes, 1);
   assert.deepEqual(log, ["https://v1.tiktok.com/3.mp4"]);
+});
+
+test("URLs on hosts the manifest does not cover count in the budget, never requested: Python's fresh-list condition", async () => {
+  const covered = "https://v16-webapp-prime.tiktok.com/v/1.mp4";
+  const elsewhere = [1, 2, 3].map((n) => `https://v${n}.newcdn.example/v/1.mp4`);
+  /** @type {string[]} */
+  const log = [];
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (input) => {
+      log.push(String(input));
+      return denied();
+    }
+  );
+  const lister = relister([new Map([[1, ["https://v16-webapp-prime.tiktok.com/v/fresh.mp4"]]])]);
+  const { subject } = downloader({ fetch: fetchFn, redirects: null, rediscover: lister.rediscover, thumbnail: "none" });
+  // Python requests all four, its budget is then spent and it lists nothing again
+  const result = await subject.download(episode(1, [covered, ...elsewhere]), CONTEXT);
+  assert.equal(result.status, "failed-unavailable");
+  assert.equal(result.message, `${UNAVAILABLE_MESSAGE} (v3.newcdn.example is not a host this extension may contact)`);
+  assert.deepEqual(log, [covered]);
+  assert.equal(lister.calls(), 0);
+  // the other way round: three such URLs first leave room for one TikTok GET, as in Python
+  log.length = 0;
+  const second = await subject.download(episode(2, [...elsewhere, covered, "https://v19.tiktok.com/v/1.mp4"]), CONTEXT);
+  assert.equal(second.message, `${UNAVAILABLE_MESSAGE} (HTTP 403 from v16-webapp-prime.tiktok.com)`);
+  assert.deepEqual(log, [covered]);
+  assert.equal(lister.calls(), 0);
 });
 
 test("cacheSpent: tried or expired, all of them; never for an entry without URLs or none at all", () => {

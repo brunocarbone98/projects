@@ -40,7 +40,7 @@
     "description": "Cooldown banner title."
   },
   "cooldownLeft": {
-    "message": "Faltan $minutes$ min — nada contacta a TikTok hasta entonces.",
+    "message": "Tiempo restante: $minutes$ min — nada contacta a TikTok hasta entonces.",
     "description": "Cooldown countdown.",
     "placeholders": {
       "minutes": {
@@ -186,7 +186,7 @@
     }
   },
   "pauseInForce": {
-    "message": "$text$ — faltan $seconds$ s",
+    "message": "$text$ — tiempo restante: $seconds$ s",
     "description": "The pause in force (the text is the engine's).",
     "placeholders": {
       "text": {

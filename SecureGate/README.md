@@ -180,6 +180,7 @@ and surefire reports as the `securegate-reports` artifact.
 - Agents: the project subagents in [`.claude/agents/`](./.claude/agents) (`api-test-engineer`,
   `ui-test-engineer`, `bdd-engineer`, `devsecops`, `code-reviewer`, `test-runner`) and the repo-wide
   `qa-regression`, `sre-patrol`, `repo-steward`, `security-auditor` and `docs-keeper` in
-  [`../.claude/agents/`](../.claude/agents).
+  [`../.claude/agents/`](../.claude/agents) (where DramaFetch's `download-guardian` and
+  `vuln-sentinel` live too).
 - Operations manual (roster, shifts, runtimes, guardrails, incident flow):
   [`../OPERATIONS.md`](../OPERATIONS.md) · live-interview runbook: [`../DEMO.md`](../DEMO.md).

@@ -7,7 +7,8 @@ against the fake TikTok server:
   time (the app page's own Resource Timing: no two of its requests overlap), and none while a job
   runs;
 - the DramaFetch tab is never discardable while a job runs or waits, and is again once nothing
-  does (after the queue, after a Stop) — `chrome.tabs` of the app page itself;
+  does (after the queue, after a Stop) — `chrome.tabs` of the app page itself; a second,
+  read-only DramaFetch tab never queues the popup's request, and stays discardable;
 - with Chrome's UI in Spanish (`LANGUAGE=es`: how Chrome on Linux picks its UI language), every
   outcome the fake offers reads in Spanish on screen — no English template word outside the data
   (series and file names, hosts, the payload's `key=value` hints) — while the history keeps the
@@ -22,7 +23,7 @@ import itertools
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -40,6 +41,9 @@ from .fake_tiktok import (
     FakeTikTok,
     RequestRecord,
 )
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Page
 
 pytestmark = [
     pytest.mark.integration,
@@ -169,7 +173,12 @@ def _assert_one_at_a_time(entries: list[dict[str, Any]]) -> None:
 
 def _auto_discardable(ext: ExtensionHarness) -> bool:
     """`autoDiscardable` of the DramaFetch tab, as `chrome.tabs` tells the app page itself."""
-    value = ext.page.evaluate("async () => (await chrome.tabs.getCurrent()).autoDiscardable")
+    return _discardable(ext.page)
+
+
+def _discardable(page: Page) -> bool:
+    """`autoDiscardable` of the tab of `page`, an extension page, as `chrome.tabs` tells it."""
+    value = page.evaluate("async () => (await chrome.tabs.getCurrent()).autoDiscardable")
     assert isinstance(value, bool)
     return value
 
@@ -194,6 +203,16 @@ def _assert_spanish(texts: list[str]) -> None:
 def _texts(ext: ExtensionHarness, selector: str) -> list[str]:
     """The visible text of every element `selector` matches."""
     return [text for text in ext.page.locator(selector).all_inner_texts() if text.strip()]
+
+
+def _titles(ext: ExtensionHarness, selector: str) -> list[str]:
+    """The tooltip (`title`) of every element inside `selector`: shown on hover, so text too."""
+    titles: list[str] = ext.page.evaluate(
+        "(selector) => [...document.querySelectorAll(`${selector} [title]`)]"
+        ".map((element) => element.title).filter((title) => title.trim())",
+        selector,
+    )
+    return titles
 
 
 def _run(ext: ExtensionHarness, links: str, *, watch_pauses: bool = False) -> list[str]:
@@ -222,6 +241,7 @@ def _engine_texts(ext: ExtensionHarness) -> list[str]:
     texts = _texts(ext, "#result-table tbody tr")
     texts += _texts(ext, "#report-lines li")
     texts += _texts(ext, "#batch-table tbody tr")
+    texts += _titles(ext, "#batch-table")  # its tooltips too (the badges' titles are status codes)
     texts += _texts(ext, "#input-status")
     if ext.page.locator("#cooldown-banner").is_visible():
         texts += _texts(ext, "#cooldown-banner")
@@ -322,6 +342,30 @@ def test_the_app_tab_is_never_discarded_while_a_job_runs_or_waits(tmp_path: Path
         assert ext.history()[0]["stopped"] == "stopped by you"  # stored in English
         ext.wait_for(lambda: _auto_discardable(ext) is True, 5, "not discardable after a Stop")
         assert server.media_requests  # the jobs really ran
+
+
+def test_a_read_only_dramafetch_tab_queues_nothing_and_stays_discardable(tmp_path: Path) -> None:
+    """A second DramaFetch tab is read-only — the first one holds the engine. The popup's
+    **Download this series** reaches every DramaFetch tab: the engine's lists the series, the
+    read-only one queues nothing, and neither stays undiscardable once the listing is over."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        second = ext.context.new_page()
+        second.goto(ext.app_url)
+        ext.wait_for(lambda: second.locator("#duplicate-banner").is_visible(), 10, "no banner")
+        assert _discardable(second) is True
+        popup = ext.context.new_page()
+        popup.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
+        jobs = ext.finished_jobs()
+        popup.evaluate(
+            "(id) => chrome.runtime.sendMessage({type: 'dramafetch:open', load: id})", SERIES_ID
+        )
+        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "nothing listed")
+        assert ext.page.locator("#episode-table tbody tr").count() == 5  # the engine listed it
+        assert second.locator("#queue-list li").count() == 0
+        assert second.locator("#queue-card").is_hidden()
+        assert second.locator("#app-status").get_attribute("data-finished") == "0"
+        assert _discardable(second) is True
+        ext.wait_for(lambda: _auto_discardable(ext) is True, 5, "the engine's tab stayed pinned")
 
 
 def test_the_spanish_ui_shows_every_outcome_in_spanish(

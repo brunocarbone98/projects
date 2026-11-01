@@ -16,8 +16,11 @@
  * not a URL of the chain already, and at most {@link MAX_REDIRECTS} hops from the URL requested
  * (what the Python browser engine's Playwright follows, `max_redirects=5`). Anything else is
  * {@link RedirectRefused}, whose message names hosts only — never a path or a query string, which
- * carry signatures. The hops of one URL are not further candidate URLs: the caller's budget counts
- * the URLs it requested, as Python's `tried` does.
+ * carry signatures — and whose `kind` tells a target the extension may not request (`target`)
+ * from a loop or a chain longer than {@link MAX_REDIRECTS} (`loop`, `limit`: where Playwright's
+ * request raises). The hops of one URL are not further candidate URLs: the caller's budget counts
+ * the URLs it requested, as Python's `tried` does. The listener is registered for the DramaFetch
+ * tab only ({@link initPageRedirects}): Chrome never hands it a redirect of another tab.
  */
 
 /** Redirects followed per requested URL, at most (`downloader_browser.MAX_REDIRECTS`). */
@@ -50,12 +53,25 @@ export function isRedirect(response) {
   return response.type === "opaqueredirect" || response.status === 0;
 }
 
+/**
+ * Why a redirect is not followed: `target` — no target known, one the extension may not request,
+ * or https down to http (like a refused URL: the next candidate); `loop` — the chain came back to
+ * one of its URLs; `limit` — more than {@link MAX_REDIRECTS} hops. The last two are where
+ * Playwright's request raises (`Max redirect count exceeded`): the episode fails.
+ * @typedef {"target" | "loop" | "limit"} RefusalKind
+ */
+
 /** A redirect the extension does not follow; the message names hosts only. */
 export class RedirectRefused extends Error {
-  /** @param {string} message */
-  constructor(message) {
+  /**
+   * @param {string} message
+   * @param {RefusalKind} [kind]
+   */
+  constructor(message, kind = "target") {
     super(message);
     this.name = "RedirectRefused";
+    /** @type {RefusalKind} */
+    this.kind = kind;
   }
 }
 
@@ -64,38 +80,62 @@ export class RedirectRefused extends Error {
  * @property {string} url the URL that answered the redirect
  * @property {string} redirectUrl where it points
  * @property {string} [initiator] the origin that made the request
+ * @property {number} [timeStamp] when Chrome saw the redirect, in milliseconds since the epoch
  */
 
 /**
  * The redirects answered to the extension's own requests, `url → redirectUrl`, from the moment the
  * request is about to go out ({@link expect}) until its lookup ({@link take}) claims it. Only events
- * whose initiator is the extension itself count; at most {@link MAX_TRACKED_REDIRECTS} unclaimed
- * ones are kept.
+ * whose initiator is the extension itself count, and only the current request's: an event Chrome
+ * stamped before the request of its URL went out belongs to an earlier request of that URL (its
+ * lookup gave up on it) and is dropped. At most {@link MAX_TRACKED_REDIRECTS} unclaimed ones are
+ * kept.
  */
 export class RedirectTracker {
   /**
-   * @param {{initiator: string, waitMs?: number, maxEntries?: number}} options `initiator` the
-   *   extension's origin, `chrome-extension://<id>`
+   * @param {{initiator: string, waitMs?: number, maxEntries?: number, now?: () => number}} options
+   *   `initiator` the extension's origin, `chrome-extension://<id>`; `now` the clock the requests
+   *   are stamped with, `Date.now` by default (Chrome stamps its events in epoch milliseconds too)
    */
   constructor(options) {
     this.initiator = options.initiator;
     this.waitMs = options.waitMs ?? REDIRECT_EVENT_WAIT_MS;
     this.maxEntries = Math.max(1, options.maxEntries ?? MAX_TRACKED_REDIRECTS);
+    this.now = options.now ?? (() => Date.now());
     /** @type {Map<string, string>} requested URL → where it redirected, oldest first */
     this.targets = new Map();
     /** @type {Map<string, (target: string) => void>} the lookup waiting for a URL's event */
     this.waiting = new Map();
+    /** @type {Map<string, number>} requested URL → when its latest request was about to go out */
+    this.expectedAt = new Map();
     /** The `onBeforeRedirect` listener. @param {RedirectEvent} details */
     this.listener = (details) => this.record(details);
   }
 
   /**
-   * One `onBeforeRedirect` event: kept when the extension itself made the request.
+   * Whether an event belongs to an earlier request of its URL than the one expected now: Chrome
+   * stamped it before that request went out. A late event of an earlier request is at least the
+   * wait older than the next request of its URL (that request's lookup waited for it), the
+   * current request's never older: half the wait leaves room for the clocks of Chrome's processes.
+   * An event without a time stamp is not judged.
+   * @param {RedirectEvent} details
+   * @returns {boolean}
+   */
+  stale(details) {
+    const expected = this.expectedAt.get(details.url);
+    if (expected === undefined || typeof details.timeStamp !== "number") return false;
+    return details.timeStamp < expected - this.waitMs / 2;
+  }
+
+  /**
+   * One `onBeforeRedirect` event: kept when the extension itself made the request and it is the
+   * current request's.
    * @param {RedirectEvent} details
    */
   record(details) {
     if (details.initiator !== this.initiator) return;
     if (typeof details.url !== "string" || typeof details.redirectUrl !== "string") return;
+    if (this.stale(details)) return; // an earlier request's event, arrived late: never this one's answer
     const waiter = this.waiting.get(details.url);
     if (waiter !== undefined) {
       this.waiting.delete(details.url);
@@ -111,12 +151,18 @@ export class RedirectTracker {
   }
 
   /**
-   * A request of `url` is about to go out: forget where an earlier one redirected, so only this
-   * request's event can answer its lookup.
+   * A request of `url` is about to go out: forget where an earlier one redirected and note when
+   * this one left, so only this request's event can answer its lookup ({@link stale}).
    * @param {string} url
    */
   expect(url) {
     this.targets.delete(url);
+    this.expectedAt.delete(url);
+    this.expectedAt.set(url, this.now());
+    for (const oldest of this.expectedAt.keys()) {
+      if (this.expectedAt.size <= this.maxEntries) break;
+      this.expectedAt.delete(oldest);
+    }
   }
 
   /**
@@ -151,16 +197,20 @@ export class RedirectTracker {
 
 /**
  * A tracker listening to `chrome.webRequest.onBeforeRedirect` for the URLs the manifest's host
- * permissions cover (observation only: no `blocking`, no `extraHeaders`).
+ * permissions cover, in the tab `tabId` only — the DramaFetch tab, whose page makes the
+ * extension's own requests: Chrome then never hands it a redirect of another tab, the user's
+ * TikTok tabs and the discovery's included (observation only: no `blocking`, no `extraHeaders`).
  * @param {readonly string[]} hostPatterns
+ * @param {number} tabId
  * @returns {RedirectTracker}
  */
-export function chromeRedirectTracker(hostPatterns) {
+export function chromeRedirectTracker(hostPatterns, tabId) {
   const tracker = new RedirectTracker({ initiator: chrome.runtime.getURL("").replace(/\/+$/, "") });
   if (hostPatterns.length > 0) {
     chrome.webRequest.onBeforeRedirect.addListener(tracker.listener, {
       urls: [...hostPatterns],
       types: ["xmlhttprequest", "other"],
+      tabId,
     });
   }
   return tracker;
@@ -170,14 +220,27 @@ export function chromeRedirectTracker(hostPatterns) {
 let pageTracker = null;
 
 /**
- * The extension page's one tracker, registered on first use (before the page's first request of
- * its own), or null where `chrome.webRequest` does not exist (Node: no redirect is then followed).
+ * Register the page's one tracker for its tab (the DramaFetch tab calls it once it knows its tab
+ * id, before its first request of its own); the tracker, or null where `chrome.webRequest` does
+ * not exist or the tab is unknown (no redirect is then followed).
+ * @param {number | undefined} tabId
+ * @returns {RedirectTracker | null}
+ */
+export function initPageRedirects(tabId) {
+  if (pageTracker !== null) return pageTracker;
+  if (tabId === undefined || typeof chrome === "undefined" || chrome.webRequest?.onBeforeRedirect === undefined) {
+    return null;
+  }
+  pageTracker = chromeRedirectTracker(chrome.runtime.getManifest().host_permissions ?? [], tabId);
+  return pageTracker;
+}
+
+/**
+ * The extension page's one tracker, or null until {@link initPageRedirects} registered it — and
+ * wherever it could not (Node, no tab): no redirect is then followed.
  * @returns {RedirectTracker | null}
  */
 export function pageRedirects() {
-  if (pageTracker !== null) return pageTracker;
-  if (typeof chrome === "undefined" || chrome.webRequest?.onBeforeRedirect === undefined) return null;
-  pageTracker = chromeRedirectTracker(chrome.runtime.getManifest().host_permissions ?? []);
   return pageTracker;
 }
 
@@ -193,7 +256,8 @@ export function pageRedirects() {
 /**
  * GET `url`, following a redirect only to a known, allowed target, at most `maxRedirects` hops
  * (each requested the same way); the first answer that is no redirect. A fetch that throws (a hop
- * included) throws as it is; a redirect not followed throws {@link RedirectRefused}.
+ * included) throws as it is; a redirect not followed throws {@link RedirectRefused} — `limit`
+ * past `maxRedirects` hops, `loop` back to a URL of the chain, `target` for the rest.
  * @param {string} url
  * @param {FollowOptions} options
  * @returns {Promise<{response: Response, url: string, hops: number}>}
@@ -209,7 +273,7 @@ export async function fetchFollowing(url, options) {
     const from = hostOf(current);
     const target = options.redirects === null ? null : await options.redirects.take(current);
     if (hops >= maxRedirects) {
-      throw new RedirectRefused(`more than ${maxRedirects} redirects from ${hostOf(url)}, not followed`);
+      throw new RedirectRefused(`more than ${maxRedirects} redirects from ${hostOf(url)}, not followed`, "limit");
     }
     /** @type {URL | null} */
     let parsed = null;
@@ -223,7 +287,7 @@ export async function fetchFollowing(url, options) {
       throw new RedirectRefused(`a redirect from ${from} down to ${parsed.protocol.replace(/:$/, "")} on ${hostOf(target)}, not followed`);
     }
     if (!options.allowed(target)) throw new RedirectRefused(`a redirect from ${from}, not followed`);
-    if (chain.has(target)) throw new RedirectRefused(`a redirect loop at ${from}, not followed`);
+    if (chain.has(target)) throw new RedirectRefused(`a redirect loop at ${from}, not followed`, "loop");
     chain.add(target);
     current = target;
   }

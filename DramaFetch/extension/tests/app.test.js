@@ -441,17 +441,25 @@ test("download: verified bytes, one cover GET, the cover embedded, saved under i
   assert.equal(log.length, 2);
 });
 
-test("download: 403 moves on, at most 4 media GETs, a host outside the manifest never requested", async () => {
+test("download: 403 moves on, at most 4 URLs per episode; a host outside the manifest counts, never requested", async () => {
   /** @type {string[]} */
   const log = [];
-  const urls = ["https://evil.example.com/a.mp4", ...[1, 2, 3, 4, 5].map((n) => `https://v${n}.tiktok.com/v.mp4`)];
+  const urls = [1, 2, 3, 4, 5].map((n) => `https://v${n}.tiktok.com/v.mp4`);
   const subject = downloader({ fetch: fakeFetch({ "https://v": () => new Response("no", { status: 403 }) }, log) });
   subject.config.rediscover = async () => series([]);
   const result = await subject.download(episode(1, { urls }), CONTEXT);
   assert.equal(result.status, "failed-unavailable");
-  assert.equal(log.length, 4);
-  assert.ok(!log.some((url) => url.includes("example.com")));
+  assert.deepEqual(log, urls.slice(0, 4)); // the fifth never
   assert.equal(result.message, "no playable stream: locked, region-restricted or not logged in (HTTP 403 from v4.tiktok.com)");
+
+  // a URL whose host the manifest does not cover is never requested, yet takes its place in the
+  // budget like any URL Python's `tried` holds: three TikTok GETs after it, as Python makes
+  log.length = 0;
+  const first = await subject.download(episode(2, { urls: ["https://evil.example.com/a.mp4", ...urls] }), CONTEXT);
+  assert.equal(first.status, "failed-unavailable");
+  assert.deepEqual(log, urls.slice(0, 3));
+  assert.ok(!log.some((url) => url.includes("example.com")));
+  assert.equal(first.message, "no playable stream: locked, region-restricted or not logged in (HTTP 403 from v3.tiktok.com)");
 });
 
 test("download: a 429 is a stop, a truncated body fails with no next mirror, DRM is never saved", async () => {

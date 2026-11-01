@@ -714,6 +714,24 @@ test("the list's warnings and the cooldown read in Spanish", () => {
   assert.match(spanish, /\(faltan 30 min\) antes de volver a contactar a TikTok — la extensión no tiene forma de levantarla antes de tiempo$/);
 });
 
+test("a count of one reads in the singular: one episode announced or listed, one minute left", () => {
+  const ep = (/** @type {number} */ number) => episode(number);
+  assert.deepEqual(catalogWarnings([ep(1)], 30).map(es), ["TikTok anuncia 30 episodios, 1 listado"]);
+  assert.deepEqual(catalogWarnings([ep(1), ep(2)], 1).map(es), ["TikTok anuncia 1 episodio, 2 listados"]);
+  assert.deepEqual(catalogWarnings([ep(1), ep(2)], 30).map(es), ["TikTok anuncia 30 episodios, 2 listados"]);
+  assert.equal(
+    es("incomplete: 2 of 2 — TikTok announces 1 episodes, 2 listed"),
+    "incompleta: 2 de 2 — TikTok anuncia 1 episodio, 2 listados",
+  );
+  const now = 1_800_000_000;
+  const { cooldown } = makeCooldown(CHALLENGE_MESSAGE, "discovery", { now });
+  const last = es(cooldownMessage(cooldown, { now: now + 29 * 60 + 50 }));
+  assert.match(last, / \(falta 1 min\) antes de volver a contactar a TikTok — /);
+  assert.match(es(cooldownMessage(cooldown, { now: now + 28 * 60 })), / \(faltan 2 min\) /);
+  assert.match(es(cooldownSummary(cooldown, { now: now + 29 * 60 + 50 })), /^hasta las \d{2}:\d{2} \(falta 1 min\): /);
+  assert.match(es(`not started: batch stopped in Zafiro (${cooldownMessage(cooldown, { now: now + 1790 })})`), /\(falta 1 min\)/);
+});
+
 test("every exported message constant reads in Spanish; the remembered DRM verdict names the checkbox", () => {
   const constants = messageConstants();
   assert.ok(constants.length >= 20);

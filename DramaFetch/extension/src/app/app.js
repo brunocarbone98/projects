@@ -26,6 +26,7 @@ import { doneEntries, readState } from "../lib/state.js";
 import { parseSeriesList } from "../lib/urls.js";
 import { closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
 import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine } from "./downloader.js";
+import { initPageRedirects } from "./redirects.js";
 import { StopRequested, checkCooldown, episodeContext, resolve, restBetweenJobs, runBatch, runSelectionJob } from "./engine.js";
 import { displayLabels, displayLanguage, localize, t } from "./i18n.js";
 import {
@@ -424,7 +425,7 @@ function renderBatchTable(runs) {
     body.append(
       el("tr", { attrs: { "data-series-id": run.ref.seriesId } }, [
         el("td", { text: report.name || run.series?.name || run.ref.seriesId }),
-        el("td", { text: shownText(status), title: status }),
+        el("td", { text: shownText(status), attrs: { "data-status": status } }), // the stored English: data, not shown
         el("td", { text: String(report.listed) }),
         el("td", { text: String(report.done) }),
         el("td", { text: String(report.onDisk) }),
@@ -463,12 +464,17 @@ function renderAppStatus() {
   $("queue-card").hidden = app.queue.length === 0;
   updateButtons();
   // never discarded while a job runs or waits; discardable again once the queue is done (a Stop
-  // and an error end the job too)
-  void keeper.keep(app.tabId, running || app.queue.length > 0);
+  // and an error end the job too). Only the engine's tab ever runs one: a read-only tab stays
+  // discardable.
+  void keeper.keep(app.tabId, app.owner && (running || app.queue.length > 0));
 }
 
-/** @param {Omit<Job, "id">} job */
+/**
+ * Queue a job — in the engine's tab only: a read-only tab could never run it.
+ * @param {Omit<Job, "id">} job
+ */
 function enqueue(job) {
+  if (!app.owner) return;
   app.queue.push({ ...job, id: app.nextJobId++ });
   renderAppStatus();
   void pump();
@@ -987,10 +993,12 @@ async function setupTestMode() {
 // ------------------------------------------------------------------------------- start
 
 /**
- * Put a link into the box and list it (the popup's "Download this series").
+ * Put a link into the box and list it (the popup's "Download this series") — in the engine's tab
+ * only: the popup's request reaches every DramaFetch tab, and the engine's lists it.
  * @param {string} link
  */
 function loadFromOutside(link) {
+  if (!app.owner) return;
   textarea("links").value = link;
   onLoad();
 }
@@ -1035,6 +1043,7 @@ async function main() {
   const tab = await chrome.tabs.getCurrent().catch(() => undefined);
   app.tabId = tab?.id;
   app.windowId = tab?.windowId;
+  initPageRedirects(app.tabId); // the redirects of this tab's own requests, before its first one
   app.settings = await loadSettings();
   app.testSettings = await loadTestSettings();
   const stored = await loadPacing();

@@ -158,7 +158,7 @@ weekly grouped dependency PRs for npm and pip (label `dependencies`).
 - Agents: the project subagents in [`.claude/agents/`](./.claude/agents) (`frontend-dev`,
   `backend-dev`, `python-services`, `code-reviewer`, `test-runner`) and the repo-wide ones in
   [`../.claude/agents/`](../.claude/agents) (`sre-patrol`, `repo-steward`, `qa-regression`,
-  `security-auditor`, `docs-keeper`). The helper scripts in [`../.claude/scripts/`](../.claude/scripts)
+  `security-auditor`, `docs-keeper`, and DramaFetch's `download-guardian` and `vuln-sentinel`). The helper scripts in [`../.claude/scripts/`](../.claude/scripts)
   start PostgreSQL 16 and the API without Docker and run every check with one summary table.
 - Operations manual (roster, shifts, runtimes, guardrails, incident flow):
   [`../OPERATIONS.md`](../OPERATIONS.md) · live-interview runbook: [`../DEMO.md`](../DEMO.md).
