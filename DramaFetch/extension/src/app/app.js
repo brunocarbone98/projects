@@ -523,6 +523,10 @@ async function runJob(job) {
       }
     }
     entry["refreshes"] = engine.downloader.refreshes;
+    const shown = app.loaded;
+    if (job.kind !== "load" && shown !== null && job.refs.some((ref) => ref.seriesId === shown.series.seriesId)) {
+      await renderSeries(shown.series, engine.view); // the "on disk" badges now (Chrome's history only)
+    }
   } catch (error) {
     if (error instanceof StopRequested) {
       entry["error"] = stop = t("stoppedByYou");
@@ -599,6 +603,12 @@ async function renderSeries(series, view) {
   warnings.textContent = "";
   for (const warning of series.warnings) warnings.append(el("li", { text: warning }));
   const body = /** @type {HTMLTableSectionElement} */ ($("episode-table").querySelector("tbody"));
+  /** @type {Map<string, HTMLImageElement>} covers already shown, by URL: moved, never fetched again */
+  const shownCovers = new Map();
+  for (const image of body.querySelectorAll("img.cover")) {
+    const src = image.getAttribute("src");
+    if (src) shownCovers.set(src, /** @type {HTMLImageElement} */ (image));
+  }
   body.textContent = "";
   const patterns = chrome.runtime.getManifest().host_permissions ?? [];
   for (const episode of [...series.episodes].sort((a, b) => a.number - b.number)) {
@@ -609,8 +619,10 @@ async function renderSeries(series, view) {
     box.addEventListener("change", updateSelection);
     const cover = el("td");
     if (episode.coverUrl && hostCovered(episode.coverUrl, patterns)) {
+      const shown = shownCovers.get(episode.coverUrl);
+      shownCovers.delete(episode.coverUrl); // an element lives in one row only
       cover.append(
-        el("img", { className: "cover", attrs: { src: episode.coverUrl, alt: "", loading: "lazy", referrerpolicy: "no-referrer" } }),
+        shown ?? el("img", { className: "cover", attrs: { src: episode.coverUrl, alt: "", loading: "lazy", referrerpolicy: "no-referrer" } }),
       );
     }
     const access = el("td", {}, [accessBadge(episode)]);

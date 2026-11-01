@@ -22,6 +22,8 @@ export const PACING_KEY = "pacing";
 export const SERIES_KEY_PREFIX = "series:";
 /** How many past runs the history keeps. */
 export const HISTORY_LIMIT = 20;
+/** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB of the 10 MB quota. */
+export const HISTORY_MAX_BYTES = 1024 * 1024;
 
 /**
  * @typedef {object} Settings What the user may set (Settings panel); the pauses only upwards.
@@ -306,11 +308,46 @@ export async function readHistory() {
 }
 
 /**
- * Put a finished run first in the history and keep the last {@link HISTORY_LIMIT}.
+ * The history to store: `entries` (most recent first) cut to the last {@link HISTORY_LIMIT} runs
+ * and to {@link HISTORY_MAX_BYTES} of UTF-8 JSON, the oldest runs dropped first; the most recent
+ * run is always kept. `chrome.storage.local` holds 10 MB without the `unlimitedStorage`
+ * permission, and the per-series states — the resume memory — must never lose that room to the
+ * history.
+ * @param {readonly Record<string, unknown>[]} entries
+ * @param {number} [limit]
+ * @param {number} [maxBytes]
+ * @returns {Record<string, unknown>[]}
+ */
+export function trimHistory(entries, limit = HISTORY_LIMIT, maxBytes = HISTORY_MAX_BYTES) {
+  const encoder = new TextEncoder();
+  /** @type {Record<string, unknown>[]} */
+  const kept = [];
+  let bytes = 2; // the brackets of the array
+  for (const entry of entries.slice(0, limit)) {
+    const size = encoder.encode(JSON.stringify(entry)).length + 1; // and its comma
+    if (kept.length > 0 && bytes + size > maxBytes) break;
+    kept.push(entry);
+    bytes += size;
+  }
+  return kept;
+}
+
+/**
+ * Put a finished run first in the history ({@link trimHistory}). Should the storage still refuse
+ * it (the quota), the history gives way — the run alone, else no history at all — and never the
+ * series states.
  * @param {Record<string, unknown>} entry
  * @returns {Promise<void>}
  */
 export async function appendHistory(entry) {
-  const history = await readHistory();
-  await chrome.storage.local.set({ [HISTORY_KEY]: [entry, ...history].slice(0, HISTORY_LIMIT) });
+  const history = trimHistory([entry, ...(await readHistory())]);
+  try {
+    await chrome.storage.local.set({ [HISTORY_KEY]: history });
+  } catch {
+    try {
+      await chrome.storage.local.set({ [HISTORY_KEY]: [entry] });
+    } catch {
+      await chrome.storage.local.remove(HISTORY_KEY).catch(() => undefined);
+    }
+  }
 }
