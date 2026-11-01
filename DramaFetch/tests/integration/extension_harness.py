@@ -91,7 +91,11 @@ class ExtensionHarness:
         self.extension_dir = make_test_copy(tmp_path / "extension")
         self.profile = profile or tmp_path / "profile"
         self.downloads = tmp_path / "downloads"
-        self.settings: dict[str, Any] = {"baseUrl": base_url, **TEST_PACING, **(test_settings or {})}
+        self.settings: dict[str, Any] = {
+            "baseUrl": base_url,
+            **TEST_PACING,
+            **(test_settings or {}),
+        }
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
@@ -139,7 +143,9 @@ class ExtensionHarness:
             cdp.send("Browser.setDownloadBehavior", {"behavior": "default"})
             page.goto(self.app_url)
             self._page = page
-            self.wait_for(lambda: self.page.locator("#app-status").get_attribute("data-state") == "idle")
+            self.wait_for(
+                lambda: self.page.locator("#app-status").get_attribute("data-state") == "idle"
+            )
             self.save_test_settings(self.settings)
         except BaseException:
             self.__exit__(None, None, None)
@@ -185,7 +191,9 @@ class ExtensionHarness:
 
     def storage(self, keys: str | list[str] | None = None) -> dict[str, Any]:
         """`chrome.storage.local.get(keys)` of the extension (never a cookie: it stores none)."""
-        result: dict[str, Any] = self.page.evaluate("(keys) => chrome.storage.local.get(keys)", keys)
+        result: dict[str, Any] = self.page.evaluate(
+            "(keys) => chrome.storage.local.get(keys)", keys
+        )
         return result
 
     def history(self) -> list[dict[str, Any]]:
@@ -218,7 +226,9 @@ class ExtensionHarness:
         page.fill("#test-settings", json.dumps(settings))
         page.click("#test-settings-save")
         self.wait_for(
-            lambda: (page.locator("#test-settings-status").text_content() or "").startswith("saved"),
+            lambda: (page.locator("#test-settings-status").text_content() or "").startswith(
+                "saved"
+            ),
             10,
             "the test settings were not saved",
         )

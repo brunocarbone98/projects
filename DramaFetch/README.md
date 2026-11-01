@@ -43,6 +43,57 @@ TikTok protects its site against bulk downloading, and a whole series is 30+ req
 
 Pauses are printed on stderr as they happen (`… pausing 7 s`, `… resting 95 s after 10 downloads`, `… resting 95 s before the next series`, `… long break 22 min after 100 episodes`), and so is the reason a run stopped, so a quiet terminal is not a stuck one; `dramafetch doctor` prints the defaults in one line and whether a cooldown is in force (`– cooldown: none` / `✗ cooldown: until 14:32 (27 min left): <reason>`). The thresholds are TikTok's and unknown, and they change: the defaults are a floor, not a recommendation. For a long series raise them — `--delay-min 8 --delay-max 20 --rest-every 5`, or `--pace human` — and let the run take an hour; that is still faster than a 403 followed by a 30–60 minute wait.
 
+## Chrome extension (Windows, macOS, Linux)
+
+**DramaFetch for Chrome** is the same tool as a Chrome extension: no Python, no command prompt and no `cookies.txt` — it works with the TikTok session of the Chrome you are logged in to. It lives in [`extension/`](./extension) and re-implements the engine in plain JavaScript with the Python tool's rules, texts and constants (a parity test compares them): whole series, several per run; `<Series name> - Episode NN.mp4` in a folder per series; the file exactly as TikTok serves it (nothing is re-encoded, picture and sound stay in sync) with its cover embedded as the MP4's cover art; every file checked before it is saved; paid episodes your own account has unlocked downloaded like free ones, locked ones listed and skipped, DRM detected and never kept; the same pacing, stops and 30-minute cooldown; interrupted runs resume. The [legal notice](#dramafetch) applies unchanged and is in the extension's footer.
+
+**Install (once).**
+
+1. Download this repository as a ZIP (on GitHub: **Code → Download ZIP**) — or the `dramafetch-extension` artifact of the latest CI run — and unzip it.
+2. Open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked** and select the `DramaFetch/extension` folder (the one that contains `manifest.json`).
+3. Pin DramaFetch to the toolbar (the puzzle-piece button → the pin). To update, replace the folder and press the reload arrow on DramaFetch's card in `chrome://extensions`.
+
+**Use.**
+
+- On a TikTok short-drama tab (any episode of the series), click the toolbar button → **Download this series**: the DramaFetch tab opens with that series listed. **Download all available** takes every free episode and every paid one your account has unlocked; or tick episodes and **Download selected** (a ticked locked episode is asked for anyway — TikTok decides, and it usually fails).
+- Or **Open DramaFetch** and paste links into the box, one per line — any episode of a series, or the bare series id; blank lines and `#` comments are skipped, a series listed twice is taken once, and a single-video link or anything else is refused naming its line before anything starts. **Download all** takes every series of the box, strictly one after the other, each listed right before its own downloads. **Load list** shows one series first: cover, number, length, quality, the `free` / `paid · unlocked` / `locked` badge with its hints, and **on disk** for what is already saved.
+- **Keep the DramaFetch tab open while it works.** It may sit in the background (a background tab's timers can make a pause longer, never shorter); closing it stops the run, and the next run resumes — what is saved is skipped. **Stop** ends a run at its next pause. There is one DramaFetch tab per browser; jobs queue and run one at a time.
+- The tab shows the current series, the pause in force (`resting 95 s before the next series`), a row per episode (status and message), each series' report line — e.g. `complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked (3), 1 locked (4)` — and a batch table; **Past runs** keeps the last 20.
+
+**Where the files go.** Into Chrome's download folder: `Downloads/DramaFetch/<Series name> [<series id>]/<Series name> - Episode 01.mp4`. For Windows' path limits the folder name is at most 60 characters and the file name at most 110, the series name shortened first so `Episode NN` is never cut. Chrome never overwrites a file (a name already taken gets ` (1)`), and an episode Chrome's download history shows saved at exactly that path — the file still there — is skipped without a request. With the cover mode `both` or `file` the cover is also saved next to the video (`<name>.jpg`).
+
+**Settings.** Quality — **Compatible** (the best H.264 rendition, plays everywhere; the default) or **Best** (the highest bitrate, any codec); cover — **embedded** (the default), **both**, **file** or **none**; file names — `{series} - Episode {number}` by default, with `{series}`, `{number}`, `{n}`, `{title}` and `{id}`; pace — a random pause or **human** (about one episode's length); and longer pauses only: between episodes and the rest every N episodes may be raised, never set below 4–9 s and 60–120 s every 10. Per run, in the box: **Also ask for locked episodes** (asks TikTok with your session; nothing is unlocked) and **Look again at series found complete in the last 24 hours**.
+
+**Pacing — the Python tool's floors, none lowerable.** One request at a time and one job at a time; 4–9 s between episodes (or the human pace: the previous episode's length plus 0–3 s, at most 300 s); a 60–120 s rest every 10 episodes that needed the network, and the same rest between two series that both contact TikTok; a 15–30 minute break every 100 network attempts (15 minutes without a request count as that break); 0.8–1.6 s before each episode-list page; at most 4 video requests and 1 cover request per episode; a stop on HTTP 403, HTTP 429, a captcha, a login wall or 3 failures in a row (across the series of a run), after which every remaining series is `not started` with no request; and a 30-minute cooldown after a 403, a 429 or a captcha — a banner shows the minutes left, every TikTok action is disabled and no button lifts it — asked before every series and again right before every request. A series found complete less than 24 hours ago, every file still on disk, costs no request at all. The run's pacing is kept in the extension's storage, so closing and reopening the tab resets neither the long break nor the rest between jobs.
+
+**One extra list request per series.** The extension cannot read the responses of TikTok's own page, so it repeats the page's first episode-list request once, from inside the page, and fetches the following pages the same way: a series costs one list request more than in the Python browser strategy.
+
+**How it works, and what it never does.** It lists a series by opening it in a new, inactive and muted tab of your Chrome, watching the URLs and status codes of the page's own list requests (never their content), and fetching the list from inside that page with the page's own `fetch` — your session's cookies apply exactly as they would for you, and the extension never reads them; the tab is closed when the list is read (also on any error). It then downloads, from the DramaFetch tab, the play URLs that list gives your session, one at a time, with `Referer: https://www.tiktok.com/` set on its own requests only (a session rule scoped to the extension); each body is checked in memory — complete, not encrypted, a valid MP4 with an audio track and the listed length — before anything is saved through Chrome's downloads. It never unlocks, buys or fakes entitlement; never sends anything back to TikTok, reuses a preview's or another account's URL, or re-signs or guesses a URL; never decrypts or strips DRM, and never keeps encrypted media; never patches, wraps or overrides anything in TikTok's page, uses `chrome.debugger`, reads cookies or changes a request of TikTok's page; and contacts no site but TikTok and its CDNs — no analytics, no remote code.
+
+| Permission | Why |
+| --- | --- |
+| `downloads` | Save the episodes (and covers) into your download folder, and know whether a saved file still exists |
+| `storage` | The settings, the 30-minute cooldown, each series' progress (what is on disk), the run's pacing and the last 20 runs — never a cookie |
+| `scripting` | Read the episode list from inside the TikTok tab it opened (the page's own `fetch`) and that page's visible text (a captcha) |
+| `tabs` | Open, mute and close that tab and read its address (a login redirect); find and focus the one DramaFetch tab; the toolbar popup reads the active tab's address |
+| `webRequest` | Observe the URLs and status codes of the page's own episode-list requests — never bodies, never blocking |
+| `declarativeNetRequestWithHostAccess` | Set `Referer: https://www.tiktok.com/` on the extension's own video and cover requests, as TikTok's CDN expects |
+| Host access to `tiktok.com`, `tiktokcdn.com`, `tiktokcdn-us.com`, `tiktokcdn-eu.com`, `tiktokv.com`, `tiktokv.us`, `byteoversea.com`, `ibytedtos.com`, `ibyteimg.com`, `muscdn.com` | TikTok and its video and image CDNs, nothing else; a video URL on any other host is never requested. No `cookies`, no `debugger`, no `<all_urls>` |
+
+**Why it is not on the Chrome Web Store.** It is a tool for personal use, and the store does not accept downloaders of this kind; it is installed with **Load unpacked** instead (Chrome may remind you at startup that a developer-mode extension is installed).
+
+| Symptom | What to do |
+| --- | --- |
+| Chrome asks where to save every episode | Turn off **Ask where to save each file before downloading** in `chrome://settings/downloads` |
+| `login required` / `TikTok redirected to its login page` | Log in to TikTok in a normal tab of the same Chrome profile, then run again |
+| `captcha` / `TikTok is asking for a verification` | Open the series in a normal tab and solve it there; the 30-minute cooldown has started — wait it out, then run again (it resumes) |
+| The banner `TikTok refused a request.` | The cooldown after a 403, a 429 or a captcha: nothing contacts TikTok until the time shown; nothing lifts it early |
+| Nothing happens, or the run stopped halfway | Keep the DramaFetch tab open — closing it stops the run, and Chrome's Memory Saver may freeze a tab hidden for long (keep it visible, or add it to the sites always kept active) — then run again: what is saved is skipped |
+| `… (1).mp4` next to an episode | Chrome's download history was cleared or the file moved, so the extension could not see it and saved the episode again; Chrome never overwrites |
+| `DramaFetch is already open in another tab` | One engine per browser: use that tab |
+
+For developers: `cd extension && node --test && npx -y -p typescript@5.9.3 tsc -p jsconfig.json` (no npm dependencies at all); `pytest -m integration` also drives the extension in a real Chromium against the fake TikTok server (`tests/integration/test_extension.py`), through a temporary copy of the extension whose manifest — and only that copy's — carries `dramafetch_test` and `http://127.0.0.1/*`.
+
 ## Install
 
 Python 3.11 or newer.

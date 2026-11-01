@@ -96,7 +96,9 @@ def _episode_file(ext: ExtensionHarness, number: int) -> Path:
 def _ffmpeg() -> str | None:
     """The first ffmpeg that decodes the fixture (H.264 + AAC) without a word."""
     candidates = [shutil.which("ffmpeg")]
-    candidates += [str(path) for path in sorted(Path("/opt/pw-browsers").glob("ffmpeg-*/ffmpeg-linux"))]
+    candidates += [
+        str(path) for path in sorted(Path("/opt/pw-browsers").glob("ffmpeg-*/ffmpeg-linux"))
+    ]
     for candidate in candidates:
         if not candidate:
             continue
@@ -162,7 +164,9 @@ def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path) -> No
             item = MAIN_ITEMS[number]
             path = _episode_file(ext, number)
             message = rows[number]["message"]
-            assert message.startswith(f"saved {path.name} (") and message.endswith(" + cover embedded")
+            assert message.startswith(f"saved {path.name} (") and message.endswith(
+                " + cover embedded"
+            )
             mp4 = MP4(path)
             assert mp4.tags is not None
             (cover,) = mp4.tags["covr"]
@@ -215,6 +219,12 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
 
         listing = ext.load(MAIN_LINK)
         assert listing["series"][0]["episodes"] == 5
+        table = ext.page.locator("#episode-table tbody")
+        for number in range(1, 6):
+            row = table.locator(f"tr[data-number='{number}']")
+            assert row.locator(".badge.ondisk").count() == (1 if number < 5 else 0)
+            assert row.locator("input[type=checkbox]").is_checked() is False  # on disk, or locked
+        assert table.locator("tr[data-number='5']").get_attribute("data-access") == "locked"
         selection = ext.download_available()
         (selected,) = selection["series"]
         assert _statuses(selected) == ["skipped-exists"] * 4
@@ -285,7 +295,10 @@ def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: P
         media = len(server.media_requests)
         second = ext.download_all(MAIN_LINK)
         (series,) = second["series"]
-        assert _statuses(series) == ["skipped-exists", "skipped-locked", "skipped-exists"] + [
+        assert _statuses(series) == [
+            "skipped-exists",
+            "skipped-locked",
+            "skipped-exists",
             "skipped-exists",
             "skipped-locked",
         ]

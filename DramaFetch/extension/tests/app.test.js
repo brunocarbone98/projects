@@ -28,7 +28,7 @@ const SERIES_ID = "7699393770256782354";
 
 /**
  * tiny.mp4 padded with a top-level `free` box to 128 KiB (a real video: >= 64 KiB, 3 s, audio).
- * @returns {Uint8Array}
+ * @returns {Uint8Array<ArrayBuffer>}
  */
 function video() {
   const size = 128 * 1024;

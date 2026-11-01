@@ -480,6 +480,8 @@ async function runJob(job) {
   /** @type {Record<string, unknown>} */
   const entry = { id: Date.now(), kind: job.kind, label: job.label, started_at: startedAt, error: null, stopped: null, refreshes: 0, pauses: jobRecord.pauses, series: [] };
   startProgress(job);
+  const tab = await chrome.tabs.getCurrent().catch(() => undefined); // the tab may have moved
+  app.windowId = tab?.windowId ?? app.windowId;
   const engine = buildEngine(job, jobRecord);
   /** @type {string | null} why the job stopped (then every queued job ends unstarted) */
   let stop = null;
@@ -588,6 +590,7 @@ async function renderSeries(series, view) {
   $("series-card").hidden = false;
   const name = episodeContext(series).seriesName;
   $("series-title").textContent = name;
+  await view.refresh(); // what Chrome's download history says is still on disk
   const state = readState(await readSeriesState(series.seriesId), series.seriesId);
   const onDisk = new Set(state !== null ? doneEntries(state, (entry) => view.exists(entry)).map(([number]) => number) : []);
   const available = series.episodes.filter((episode) => !isLocked(episode)).length;
