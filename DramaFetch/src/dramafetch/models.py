@@ -23,6 +23,16 @@ QUALITY_MODES = ("compatible", "best")
 #: A series whose manifest says it was complete less than this long ago is skipped without a
 #: single request (``engine.run_series``); ``--recheck`` resolves it anyway.
 RECHECK_AFTER_S = 24 * 3600
+#: ``Episode.access`` values — what THIS session may do with an episode, decided by
+#: ``catalog.access_of`` from the payload TikTok served to the user's own account: ``free`` (nothing
+#: says it is sold), ``unlocked`` (a paid episode this account may play: an entitlement flag, or a
+#: play address TikTok gave this session for a sold episode) and ``locked`` (a lock, preview or DRM
+#: flag, or no play address at all: listed and skipped, never unlocked).
+ACCESS_MODES = ("free", "unlocked", "locked")
+#: Every DRM message starts with this: DramaFetch never decrypts and never keeps encrypted media.
+DRM_MARK = "protected by DRM"
+#: Why an encrypted download is deleted (``media.drm_problem``) or an episode is refused.
+DRM_MESSAGE = f"{DRM_MARK} (encrypted tracks): DramaFetch does not decrypt it"
 
 
 @dataclass(frozen=True)
@@ -64,19 +74,42 @@ class Episode:
     series_name: str | None = None
     author: str | None = None
     duration_s: int | None = None
-    # Human-readable reasons to believe the episode is locked/paid/unplayable, e.g. "isFree=false".
-    # Empty means "nothing in the payload says it is locked" — not a guarantee it will download.
+    # Every pricing / lock / entitlement / DRM clue the payload carries, human-readable, e.g.
+    # "isFree=false" or "isUnlocked=true". Informational: ``access`` decides. Empty means "nothing
+    # in the payload says anything about a price or a lock" — not a guarantee it will download.
     lock_hints: tuple[str, ...] = ()
     # The episode cover (thumbnail): video.originCover, else video.cover, else video.dynamicCover.
     cover_url: str | None = None
     # What the default quality mode would download, e.g. "720p h264": the label of the rendition
     # ``catalog.choose_rendition(item, "compatible")`` picks; None when the item lists none.
     quality_hint: str | None = None
+    # One of ACCESS_MODES: "free", "unlocked" (paid, and playable with THIS session: the user's own
+    # account bought it or subscribes) or "locked" (skipped unless --include-locked). ``""`` derives
+    # it in ``__post_init__`` — "locked" when ``lock_hints`` (or ``drm``) is set, else "free" — so a
+    # caller that sets only ``lock_hints`` keeps the old meaning; ``catalog.episode_from_item``
+    # always passes an explicit value.
+    access: str = ""
+    # A pricing or entitlement clue is present (the episode is sold, whether or not this account
+    # has unlocked it). Set by catalog.
+    paid: bool = False
+    # The payload itself says the episode is DRM-protected / encrypted (set by catalog). Such an
+    # episode is always "locked": DramaFetch never decrypts anything.
+    drm: bool = False
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.access:
+            self.access = "locked" if self.lock_hints or self.drm else "free"
+        if self.access not in ACCESS_MODES:
+            raise ValueError(
+                f"Episode.access must be one of {', '.join(ACCESS_MODES)}, not {self.access!r}"
+            )
+        if self.drm and self.access != "locked":
+            raise ValueError("a DRM-protected episode is always locked: DramaFetch never decrypts")
 
     @property
     def locked(self) -> bool:
-        return bool(self.lock_hints)
+        return self.access == "locked"
 
     @property
     def page_url(self) -> str:
