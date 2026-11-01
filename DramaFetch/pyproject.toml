@@ -20,7 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 # yt-dlp uses curl_cffi to impersonate a real browser's TLS fingerprint; TikTok is friendlier to it.
 impersonate = ["curl_cffi>=0.17.0"]
-dev = ["pytest>=8", "ruff>=0.17.3", "mypy>=1.14"]
+dev = ["pytest>=9.2.0", "ruff>=0.17.3", "mypy>=1.14"]
 
 [project.scripts]
 dramafetch = "dramafetch.cli:main"
