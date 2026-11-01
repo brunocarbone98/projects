@@ -217,7 +217,28 @@ class ExtensionHarness:
         return self.page.locator("#app-status").get_attribute("data-state") == "idle"
 
     def tab_urls(self) -> list[str]:
-        return [page.url for page in self.context.pages]
+        """Every open tab's URL as `chrome.tabs.query` sees it: Playwright's `context.pages` never
+        lists the tabs the extension opens itself (`chrome.tabs.create`: the discovery's tab)."""
+        urls: list[str] = self.page.evaluate(
+            "async () => (await chrome.tabs.query({}))"
+            ".map((tab) => tab.url || tab.pendingUrl || '')"
+        )
+        return urls
+
+    def watch_tabs(self) -> None:
+        """Start recording every tab opened from now on (`chrome.tabs.onCreated`, in the app page);
+        `opened_tabs()` reads them. Playwright's own `page` events miss the extension's tabs."""
+        self.page.evaluate(
+            "() => { if (globalThis.__openedTabs) return; globalThis.__openedTabs = [];"
+            " chrome.tabs.onCreated.addListener((tab) =>"
+            " globalThis.__openedTabs.push(tab.pendingUrl || tab.url || '')); }"
+        )
+
+    def opened_tabs(self) -> list[str]:
+        """The tabs opened since `watch_tabs()`, by their first URL (`about:blank` for the
+        discovery's tab, which navigates to the series afterwards)."""
+        opened: list[str] = self.page.evaluate("() => globalThis.__openedTabs ?? []")
+        return opened
 
     # -- actions -------------------------------------------------------------------------------
 
