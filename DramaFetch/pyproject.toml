@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -12,15 +12,15 @@ license = { text = "MIT" }
 authors = [{ name = "Bruno Carbone" }]
 dependencies = [
   "yt-dlp>=2026.10.26",
-  "playwright>=1.50",
+  "playwright>=1.64.1",
   # Pure Python; writes the cover into the MP4 (the `covr` atom). yt-dlp uses it for the same job.
   "mutagen>=1.47",
 ]
 
 [project.optional-dependencies]
 # yt-dlp uses curl_cffi to impersonate a real browser's TLS fingerprint; TikTok is friendlier to it.
-impersonate = ["curl_cffi>=0.10"]
-dev = ["pytest>=8", "ruff>=0.9", "mypy>=1.14"]
+impersonate = ["curl_cffi>=0.17.0"]
+dev = ["pytest>=8", "ruff>=0.17.3", "mypy>=1.14"]
 
 [project.scripts]
 dramafetch = "dramafetch.cli:main"
