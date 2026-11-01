@@ -42,7 +42,11 @@ Routes (all GET):
                                  server was started with `cdn_rate_limit`. `expired_media_first`
                                  makes the FIRST item_list response carry already-expired URLs and
                                  the later ones fresh URLs, to exercise the download engine's
-                                 refresh. The media lasts 3 s, so the item_list payloads served
+                                 refresh; `expired_media_first_visit` expires every list served
+                                 before the series page is loaded a second time (a discovery
+                                 that repeats the page's first request, like the Chrome
+                                 extension's, still sees expired URLs until it lists the series
+                                 again). The media lasts 3 s, so the item_list payloads served
                                  say `video.duration = 3` (`MEDIA_DURATION_S`) for every item —
                                  unless `short_media`, which keeps the fixtures' own durations
                                  (92 s, 88 s, …) while the CDN still serves the 3-second file: a
@@ -223,6 +227,9 @@ class FakeOptions:
     # The fake CDN (browser download engine).
     media_ttl_s: int = 3600  # `expire` of the rewritten play URLs, seconds from now
     expired_media_first: bool = False  # the FIRST item_list served carries expire=now-10
+    # Every item_list served before the series page is loaded a SECOND time carries expired URLs
+    # (the first discovery's lists, however many requests it makes); a fresh visit's are fresh.
+    expired_media_first_visit: bool = False
     cdn_rate_limit: bool = False  # every /cdn/ request answers HTTP 429
     # Integrity failures (both make the engines fail the episode without a retry):
     truncate_media: bool = False  # Content-Length says all, the body stops at 60 %, then EOF
@@ -358,7 +365,10 @@ class _Handler(BaseHTTPRequestHandler):
         now = int(time.time())
         with server.lock:
             first = server.media_lists_served == 0
-            if options.expired_media_first and first:
+            visits = sum(1 for record in server.requests if SERIES_PATH_RE.match(record.path))
+            if (options.expired_media_first and first) or (
+                options.expired_media_first_visit and visits <= 1
+            ):
                 expire = now - EXPIRED_MEDIA_OFFSET_S
             else:
                 expire = now + options.media_ttl_s
