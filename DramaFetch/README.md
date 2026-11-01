@@ -77,7 +77,7 @@ What DramaFetch never does, whatever the flags: unlock an episode, buy one, fake
 | --- | --- | --- | --- |
 | `free` | `free` | Nothing in the list says the episode is sold | Downloads it |
 | `unlocked (paid)` | `paid · unlocked` | Sold, and your account may play it: the list carries an entitlement flag (`isUnlocked`, `hasPaid`, `payStatus: "paid"`, …), or a play address TikTok gave your session for a sold episode | Downloads it with your session, like a free one; the report line names it (`1 paid episode your account unlocked (3)`) |
-| `locked: <hints>` | `locked` and the hints | Your session cannot play it: a lock, preview, trial or paywall flag (`isLocked`, `needPay`, …), a DRM flag, or no play address at all for a sold episode | Skips it (`skipped-locked`) without a request |
+| `locked: <hints>` | `locked` and the hints | Your session cannot play it: a lock, preview, trial or paywall flag (`isLocked`, `needPay`, …), a DRM flag, or — without an entitlement flag — no play address at all, sold or not | Skips it (`skipped-locked`) without a request |
 
 `info --json` and the web UI's `/api/resolve` carry it per episode as `access` (`free`, `unlocked` or `locked`), `paid` (a price or an entitlement is mentioned) and `drm` (the list itself flags DRM), next to `locked` and `lock_hints`.
 
