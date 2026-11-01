@@ -15,7 +15,7 @@ Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `
 ## Conventions
 
 - Everything in English: code, comments, commits, docs. UI copy lives in the `next-intl` message files (`apps/web/messages/*.json`, both languages), never hardcoded.
-- Conventional commits in the imperative: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`.
+- Conventional commits in the imperative: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`, `revert:` (the merge gate's reverts).
 - Strict TypeScript everywhere; `any` is forbidden; validate external input with Zod at the edge; shared contracts live in `packages/shared` and are never duplicated.
 - Prettier (printWidth 100) is mandatory for every `.ts/.tsx/.md/.json/.yml` under `FullStackHub/`: `pnpm --dir FullStackHub exec prettier --write <files>`. Ignored on purpose: `ROADMAP.md`, `pnpm-lock.yaml`, `apps/web/src/lib/world-coastlines.ts`.
 - Python services: type hints everywhere, Pydantic models are the contract, tests with pytest in each service's `.venv`.
@@ -55,7 +55,7 @@ Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `
 
 ## Guardrails
 
-1. Never push to `main`. Always a branch + a pull request. Never force-push, rewrite history, or merge your own PR — a human merges.
+1. Never push to `main`. Always a branch + a pull request. Never force-push or rewrite history. Only `merge-steward`, inside the merge gate shift (`.claude/shifts/merge-gate.md`), merges a pull request: a Dependabot or agent PR that passes that gate, or its own revert when `main` turns red after one of its merges. No other agent merges; a person's PR, and anything the gate escalates, is merged by a human.
 2. One PR per shift run, small and reviewable (aim for under 200 changed lines excluding lockfiles). If nothing is needed, do nothing: no empty PRs, no "all good" issues or comments.
 3. Run the project's own checks before opening a PR (FullStackHub: `pnpm lint && pnpm format:check && pnpm typecheck && pnpm test`; services: `pytest`; SecureGate: `./mvnw -q verify` when a local stack is up; DramaFetch: `ruff check`, `ruff format --check`, `mypy` and `pytest`, plus `pytest -m integration` when a Chromium is available, and the extension's `node --test` and `npx -y -p typescript@5.9.3 tsc -p jsconfig.json`). Report the real results.
 4. Never weaken, skip or quarantine a test, loosen a lint rule, or add `any` to get green.
@@ -66,9 +66,9 @@ Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `
 
 ## Branches, PRs and issues
 
-- Branches for agent work: `agents/<shift>/<YYYY-MM-DD>`, e.g. `agents/nightly-maintenance/2026-10-29`. Humans use any descriptive branch name.
-- PR titles are conventional commits: `chore(agents): nightly maintenance 2026-10-29`, `fix(agents): …`, `docs(agents): …`, `chore(deps): …`. Every agent PR carries the `agent` label and fills the template's `Opened by:` line with the shift name.
+- Branches for agent work: `agents/<shift>/<YYYY-MM-DD>`, e.g. `agents/nightly-maintenance/2026-10-29`; the merge gate's reverts use `agents/merge-gate/<YYYY-MM-DD>-revert-<N>`. Humans use any descriptive branch name.
+- PR titles are conventional commits: `chore(agents): nightly maintenance 2026-10-29`, `fix(agents): …`, `docs(agents): …`, `chore(deps): …`, `revert(agents): #<N> — …` (the merge gate). Every agent PR carries the `agent` label and fills the template's `Opened by:` line with the shift name.
 - Labels: `agent` (work by/for agents) · `incident` (uptime) · `dependencies` (Dependabot) · `security` · `maintenance` · `bug`.
-- Issue titles: `🚨 Production incident: Shipping Hub is unhealthy` (label `incident`; opened, updated and closed by the Uptime patrol workflow) · `🧪 Nightly maintenance failed: <YYYY-MM-DD>` (labels `agent`, `maintenance`) · `🎬 DramaFetch needs a decision: <topic>` (labels `agent`, `maintenance`; one per topic, for what `download-guardian` leaves to a human — an open one gets a comment with the new evidence, never a second issue) · `🔐 Weekly security review: <YYYY-MM-DD>` (labels `agent`, `security`).
+- Issue titles: `🚨 Production incident: Shipping Hub is unhealthy` (label `incident`; opened, updated and closed by the Uptime patrol workflow) · `🧪 Nightly maintenance failed: <YYYY-MM-DD>` (labels `agent`, `maintenance`) · `🚦 Merge gate reverted #<N>: <YYYY-MM-DD>` (labels `agent`, `maintenance`; opened by the merge gate when `main` turned red after one of its merges, next to its revert PR) · `🎬 DramaFetch needs a decision: <topic>` (labels `agent`, `maintenance`; one per topic, for what `download-guardian` leaves to a human — an open one gets a comment with the new evidence, never a second issue) · `🔐 Weekly security review: <YYYY-MM-DD>` (labels `agent`, `security`).
 - To ask the on-call agent for something, mention `@claude` in an issue or PR comment, or open an issue with the "Ask the on-call agent" template (`.github/ISSUE_TEMPLATE/agent-task.yml`).
-- Humans merge. Agents never merge, never force-push, never rewrite history.
+- Merging: only the merge gate (`.claude/shifts/merge-gate.md`, daily at 11:47 UTC, after the maintenance shifts) merges, through `merge-steward`, and only Dependabot and agent PRs that pass its gate; a human merges the rest. Agents never force-push, never rewrite history.

@@ -22,7 +22,7 @@ Triggers: PRs touching `SecureGate/**`, `FullStackHub/**` or the workflow; pushe
 - Least privilege: keep an explicit `permissions:` block, pin actions to a major version, never echo secrets, use `${{ secrets.* }}` only.
 - Keep headless + pinned Chrome/driver; never add retries or `continue-on-error` to the test step to hide failures.
 - Validate YAML before pushing: `python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" ../.github/workflows/securegate-ci.yml`.
-- Workflow changes go through a PR like any other change (branch `agents/<shift>/<date>` when a shift does it); a human merges.
+- Workflow changes go through a PR like any other change (branch `agents/<shift>/<date>` when a shift does it); a human or the merge gate merges.
 
 ## Reading a run
 

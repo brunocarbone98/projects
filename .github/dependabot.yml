@@ -1,6 +1,7 @@
 # Dependabot — version updates for every package ecosystem in the monorepo.
 # Every PR carries the `dependencies` label and the `chore(deps)` commit prefix. The nightly
-# maintenance shift reviews them (CI state + changelog, a one-paragraph verdict); a human merges.
+# maintenance shift reviews them (CI state + changelog, a one-paragraph verdict); the merge gate merges
+# the ones that pass its gate, a human the rest.
 # npm, Maven and the services' pip: minor and patch updates arrive as one grouped PR per
 # directory entry, majors one by one; GitHub Actions: one grouped PR for everything;
 # /DramaFetch: one PR per floor (below).

@@ -12,7 +12,7 @@ Twelve minutes, five acts, one browser. The goal: show a working product, the en
 - [ ] Issues → Labels shows `agent` · `incident` · `dependencies` · `security` · `maintenance` · `bug`; otherwise Actions → **Sync labels** → **Run workflow** (the `label:agent` / `label:incident` filters you will show are empty without them).
 - [ ] Make sure at least one open agent PR (`label:agent`) or Dependabot PR (`label:dependencies`) exists. If none does, run a shift by hand from the repo root: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"`.
 - [ ] Repository → Settings → Secrets and variables → Actions: `CLAUDE_CODE_OAUTH_TOKEN` is set (otherwise `@claude` only prints a setup notice).
-- [ ] Open the scheduled-task list in claude.ai/code: the three `Autonomous maintenance · …` tasks are enabled and have recent runs you can open.
+- [ ] Open the scheduled-task list in claude.ai/code: the four `Autonomous maintenance · …` tasks are enabled; the first three have recent runs you can open (the merge gate's first run is 2026-11-02 at 11:47 UTC).
 - [ ] Actions tab → **SecureGate CI**: if a banner says the workflow was disabled for inactivity, click **Enable workflow** (GitHub set it to `disabled_inactivity` on 2026-09-10 and a push does not bring it back; until you click, nothing from SecureGate runs, not even on pull requests). Then **Run workflow** on `main` and wait for the green run with its `securegate-reports` artifact.
 - [ ] Optional, if you plan to show a local run: pull `main`, then `cd FullStackHub && pnpm install && pnpm test` once.
 
@@ -70,10 +70,10 @@ Say: "Everything you see is one container on Railway — Next.js web, Express AP
 ### Act 4 — autonomous maintenance (3:00)
 
 1. **Actions tab** (tab 9): `Uptime patrol` — click **Run workflow** (about 10 seconds) or open the run you dispatched in the pre-flight, and show its step summary (endpoint · status · time · result). It is scheduled every 30 minutes, but GitHub runs schedules best-effort — a few runs a day here, hours late — so do not promise a run every half hour; the Claude shifts run on Anthropic's scheduler and have fired on the minute.
-2. **Agent PRs** (tab 10): `label:agent` — the nightly maintenance PR with its check-results table, Dependabot PRs with the shift's verdict comment. "Agents open PRs; I merge."
+2. **Agent PRs** (tab 10): `label:agent` — the nightly maintenance PR with its check-results table, Dependabot PRs with the shift's verdict comment. "Agents open PRs; the merge gate merges what passes every check, and I merge the rest."
 3. **Ask the on-call agent** (tab 11): pick the "Ask the on-call agent" template; the body already starts with `@claude ` — ask something small and concrete, for example `@claude summarise the latest SecureGate CI run and list any skipped scenarios`. Submit, switch to tab 9: the `Claude on-call` run starts within seconds and the agent answers in a comment on the issue.
-4. **The configuration** (tab 12): `.claude/agents/` — seven root agents (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`, and DramaFetch's `download-guardian` and `vuln-sentinel`); `.claude/shifts/` — three shift prompts (a shift is a Markdown file, reviewed like code); `.claude/scripts/` — the local-stack helpers and DramaFetch's upstream watch (`dramafetch-watch.sh`) the shifts use.
-5. **The scheduled tasks** (tab 13): three Claude Code cloud tasks — SRE patrol every 6 h, nightly maintenance at 08:40 UTC, weekly security review on Mondays at 10:20 UTC — each resuming its standing session, whose transcript you can open run after run.
+4. **The configuration** (tab 12): `.claude/agents/` — eight root agents (`sre-patrol`, `repo-steward`, `qa-regression`, `security-auditor`, `docs-keeper`, DramaFetch's `download-guardian` and `vuln-sentinel`, and the merge gate's `merge-steward`); `.claude/shifts/` — four shift prompts (a shift is a Markdown file, reviewed like code); `.claude/scripts/` — the local-stack helpers and DramaFetch's upstream watch (`dramafetch-watch.sh`) the shifts use.
+5. **The scheduled tasks** (tab 13): four Claude Code cloud tasks — SRE patrol every 6 h, nightly maintenance at 08:40 UTC, weekly security review on Mondays at 10:20 UTC, merge gate daily at 11:47 UTC — each resuming its standing session, whose transcript you can open run after run.
 
 Close with the story: "The last commit was in July. After 60 days without activity GitHub disabled the SecureGate nightly — its last run was 2026-09-10 — and nobody noticed. Now the agents produce the activity, and silence turns into an issue or a PR."
 
@@ -84,7 +84,7 @@ Close with the story: "The last commit was in July. After 60 days without activi
 - **Screenplay vs Page Object Model** — POM grew hard to maintain as the UI surface widened; Screenplay separates Targets (where), Tasks (what the actor does) and Questions (what we assert), so steps read like the business and selectors live in one place.
 - **Black-box QA** — SecureGate knows only the public API and UI; it creates and cleans its own data through the API; the same suite runs against local, CI or any URL (`-DapiBaseUrl`).
 - **Why one container** — a pragmatic packaging for a portfolio: four separate apps in code, one deploy unit on Railway, one public port; the trade-off is no independent scaling.
-- **Guardrails and the cost of agents** — never push to `main`, one small PR per run, no empty PRs, truthful reporting, humans merge; GitHub Actions is free on a public repository, the cloud shifts cost Claude usage — the read-only SRE patrol is cheap, the nightly run is the expensive one and can be paused.
+- **Guardrails and the cost of agents** — never push to `main`, one small PR per run, no empty PRs, truthful reporting, and only the merge gate merges — what passes its checks, reverted if `main` turns red; GitHub Actions is free on a public repository, the cloud shifts cost Claude usage — the read-only SRE patrol is cheap, the nightly run is the expensive one and can be paused.
 - **What I would do next** — branch protection with required checks; the SonarQube gate with a real token; a staging URL so the UI suite also runs against a deployment; measured run durations and costs in `OPERATIONS.md`.
 
 ## If something breaks
@@ -126,7 +126,7 @@ claude -p "$(cat .claude/shifts/sre-patrol.md)"         # run a shift by hand
 gh workflow run "Uptime patrol"                         # or the Run workflow button in Actions
 ```
 
-**Numbers** — 28 Karate API scenarios + 1 opt-in `@ratelimit`; 6 Serenity UI scenarios; pytest: pricing 41, labels 13; uptime probe scheduled every 30 min (GitHub runs it best-effort); SRE patrol every 6 h; nightly maintenance 08:40 UTC; weekly security review Mondays 10:20 UTC.
+**Numbers** — 28 Karate API scenarios + 1 opt-in `@ratelimit`; 6 Serenity UI scenarios; pytest: pricing 41, labels 13; uptime probe scheduled every 30 min (GitHub runs it best-effort); SRE patrol every 6 h; nightly maintenance 08:40 UTC; weekly security review Mondays 10:20 UTC; merge gate daily 11:47 UTC.
 
 ## Guion rápido (ES)
 
@@ -137,6 +137,6 @@ gh workflow run "Uptime patrol"                         # or the Run workflow bu
 - Calidad: SecureGate prueba la plataforma como caja negra — 28 escenarios Karate de API, 6 escenarios de UI con Serenity Screenplay, colección Postman/Newman — en GitHub Actions en cada PR y cada noche.
 - Screenplay en vez de Page Objects: Targets, Tasks y Questions; sin selectores en los step definitions; esperas explícitas, nunca `Thread.sleep`.
 - Mantenimiento autónomo: agentes de Claude Code mantienen el repositorio 24/7 — patrulla de disponibilidad programada cada 30 min (GitHub la ejecuta a su ritmo; también se lanza a mano), patrulla SRE cada 6 h, mantenimiento nocturno, revisión de seguridad semanal, Dependabot y un agente de guardia al que se le escribe `@claude`.
-- Límites (guardrails): nunca a `main`, un PR pequeño por turno, nada de PRs vacíos, reportes veraces (saltado no es aprobado), decisiones de esquema/dinero/auth/deploy van a un issue; un humano revisa y fusiona todo.
+- Límites (guardrails): nunca a `main`, un PR pequeño por turno, nada de PRs vacíos, reportes veraces (saltado no es aprobado), decisiones de esquema/dinero/auth/deploy van a un issue; un humano revisa y fusiona todo, salvo los PRs de Dependabot y de agentes que pasan la puerta de fusión, que fusiona el agente `merge-steward`.
 - La historia: el último commit fue en julio; a los 60 días sin actividad GitHub desactivó el nightly de SecureGate (última ejecución 2026-09-10) y nadie lo notó; ahora los agentes generan actividad y el silencio se convierte en issue o PR.
 - Si algo falla: la caída de Railway es la demo (issue de incidente → diagnóstico → cierre automático); CI en rojo muestra cómo triagea un agente; sin internet, capturas en `FullStackHub/screenshots/`.

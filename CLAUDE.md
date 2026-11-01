@@ -48,6 +48,7 @@ The full command list is in `AGENTS.md` → Commands. Repo-level helpers (`set -
 | `docs-keeper` | `.claude/agents/` | Keeps README, CLAUDE.md, AGENTS.md, OPERATIONS.md and DEMO.md in sync with the code: counts, commands, names, crons |
 | `download-guardian` | `.claude/agents/` | Keeps DramaFetch's downloads meeting the owner's acceptance criteria: runs `dramafetch-watch.sh` and DramaFetch's checks, reads upstream changes (yt-dlp's TikTok extractor and changelog, Playwright, mutagen, curl_cffi, Chrome) from primary sources only, ships small cited fixes in both front ends; never commits or crosses DramaFetch's Scope |
 | `vuln-sentinel` | `.claude/agents/` | DramaFetch's vulnerability watch (read-only): every installed distribution against PyPI's OSV data, yt-dlp's security notes, the extension's permissions, CSP and message handling, the web UI's token, Host guard and `--out` confinement, cookie values in the repository, the `dramafetch` CI job |
+| `merge-steward` | `.claude/agents/` | The only agent that merges or closes PRs, inside the merge gate shift: one Dependabot or agent PR at a time, on a green, conflict-free head that passed the gate's own project checks (for DramaFetch its whole definition of done with no test lost, an independent review and the guardian's dependency verdict); never a person's PR or a human decision; reverts its own merge if `main` turns red |
 | `frontend-dev` · `backend-dev` · `python-services` | `FullStackHub/.claude/agents/` | `apps/web` · `apps/api` · `services/pricing` and `services/labels` |
 | `code-reviewer` · `test-runner` | `FullStackHub/.claude/agents/` | Diff review, read-only · Vitest + pytest runner (`haiku`), failures only |
 | `api-test-engineer` · `ui-test-engineer` · `bdd-engineer` · `devsecops` | `SecureGate/.claude/agents/` | Karate API features · Serenity Screenplay · Gherkin + step definitions · the SecureGate CI pipeline |
@@ -63,8 +64,9 @@ Root agents work from the repository root and read the relevant project `CLAUDE.
 | SRE patrol | `28 */6 * * *` | `.claude/shifts/sre-patrol.md` |
 | Nightly maintenance | `40 8 * * *` (03:40 Panama) | `.claude/shifts/nightly-maintenance.md` |
 | Weekly security review | `20 10 * * 1` | `.claude/shifts/weekly-security-review.md` |
+| Merge gate | `47 11 * * *` (06:47 Panama) | `.claude/shifts/merge-gate.md` |
 
-Each shift is a Claude Code cloud scheduled task that resumes the shift's standing session with a stored prompt that boils down to "sync the checkout to the default branch, read `.claude/shifts/<name>.md` and follow it" (the full prompt: `OPERATIONS.md` → 4.2). The three tasks already exist — do not create them again. To run one by hand: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"` from the repo root, or ask "run the nightly maintenance shift" in an interactive session. Runtimes, outputs and the incident flow: `OPERATIONS.md`.
+Each shift is a Claude Code cloud scheduled task that resumes the shift's standing session with a stored prompt that boils down to "sync the checkout to the default branch, read `.claude/shifts/<name>.md` and follow it" (the full prompt: `OPERATIONS.md` → 4.2). The four tasks already exist — do not create them again. Only the merge gate merges, and only what passes its gate; the other shifts never merge. To run one by hand: `claude -p "$(cat .claude/shifts/nightly-maintenance.md)"` from the repo root, or ask "run the nightly maintenance shift" in an interactive session. Runtimes, outputs and the incident flow: `OPERATIONS.md`.
 
 Guardrails: the eight rules in `AGENTS.md` → Guardrails apply to every session and every shift — follow them, do not restate them.
 

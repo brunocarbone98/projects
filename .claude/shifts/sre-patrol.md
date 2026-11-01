@@ -29,7 +29,7 @@
 - One red run followed by a green one is transient: mention it, change nothing.
 - GitHub runs `schedule` triggers best-effort: Uptime patrol and the SecureGate nightly regularly start hours late or are skipped — a few patrol runs a day is normal. Late or missing scheduled runs are not a failure: no issue, no PR; give the time of the last scheduled run in the report. The one scheduling problem worth a line in the report is a workflow GitHub has **disabled** (`disabled_inactivity` in `actions_list`, a banner in the Actions tab) — a human clicks Enable.
 - Never fix a red check by weakening a probe, test or lint rule. Never touch money, state-machine or auth code, the schema or the deploy config to "make it green" — open an issue.
-- At most one PR per run and at most one new comment per issue per run. Humans merge.
+- At most one PR per run and at most one new comment per issue per run. Only the merge gate merges; a human merges what it escalates.
 
 ## Outputs
 
@@ -39,7 +39,7 @@
 
 ## Guardrails
 
-1. Never push to `main`. Always a branch + a pull request. Never force-push, rewrite history, or merge your own PR — a human merges.
+1. Never push to `main`. Always a branch + a pull request. Never force-push or rewrite history. Only `merge-steward`, inside the merge gate shift (`.claude/shifts/merge-gate.md`), merges a pull request: a Dependabot or agent PR that passes that gate, or its own revert when `main` turns red after one of its merges. No other agent merges; a person's PR, and anything the gate escalates, is merged by a human.
 2. One PR per shift run, small and reviewable (aim for under 200 changed lines excluding lockfiles). If nothing is needed, do nothing: no empty PRs, no "all good" issues or comments.
 3. Run the project's own checks before opening a PR (FullStackHub: `pnpm lint && pnpm format:check && pnpm typecheck && pnpm test`; services: `pytest`; SecureGate: `./mvnw -q verify` when a local stack is up; DramaFetch: `ruff check`, `ruff format --check`, `mypy` and `pytest`, plus `pytest -m integration` when a Chromium is available, and the extension's `node --test` and `npx -y -p typescript@5.9.3 tsc -p jsconfig.json`). Report the real results.
 4. Never weaken, skip or quarantine a test, loosen a lint rule, or add `any` to get green.

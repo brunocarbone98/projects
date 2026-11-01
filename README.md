@@ -9,7 +9,7 @@ A production full-stack platform, the black-box QA suite that tests it and a Tik
 [![Live app](https://img.shields.io/badge/live-shipping--hub.up.railway.app-22d3ee?logo=railway&logoColor=white)](https://shipping-hub.up.railway.app/)
 [![Autonomous maintenance · 24/7](https://img.shields.io/badge/autonomous%20maintenance-24%2F7-a78bfa)](./OPERATIONS.md)
 
-**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents the projects. **DramaFetch** is a Python CLI, a local web UI and a Chrome extension that download the TikTok short-drama episodes your own account can already watch — whole series, several in one run — for personal offline viewing: paid episodes your account has unlocked download like free ones, and it never unlocks, buys or decrypts anything. Shipping Hub, SecureGate and DramaFetch are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges.
+**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents the projects. **DramaFetch** is a Python CLI, a local web UI and a Chrome extension that download the TikTok short-drama episodes your own account can already watch — whole series, several in one run — for personal offline viewing: paid episodes your account has unlocked download like free ones, and it never unlocks, buys or decrypts anything. Shipping Hub, SecureGate and DramaFetch are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, a daily merge gate, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges them, except the Dependabot and agent PRs that pass the merge gate, which an agent merges after running every check itself.
 
 ## What's inside
 
@@ -41,8 +41,8 @@ flowchart TB
   subgraph AM["Autonomous maintenance · 24/7"]
     direction LR
     GHA["GitHub Actions · Uptime patrol every 30 min · Claude on-call · Dependabot · CI"] --> OUT["Pull requests and issues"]
-    CC["Claude Code cloud · SRE patrol every 6 h · nightly maintenance · weekly security review"] --> OUT
-    OUT --> HUMAN["Human review"] --> MERGE["Merge to main · Railway redeploys"]
+    CC["Claude Code cloud · SRE patrol every 6 h · nightly maintenance · weekly security review · merge gate"] --> OUT
+    OUT --> GATE["Merge gate (merge-steward) or human review"] --> MERGE["Merge to main · Railway redeploys"]
   end
 ```
 
@@ -60,10 +60,11 @@ The repository is maintained around the clock by Claude Code agents on two runti
 | SRE patrol | every 6 h (`28 */6 * * *` UTC) | Claude Code cloud · `.claude/shifts/sre-patrol.md` | Reads the last 24 h of workflow runs and open incidents; diagnoses from logs | `fix(agents): …` PR when the cause is in-repo; one diagnosis comment on the incident issue when it is the hosting |
 | Nightly maintenance | daily 08:40 UTC (`40 8 * * *`) | Claude Code cloud · `.claude/shifts/nightly-maintenance.md` | Runs every check and the Karate API suite against a local stack, DramaFetch's checks and its upstream watch (`download-guardian`: yt-dlp's TikTok changes, new releases, Chrome Stable — primary sources only), reviews Dependabot PRs, fixes docs drift, picks at most one small improvement | `chore(agents): nightly maintenance <date>` PR or `🧪 Nightly maintenance failed: <date>` issue — nothing when nothing is needed |
 | Weekly security review | Mondays 10:20 UTC (`20 10 * * 1`) | Claude Code cloud · `.claude/shifts/weekly-security-review.md` | `pnpm audit`, `pip-audit`, Maven updates, DramaFetch's vulnerability watch (`vuln-sentinel`: every installed distribution against PyPI's OSV data, the extension's permissions and CSP, the web UI's token and file confinement), secret grep, auth/CORS/rate-limit/Dockerfile/workflow-permissions review | `chore(deps): weekly security bumps <date>` PR; `🔐 Weekly security review: <date>` issue for everything else |
+| Merge gate | daily 11:47 UTC (`47 11 * * *`) | Claude Code cloud · `.claude/shifts/merge-gate.md` | After the maintenance shifts: for each finished Dependabot or agent PR with a green, conflict-free head, runs the project checks itself (DramaFetch's whole definition of done with no test lost, Shipping Hub's production web build) and `merge-steward` merges it, one at a time, reverting it if `main` turns red | Merge commits on `main`; `Merge gate: needs a human — …` comments; a revert PR and `🚦 Merge gate reverted #<N>: <date>` if needed |
 
 **Guardrails** (the full eight rules are in [`AGENTS.md`](./AGENTS.md)):
 
-- Agents never push to `main`, never force-push and never merge — a human merges every PR.
+- Agents never push to `main` and never force-push. Only `merge-steward`, inside the merge gate, merges — Dependabot and agent PRs that pass every check, one at a time, reverted if `main` turns red; a human merges everything else.
 - One small PR per shift run; if nothing is needed, nothing is opened — no empty PRs, no "all good" issues.
 - The project's own checks run before any PR and the real results are reported — a SecureGate run with 0 failures and N skipped is not a pass.
 - No test is weakened, skipped or quarantined to get green, and each project's architectural rules are respected.
@@ -123,8 +124,8 @@ open PersonalWebsite/MainPage.html                     # xdg-open on Linux
 ```text
 .
 ├── .claude/
-│   ├── agents/              sre-patrol · repo-steward · qa-regression · security-auditor · docs-keeper · download-guardian · vuln-sentinel
-│   ├── shifts/              sre-patrol.md · nightly-maintenance.md · weekly-security-review.md
+│   ├── agents/              sre-patrol · repo-steward · qa-regression · security-auditor · docs-keeper · download-guardian · vuln-sentinel · merge-steward
+│   ├── shifts/              sre-patrol.md · nightly-maintenance.md · weekly-security-review.md · merge-gate.md
 │   ├── scripts/             local-postgres.sh · local-api.sh · run-checks.sh · dramafetch-watch.sh
 │   ├── hooks/               format-on-save.sh — Prettier on FullStackHub files after every edit
 │   └── settings.example.json  pre-allowed commands + the PostToolUse hook — copy to settings.json and commit to enable

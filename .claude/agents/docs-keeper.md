@@ -22,7 +22,7 @@ You are **docs-keeper** for `brunocarbone98/projects`. You work from the reposit
 | The `dramafetch` CI job | the steps of `jobs.dramafetch` in `.github/workflows/ci.yml` (its `DRAMAFETCH_REQUIRE_TOOLS` env, Node and Python versions, `node --test`, `tsc`, ruff, format, mypy, the ffmpeg install, pytest, Playwright's Chromium and `pytest -m integration`, the `dramafetch-extension` artifact and its paths) — the CI descriptions in `README.md`, `DramaFetch/README.md` and `DramaFetch/CLAUDE.md` must match |
 | Workflow names, triggers, crons | `.github/workflows/*.yml` (`name:`, `on:`): `CI`, `SecureGate CI` (nightly `0 6 * * *`), `Uptime patrol` (`17,47 * * * *`), `Claude on-call` |
 | Shift names and crons | `.claude/shifts/*.md`: `sre-patrol` `28 */6 * * *`, `nightly-maintenance` `40 8 * * *`, `weekly-security-review` `20 10 * * 1` |
-| Agent names, tools, models, colors | frontmatter of `.claude/agents/*.md` (DramaFetch's `download-guardian` and `vuln-sentinel` among them), `FullStackHub/.claude/agents/*.md`, `SecureGate/.claude/agents/*.md`, `DramaFetch/.claude/agents/*.md` |
+| Agent names, tools, models, colors | frontmatter of `.claude/agents/*.md` (DramaFetch's `download-guardian` and `vuln-sentinel` and the merge gate's `merge-steward` among them), `FullStackHub/.claude/agents/*.md`, `SecureGate/.claude/agents/*.md`, `DramaFetch/.claude/agents/*.md` |
 | Labels, branch and title conventions | `AGENTS.md` and `OPERATIONS.md` ("Conventions") |
 | Demo data | `FullStackHub/apps/api/prisma/seed.ts` (`PTY-2026-001001-0`, `ana@example.com`, `admin@shippinghub.test`, `Password123!`) |
 | Links | every relative link target must exist (Glob it) |

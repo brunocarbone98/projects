@@ -164,7 +164,7 @@ a quality gate and published reports — see [`ROADMAP.md`](./ROADMAP.md). The s
 
 ## Autonomous maintenance
 
-SecureGate is maintained around the clock by Claude Code agents; a human reviews and merges every PR.
+SecureGate is maintained around the clock by Claude Code agents; a human reviews and merges every PR except the Dependabot and agent PRs that pass the merge gate.
 **SecureGate CI** runs the full suite (Karate API + Serenity/Screenplay UI with Chrome + Newman) nightly
 at 06:00 UTC and on PRs touching `SecureGate/**` or `FullStackHub/**`, and uploads the Serenity, Karate
 and surefire reports as the `securegate-reports` artifact.
@@ -175,11 +175,12 @@ and surefire reports as the `securegate-reports` artifact.
   reading `target/surefire-reports/*.xml` and `target/karate-reports/karate-summary-json.txt` —
   `tests="0"` means the suite was skipped (no reachable stack) and is never reported as a pass;
   **SRE patrol** (every 6 h) triages red SecureGate CI runs; the **weekly security review** (Mondays
-  10:20 UTC) checks Maven dependency updates. The Selenium UI suite needs Chrome and runs only in
+  10:20 UTC) checks Maven dependency updates, and the **merge gate** (daily 11:47 UTC) merges the
+  Dependabot and agent PRs that pass its checks (SecureGate CI green with tests above 0 among them). The Selenium UI suite needs Chrome and runs only in
   SecureGate CI.
 - Agents: the project subagents in [`.claude/agents/`](./.claude/agents) (`api-test-engineer`,
   `ui-test-engineer`, `bdd-engineer`, `devsecops`, `code-reviewer`, `test-runner`) and the repo-wide
-  `qa-regression`, `sre-patrol`, `repo-steward`, `security-auditor` and `docs-keeper` in
+  `qa-regression`, `sre-patrol`, `repo-steward`, `security-auditor`, `docs-keeper` and `merge-steward` in
   [`../.claude/agents/`](../.claude/agents) (where DramaFetch's `download-guardian` and
   `vuln-sentinel` live too).
 - Operations manual (roster, shifts, runtimes, guardrails, incident flow):

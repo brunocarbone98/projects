@@ -6,7 +6,7 @@ name: Claude on-call
 # comment; when code changes are needed it commits on a claude/… branch, runs the project checks
 # allowed below (pnpm, ./mvnw, pytest, the .claude/scripts helpers), pushes the branch and posts a
 # link to open the pull request — the action never opens the PR itself, and a human reviews and
-# merges everything.
+# merges it (the merge gate treats on-call PRs as a person's: a human opened them).
 #
 # Credential: the repository secret CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, Claude
 # Pro/Max subscriptions) or ANTHROPIC_API_KEY. Until one exists the job only writes a setup

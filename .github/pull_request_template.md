@@ -13,7 +13,7 @@ excluding lockfiles. Agent PRs carry the `agent` label and name their shift in "
 
 ## How I verified
 
-Tick what you ran and paste the real results. Failing is failing (with the output); skipped is skipped.
+Tick what you ran and paste the real results. Failing is failing (with the output); skipped is skipped. Delete the sections of the projects this PR does not touch.
 
 **FullStackHub — Shipping Hub** (from `FullStackHub/`; `.claude/scripts/run-checks.sh` runs all of these in one go)
 
@@ -48,6 +48,6 @@ Tick what you ran and paste the real results. Failing is failing (with the outpu
 
 ---
 
-**Opened by:** <!-- human · or the agent shift that opened it: sre-patrol / nightly-maintenance / weekly-security-review / claude-on-call -->
+**Opened by:** <!-- human · or the agent shift that opened it: sre-patrol / nightly-maintenance / weekly-security-review / merge-gate / claude-on-call -->
 
-> Agents never merge. A human reviews and merges every pull request — see `AGENTS.md`.
+> Only `merge-steward`, inside the merge gate (`.claude/shifts/merge-gate.md`), merges a Dependabot or agent pull request that passes every check; a human reviews and merges every other one — see `AGENTS.md`.
