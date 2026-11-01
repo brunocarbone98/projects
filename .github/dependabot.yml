@@ -54,6 +54,27 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
+  # DramaFetch — the floors in pyproject.toml (yt-dlp, playwright, mutagen; the extras curl_cffi,
+  # pytest, ruff, mypy). `increase` raises a floor to the new release, so a TikTok fix in yt-dlp
+  # reaches every install; the nightly shift's download-guardian tries each bump against the fake
+  # TikTok before its verdict.
+  - package-ecosystem: pip
+    directory: /DramaFetch
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: America/Panama
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    labels: [dependencies]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
   # SecureGate — Maven (pom.xml: Karate, Serenity, Selenium, Cucumber, JUnit 5).
   - package-ecosystem: maven
     directory: /SecureGate
