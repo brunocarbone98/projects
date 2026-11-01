@@ -988,6 +988,13 @@ NOT_DRM_KEYS = [
     ("encryptedUid", ENCRYPTED_UID),
     ("encrypted_id", "x"),
     ("unencrypted", True),
+    # their camelCase spellings too: an acronym's plural is one word, `un` a negation
+    ("encryptedIDs", "x"),
+    ("encryptedUIDs", f"{ENCRYPTED_UID},{ENCRYPTED_UID}"),
+    ("encryptedUserIDs", "x"),
+    ("unEncrypted", True),
+    ("isUnEncrypted", True),
+    ("un_encrypted", True),
 ]
 
 
@@ -1050,6 +1057,12 @@ def test_a_falsy_drm_value_is_never_a_clue(key, value):
         ("isDRM", ("is", "drm")),
         ("DRM", ("drm",)),
         ("unencrypted", ("unencrypted",)),
+        ("encryptedIDs", ("encrypted", "ids")),  # an acronym's plural stays one word
+        ("encryptedUIDs", ("encrypted", "uids")),
+        ("encryptedUserIDs", ("encrypted", "user", "ids")),
+        ("IDsList", ("ids", "list")),
+        ("unEncrypted", ("un", "encrypted")),
+        ("IsDrmFree", ("is", "drm", "free")),  # a capital and an `s` before a capital: a word
         ("", ()),
         ("__", ()),
         ("ü", ()),
@@ -1094,6 +1107,41 @@ FREE = ("free", False, False)
 
 
 @pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        # a `lock_?status` key whose word before `Lock` merely ends in b: a lock, as before 7b
+        ("subLockStatus", 1, LOCKED),
+        ("subLockStatus", "locked", LOCKED),
+        ("webLockStatus", True, LOCKED),
+        ("clubLockStatus", "1", LOCKED),
+        ("dubLockStatus", 1, LOCKED),
+        ("WEBLockStatus", 1, LOCKED),  # an acronym run that ends in B
+        ("blockLockStatus", 1, LOCKED),  # a lock word next to a block word
+        # the old heuristic's leftovers: a pricing clue, as before 7b
+        ("isSubLocked", True, UNLOCKED),
+        ("subLock", 1, UNLOCKED),
+        ("webLock", 1, UNLOCKED),
+        ("DBLock", 1, UNLOCKED),
+        ("isBlockLocked", True, UNLOCKED),
+    ],
+)
+def test_a_word_that_ends_in_b_before_lock_is_not_block(key, value, expected):
+    """Only a word that CONTAINS `block` is no lock word (`test_block_is_not_lock`): `subLock…`,
+    `webLock…` and `DBLock` are two words, the second a lock — such an episode is never
+    attempted on a lock flag's account, nor a sold one without a play URL."""
+    access, paid, drm, hints = access_of(_item({key: value}))
+    assert (access, paid, drm) == expected
+    assert hints == (f"{key}={value}",)
+    if expected == UNLOCKED:  # sold, and no real play URL: locked, as for any sold episode
+        assert access_of(_item({key: value}, video={"playAddr": "null"})) == (
+            "locked",
+            True,
+            False,
+            (f"{key}={value}", NO_PLAY_ADDRESS),
+        )
+
+
+@pytest.mark.parametrize(
     ("value", "expected", "hint"),
     [
         # a STRING value is read like an (unlock|pay|purchase)_?status one: ENTITLED ...
@@ -1106,15 +1154,26 @@ FREE = ("free", False, False)
         ("NEED_PAY", LOCKED, "NEED_PAY"),
         # ... and any other non-falsy string is AMBIGUOUS: a hint that never decides
         ("pending", FREE, "pending"),
-        ("2", FREE, "2"),
-        # a bool or a number stays a lock when truthy (unchanged)
+        ("on", FREE, "on"),
+        # a bool or a number stays a lock when truthy (unchanged) ...
         (True, LOCKED, "True"),
         (1, LOCKED, "1"),
         (2, LOCKED, "2"),
+        # ... and so does a string that spells one, the way `_truthy` reads "0" and "false"
+        ("1", LOCKED, "1"),
+        ("2", LOCKED, "2"),
+        (" 1 ", LOCKED, "1"),
+        ("-1", LOCKED, "-1"),
+        ("1.5", LOCKED, "1.5"),
+        ("true", LOCKED, "true"),
+        ("TRUE", LOCKED, "TRUE"),
+        ("yes", LOCKED, "yes"),
         # falsy: no clue at all
         (False, FREE, None),
         (0, FREE, None),
         ("0", FREE, None),
+        ("false", FREE, None),
+        ("no", FREE, None),
         ("none", FREE, None),
         ("", FREE, None),
     ],
@@ -1143,6 +1202,13 @@ def test_lock_status_unlocked_with_a_play_address_is_unlocked_and_an_unknown_one
     )
     assert access_of(_item({"lockStatus": "pending"}, video={}))[0] == "locked"
     assert access_of(_item({"lockStatus": "pending", "isLocked": True}))[0] == "locked"
+    # a lock spelled as a string still locks a sold episode TikTok gave this session a URL for
+    assert access_of(_item({"isFree": False, "unlockPrice": 30, "lockStatus": "1"})) == (
+        "locked",
+        True,
+        False,
+        ("isFree=false", "unlockPrice=30", "lockStatus=1"),
+    )
 
 
 #: Keys the fuzz test draws from: every clue class, the containers access_of walks, and noise.

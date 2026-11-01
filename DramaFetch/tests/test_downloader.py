@@ -414,6 +414,12 @@ def test_non_zero_return_code_is_a_failure(tmp_path):
         ("Forbidden", DownloadStatus.FAILED_BLOCKED),
         ("Access Denied", DownloadStatus.FAILED_BLOCKED),
         ("<h1>access denied</h1> you don't have permission", DownloadStatus.FAILED_BLOCKED),
+        # TikTok's status 10204, in the words of yt-dlp's TikTok extractor: the same refusal
+        (
+            "ERROR: [TikTok] 7699400000000000007: "
+            "Your IP address is blocked from accessing this post",
+            DownloadStatus.FAILED_BLOCKED,
+        ),
         # login wording wins over a 403, and a 429 wins over "forbidden"
         ("HTTP Error 403: Forbidden; log in to continue", DownloadStatus.FAILED_LOGIN),
         ("HTTP Error 429: Too Many Requests (forbidden)", DownloadStatus.FAILED_RATE_LIMITED),

@@ -46,6 +46,7 @@ from dramafetch.cooldown import (
     clear_cooldown,
     cooldown_message,
     record_block,
+    state_dir,
 )
 from dramafetch.errors import (
     ChallengeError,
@@ -509,13 +510,17 @@ def test_security_headers(harness: Harness) -> None:
 
 @pytest.mark.parametrize("token", [None, TOKEN], ids=["no-token", "token"])
 def test_the_favicon_is_an_empty_204_before_the_token_check(
-    make_harness: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch, token: str | None
+    make_harness: Callable[..., Harness],
+    monkeypatch: pytest.MonkeyPatch,
+    dramafetch_state_dir: Path,
+    token: str | None,
 ) -> None:
     """Build 7b: the browser asks for /favicon.ico on every page load. The page has no icon, and
     with a token that automatic request used to cost a 401 — a console error per page load. Now
     `GET` / `HEAD` of exactly that path is a bare 204 with the usual security headers, before
     the token check and without reading any file; every other path keeps its rules."""
     harness = make_harness(token=token)
+    page = web_server.index_html
 
     def no_page() -> str:
         raise AssertionError("the favicon answer reads no file")
@@ -552,7 +557,10 @@ def test_the_favicon_is_an_empty_204_before_the_token_check(
     assert harness.raw("GET", "/favicon.ico", headers={"Host": "evil.example"})[0] == 403
     status, _, body = harness.raw("HEAD", "/favicon.ico", headers={"Host": "evil.example"})
     assert (status, body) == (403, b"")  # an answer to HEAD carries no body
-    monkeypatch.undo()
+    # the page back — not monkeypatch.undo(), which would also undo the autouse state directory
+    # and leave the rest of this test pointed at the real ~/.dramafetch
+    monkeypatch.setattr(web_server, "index_html", page)
+    assert state_dir() == dramafetch_state_dir
     assert harness.request("GET", "/")[0] == 200  # the page itself: unchanged
     assert harness.discovery.refs == []
 

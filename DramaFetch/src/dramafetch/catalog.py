@@ -57,9 +57,9 @@ NO_PLAY_ADDRESS = "no play address"
 
 _ITEM_LIST_KEYS = ("itemList", "item_list")
 #: The key-name heuristic of the builds before the access model; it still catches the leftovers
-#: (``unlockType: 1``) as pricing clues, see :func:`access_of`. "block" is not "lock":
-#: ``blockStatus`` and ``isBlocked`` are no clue at all.
-_LOCK_KEY_RE = re.compile(r"(?<!b)lock|paid|needpay|unlock|price|coin|vip|preview", re.IGNORECASE)
+#: (``unlockType: 1``) as pricing clues, see :func:`access_of`. Matched against the key without
+#: its ``block`` words (:func:`_without_block_words`): "block" is not "lock".
+_LOCK_KEY_RE = re.compile(r"lock|paid|needpay|unlock|price|coin|vip|preview", re.IGNORECASE)
 _FREE_KEY_RE = re.compile(r"free", re.IGNORECASE)
 # The clue classes of :func:`access_of` and the key patterns behind them (case-insensitive).
 _DRM = "drm"
@@ -70,13 +70,14 @@ _NOT_ENTITLED = "not-entitled"
 _VIEWER_LOCK = "viewer-lock"
 _AMBIGUOUS = "ambiguous"
 _PRICING = "pricing"
-#: One word of a key (:func:`key_words`): the acronym run before a capitalised word (``DRM`` of
-#: ``DRMType``), a capitalised or lower-case word, an acronym, a run of digits. Anything else —
-#: ``_``, ``-``, spaces, other characters — only separates words.
-_KEY_WORD_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+#: One word of a key (:func:`key_words`): an acronym run with its plural ``s`` (``IDs`` of
+#: ``encryptedIDs``), the acronym run before a capitalised word (``DRM`` of ``DRMType``), a
+#: capitalised or lower-case word, an acronym, a run of digits. Anything else — ``_``, ``-``,
+#: spaces, other characters — only separates words.
+_KEY_WORD_RE = re.compile(r"[A-Z]+s(?![a-z])|[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
 #: Words that turn a DRM key into its opposite (``isDrmFree``, ``no_drm``, ``nonEncrypted``,
-#: ``notEncrypted``) ...
-_DRM_NEGATION_WORDS = frozenset({"free", "no", "non", "not", "without"})
+#: ``notEncrypted``, ``unEncrypted``) ...
+_DRM_NEGATION_WORDS = frozenset({"free", "no", "non", "not", "un", "without"})
 #: ... or into an identifier, which says nothing about the media (``encryptedUid``,
 #: ``encrypted_id``: TikTok's encrypted user ids).
 _DRM_ID_WORDS = frozenset({"id", "ids", "uid", "uids"})
@@ -95,9 +96,15 @@ _VIEWER_LOCK_KEY_RE = re.compile(
     r"need_?(?:pay|unlock|buy|purchase)|preview|trial|paywall", re.IGNORECASE
 )
 #: ``lockStatus`` / ``lock_status`` — not ``unlockStatus``, which is a :data:`_STATUS_KEY_RE`,
-#: and not ``blockStatus``. A bool or a number locks when truthy; a STRING value is read like a
-#: status (the two sets below), any other non-falsy string is a hint only.
-_LOCK_STATUS_KEY_RE = re.compile(r"(?<!un)(?<!b)lock_?status", re.IGNORECASE)
+#: and not ``blockStatus`` (matched against the key without its ``block`` words, see
+#: :func:`_without_block_words`). A bool or a number — or a string that spells one, see
+#: :data:`_NUMBER_OR_BOOL_TEXT_RE` — locks when truthy; any other STRING value is read like a
+#: status (the two sets below), and one that neither set knows is a hint only.
+_LOCK_STATUS_KEY_RE = re.compile(r"(?<!un)lock_?status", re.IGNORECASE)
+#: A string that spells a number or a bool (``"1"``, ``" 2 "``, ``"-1"``, ``"1.5"``, ``"true"``,
+#: ``"yes"``): a ``lock_?status`` key reads it as that number or bool, the way :func:`_truthy`
+#: reads ``"0"`` and ``"false"`` — so ``lockStatus: "1"`` locks like ``lockStatus: 1``.
+_NUMBER_OR_BOOL_TEXT_RE = re.compile(r"[+-]?[0-9]+(?:\.[0-9]+)?|true|yes", re.IGNORECASE)
 #: ``unlockStatus`` / ``payStatus`` / ``purchaseStatus``: only a STRING value decides (one of the
 #: two sets below); a bool or a number is a hint only (1 can mean either).
 _STATUS_KEY_RE = re.compile(r"(?:unlock|pay|purchase)_?status", re.IGNORECASE)
@@ -172,10 +179,10 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
 
     - DRM: a key that names DRM in whole words (:func:`is_drm_key`: one of its
       :func:`key_words` is ``drm`` or starts with ``encrypt``, none is a negation — ``free``,
-      ``no``, ``non``, ``not``, ``without`` — or an identifier — ``id``, ``ids``, ``uid``,
-      ``uids``), truthy: ``isDrm``, ``drmType: "widevine"``, ``DRMType``, ``is_encrypted``,
-      ``encryption: "cenc"``; never ``hdrMode``, ``isDrmFree``, ``no_drm``, ``nonEncrypted``,
-      ``unencrypted`` or ``encryptedUid``.
+      ``no``, ``non``, ``not``, ``un``, ``without`` — or an identifier — ``id``, ``ids``,
+      ``uid``, ``uids``), truthy: ``isDrm``, ``drmType: "widevine"``, ``DRMType``,
+      ``is_encrypted``, ``encryption: "cenc"``; never ``hdrMode``, ``isDrmFree``, ``no_drm``,
+      ``nonEncrypted``, ``unencrypted``, ``unEncrypted``, ``encryptedUid`` or ``encryptedUIDs``.
     - ENTITLED (the account may play it): a FULL key ``(is_?)?(unlocked|purchased|bought|
       entitled)``, ``has_?(paid|purchased|unlocked|bought|access)`` or
       ``paid_?by_?(user|viewer|me)``, truthy; or an ``(unlock|pay|purchase)_?status`` or
@@ -187,9 +194,9 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     - VIEWER-LOCK (this session cannot play it): a FULL key ``(is_?)?locked``; a key containing
       ``need_?(pay|unlock|buy|purchase)``, ``preview``, ``trial`` or ``paywall`` (a preview or
       trial clip is not the episode); a ``lock_?status`` key (not ``unlock…``, not ``block…``)
-      with a bool or a number — all truthy; or an ``(unlock|pay|purchase)_?status`` or
-      ``lock_?status`` key whose string value is ``locked``, ``lock``, ``need_pay``,
-      ``needpay``, ``unpaid`` or ``unpurchased``.
+      with a bool or a number, or a string that spells one (``"1"``, ``"true"``) — all truthy;
+      or an ``(unlock|pay|purchase)_?status`` or ``lock_?status`` key whose string value is
+      ``locked``, ``lock``, ``need_pay``, ``needpay``, ``unpaid`` or ``unpurchased``.
     - AMBIGUOUS: an ``(unlock|pay|purchase)_?status`` key with a bool or numeric value (1 can mean
       either), or a ``lock_?status`` key with any other non-falsy string: a hint, it NEVER
       decides.
@@ -197,8 +204,9 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
       ``price``, ``coin``, ``cost`` or ``charge`` with a number above 0 (or a truthy string); a key
       containing ``vip`` or ``paid`` that is not an ENTITLED full key, truthy; and any other truthy
       key the old ``lock|paid|needpay|unlock|price|coin|vip|preview`` heuristic matched and no
-      class above turned into a clue (``unlockType: 1``) — "block" is not "lock": ``blockStatus``
-      and ``isBlocked`` give no clue at all.
+      class above turned into a clue (``unlockType: 1``) — "block" is not "lock": a word that
+      contains ``block`` is no lock word (``blockStatus``, ``isBlocked``: no clue at all), while
+      ``subLockStatus`` or ``webLock`` still is one.
     - PLAY: no ``video.playAddr`` and an empty ``video.bitrateInfo`` (or no ``video`` at all) in
       this session's payload: the hint :data:`NO_PLAY_ADDRESS`.
 
@@ -292,26 +300,39 @@ def _collect_clues(node: Any, depth: int, clues: list[tuple[str, str]]) -> None:
 def key_words(key: str) -> tuple[str, ...]:
     """The lower-case words of a payload key, in order: camelCase and PascalCase split at every
     capital, an acronym run kept whole (``DRMType`` -> ``drm``, ``type``; ``HDRBit`` -> ``hdr``,
-    ``bit``), ``snake_case`` and ``kebab-case`` at their separators, digits on their own
-    (``drm2`` -> ``drm``, ``2``). Pure; anything that is not an ASCII letter or digit separates."""
+    ``bit``), its plural too (``encryptedIDs`` -> ``encrypted``, ``ids``), ``snake_case`` and
+    ``kebab-case`` at their separators, digits on their own (``drm2`` -> ``drm``, ``2``). Pure;
+    anything that is not an ASCII letter or digit separates."""
     return tuple(word.lower() for word in _KEY_WORD_RE.findall(key))
 
 
 def is_drm_key(key: str) -> bool:
     """Whether a payload key names DRM (the DRM class of :func:`access_of`, whose value must also
     be truthy): one of its :func:`key_words` is ``drm`` or starts with ``encrypt``, and none is a
-    negation (``free``, ``no``, ``non``, ``not``, ``without``) or an identifier (``id``,
+    negation (``free``, ``no``, ``non``, ``not``, ``un``, ``without``) or an identifier (``id``,
     ``ids``, ``uid``, ``uids``). So ``isDrm``, ``drmType``, ``DRMType``, ``is_encrypted``,
     ``videoEncrypted``, ``encryption`` and ``encryptType`` are DRM keys; ``hdrMode``,
     ``HDRType``, ``isDrmFree``, ``drm_free``, ``no_drm``, ``nonEncrypted``, ``notEncrypted``,
-    ``unencrypted``, ``encryptedUid`` and ``encrypted_id`` are not. Whole words, not letters: a
-    DRM clue locks the episode whatever else the payload says, and it only saves a download that
-    would be refused anyway (the media check, ``media.drm_problem``, is the real guard), so
-    precision beats recall."""
+    ``unencrypted``, ``unEncrypted``, ``encryptedUid``, ``encryptedUIDs`` and ``encrypted_id``
+    are not. Whole words, not letters: a DRM clue locks the episode whatever else the payload
+    says, and it only saves a download that would be refused anyway (the media check,
+    ``media.drm_problem``, is the real guard), so precision beats recall."""
     words = key_words(key)
     if not any(word == "drm" or word.startswith("encrypt") for word in words):
         return False
     return not any(word in _DRM_NEGATION_WORDS or word in _DRM_ID_WORDS for word in words)
+
+
+def _without_block_words(key: str) -> str:
+    """``key`` with each of its :func:`key_words` that contains ``block`` turned into ``_``: what
+    :data:`_LOCK_STATUS_KEY_RE` and the old heuristic's leftovers (:data:`_LOCK_KEY_RE`) are
+    matched against, because "block" is not "lock" — ``blockStatus``, ``isBlocked``,
+    ``BLOCK_STATUS`` and ``unblockStatus`` give no clue at all — while a word that merely ends in
+    ``b`` (``subLockStatus``, ``webLock``, ``DBLock``) and a lock word next to a block word
+    (``blockLockStatus``) still count, as they did before."""
+    return _KEY_WORD_RE.sub(
+        lambda word: "_" if "block" in word.group().lower() else word.group(), key
+    )
 
 
 def _clues(key: str, value: Any) -> list[tuple[str, str]]:
@@ -323,8 +344,12 @@ def _clues(key: str, value: Any) -> list[tuple[str, str]]:
     truthy = _truthy(value)
     entitled_key = _ENTITLED_KEY_RE.fullmatch(key) is not None
     status_key = _STATUS_KEY_RE.search(key) is not None
-    lock_status_key = _LOCK_STATUS_KEY_RE.search(key) is not None
-    is_text = isinstance(value, str)
+    lock_key = _without_block_words(key)  # "block" is not "lock"
+    lock_status_key = _LOCK_STATUS_KEY_RE.search(lock_key) is not None
+    # a lockStatus string that spells a number or a bool ("1", "true") is that number or bool
+    is_text = isinstance(value, str) and not (
+        lock_status_key and _NUMBER_OR_BOOL_TEXT_RE.fullmatch(value.strip()) is not None
+    )
     # a status STRING decides through the two value sets, for lockStatus as for unlockStatus
     status = (
         value.strip().lower()
@@ -341,7 +366,7 @@ def _clues(key: str, value: Any) -> list[tuple[str, str]]:
     viewer_lock_key = (
         _LOCKED_KEY_RE.fullmatch(key) is not None
         or _VIEWER_LOCK_KEY_RE.search(key) is not None
-        or (lock_status_key and not is_text)  # a bool or a number: truthy locks, as ever
+        or (lock_status_key and not is_text)  # a bool or a number (or one spelled): truthy locks
     )
     if (truthy and viewer_lock_key) or status in _LOCKED_STATUS_VALUES:
         found.append((_VIEWER_LOCK, hint))
@@ -353,7 +378,7 @@ def _clues(key: str, value: Any) -> list[tuple[str, str]]:
         (_PRICE_KEY_RE.search(key) is not None and _positive(value))
         or (truthy and not entitled_key and _SOLD_KEY_RE.search(key) is not None)
         # the old heuristic's leftovers, for a key no class above turned into a clue
-        or (truthy and not found and _LOCK_KEY_RE.search(key) is not None)
+        or (truthy and not found and _LOCK_KEY_RE.search(lock_key) is not None)
     )
     if _FREE_KEY_RE.search(key) and not truthy:
         found.append((_PRICING, "isFree=false"))
