@@ -1,0 +1,478 @@
+{
+  "extName": {
+    "message": "DramaFetch",
+    "description": "The extension's name."
+  },
+  "extDescription": {
+    "message": "Download whole TikTok short-drama series your own account can watch, paced like one person watching.",
+    "description": "The extension's description (at most 132 characters)."
+  },
+  "actionTitle": {
+    "message": "DramaFetch",
+    "description": "Toolbar button tooltip."
+  },
+  "appTitle": {
+    "message": "DramaFetch",
+    "description": "Page title."
+  },
+  "appSubtitle": {
+    "message": "Whole TikTok short-drama series, for offline viewing",
+    "description": "Subtitle under the page title."
+  },
+  "statusIdle": {
+    "message": "idle",
+    "description": "Engine state badge: nothing running."
+  },
+  "statusRunning": {
+    "message": "working",
+    "description": "Engine state badge: a job is running."
+  },
+  "duplicateTab": {
+    "message": "DramaFetch is already open in another tab: use that one (one engine at a time).",
+    "description": "Banner of a second DramaFetch tab."
+  },
+  "cooldownTitle": {
+    "message": "TikTok refused a request.",
+    "description": "Cooldown banner title."
+  },
+  "cooldownLeft": {
+    "message": "$minutes$ min left — nothing contacts TikTok until then.",
+    "description": "Cooldown countdown.",
+    "placeholders": {
+      "minutes": {
+        "content": "$1"
+      }
+    }
+  },
+  "linksHeading": {
+    "message": "Series to download",
+    "description": "Heading of the input card."
+  },
+  "linksLabel": {
+    "message": "One series link (any episode of it) or series id per line",
+    "description": "Label of the links box."
+  },
+  "linksPlaceholder": {
+    "message": "https://www.tiktok.com/shortdrama/episode/7699393770256782354/1",
+    "description": "Placeholder of the links box."
+  },
+  "linksHint": {
+    "message": "Load list shows the episodes of one series first. Download all takes every series of the box, one after the other, each listed right before its own downloads. Keep this tab open while DramaFetch works.",
+    "description": "Hint under the links box."
+  },
+  "includeLockedLabel": {
+    "message": "Also ask for locked episodes (TikTok decides; usually they fail)",
+    "description": "Per-run checkbox: include locked."
+  },
+  "recheckLabel": {
+    "message": "Look again at series found complete in the last 24 hours",
+    "description": "Per-run checkbox: recheck."
+  },
+  "loadButton": {
+    "message": "Load list",
+    "description": "Button: list one series."
+  },
+  "downloadAllButton": {
+    "message": "Download all",
+    "description": "Button: download every series of the box."
+  },
+  "downloadAvailableButton": {
+    "message": "Download all available",
+    "description": "Button: free and unlocked episodes."
+  },
+  "downloadSelectedButton": {
+    "message": "Download selected",
+    "description": "Button: ticked episodes."
+  },
+  "selectAll": {
+    "message": "Select all episodes",
+    "description": "Accessible label of the select-all box."
+  },
+  "colCover": {
+    "message": "Cover",
+    "description": "Column."
+  },
+  "colNumber": {
+    "message": "#",
+    "description": "Column: episode number."
+  },
+  "colTitle": {
+    "message": "Title",
+    "description": "Column."
+  },
+  "colDuration": {
+    "message": "Length",
+    "description": "Column."
+  },
+  "colQuality": {
+    "message": "Quality",
+    "description": "Column."
+  },
+  "colAccess": {
+    "message": "Access",
+    "description": "Column."
+  },
+  "colStatus": {
+    "message": "Status",
+    "description": "Column."
+  },
+  "colMessage": {
+    "message": "Message",
+    "description": "Column."
+  },
+  "colSeries": {
+    "message": "Series",
+    "description": "Column."
+  },
+  "colListed": {
+    "message": "Listed",
+    "description": "Column."
+  },
+  "colDone": {
+    "message": "Downloaded",
+    "description": "Column."
+  },
+  "colOnDisk": {
+    "message": "On disk",
+    "description": "Column."
+  },
+  "colLocked": {
+    "message": "Locked",
+    "description": "Column."
+  },
+  "colFailed": {
+    "message": "Failed",
+    "description": "Column."
+  },
+  "progressHeading": {
+    "message": "Progress",
+    "description": "Heading of the progress card."
+  },
+  "progressSeries": {
+    "message": "Series: $name$",
+    "description": "The series being worked on.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "progressBatch": {
+    "message": "Series $index$ of $total$: $id$",
+    "description": "Batch progress.",
+    "placeholders": {
+      "index": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      },
+      "id": {
+        "content": "$3"
+      }
+    }
+  },
+  "seriesSkippedComplete": {
+    "message": "$name$ — complete on disk, nothing to do",
+    "description": "Header row of a series skipped as complete.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "pauseInForce": {
+    "message": "$text$ — $seconds$ s left",
+    "description": "The pause in force (the text is the engine's).",
+    "placeholders": {
+      "text": {
+        "content": "$1"
+      },
+      "seconds": {
+        "content": "$2"
+      }
+    }
+  },
+  "stopButton": {
+    "message": "Stop",
+    "description": "Button: stop the run at the next pause."
+  },
+  "stoppedByYou": {
+    "message": "stopped by you",
+    "description": "Why a run ended."
+  },
+  "queueHeading": {
+    "message": "Waiting",
+    "description": "Heading of the queue card."
+  },
+  "loading": {
+    "message": "Listing the series in a background tab… this usually takes 10–40 s.",
+    "description": "Status while listing."
+  },
+  "loaded": {
+    "message": "$count$ episodes listed.",
+    "description": "Status after listing.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "noLinks": {
+    "message": "Paste at least one series link or id.",
+    "description": "Input error."
+  },
+  "loadOneOnly": {
+    "message": "Load list takes one series; use Download all for several.",
+    "description": "Input error."
+  },
+  "jobLoad": {
+    "message": "List series $id$",
+    "description": "Queue label.",
+    "placeholders": {
+      "id": {
+        "content": "$1"
+      }
+    }
+  },
+  "jobSeries": {
+    "message": "Series $id$",
+    "description": "Queue label.",
+    "placeholders": {
+      "id": {
+        "content": "$1"
+      }
+    }
+  },
+  "jobBatch": {
+    "message": "$count$ series",
+    "description": "Queue label.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "jobSelection": {
+    "message": "$count$ episodes of $name$",
+    "description": "Queue label.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "name": {
+        "content": "$2"
+      }
+    }
+  },
+  "seriesMeta": {
+    "message": "$episodes$ episodes listed, $available$ available (free or unlocked by your account), $ondisk$ already on disk.",
+    "description": "Summary of a listed series.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      },
+      "available": {
+        "content": "$2"
+      },
+      "ondisk": {
+        "content": "$3"
+      }
+    }
+  },
+  "selectionCount": {
+    "message": "$checked$ of $total$ selected",
+    "description": "Selection count.",
+    "placeholders": {
+      "checked": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      }
+    }
+  },
+  "selectionLocked": {
+    "message": "($count$ locked: will be asked for, usually fails)",
+    "description": "Locked episodes in the selection.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "badgeFree": {
+    "message": "free",
+    "description": "Access badge."
+  },
+  "badgeFreeTitle": {
+    "message": "Free to watch: downloaded with your session",
+    "description": "Access badge tooltip."
+  },
+  "badgeUnlocked": {
+    "message": "paid · unlocked",
+    "description": "Access badge."
+  },
+  "badgeUnlockedTitle": {
+    "message": "A paid episode your TikTok account has unlocked: downloaded with your session, like a free one",
+    "description": "Access badge tooltip."
+  },
+  "badgeLocked": {
+    "message": "locked",
+    "description": "Access badge."
+  },
+  "badgeLockedTitle": {
+    "message": "Your account has not unlocked it (or it is protected by DRM): skipped; nothing is ever unlocked",
+    "description": "Access badge tooltip."
+  },
+  "badgeOnDisk": {
+    "message": "on disk",
+    "description": "Badge of an episode already saved."
+  },
+  "badgeOnDiskTitle": {
+    "message": "Already downloaded: downloading again skips it without a request",
+    "description": "Tooltip of the on-disk badge."
+  },
+  "settingsHeading": {
+    "message": "Settings",
+    "description": "Heading of the settings card."
+  },
+  "settingQuality": {
+    "message": "Quality",
+    "description": "Setting label."
+  },
+  "qualityCompatible": {
+    "message": "Compatible (best H.264)",
+    "description": "Quality option."
+  },
+  "qualityBest": {
+    "message": "Best (highest bitrate, any codec)",
+    "description": "Quality option."
+  },
+  "settingThumbnail": {
+    "message": "Cover",
+    "description": "Setting label."
+  },
+  "thumbnailEmbed": {
+    "message": "Embedded in the video",
+    "description": "Cover option."
+  },
+  "thumbnailBoth": {
+    "message": "Embedded, and a separate image",
+    "description": "Cover option."
+  },
+  "thumbnailFile": {
+    "message": "Separate image only",
+    "description": "Cover option."
+  },
+  "thumbnailNone": {
+    "message": "None",
+    "description": "Cover option."
+  },
+  "settingNameFormat": {
+    "message": "File names",
+    "description": "Setting label."
+  },
+  "settingPace": {
+    "message": "Pace",
+    "description": "Setting label."
+  },
+  "paceFixed": {
+    "message": "A random pause between episodes",
+    "description": "Pace option."
+  },
+  "paceHuman": {
+    "message": "Human: about one episode's length",
+    "description": "Pace option."
+  },
+  "settingDelayMin": {
+    "message": "Pause between episodes, at least (s)",
+    "description": "Setting label."
+  },
+  "settingDelayMax": {
+    "message": "Pause between episodes, at most (s)",
+    "description": "Setting label."
+  },
+  "settingRestEvery": {
+    "message": "A longer rest every (episodes)",
+    "description": "Setting label."
+  },
+  "settingRestMin": {
+    "message": "Longer rest, at least (s)",
+    "description": "Setting label."
+  },
+  "settingRestMax": {
+    "message": "Longer rest, at most (s)",
+    "description": "Setting label."
+  },
+  "settingsHint": {
+    "message": "File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.",
+    "description": "Hint of the settings card."
+  },
+  "saveSettings": {
+    "message": "Save settings",
+    "description": "Button."
+  },
+  "resetSettings": {
+    "message": "Defaults",
+    "description": "Button."
+  },
+  "settingsSaved": {
+    "message": "Settings saved.",
+    "description": "Status."
+  },
+  "settingsRefused": {
+    "message": "Not saved: $reason$",
+    "description": "Status.",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "historyHeading": {
+    "message": "Past runs",
+    "description": "Heading of the history card."
+  },
+  "testHeading": {
+    "message": "Test mode",
+    "description": "Heading of the test card (test copy only)."
+  },
+  "testLabel": {
+    "message": "Test settings (JSON), honoured only by this test copy of the extension",
+    "description": "Label of the test settings box."
+  },
+  "testSave": {
+    "message": "Save test settings",
+    "description": "Button."
+  },
+  "popupDownload": {
+    "message": "Download this series",
+    "description": "Popup button."
+  },
+  "popupOpen": {
+    "message": "Open DramaFetch",
+    "description": "Popup button."
+  },
+  "popupSeries": {
+    "message": "Series $id$",
+    "description": "Popup: the series of this tab.",
+    "placeholders": {
+      "id": {
+        "content": "$1"
+      }
+    }
+  },
+  "popupHint": {
+    "message": "Open a TikTok short drama to download its whole series, or paste links in the DramaFetch tab.",
+    "description": "Popup hint."
+  },
+  "legalNotice": {
+    "message": "DramaFetch is for personal, offline viewing of episodes that your own TikTok account can already watch. It does not unlock paid episodes and does not bypass DRM or access controls; locked episodes are listed and skipped. Downloading may breach TikTok's Terms of Service, and the videos belong to their creators and studios — you are responsible for how you use this tool.",
+    "description": "The README's legal notice, verbatim, in English (both locales)."
+  },
+  "legalNoticeSpanish": {
+    "message": "DramaFetch es para ver sin conexión, de forma personal, episodios que tu propia cuenta de TikTok ya puede ver. No desbloquea episodios de pago y no elude el DRM ni los controles de acceso; los episodios bloqueados se listan y se omiten. Descargar puede infringir las Condiciones del servicio de TikTok, y los videos pertenecen a sus creadores y estudios — eres responsable de cómo usas esta herramienta.",
+    "description": "The legal notice in Spanish (both locales)."
+  }
+}

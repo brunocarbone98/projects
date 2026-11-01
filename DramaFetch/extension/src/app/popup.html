@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title data-i18n="appTitle">DramaFetch</title>
+<link rel="stylesheet" href="app.css">
+<style>
+  body { width: 300px; }
+  .popup { padding: 14px 16px 16px; display: grid; gap: 10px; }
+  .popup button { width: 100%; }
+  .popup p { margin: 0; }
+</style>
+<script type="module" src="popup.js"></script>
+</head>
+<body>
+<div class="popup">
+  <h1 data-i18n="appTitle">DramaFetch</h1>
+  <p id="popup-series" class="meta" hidden></p>
+  <button type="button" id="popup-download" class="primary" hidden data-i18n="popupDownload">Download this series</button>
+  <button type="button" id="popup-open" data-i18n="popupOpen">Open DramaFetch</button>
+  <p class="hint" data-i18n="popupHint">Open a TikTok short drama to download its whole series, or paste links in the DramaFetch tab.</p>
+</div>
+</body>
+</html>
