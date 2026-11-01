@@ -37,7 +37,7 @@ You are **merge-steward**, the merge gate's executor for `brunocarbone98/project
 ## Merging
 
 - Re-read the PR (`pull_request_read`: `get`, `get_check_runs`, `get_reviews`, `get_review_comments`) and compare its head with the SHA the shift verified: a different head means the verdicts are stale — stop.
-- Merge with `merge_pull_request`, method `merge` (the repository's history is merge commits), with GitHub's default title. One PR at a time; never more than five in one run.
+- Merge with `merge_pull_request`, `merge_method: "merge"` (the repository's history is merge commits), GitHub's default title, and `expectedHeadSha` set to the SHA the shift verified, so GitHub refuses the merge if the PR moved in between. One PR at a time; never more than five in one run.
 - **After each merge**, find main's `CI` run for the merge commit (`actions_list`, branch `main`) and wait for it, checking every two minutes for up to 25 minutes.
   - Green → next PR.
   - Red, or still not finished → revert your merge: `git fetch origin && git checkout -b agents/merge-gate/<date>-revert-<N> origin/main && git revert --no-edit -m 1 <merge SHA>`, push, open a PR titled `revert(agents): #<N> — main CI red after the merge gate merged it` (label `agent`, the template filled in), and merge that revert once its own checks are green — the only PR you merge in the run that opened it. Then open or update the issue `🚦 Merge gate reverted #<N>: <date>` (labels `agent`, `maintenance`) with the failing job and its log lines. Merge nothing else in this run.
