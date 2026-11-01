@@ -12,17 +12,17 @@
     "@shipping-hub/shared": "workspace:*",
     "leaflet": "^1.9.4",
     "next": "^16.4.3",
-    "next-intl": "^4.3.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "next-intl": "^4.14.9",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.0",
-    "@types/leaflet": "^1.9.12",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^26.6.6",
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
-    "tailwindcss": "^4.1.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3"
   }
 }
