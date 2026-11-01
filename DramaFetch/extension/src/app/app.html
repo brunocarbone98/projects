@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="appTitle">DramaFetch</title>
+<link rel="icon" href="../../icons/icon48.png">
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="top">
+  <img src="../../icons/icon48.png" alt="" width="36" height="36">
+  <div class="titles">
+    <h1 data-i18n="appTitle">DramaFetch</h1>
+    <p class="sub" data-i18n="appSubtitle">Whole TikTok short-drama series, for offline viewing</p>
+  </div>
+  <span id="app-status" class="badge idle" data-state="idle" data-finished="0" data-i18n="statusIdle">idle</span>
+</header>
+
+<main>
+  <section id="duplicate-banner" class="banner" role="alert" hidden>
+    <span data-i18n="duplicateTab">DramaFetch is already open in another tab: use that one (one engine at a time).</span>
+  </section>
+
+  <section id="cooldown-banner" class="banner" role="alert" hidden>
+    <strong data-i18n="cooldownTitle">TikTok refused a request.</strong>
+    <span id="cooldown-text"></span>
+    <span id="cooldown-left" class="countdown"></span>
+  </section>
+
+  <section class="card" id="input-card">
+    <h2 data-i18n="linksHeading">Series to download</h2>
+    <label for="links" data-i18n="linksLabel">One series link (any episode of it) or series id per line</label>
+    <textarea id="links" rows="4" spellcheck="false" autocomplete="off" data-i18n-placeholder="linksPlaceholder"></textarea>
+    <div class="options">
+      <label><input type="checkbox" id="include-locked"> <span data-i18n="includeLockedLabel">Also ask for locked episodes (TikTok decides; usually they fail)</span></label>
+      <label><input type="checkbox" id="recheck"> <span data-i18n="recheckLabel">Look again at series found complete in the last 24 hours</span></label>
+    </div>
+    <div class="buttons">
+      <button type="button" id="load-button" data-i18n="loadButton">Load list</button>
+      <button type="button" id="download-all-button" class="primary" data-i18n="downloadAllButton">Download all</button>
+    </div>
+    <p class="hint" data-i18n="linksHint">Load list shows the episodes of one series first. Download all takes every series of the box, one after the other, each listed right before its own downloads. Keep this tab open while DramaFetch works.</p>
+    <p id="input-status" class="status" role="status"></p>
+  </section>
+
+  <section class="card" id="series-card" hidden>
+    <h2 id="series-title"></h2>
+    <p id="series-meta" class="meta"></p>
+    <ul id="series-warnings" class="warnings"></ul>
+    <div class="buttons">
+      <button type="button" id="download-available-button" class="primary" data-i18n="downloadAvailableButton">Download all available</button>
+      <button type="button" id="download-selected-button" data-i18n="downloadSelectedButton">Download selected</button>
+      <span id="selection-count" class="meta"></span>
+    </div>
+    <div class="table-wrap">
+      <table id="episode-table">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="select-all" data-i18n-aria-label="selectAll"></th>
+            <th data-i18n="colCover">Cover</th>
+            <th data-i18n="colNumber">#</th>
+            <th data-i18n="colTitle">Title</th>
+            <th data-i18n="colDuration">Length</th>
+            <th data-i18n="colQuality">Quality</th>
+            <th data-i18n="colAccess">Access</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="progress-card" hidden>
+    <h2 data-i18n="progressHeading">Progress</h2>
+    <p id="progress-current" class="meta"></p>
+    <p id="progress-pause" class="pause" hidden></p>
+    <p id="progress-activity" class="meta"></p>
+    <div class="buttons">
+      <button type="button" id="stop-button" data-i18n="stopButton">Stop</button>
+    </div>
+    <div class="table-wrap">
+      <table id="result-table">
+        <thead>
+          <tr>
+            <th data-i18n="colNumber">#</th>
+            <th data-i18n="colStatus">Status</th>
+            <th data-i18n="colMessage">Message</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <ul id="report-lines" class="report"></ul>
+    <div class="table-wrap">
+      <table id="batch-table" hidden>
+        <thead>
+          <tr>
+            <th data-i18n="colSeries">Series</th>
+            <th data-i18n="colStatus">Status</th>
+            <th data-i18n="colListed">Listed</th>
+            <th data-i18n="colDone">Downloaded</th>
+            <th data-i18n="colOnDisk">On disk</th>
+            <th data-i18n="colLocked">Locked</th>
+            <th data-i18n="colFailed">Failed</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="queue-card" hidden>
+    <h2 data-i18n="queueHeading">Waiting</h2>
+    <ul id="queue-list"></ul>
+  </section>
+
+  <details class="card" id="settings-card">
+    <summary data-i18n="settingsHeading">Settings</summary>
+    <form id="settings-form">
+      <div class="grid">
+        <label for="setting-quality" data-i18n="settingQuality">Quality</label>
+        <select id="setting-quality">
+          <option value="compatible" data-i18n="qualityCompatible">Compatible (best H.264)</option>
+          <option value="best" data-i18n="qualityBest">Best (highest bitrate, any codec)</option>
+        </select>
+        <label for="setting-thumbnail" data-i18n="settingThumbnail">Cover</label>
+        <select id="setting-thumbnail">
+          <option value="embed" data-i18n="thumbnailEmbed">Embedded in the video</option>
+          <option value="both" data-i18n="thumbnailBoth">Embedded, and a separate image</option>
+          <option value="file" data-i18n="thumbnailFile">Separate image only</option>
+          <option value="none" data-i18n="thumbnailNone">None</option>
+        </select>
+        <label for="setting-name-format" data-i18n="settingNameFormat">File names</label>
+        <input type="text" id="setting-name-format" spellcheck="false" autocomplete="off">
+        <label for="setting-pace" data-i18n="settingPace">Pace</label>
+        <select id="setting-pace">
+          <option value="fixed" data-i18n="paceFixed">A random pause between episodes</option>
+          <option value="human" data-i18n="paceHuman">Human: about one episode's length</option>
+        </select>
+        <label for="setting-delay-min" data-i18n="settingDelayMin">Pause between episodes, at least (s)</label>
+        <input type="number" id="setting-delay-min" min="0" max="86400" step="0.1">
+        <label for="setting-delay-max" data-i18n="settingDelayMax">Pause between episodes, at most (s)</label>
+        <input type="number" id="setting-delay-max" min="0" max="86400" step="0.1">
+        <label for="setting-rest-every" data-i18n="settingRestEvery">A longer rest every (episodes)</label>
+        <input type="number" id="setting-rest-every" min="1" step="1">
+        <label for="setting-rest-min" data-i18n="settingRestMin">Longer rest, at least (s)</label>
+        <input type="number" id="setting-rest-min" min="0" max="86400" step="1">
+        <label for="setting-rest-max" data-i18n="settingRestMax">Longer rest, at most (s)</label>
+        <input type="number" id="setting-rest-max" min="0" max="86400" step="1">
+      </div>
+      <p class="hint" data-i18n="settingsHint">File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.</p>
+      <div class="buttons">
+        <button type="submit" id="settings-save" data-i18n="saveSettings">Save settings</button>
+        <button type="button" id="settings-reset" data-i18n="resetSettings">Defaults</button>
+      </div>
+      <p id="settings-status" class="status" role="status"></p>
+      <p id="pacing-line" class="meta"></p>
+    </form>
+  </details>
+
+  <details class="card" id="history-card">
+    <summary data-i18n="historyHeading">Past runs</summary>
+    <ol id="history-list" class="history"></ol>
+  </details>
+
+  <section class="card" id="test-card" hidden>
+    <h2 data-i18n="testHeading">Test mode</h2>
+    <label for="test-settings" data-i18n="testLabel">Test settings (JSON), honoured only by this test copy of the extension</label>
+    <textarea id="test-settings" rows="4" spellcheck="false"></textarea>
+    <div class="buttons">
+      <button type="button" id="test-settings-save" data-i18n="testSave">Save test settings</button>
+    </div>
+    <p id="test-settings-status" class="status" role="status"></p>
+  </section>
+</main>
+
+<footer class="legal">
+  <p id="legal-en" lang="en" data-i18n="legalNotice">DramaFetch is for personal, offline viewing of episodes that your own TikTok account can already watch. It does not unlock paid episodes and does not bypass DRM or access controls; locked episodes are listed and skipped. Downloading may breach TikTok's Terms of Service, and the videos belong to their creators and studios — you are responsible for how you use this tool.</p>
+  <p id="legal-es" lang="es" data-i18n="legalNoticeSpanish">DramaFetch es para ver sin conexión, de forma personal, episodios que tu propia cuenta de TikTok ya puede ver. No desbloquea episodios de pago y no elude el DRM ni los controles de acceso; los episodios bloqueados se listan y se omiten. Descargar puede infringir las Condiciones del servicio de TikTok, y los videos pertenecen a sus creadores y estudios — eres responsable de cómo usas esta herramienta.</p>
+</footer>
+</body>
+</html>

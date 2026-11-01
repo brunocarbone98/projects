@@ -42,7 +42,11 @@ Routes (all GET):
                                  server was started with `cdn_rate_limit`. `expired_media_first`
                                  makes the FIRST item_list response carry already-expired URLs and
                                  the later ones fresh URLs, to exercise the download engine's
-                                 refresh. The media lasts 3 s, so the item_list payloads served
+                                 refresh; `expired_media_first_visit` expires every list served
+                                 before the series page is loaded a second time (a discovery
+                                 that repeats the page's first request, like the Chrome
+                                 extension's, still sees expired URLs until it lists the series
+                                 again). The media lasts 3 s, so the item_list payloads served
                                  say `video.duration = 3` (`MEDIA_DURATION_S`) for every item —
                                  unless `short_media`, which keeps the fixtures' own durations
                                  (92 s, 88 s, …) while the CDN still serves the 3-second file: a
@@ -66,6 +70,10 @@ Routes (all GET):
                                  segment that names the item and pads it past 600 bytes, 429
                                  with `cdn_rate_limit` like `/cdn/`;
                                  no login is needed (TikTok's covers are public).
+                                 `redirect_media` / `redirect_covers` answer `/cdn/` / `/cover/`
+                                 with a 302 to `http://localhost:<port>/elsewhere<path>` — a host
+                                 the extension's test copy does not cover — which serves what the
+                                 CDN would have (`elsewhere_requests`: whoever followed it).
 The request log keeps method, path and query plus three booleans; never headers or cookie values.
 """
 
@@ -124,6 +132,8 @@ THIRD_ITEMS = tuple(str(item["id"]) for item in THIRD_PAGES_LOGGED_IN["0"]["item
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
 CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
 COVER_PATH_RE = re.compile(r"^/cover/(?P<id>\d+)\.jpg$")
+#: The path prefix a `redirect_media` / `redirect_covers` redirect points below (on `localhost`).
+ELSEWHERE_PREFIX = "/elsewhere"
 MEDIA_URL_PREFIX = "https://v16-webapp-prime.tiktok.com/"
 COVER_URL_PREFIX = "https://p16-sign-sg.tiktokcdn.com/"
 #: 20 531 bytes: 3 s of 160x120 H.264 with silent AAC, `moov` before `mdat` (faststart).
@@ -223,6 +233,9 @@ class FakeOptions:
     # The fake CDN (browser download engine).
     media_ttl_s: int = 3600  # `expire` of the rewritten play URLs, seconds from now
     expired_media_first: bool = False  # the FIRST item_list served carries expire=now-10
+    # Every item_list served before the series page is loaded a SECOND time carries expired URLs
+    # (the first discovery's lists, however many requests it makes); a fresh visit's are fresh.
+    expired_media_first_visit: bool = False
     cdn_rate_limit: bool = False  # every /cdn/ request answers HTTP 429
     # Integrity failures (both make the engines fail the episode without a retry):
     truncate_media: bool = False  # Content-Length says all, the body stops at 60 %, then EOF
@@ -232,6 +245,12 @@ class FakeOptions:
     # Episodes, as (series id, episode number), whose media the CDN serves ENCRYPTED: the
     # `encv`/`enca` + `pssh` variant of tiny.mp4 (`drm_media_bytes`), same size, same headers.
     drm_media: frozenset[tuple[str, int]] = frozenset()
+    # A 302 to a host the Chrome extension's test copy does not cover — `localhost` (only
+    # `http://127.0.0.1/*` is granted there), `/elsewhere` + the same path and query — instead of
+    # the video (`redirect_media`) or the cover (`redirect_covers`); `/elsewhere/…` serves what
+    # the CDN would have, so a client that followed the redirect shows up in `elsewhere_requests`.
+    redirect_media: bool = False
+    redirect_covers: bool = False
 
     @property
     def page_scrolls(self) -> bool:
@@ -262,6 +281,11 @@ class FakeTikTokServer(ThreadingHTTPServer):
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def elsewhere_url(self, path_and_query: str) -> str:
+        """Where `redirect_media` / `redirect_covers` send a client: this server under another
+        host name (`localhost`), below `ELSEWHERE_PREFIX`."""
+        return f"http://localhost:{self.server_address[1]}{ELSEWHERE_PREFIX}{path_and_query}"
 
     def record(self, record: RequestRecord) -> None:
         with self.lock:
@@ -308,10 +332,18 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 payload = self._item_list(options, query, logged_in, from_scroll)
                 self._json(self._with_media_urls(server, payload))
+        elif parts.path.startswith(ELSEWHERE_PREFIX):
+            self._elsewhere(parts.path[len(ELSEWHERE_PREFIX) :])
         elif (match := CDN_PATH_RE.match(parts.path)) is not None:
-            self._media(options, query, logged_in, match.group("id"), match.group("n"))
+            if options.redirect_media:
+                self._redirect(server.elsewhere_url(self.path))
+            else:
+                self._media(options, query, logged_in, match.group("id"), match.group("n"))
         elif (match := COVER_PATH_RE.match(parts.path)) is not None:
-            self._cover(options, match.group("id"))
+            if options.redirect_covers:
+                self._redirect(server.elsewhere_url(self.path))
+            else:
+                self._cover(options, match.group("id"))
         elif parts.path == "/api/drama/detail/":
             if query.get("dramaID") == SECOND_SERIES_ID:
                 name, total = SECOND_SERIES_NAME, SECOND_TOTAL_EPISODES
@@ -358,7 +390,10 @@ class _Handler(BaseHTTPRequestHandler):
         now = int(time.time())
         with server.lock:
             first = server.media_lists_served == 0
-            if options.expired_media_first and first:
+            visits = sum(1 for record in server.requests if SERIES_PATH_RE.match(record.path))
+            if (options.expired_media_first and first) or (
+                options.expired_media_first_visit and visits <= 1
+            ):
                 expire = now - EXPIRED_MEDIA_OFFSET_S
             else:
                 expire = now + options.media_ttl_s
@@ -402,6 +437,15 @@ class _Handler(BaseHTTPRequestHandler):
             )
         else:
             self._send(HTTPStatus.OK, cover_bytes(item_id), "image/jpeg")
+
+    def _elsewhere(self, path: str) -> None:
+        """What a redirect of `redirect_media` / `redirect_covers` points at: the CDN's answer."""
+        if (match := CDN_PATH_RE.match(path)) is not None:
+            self._send(HTTPStatus.OK, media_bytes(match.group("id"), match.group("n")), "video/mp4")
+        elif (match := COVER_PATH_RE.match(path)) is not None:
+            self._send(HTTPStatus.OK, cover_bytes(match.group("id")), "image/jpeg")
+        else:
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
 
     def _has_session_cookie(self) -> bool:
         jar: SimpleCookie = SimpleCookie()
@@ -604,6 +648,11 @@ class FakeTikTok:
     @property
     def cover_requests(self) -> list[RequestRecord]:
         return [r for r in self.requests if COVER_PATH_RE.match(r.path)]
+
+    @property
+    def elsewhere_requests(self) -> list[RequestRecord]:
+        """Requests that followed a `redirect_media` / `redirect_covers` redirect."""
+        return [r for r in self.requests if r.path.startswith(ELSEWHERE_PREFIX)]
 
     def series_requests(self, series_id: str) -> list[RequestRecord]:
         """Every request about one series: its page, its `item_list` / `detail` (by `dramaID`)

@@ -57,7 +57,8 @@ ignore = ["ANN401"]
 python_version = "3.11"
 strict = true
 mypy_path = "src"
-packages = ["dramafetch"]
+# the package, plus the maintenance tool outside it (standard library only)
+files = ["src/dramafetch", "tools/upstream_watch.py"]
 
 [[tool.mypy.overrides]]
 module = ["yt_dlp", "yt_dlp.*", "curl_cffi", "curl_cffi.*"]

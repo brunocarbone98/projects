@@ -52,7 +52,7 @@ The repository is maintained around the clock by Claude Code agents on two runti
 
 | Shift | Cadence | Runtime | What it does | Output |
 | --- | --- | --- | --- | --- |
-| CI | every push to `main`, every PR | GitHub Actions · `ci.yml` | Lint, format check, typecheck, Vitest (shared + API against PostgreSQL); DramaFetch `ruff`, `mypy`, `pytest` and the Chromium integration test | Green/red check |
+| CI | every push to `main`, every PR | GitHub Actions · `ci.yml` | Lint, format check, typecheck, Vitest (shared + API against PostgreSQL); DramaFetch `ruff`, `mypy`, `pytest` and the Chromium integration test, plus the Chrome extension's `node --test` and type check, uploaded as the `dramafetch-extension` artifact | Green/red check |
 | SecureGate CI | PRs touching `SecureGate/` or `FullStackHub/`; nightly 06:00 UTC | GitHub Actions · `securegate-ci.yml` | Starts Postgres + API + web + Chrome; runs Karate API + Serenity UI + Newman | `securegate-reports` artifact (Serenity, Karate, surefire) |
 | Uptime patrol | every 30 min (best-effort GitHub schedule) + manual | GitHub Actions · `uptime-patrol.yml` | Probes `/en`, the demo tracking page, `/es/quote` and `/sitemap.xml` on the live app | Opens, updates and auto-closes `🚨 Production incident: Shipping Hub is unhealthy` (label `incident`) |
 | Claude on-call | on `@claude` in an issue, PR comment or review | GitHub Actions · `claude.yml` | Reads the request, works on a branch, answers in a comment | Comments; `claude/…` branches with a ready-to-open PR link |
@@ -109,6 +109,8 @@ dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, curl_c
 dramafetch download "https://www.tiktok.com/shortdrama/episode/<series id>/1" --cookies cookies.txt
 dramafetch download --from-file series.txt --cookies cookies.txt   # several series, one after the other, paced
 ```
+
+DramaFetch for Chrome — no Python, no `cookies.txt`: in `chrome://extensions` turn on Developer mode, **Load unpacked** the `DramaFetch/extension` folder (or the unzipped `dramafetch-extension` artifact of a CI run) and use the TikTok session of the Chrome you are logged in to ([Chrome extension](./DramaFetch/README.md#chrome-extension-windows-macos-linux)).
 
 Website — no build step, no dependencies:
 
