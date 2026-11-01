@@ -42,6 +42,7 @@ from dramafetch.web.jobs import JobManager, cover_sidecar, redact_secrets, resul
 from dramafetch.web.server import (
     MAX_BODY_BYTES,
     content_disposition,
+    host_header_allowed,
     is_loopback_host,
     normalize_host,
     run_server,
@@ -161,6 +162,21 @@ class Harness:
             response = connection.getresponse()
             data = response.read()
             return response.status, dict(response.getheaders()), data
+        finally:
+            connection.close()
+
+    def status_with_header_lines(self, method: str, path: str, lines: list[tuple[str, str]]) -> int:
+        """The status of a request whose header lines are sent exactly as given, repeated names
+        included (``HTTPConnection.request`` takes a dict, so it cannot send two ``Cookie``s)."""
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        try:
+            connection.putrequest(method, path)
+            for name, value in lines:
+                connection.putheader(name, value)
+            connection.endheaders()
+            response = connection.getresponse()
+            response.read()
+            return response.status
         finally:
             connection.close()
 
@@ -503,6 +519,77 @@ def test_host_header_guard(harness: Harness) -> None:
     assert harness.request("GET", "/", headers={"Host": "127.0.0.1"})[0] == 200
 
 
+def test_host_guard_for_a_wildcard_bind_accepts_addresses_but_no_other_name() -> None:
+    """Bound to every interface the server cannot know its addresses, so any IP literal passes —
+    `http://<pc-ip>:8765/` — but no other host name does: a DNS-rebinding attacker needs a name
+    they control, never an address. A pure function, so nothing is bound off loopback here."""
+    for bound in ("0.0.0.0", "::"):
+        for host in (
+            "192.168.1.20:8765",
+            "192.168.1.20",
+            "10.0.0.7:80",
+            "0.0.0.0:8765",
+            "[fe80::1]:8765",
+            "[2001:db8::7]",
+            "localhost",
+            "LOCALHOST:8765",
+            "127.0.0.1:8765",
+            "[::1]:8765",
+        ):
+            assert host_header_allowed(bound, host), (bound, host)
+        for host in (
+            "evil.example:8765",
+            "evil.example",
+            "mypc.local",
+            "192.168.1.20.evil.example",
+            "localhost.evil.example:8765",
+            "192.168.1.999",
+            "[]",
+            "",
+            None,
+        ):
+            assert not host_header_allowed(bound, host), (bound, host)
+    # A specific bind stays as strict as before: that host or localhost, the port ignored.
+    assert host_header_allowed("192.168.1.20", "192.168.1.20:8765")
+    assert host_header_allowed("192.168.1.20", "localhost:8765")
+    assert not host_header_allowed("192.168.1.20", "192.168.1.21:8765")
+    assert not host_header_allowed("192.168.1.20", "evil.example:8765")
+    assert not host_header_allowed("127.0.0.1", "192.168.1.20:8765")
+    assert host_header_allowed("::1", "[::1]:8765")
+    assert host_header_allowed("example.lan", "example.lan")
+
+
+def test_wildcard_bind_host_guard_through_the_handler(tmp_path: Path) -> None:
+    """The handler consults the guard with the bound host: a loopback-bound server told it is bound
+    to 0.0.0.0 answers IP literals and refuses a name with 403, before the token is looked at."""
+    server = run_server(
+        "127.0.0.1",
+        0,
+        tmp_path,
+        DiscoveryOptions(),
+        DownloadOptions(),
+        serve_forever=False,
+        token=TOKEN,
+    )
+    server.bound_host = "0.0.0.0"  # type: ignore[attr-defined] - the socket stays on loopback
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+    thread.start()
+    try:
+        harness = Harness(server.server_address[1], tmp_path, FakeDiscovery(), FakeDownloader())
+        assert harness.request("GET", "/", headers={"Host": "192.168.1.20:8765"})[0] == 200
+        assert harness.request("GET", "/", headers={"Host": "[fe80::1]:8765"})[0] == 200
+        status, data = harness.request("GET", "/", headers={"Host": "evil.example:8765"})
+        assert (status, data["error"]) == (403, "unexpected Host header")
+        status, data = harness.request(
+            "GET", "/api/doctor", headers={"Host": "mypc.local", **bearer()}
+        )
+        assert (status, data["error"]) == (403, "unexpected Host header")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 # ---------------------------------------------------------------------------- access token
 
 
@@ -600,6 +687,36 @@ def test_session_rejects_wrong_tokens_at_once(locked_harness: Harness) -> None:
     assert locked_harness.request("GET", "/api/jobs/nope", headers=cookie(TOKEN[:-1]))[0] == 401
 
 
+def test_only_the_first_session_cookie_is_a_candidate(locked_harness: Harness) -> None:
+    """A request presents at most two credentials: the Bearer token and the first session cookie.
+    Checking every `dramafetch_session=` value of every `Cookie` header would let one request try
+    some 180 000 guesses (http.server reads 100 header lines of 64 KiB), turning a dictionary
+    attack on a weak token from hours into seconds."""
+    assert locked_harness.request("GET", "/api/jobs/nope", headers=cookie())[0] == 404
+    wrong_first = {"Cookie": f"dramafetch_session=wrong-value; dramafetch_session={TOKEN}"}
+    assert locked_harness.request("GET", "/api/jobs/nope", headers=wrong_first)[0] == 401
+    right_first = {"Cookie": f"dramafetch_session={TOKEN}; dramafetch_session=wrong-value"}
+    assert locked_harness.request("GET", "/api/jobs/nope", headers=right_first)[0] == 404
+    guesses = [f"dramafetch_session=guess{i}" for i in range(50)]
+    many = {"Cookie": "; ".join([*guesses, f"dramafetch_session={TOKEN}"])}
+    assert locked_harness.request("GET", "/api/jobs/nope", headers=many)[0] == 401
+    # The same across several Cookie headers: only the first session cookie seen is checked...
+    two_headers = [
+        ("Cookie", "dramafetch_session=wrong-value"),
+        ("Cookie", f"dramafetch_session={TOKEN}"),
+    ]
+    assert locked_harness.status_with_header_lines("GET", "/api/jobs/nope", two_headers) == 401
+    # ...other cookies before it do not count, and an empty value is no candidate.
+    crowded = [
+        ("Cookie", "theme=dark; dramafetch_session="),
+        ("Cookie", f"other=1; dramafetch_session={TOKEN}"),
+    ]
+    assert locked_harness.status_with_header_lines("GET", "/api/jobs/nope", crowded) == 404
+    # A Bearer token is checked in its own right, whatever cookie comes with it.
+    both = {**bearer(), **cookie("wrong-value")}
+    assert locked_harness.request("GET", "/api/jobs/nope", headers=both)[0] == 404
+
+
 def test_session_endpoint_without_a_server_token_is_400(harness: Harness) -> None:
     status, data = harness.request("POST", "/api/session", {"token": TOKEN})
     assert status == 400
@@ -642,12 +759,16 @@ def test_token_is_never_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture)
     assert TOKEN not in caplog.text and "wrong-token-value" not in caplog.text  # ...values never
 
 
-def test_off_loopback_binding_needs_a_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_off_loopback_binding_needs_a_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     binds: list[Any] = []
     monkeypatch.setattr(web_server.DramaFetchServer, "server_bind", lambda self: binds.append(self))
     for host in ("0.0.0.0", "::", "[::]", "192.168.1.20", "example.lan"):
         with pytest.raises(ValueError, match="needs an access token"):
-            run_server(host, 0, tmp_path, DiscoveryOptions(), DownloadOptions(), serve_forever=False)
+            run_server(
+                host, 0, tmp_path, DiscoveryOptions(), DownloadOptions(), serve_forever=False
+            )
     assert binds == []  # refused before any socket was bound
 
 
@@ -664,7 +785,9 @@ def test_server_refuses_an_unusable_token(tmp_path: Path) -> None:
                 token=bad,
             )
     assert token_problem("short") == "the token must be at least 8 characters"
-    assert token_problem("ünïcödé-token") is not None and "ASCII" in (token_problem("tab\there") or "")
+    assert token_problem("ünïcödé-token") is not None and "ASCII" in (
+        token_problem("tab\there") or ""
+    )
     assert token_problem("correct-horse-battery-staple") is None
     assert token_problem("A1!#$%&'()*+-./:<=>?@[]^_`{|}~") is None  # every cookie-safe punctuation
 
@@ -692,7 +815,10 @@ def test_files_endpoint_streams_the_finished_video_and_its_cover(harness: Harnes
     assert headers["Content-Length"] == str(len(data))
     assert headers["Cache-Control"] == "no-store"
     assert headers["X-Content-Type-Options"] == "nosniff"
-    assert headers["Content-Disposition"] == "attachment; filename=\"E01.mp4\"; filename*=UTF-8''E01.mp4"
+    assert (
+        headers["Content-Disposition"]
+        == "attachment; filename=\"E01.mp4\"; filename*=UTF-8''E01.mp4"
+    )
 
     status, headers, data = harness.raw("GET", f"/api/files/{job_id}/1/cover")
     assert status == 200
@@ -700,18 +826,19 @@ def test_files_endpoint_streams_the_finished_video_and_its_cover(harness: Harnes
     assert headers["Content-Type"] == "image/jpeg"
     assert headers["Content-Disposition"].startswith('attachment; filename="E01.jpg"')
     assert harness.request("GET", f"/api/files/{job_id}/2/cover") == NOT_FOUND  # no sidecar
-    assert harness.request("GET", f"/api/files/{job_id}/01") [0] == 200  # a padded number is fine
+    assert harness.raw("GET", f"/api/files/{job_id}/01")[0] == 200  # a padded number is fine
 
 
 def test_files_endpoint_names_non_ascii_files_for_every_client(harness: Harness) -> None:
-    harness.downloader.name_format = "Épisode {number:02d} – 测试.mp4"
+    # Accents, an en dash and CJK on purpose: the ASCII fallback must still name the file.
+    harness.downloader.name_format = "Épisode {number:02d} – 测试.mp4"  # noqa: RUF001
     job_id, rows = harness.finished_rows(episodes="1")
-    name = "Épisode 01 – 测试.mp4"
+    name = "Épisode 01 – 测试.mp4"  # noqa: RUF001 - the en dash is deliberate
     assert rows[1]["file_name"] == name
     status, headers, data = harness.raw("GET", f"/api/files/{job_id}/1")
     assert status == 200 and data == b"fake video"
     assert headers["Content-Disposition"] == (
-        'attachment; filename="Episode 01 .mp4"; filename*=UTF-8\'\'' + quote(name, safe="")
+        "attachment; filename=\"Episode 01 .mp4\"; filename*=UTF-8''" + quote(name, safe="")
     )
     assert content_disposition("测试.mp4") == (
         "attachment; filename=\"download.mp4\"; filename*=UTF-8''%E6%B5%8B%E8%AF%95.mp4"
@@ -729,8 +856,8 @@ def test_files_endpoint_answers_one_404_to_everything_else(harness: Harness) -> 
     assert harness.request("GET", f"/api/files/{job_id}/5") == NOT_FOUND  # a row that is not done
     assert harness.request("GET", f"/api/files/{job_id}/5/cover") == NOT_FOUND
     assert harness.request("GET", f"/api/files/{job_id}/1/../../x") == NOT_FOUND  # traversal shape
+    assert harness.request("GET", "/api/files")[0] == 404  # the bare prefix is no page
     for odd in (
-        "",
         "/",
         f"/{job_id}",
         f"/{job_id}/",
@@ -741,9 +868,7 @@ def test_files_endpoint_answers_one_404_to_everything_else(harness: Harness) -> 
         f"/{job_id}/1/cover/../1",
         f"//{job_id}/1",
     ):
-        status, data = harness.request("GET", "/api/files" + odd)
-        assert status == 404, odd
-        assert "/" not in data["error"]  # never a path
+        assert harness.request("GET", "/api/files" + odd) == NOT_FOUND, odd  # never a path
     # The row is served once it is done, and no longer once the file is gone.
     assert harness.raw("GET", f"/api/files/{job_id}/1")[0] == 200
     Path(rows[1]["path"]).unlink()
@@ -800,7 +925,7 @@ def test_files_endpoint_refuses_part_files_and_directories(harness: Harness) -> 
 def test_files_endpoint_honours_the_session_cookie(locked_harness: Harness) -> None:
     locked_harness.auth = bearer()  # drive the job with the header...
     locked_harness.downloader.cover_numbers = {1}
-    job_id, rows = locked_harness.finished_rows(episodes="1")
+    job_id, _ = locked_harness.finished_rows(episodes="1")
     locked_harness.auth = {}
     assert locked_harness.request("GET", f"/api/files/{job_id}/1")[0] == 401
     assert locked_harness.request("GET", f"/api/files/{job_id}/1/cover")[0] == 401
@@ -1008,9 +1133,8 @@ def test_cover_sidecar_prefers_jpg_then_jpeg_png_webp(tmp_path: Path) -> None:
     assert cover_sidecar(video) == tmp_path / "Series - Episode 01.png"
     (tmp_path / "Series - Episode 01.jpg").write_bytes(b"j")
     assert cover_sidecar(video) == tmp_path / "Series - Episode 01.jpg"
-    (tmp_path / "Series - Episode 01.jpg").mkdir
     assert cover_sidecar(tmp_path / "missing.mp4") is None
-    assert cover_sidecar(Path("")) is None
+    assert cover_sidecar(Path()) is None  # no name at all
     # Only the last suffix is swapped: a dotted series name keeps its dots.
     dotted = tmp_path / "Dr. Who v1.2 - Episode 01.mp4"
     (tmp_path / "Dr. Who v1.2 - Episode 01.jpeg").write_bytes(b"j")

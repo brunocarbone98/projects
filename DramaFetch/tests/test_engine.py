@@ -1049,6 +1049,8 @@ def test_summarize_and_exit_codes():
 def test_json_views():
     series = make_series(numbers=(2, 1), locked=(2,), total=5)
     series.warnings.append("w")
+    first = next(episode for episode in series.episodes if episode.number == 1)
+    first.cover_url = "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/cover01.jpeg"
     data = engine.series_to_dict(series)
     assert data["series_id"] == SERIES_ID
     assert data["name"] == NAME
@@ -1058,6 +1060,7 @@ def test_json_views():
     assert data["episodes"][1]["locked"] is True
     assert data["episodes"][1]["lock_hints"] == ["isFree=false"]
     assert data["episodes"][0]["page_url"].endswith("/video/7699400000000000001")
+    assert data["episodes"][0]["cover_url"] == first.cover_url  # what the page shows as the cover
     assert "raw" not in data["episodes"][0]
     json.dumps(data)
     result = engine.result_to_dict(

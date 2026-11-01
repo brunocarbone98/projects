@@ -1290,18 +1290,27 @@ class _StubServer:
         self.closed = True
 
 
-def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
+def _stub_run_server(monkeypatch):
+    """Replace `run_server` with a stub that records its kwargs and binds nothing; the CLI's lazy
+    `from dramafetch.web.server import run_server` picks it up. Clears DRAMAFETCH_TOKEN as well, so
+    the tests see the loopback default whatever the developer's shell exports."""
+    from dramafetch.web import server as web_server
+
     calls = []
     servers = []
-    module = types.ModuleType("dramafetch.web.server")
 
     def run_server(**kwargs):
         calls.append(kwargs)
         servers.append(_StubServer(kwargs["host"], kwargs["port"]))
         return servers[-1]
 
-    module.run_server = run_server
-    monkeypatch.setitem(sys.modules, "dramafetch.web.server", module)
+    monkeypatch.setattr(web_server, "run_server", run_server)
+    monkeypatch.delenv("DRAMAFETCH_TOKEN", raising=False)
+    return calls, servers
+
+
+def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
+    calls, servers = _stub_run_server(monkeypatch)
     code = cli.main(
         [
             "serve",
@@ -1340,6 +1349,7 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert kwargs["port"] == 9000
     assert kwargs["out_dir"] == tmp_path
     assert kwargs["serve_forever"] is False  # the CLI serves itself, after announcing the bind
+    assert kwargs["token"] is None  # the loopback default needs no token
     assert kwargs["discovery_options"].cookies_file == Path("c.txt")
     assert kwargs["discovery_options"].strategy == "browser"
     download_options = kwargs["download_options"]
@@ -1357,10 +1367,72 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert servers[0].served and servers[0].closed
     err = capsys.readouterr().err
     assert "http://127.0.0.1:9000/" in err
+    assert "token: none (loopback only)" in err
     assert "warning" not in err  # the private default needs no warning
+
+
+def test_serve_off_loopback_without_a_token_is_a_usage_error(monkeypatch, capsys):
+    calls, _ = _stub_run_server(monkeypatch)
+    for host in ("0.0.0.0", "::", "[::]", "192.168.1.20", "example.lan"):
+        assert cli.main(["serve", "--host", host]) == 2
+        err = capsys.readouterr().err
+        assert f"--host {host} needs --token (or DRAMAFETCH_TOKEN)" in err
+        assert "without it the UI would be open to everyone on the network" in err
+    assert calls == []  # refused before run_server, so before any bind
+    for host in ("127.0.0.1", "localhost", "[::1]", "127.0.0.2"):  # loopback needs none
+        assert cli.main(["serve", "--host", host]) == 0
+        assert "token: none (loopback only)" in capsys.readouterr().err
+    assert [call["token"] for call in calls] == [None] * 4
+
+
+def test_serve_token_flag_and_environment(monkeypatch, capsys):
+    calls, _ = _stub_run_server(monkeypatch)
+    assert cli.main(["serve", "--host", "0.0.0.0", "--token", "flag-token-123"]) == 0
+    assert calls[-1]["host"] == "0.0.0.0" and calls[-1]["token"] == "flag-token-123"
+    err = capsys.readouterr().err
+    assert "token: set" in err and "warning" not in err
+    assert "flag-token-123" not in err  # the value is never printed
+    monkeypatch.setenv("DRAMAFETCH_TOKEN", "env-token-4567")
     assert cli.main(["serve", "--host", "0.0.0.0"]) == 0
-    assert calls[1]["host"] == "0.0.0.0"
-    assert "warning: --host 0.0.0.0 exposes the UI" in capsys.readouterr().err
+    assert calls[-1]["token"] == "env-token-4567"
+    err = capsys.readouterr().err
+    assert "token: set" in err and "env-token-4567" not in err
+    assert cli.main(["serve", "--host", "0.0.0.0", "--token", "flag-token-123"]) == 0
+    assert calls[-1]["token"] == "flag-token-123"  # the flag wins over the variable
+    capsys.readouterr()
+    assert cli.main(["serve"]) == 0  # a token on loopback: honoured, the page is protected
+    assert calls[-1]["token"] == "env-token-4567"
+    assert "token: set" in capsys.readouterr().err
+    monkeypatch.setenv("DRAMAFETCH_TOKEN", "")  # an empty variable counts as unset
+    assert cli.main(["serve"]) == 0
+    assert calls[-1]["token"] is None
+    assert cli.main(["serve", "--host", "0.0.0.0"]) == 2
+
+
+def test_serve_refuses_an_unusable_token(monkeypatch, capsys):
+    calls, _ = _stub_run_server(monkeypatch)
+    assert cli.main(["serve", "--token", "tiny1"]) == 2
+    err = capsys.readouterr().err
+    assert "--token (or DRAMAFETCH_TOKEN): the token must be at least 8 characters" in err
+    assert "tiny1" not in err
+    assert cli.main(["serve", "--token", "has a space in it"]) == 2
+    assert "visible ASCII" in capsys.readouterr().err
+    assert cli.main(["serve", "--token", ""]) == 2
+    capsys.readouterr()
+    monkeypatch.setenv("DRAMAFETCH_TOKEN", "tiny1")
+    assert cli.main(["serve", "--host", "0.0.0.0"]) == 2
+    err = capsys.readouterr().err
+    assert "DRAMAFETCH_TOKEN" in err and "tiny1" not in err
+    assert calls == []
+
+
+def test_serve_help_mentions_the_token():
+    help_text = _subcommand_help("serve")
+    assert "--token TOKEN" in help_text and "DRAMAFETCH_TOKEN" in help_text
+    assert "needs --token" in help_text  # the --host help says when it is required
+    parser = cli.build_parser()
+    assert parser.parse_args(["serve"]).token is None
+    assert parser.parse_args(["serve", "--token", "abcdefgh"]).token == "abcdefgh"
 
 
 def test_serve_reports_a_busy_port_instead_of_a_traceback(tmp_path, capsys):

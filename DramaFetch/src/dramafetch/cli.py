@@ -262,7 +262,9 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
     group.add_argument(
         "--no-thumbnails",
         action="store_true",
-        help="do not save the episode cover next to the video (default: <name>.jpg|png|webp)",
+        help=(
+            "do not save the episode cover next to the video (default: <name>.jpeg|jpg|png|webp)"
+        ),
     )
     group.add_argument("--overwrite", action="store_true", help="re-download existing files")
     group.add_argument("--dry-run", action="store_true", help="list what would be downloaded")

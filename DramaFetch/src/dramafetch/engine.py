@@ -495,6 +495,7 @@ def episode_to_dict(episode: Episode) -> dict[str, Any]:
         "locked": episode.locked,
         "lock_hints": list(episode.lock_hints),
         "page_url": episode.page_url,
+        "cover_url": episode.cover_url,
     }
 
 

@@ -22,8 +22,10 @@ cookie (``HttpOnly; SameSite=Strict; Path=/; Max-Age=30 days``). Without a token
 default) nothing is checked. JSON bodies are capped at 64 KiB (413). POSTs must carry
 ``Content-Type: application/json``, so a browser on another site cannot fire one without a CORS
 preflight we never answer, and the ``Host`` header must name the bound host or localhost (a guard
-against DNS rebinding). The output directory is fixed server-side: the page cannot choose paths,
-and the files endpoint serves nothing but the path a finished (``done``) job row recorded, and
+against DNS rebinding; bound to every interface — ``0.0.0.0`` / ``::`` — the server cannot know
+its own addresses, so there any IP literal is accepted but still no other host name). The output
+directory is fixed server-side: the page cannot choose paths, and the files endpoint serves
+nothing but the path a finished (``done``) job row recorded, and
 only when it resolves to a regular file inside that directory (never a ``.part``) — anything else
 is a 404 that names no path. Errors are ``{"error": message, "kind": ExceptionName}`` with a
 4xx/5xx status; cookie and token values never appear in responses or logs (the log says
@@ -169,6 +171,38 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def _is_ip_literal(name: str) -> bool:
+    """``192.168.1.20`` or ``[fe80::1]`` (port already removed): an address, not a host name."""
+    try:
+        ipaddress.ip_address(name.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def host_header_allowed(bound_host: str, host_header: str | None) -> bool:
+    """Whether a server bound to ``bound_host`` may answer a request with this ``Host`` header.
+
+    The guard against DNS rebinding: a page on an attacker's site reaches this server only under
+    a name the attacker controls, so the header must name the bound host or localhost (the port
+    is ignored). Bound to every interface (``0.0.0.0`` / ``::``) the server cannot know its own
+    addresses, so there it accepts any IP literal — ``http://<pc-ip>:8765/``, the way the README
+    says to reach it — and the local names, but still no other host name. No header, no answer.
+    """
+    if not host_header:
+        return False
+    name = host_header.strip().lower()
+    if name.startswith("["):
+        name = name.split("]", 1)[0] + "]"
+    elif name.count(":") == 1:
+        name = name.rsplit(":", 1)[0]
+    if name in _LOCAL_HOSTS:
+        return True
+    if bound_host in _WILDCARD_HOSTS:
+        return _is_ip_literal(name)
+    return name.strip("[]") == bound_host.lower()
+
+
 def token_problem(token: str) -> str | None:
     """Why ``token`` cannot be the access token, or ``None`` when it can; never echoes the token."""
     if len(token) < TOKEN_MIN_CHARS:
@@ -277,17 +311,10 @@ class DramaFetchServer(ThreadingHTTPServer):
         return functools.partial(download_series, downloader=self.downloader)
 
     def host_allowed(self, host_header: str | None) -> bool:
-        """Accept only requests addressed to the bound host or localhost (DNS-rebinding guard)."""
-        if self.bound_host in _WILDCARD_HOSTS:
-            return True  # the operator exposed the server on purpose; any name may reach it
-        if not host_header:
-            return False
-        name = host_header.strip().lower()
-        if name.startswith("["):
-            name = name.split("]", 1)[0] + "]"
-        elif name.count(":") == 1:
-            name = name.rsplit(":", 1)[0]
-        return name in _LOCAL_HOSTS or name.strip("[]") == self.bound_host.lower()
+        """Accept only requests addressed to the bound host or localhost (any IP literal for a
+        wildcard bind), never another host name: :func:`host_header_allowed`, the DNS-rebinding
+        guard."""
+        return host_header_allowed(self.bound_host, host_header)
 
     def served_file(self, job_id: str, number: int, *, cover: bool = False) -> Path | None:
         """The video (or, with ``cover``, the thumbnail) a finished job row points at, if it may be
@@ -411,7 +438,13 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _presented_tokens(self) -> Iterator[str]:
-        """The credentials a request carries: the Bearer token, then every session cookie value."""
+        """The credentials a request carries: the Bearer token, then the FIRST session cookie.
+
+        At most two candidates per request. A browser holds one ``dramafetch_session`` cookie for
+        this host (``Path=/``, no ``Domain``; a new ``POST /api/session`` replaces it), whereas
+        taking every value of every ``Cookie`` header would let one request test some 180 000
+        guesses: ``http.server`` reads up to 100 header lines of 64 KiB each.
+        """
         authorization = str(self.headers.get("Authorization") or "")
         scheme, _, credentials = authorization.strip().partition(" ")
         if scheme.lower() == "bearer" and credentials.strip():
@@ -421,6 +454,7 @@ class _Handler(BaseHTTPRequestHandler):
                 name, separator, value = part.strip().partition("=")
                 if separator and name.strip() == SESSION_COOKIE and value.strip():
                     yield value.strip()
+                    return
 
     def _open_session(self, body: dict[str, Any]) -> None:
         """Turn the right token into the session cookie (204); a wrong one is a 401 at once."""

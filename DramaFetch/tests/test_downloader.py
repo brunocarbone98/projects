@@ -571,3 +571,26 @@ def test_a_lone_thumbnail_does_not_skip_the_download(tmp_path):
     assert result.status is DownloadStatus.DONE
     assert result.path == tmp_path / f"{STEM}.mp4"
     assert len(log) == 1
+
+
+def test_existing_episode_file_matches_the_whole_stem_not_a_prefix(tmp_path):
+    """`{title}` tells episodes apart by title, and one title may extend another after a dot:
+    `Ep 1` must not be reported as existing (and so never downloaded) because another episode's
+    `Ep 1.5.mp4` is there. Only the last suffix is the extension, so a dotted series name still
+    finds its own file, and yt-dlp's per-format intermediates (`<stem>.f123.mp4`) are no video."""
+    by_title = DownloadOptions(name_format="{title}")
+    first = Episode(number=1, item_id="7699400000000000001", title="Ep 1", series_id=SERIES_ID)
+    (tmp_path / "Ep 1.5.mp4").write_bytes(b"video")
+    assert episode_stem(first, by_title) == "Ep 1"
+    assert existing_episode_file(tmp_path, first, by_title) is None
+    (tmp_path / "Ep 1.mp4").write_bytes(b"video")
+    assert existing_episode_file(tmp_path, first, by_title) == tmp_path / "Ep 1.mp4"
+    finale = Episode(number=2, item_id="7699400000000000002", title="Finale", series_id=SERIES_ID)
+    (tmp_path / "Finale.Part 2.mp4").write_bytes(b"video")
+    assert existing_episode_file(tmp_path, finale, by_title) is None
+    dotted = tmp_path / "Dr. Who v1.2 - Episode 03.mp4"
+    dotted.write_bytes(b"video")
+    dotted_options = DownloadOptions(series_name="Dr. Who v1.2")
+    assert existing_episode_file(tmp_path, EPISODE, dotted_options) == dotted
+    (tmp_path / f"{STEM}.f123.mp4").write_bytes(b"video")
+    assert existing_episode_file(tmp_path, EPISODE, OPTIONS) is None
