@@ -20,6 +20,9 @@ THUMBNAIL_MODES = ("embed", "both", "file", "none")
 #: whatever the codec (TikTok's ``bytevc1``/H.265 renditions need a capable player). Nothing is
 #: re-encoded; the source's top rendition is the ceiling.
 QUALITY_MODES = ("compatible", "best")
+#: A series whose manifest says it was complete less than this long ago is skipped without a
+#: single request (``engine.run_series``); ``--recheck`` resolves it anyway.
+RECHECK_AFTER_S = 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,13 @@ class DownloadOptions:
     rest_min_s: float = 60.0
     rest_max_s: float = 120.0
     max_consecutive_failures: int = 3  # stop the run after N failures in a row (0 disables)
+    # A long break every ``long_rest_every`` network attempts of a RUN — a batch of series, or the
+    # web job manager's lifetime — because nobody watches 100 episodes without one. No CLI flag
+    # lowers these (tests set them directly); an idle gap of ``long_rest_min_s`` or more counts as
+    # the break (``engine.PacingState``).
+    long_rest_every: int = 100
+    long_rest_min_s: float = 900.0
+    long_rest_max_s: float = 1800.0
     # Engine: "yt-dlp" (default; downloads each episode's page) or "browser" (fetches the play
     # URLs the episode list already carries, inside one browser session of its own — fewer
     # requests).
@@ -168,6 +178,9 @@ class DownloadOptions:
     overwrite: bool = False
     include_locked: bool = False  # try episodes that look locked (they usually have no formats)
     dry_run: bool = False
+    # Resolve a series even when its manifest says it was complete less than RECHECK_AFTER_S ago
+    # (``--recheck``); without it such a series costs no request (``engine.run_series``).
+    recheck: bool = False
     extractor_args: dict[str, dict[str, list[str]]] | None = None  # passthrough to yt-dlp
 
     @property

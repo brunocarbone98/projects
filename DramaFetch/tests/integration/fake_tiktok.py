@@ -1,19 +1,27 @@
 """A tiny stand-in for TikTok's web app, enough to drive the browser strategy end to end offline.
 
+It serves two series: the main one (`SERIES_ID`, "The Billionaire's Secret Heiress", five
+episodes on two `item_list` pages, episode 5 locked — `FakeOptions.series_id` can move it to
+another id) and a second one (`SECOND_SERIES_ID`, "Second Chance Bride": three free episodes on
+one page, `fixtures/item_list_series2.json`), each with its own covers and play URLs through the
+same fake CDN; the series page, `item_list` and `detail` answer per `dramaID`.
+
 Routes (all GET):
   /shortdrama/episode/<id>/<n>   the series page: inline JS fetches `/api/drama/detail/` and then
                                  `/api/drama/episode/item_list/?dramaID=<id>&cursor=0&count=10&...`
                                  and renders the titles into `[data-testid="short-drama-detail"]`;
                                  302 to /login when `require_login` and no `sessionid` cookie;
                                  a "Verify to continue" page when `challenge`
-  /api/drama/episode/item_list/  JSON built from the two fixtures (cursor 0 -> page 1, 3 -> page 2);
+  /api/drama/episode/item_list/  JSON built from the fixtures: for the main series cursor 0 -> page
+                                 1, 3 -> page 2; for the second series cursor 0 -> its only page;
                                  empty for unknown `dramaID`, or when `require_login` and no cookie;
                                  with `lazy`, later pages are served only to the page's own scroll
                                  handler (header `X-Requested-By: scroll`); `lazy_empty` answers
                                  DramaFetch's own pagination fetch with a well-formed EMPTY page
                                  instead; `slow_pagination_s` delays that fetch (until shutdown at
                                  the latest); `rate_limit_pagination` answers it with HTTP 429
-  /api/drama/detail/             the series name and total
+  /api/drama/detail/             the series name and total (per `dramaID`; the main series' for
+                                 any id it does not know)
   /login                         a login page
   /cdn/<item_id>/<n>.mp4         the fake video CDN. Every `https://v16-webapp-prime.tiktok.com/...`
                                  play URL inside an item_list payload is rewritten to
@@ -75,6 +83,15 @@ PAGES = {
     "0": json.loads((FIXTURES / "item_list_page1.json").read_text(encoding="utf-8")),
     "3": json.loads((FIXTURES / "item_list_page2.json").read_text(encoding="utf-8")),
 }
+#: The second series: three free episodes on one page, TikTok announces 3.
+SECOND_SERIES_ID = "7699393770256782399"
+SECOND_SERIES_NAME = "Second Chance Bride"
+SECOND_TOTAL_EPISODES = 3
+SECOND_PAGES = {
+    "0": json.loads((FIXTURES / "item_list_series2.json").read_text(encoding="utf-8")),
+}
+#: The item ids of the second series' episodes 1-3 (what its CDN and cover paths carry).
+SECOND_ITEMS = tuple(str(item["id"]) for item in SECOND_PAGES["0"]["itemList"])
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
 CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
 COVER_PATH_RE = re.compile(r"^/cover/(?P<id>\d+)\.jpg$")
@@ -261,7 +278,11 @@ class _Handler(BaseHTTPRequestHandler):
         elif (match := COVER_PATH_RE.match(parts.path)) is not None:
             self._cover(options, match.group("id"))
         elif parts.path == "/api/drama/detail/":
-            self._json({"dramaInfo": {"dramaName": SERIES_NAME, "totalEpisode": TOTAL_EPISODES}})
+            if query.get("dramaID") == SECOND_SERIES_ID:
+                name, total = SECOND_SERIES_NAME, SECOND_TOTAL_EPISODES
+            else:
+                name, total = SERIES_NAME, TOTAL_EPISODES
+            self._json({"dramaInfo": {"dramaName": name, "totalEpisode": total}})
         elif parts.path.startswith("/login"):
             self._send(HTTPStatus.OK, LOGIN_PAGE.encode(), "text/html; charset=utf-8")
         else:
@@ -274,13 +295,18 @@ class _Handler(BaseHTTPRequestHandler):
         cursor = query.get("cursor", "0") or "0"
         if options.require_login and not logged_in:
             return {"itemList": [], "hasMore": False, "statusCode": 0}
-        if query.get("dramaID") != options.series_id:
+        drama_id = query.get("dramaID")
+        if drama_id == SECOND_SERIES_ID:
+            pages = SECOND_PAGES
+        elif drama_id == options.series_id:
+            pages = PAGES
+        else:
             return {"itemList": [], "hasMore": False, "cursor": 0, "statusCode": 0}
         if options.lazy_empty and cursor != "0" and not from_scroll:
             return {"itemList": [], "hasMore": False, "cursor": cursor, "statusCode": 0}
         if options.lazy and cursor != "0" and not from_scroll:
             return {"statusCode": 10201, "statusMsg": "pagination is only served to the page"}
-        page = PAGES.get(cursor)
+        page = pages.get(cursor)
         if page is None:
             return {"itemList": [], "hasMore": False, "cursor": cursor, "statusCode": 0}
         return page
@@ -510,3 +536,32 @@ class FakeTikTok:
     @property
     def cover_requests(self) -> list[RequestRecord]:
         return [r for r in self.requests if COVER_PATH_RE.match(r.path)]
+
+    def series_requests(self, series_id: str) -> list[RequestRecord]:
+        """Every request about one series: its page, its `item_list` / `detail` (by `dramaID`)
+        and the media and covers of its items."""
+        items = set(SECOND_ITEMS) if series_id == SECOND_SERIES_ID else _main_items(series_id)
+        found = []
+        for record in self.requests:
+            page = SERIES_PATH_RE.match(record.path)
+            media = CDN_PATH_RE.match(record.path) or COVER_PATH_RE.match(record.path)
+            if (
+                (page is not None and page.group("id") == series_id)
+                or record.query.get("dramaID") == series_id
+                or (media is not None and media.group("id") in items)
+            ):
+                found.append(record)
+        return found
+
+
+def _main_items(series_id: str) -> set[str]:
+    """The item ids of the main series' pages that belong to it (not the other drama's item)."""
+    if series_id != SERIES_ID:
+        return set()
+    items = set()
+    for page in PAGES.values():
+        listed = page.get("itemList") or page.get("data", {}).get("itemList", [])
+        for item in listed:
+            if item.get("dramaInfo", {}).get("dramaID") == SERIES_ID:
+                items.add(str(item["id"]))
+    return items

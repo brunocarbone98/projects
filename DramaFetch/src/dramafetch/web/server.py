@@ -5,35 +5,47 @@ Routes::
     GET  /                          the page (static/index.html, read through importlib.resources)
     POST /api/session  {"token"}    -> 204 + the session cookie, or 401 (needs no token itself)
     POST /api/resolve  {"url", "refresh"?}  -> the series and its episodes (each with its
-                                    cover_url) plus "from_cache" and "resolved_at" (epoch seconds)
+                                    cover_url and on_disk) plus "on_disk_count", "from_cache" and
+                                    "resolved_at" (epoch seconds)
     POST /api/download {"url", "episodes", "include_locked"} -> 202 {"job_id": ...}
+    POST /api/batch    {"urls": [...], "include_locked"?} -> 202 {"batch_id", "jobs": [{"job_id",
+                                    "series_id"}], "dropped": [...]}: one job per series, nothing
+                                    resolved yet (each job resolves its series right before its
+                                    own downloads)
+    GET  /api/jobs                  {"jobs": [summary, ...]}, the most recent first, at most 100
     GET  /api/jobs/<id>             the job snapshot (see jobs.py) -> 200, or 404 when unknown
-    GET  /api/files/<job>/<number>  the finished video of that job row -> the bytes, or 404
+    GET  /api/files/<job>/<number>  the video of that job row (done or skipped-exists) -> the
+                                    bytes, or 404
     GET  /api/files/<job>/<number>/cover   its cover: the <stem>.jpg|.jpeg|.png|.webp sidecar when
                                     one exists, else the one embedded in the video, or 404
+    GET  /api/files/<job>/all       every file of a finished job as one ZIP (stored, never
+                                    recompressed; streamed) -> 200, 409 while it runs, or 404
     GET  /api/doctor                the `dramafetch doctor` facts as JSON
 
-Rules: the server binds to the host it is given and nothing else (the CLI defaults to 127.0.0.1;
-an empty host is refused), and binding to anything but loopback requires an access token
+Rules: the server binds to the host it is given and nothing else (the CLI defaults to 127.0.0.1; an
+empty host is refused), and binding to anything but loopback requires an access token
 (``DramaFetchServer(..., token=...)``; ``dramafetch serve --token``). With a token, every request
 except ``GET /`` and ``POST /api/session`` must carry ``Authorization: Bearer <token>`` or the
 cookie ``dramafetch_session=<token>`` (compared with ``hmac.compare_digest``); otherwise it is
-answered 401 ``{"error": "token required", "kind": "auth", ...}`` before anything else happens —
-in particular before any request to TikTok. ``POST /api/session`` with the right token sets that
-cookie (``HttpOnly; SameSite=Strict; Path=/; Max-Age=30 days``). Without a token (the loopback
-default) nothing is checked. JSON bodies are capped at 64 KiB (413). POSTs must carry
-``Content-Type: application/json``, so a browser on another site cannot fire one without a CORS
-preflight we never answer, and the ``Host`` header must name the bound host or localhost (a guard
-against DNS rebinding; bound to every interface — ``0.0.0.0`` / ``::`` — the server cannot know
-its own addresses, so there any IP literal is accepted but still no other host name). The output
-directory is fixed server-side: the page cannot choose paths, and the files endpoint serves
-nothing but the path a finished (``done``) job row recorded — or, for ``/cover``, the sidecar next
-to it, else the cover embedded in that video, read into memory only after the video passed the
-same check — and only when it resolves to a regular file inside that directory (never a ``.part``):
-anything else is a 404 that names no path. Errors are ``{"error": message, "kind": ExceptionName}``
-with a 4xx/5xx status; cookie and token values never appear in responses or logs (the log says
-``token: set`` or ``token: none``). Resolving a series runs synchronously inside the request: the
-discovery opens TikTok in a browser and usually takes 10-40 s, so the page shows a waiting note.
+answered 401 ``{"error": "token required", "kind": "auth", ...}`` before anything else happens — in
+particular before any request to TikTok. ``POST /api/session`` with the right token sets that cookie
+(``HttpOnly; SameSite=Strict; Path=/; Max-Age=30 days``). Without a token (the loopback default)
+nothing is checked. JSON bodies are capped at 64 KiB (413). POSTs must carry ``Content-Type:
+application/json``, so a browser on another site cannot fire one without a CORS preflight we never
+answer, and the ``Host`` header must name the bound host or localhost (a guard against DNS
+rebinding; bound to every interface — ``0.0.0.0`` / ``::`` — the server cannot know its own
+addresses, so there any IP literal is accepted but still no other host name). The output directory
+is fixed server-side: the page cannot choose paths, and the files endpoint serves nothing but the
+path a job row recorded — a ``done`` row, or a ``skipped-exists`` one (a file an earlier run saved)
+— or, for ``/cover``, the sidecar next to it, else the cover embedded in that video, read into
+memory only after the video passed the same check — and only when it resolves to a regular file
+inside that directory (never a ``.part``): anything else is a 404 that names no path. ``/all``
+applies the very same check to every entry of its ZIP, before the answer and again right before each
+file is opened, and reads every file 64 KiB at a time (``ZIP_STORED``, ZIP64, no ``Content-Length``,
+``Connection: close``). Errors are ``{"error": message, "kind": ExceptionName}`` with a 4xx/5xx
+status; cookie and token values never appear in responses or logs (the log says ``token: set`` or
+``token: none``). Resolving a series runs synchronously inside the request: the discovery opens
+TikTok in a browser and usually takes 10-40 s, so the page shows a waiting note.
 
 Fewer requests to TikTok: a resolved episode list is kept in memory for ``SERIES_CACHE_TTL_S``
 (15 minutes; the ``SERIES_CACHE_SIZE`` most recently resolved series) and reused by both
@@ -44,26 +56,37 @@ refused a request (HTTP 403, HTTP 429, a captcha — recorded by the engines and
 cooldown file, see ``dramafetch.cooldown``) both routes refuse to contact TikTok until the cooldown
 ends: ``429 {"error": <the cooldown message>, "kind": "cooldown", "hint": ...}`` with a
 ``Retry-After`` header in seconds. ``/api/resolve`` still serves a cached list then (no request
-involved); ``/api/download`` is refused outright, and a job already queued behind one that met the
-refusal is ended as ``error`` with the same message instead of knocking again (``JobManager``'s
-gate).
+involved); ``/api/download`` is refused outright. The jobs queued behind one that met the refusal
+are cancelled (``not started: …``) instead of knocking again; when the refusal was met elsewhere
+(the CLI, a resolve of this server), the next job is ended as ``error`` with the same message by
+``JobManager``'s gate before any request, and the ones behind it are cancelled.
+
+Several series: ``POST /api/batch`` parses every entry (``urls.parse_input``, no request at all)
+and queues one job per series holding only its ``SeriesRef``; the job manager's worker resolves
+each one right before its own downloads through ``engine.run_series``
+(:meth:`DramaFetchServer.series_runner`), through the same cache, the same one-at-a-time lock and
+the same cooldown checks as the routes above (:class:`_CachedDiscovery`). Between two jobs that
+both contact TikTok the worker rests like the engine does every ``rest_every`` episodes — or,
+before a batch job's resolve, takes the run's long break there when it is due — and a job that
+ends with a stop cancels every queued job (see ``jobs.py``).
 """
 
 from __future__ import annotations
 
-import functools
 import hmac
 import ipaddress
 import json
 import logging
 import math
 import os
+import random
 import re
 import shutil
 import socket
 import threading
 import time
 import unicodedata
+import zipfile
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
@@ -71,7 +94,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
 
 from dramafetch import __version__
@@ -88,13 +111,25 @@ from dramafetch.models import (
     DiscoveryOptions,
     Downloader,
     DownloadOptions,
-    DownloadStatus,
+    DownloadResult,
     Series,
     SeriesRef,
     VideoRef,
 )
 from dramafetch.thumbnails import cover_sidecar
-from dramafetch.web.jobs import JobManager, Runner, redact_secrets
+from dramafetch.web.jobs import (
+    FINISHED_STATES,
+    SERVED_STATUSES,
+    GuardedDownloader,
+    JobManager,
+    JobRefused,
+    Runner,
+    SeriesRunner,
+    redact_secrets,
+)
+
+if TYPE_CHECKING:  # the engine pulls in yt-dlp: imported lazily, inside the handlers
+    from dramafetch.engine import PacingState, SeriesRun, SeriesStart
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +188,15 @@ _CHUNK_BYTES = 64 * 1024
 # Dropped from the ASCII fallback file name (RFC 6266): quotes and backslashes would end or escape
 # the quoted-string, control characters have no place in a header.
 _UNSAFE_ASCII_RE = re.compile(r'[\\"\x00-\x1f\x7f]')
+#: ``POST /api/batch`` takes 1 to this many series per request (duplicates included).
+MAX_BATCH_SERIES = 50
+#: The 409 of ``GET /api/files/<job>/all`` for a job that is queued or running.
+STILL_RUNNING_MESSAGE = "the job is still running"
+# What every entry of the save-all ZIP is stored as: a regular file, rw-r--r--.
+_ZIP_FILE_MODE = 0o100644
+# The earliest and latest times a ZIP entry (MS-DOS date) can carry.
+_ZIP_EARLIEST = (1980, 1, 1, 0, 0, 0)
+_ZIP_LATEST = (2107, 12, 31, 23, 59, 58)
 
 LOGIN_HINT = (
     "Export cookies.txt (Netscape format) from the browser where you are logged in to TikTok and "
@@ -174,7 +218,8 @@ VIDEO_URL_MESSAGE = (
 
 class HttpError(Exception):
     """An error with the HTTP status it should be reported with (and, for a few, extra response
-    headers: the cooldown's ``Retry-After``)."""
+    headers — the cooldown's ``Retry-After`` — or extra JSON fields: the ``index`` of the batch
+    entry a 400 is about)."""
 
     def __init__(
         self,
@@ -184,6 +229,7 @@ class HttpError(Exception):
         kind: str | None = None,
         hint: str | None = None,
         headers: Iterable[tuple[str, str]] = (),
+        fields: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -191,6 +237,7 @@ class HttpError(Exception):
         self.kind = kind or type(self).__name__
         self.hint = hint
         self.headers = tuple(headers)
+        self.fields = dict(fields or {})
 
 
 def _no_such_file() -> HttpError:
@@ -293,6 +340,42 @@ class EmbeddedCover:
     file_name: str
 
 
+class _CachedDiscovery:
+    """The ``Discovery`` a batch job's ``engine.run_series`` resolves its series through, so that a
+    lazy resolve in the worker follows the same rules as ``/api/resolve`` and ``/api/download``: a
+    list in the server's cache resolved less than ``SERIES_CACHE_TTL_S`` ago is taken as it is (no
+    request); otherwise one discovery at a time (``resolve_lock``) — a series another request
+    resolved meanwhile is taken from the cache, and a cooldown recorded meanwhile (a 429 met by
+    that other discovery, say) refuses the job with :class:`~dramafetch.web.jobs.JobRefused`
+    instead of knocking — and a successful list is stored in the cache. The injected discovery
+    (tests) or the strategy ``choose_discovery`` picks does the work; ``engine.resolve`` around
+    this records a refusal as the cooldown, as always."""
+
+    def __init__(self, app: DramaFetchServer) -> None:
+        self._app = app
+
+    def discover(self, ref: SeriesRef, options: DiscoveryOptions) -> Series:
+        app = self._app
+        cached = app.series_cache.get(ref.series_id)
+        if cached is not None:
+            return cached[1]
+        with app.resolve_lock:
+            cached = app.series_cache.get(ref.series_id)
+            if cached is not None:  # the request that held the lock resolved this very series
+                return cached[1]
+            cooldown = current_cooldown()
+            if cooldown is not None:
+                raise JobRefused(cooldown_message(cooldown))
+            discovery = app.discovery
+            if discovery is None:
+                from dramafetch.discovery import choose_discovery  # lazy: pulls in Playwright
+
+                discovery = choose_discovery(options)
+            series = discovery.discover(ref, options)
+            app.series_cache.put(ref.series_id, series)
+        return series
+
+
 def is_loopback_host(host: str) -> bool:
     """``localhost`` or a loopback address (``127.x.x.x``, ``::1``), IPv6 brackets tolerated.
 
@@ -374,10 +457,31 @@ def index_html() -> str:
     return (resources.files("dramafetch.web") / "static" / "index.html").read_text(encoding="utf-8")
 
 
+def on_disk_numbers(out_dir: Path, series_id: str, directory: Path | None = None) -> set[int]:
+    """The episodes of a series already on disk: what its manifest — the one in ``directory``
+    (``series_to_dict`` passes the folder a download would use, so an episode shown as on disk is
+    one the download skips without a request), else the one ``engine.find_series_dir`` finds
+    under ``out_dir``, read with ``manifest.read_manifest`` — records as done or found on disk,
+    its file still there (``engine.on_disk_numbers``). Read-only: nothing is created, written or
+    moved, a corrupt manifest included; never raises (an unreadable ``out_dir`` is an empty
+    set)."""
+    from dramafetch import engine  # lazy: sibling module, pulls in yt-dlp
+
+    try:
+        return engine.on_disk_numbers(out_dir, series_id, directory)
+    except OSError as exc:  # a badge is not worth a failed resolve
+        log.debug("on-disk check of %s failed: %s", series_id, exc)
+        return set()
+
+
 def series_to_dict(series: Series, out_dir: Path) -> dict[str, Any]:
-    """The JSON the page renders after `/api/resolve`."""
+    """The JSON the page renders after `/api/resolve`: per episode ``on_disk`` — the manifest of
+    the folder a download of it would use, ``series_dir``, says it is on disk (see
+    :func:`on_disk_numbers`) — and ``on_disk_count`` for the whole list."""
     from dramafetch.manifest import series_dir  # lazy: sibling module, engine side
 
+    on_disk = on_disk_numbers(out_dir, series.series_id, series_dir(out_dir, series))
+    episodes = sorted(series.episodes, key=lambda episode: episode.number)
     return {
         "series_id": series.series_id,
         "name": series.name,
@@ -385,6 +489,7 @@ def series_to_dict(series: Series, out_dir: Path) -> dict[str, Any]:
         "total_hint": series.total_hint,
         "warnings": list(series.warnings),
         "series_dir": str(series_dir(out_dir, series)),
+        "on_disk_count": sum(1 for episode in episodes if episode.number in on_disk),
         "episodes": [
             {
                 "number": episode.number,
@@ -395,8 +500,9 @@ def series_to_dict(series: Series, out_dir: Path) -> dict[str, Any]:
                 "lock_hints": list(episode.lock_hints),
                 "page_url": episode.page_url,
                 "cover_url": episode.cover_url,
+                "on_disk": episode.number in on_disk,
             }
-            for episode in sorted(series.episodes, key=lambda episode: episode.number)
+            for episode in episodes
         ],
     }
 
@@ -454,12 +560,51 @@ class DramaFetchServer(ThreadingHTTPServer):
         return None if cooldown is None else cooldown_message(cooldown)
 
     def runner(self) -> Runner:
-        """``engine.download_series`` bound to the injected downloader (tests) or yt-dlp."""
-        from dramafetch.engine import download_series  # lazy: pulls in yt-dlp
+        """``engine.download_series`` for a download job (``JobManager.engine_runner``): the job
+        manager's one ``PacingState``, its sleep / clock / rng and the rest between jobs, and the
+        injected downloader (tests) or the engine's own for ``--engine``."""
+        return self.jobs.engine_runner(self.downloader)
 
-        if self.downloader is None:
-            return download_series
-        return functools.partial(download_series, downloader=self.downloader)
+    def series_runner(self) -> SeriesRunner:
+        """``engine.run_series`` for a batch job: the server's discovery options, its resolve cache
+        and lock and the cooldown asked again under it (:class:`_CachedDiscovery`), and the
+        injected downloader (tests) or the engine's own, behind a ``GuardedDownloader``. The job
+        manager hands every other keyword — ``on_result``, ``on_start``, ``on_pause``,
+        ``before_network`` (``run_series`` calls it right before resolving), ``pacing``,
+        ``sleep``, ``clock``, ``rng`` — and the run gets them unchanged."""
+
+        def run(
+            ref: SeriesRef,
+            options: DownloadOptions,
+            *,
+            on_result: Callable[[DownloadResult], None],
+            on_start: Callable[[SeriesStart], None],
+            on_pause: Callable[[str, float], None],
+            before_network: Callable[[], None],
+            pacing: PacingState,
+            sleep: Callable[[float], None],
+            clock: Callable[[], float],
+            rng: random.Random,
+        ) -> SeriesRun:
+            from dramafetch import engine  # lazy: pulls in yt-dlp
+
+            return engine.run_series(
+                ref,
+                self.discovery_options,
+                options,
+                discovery=_CachedDiscovery(self),
+                downloader=GuardedDownloader(before_network, self.downloader),
+                on_result=on_result,
+                on_pause=on_pause,
+                sleep=sleep,
+                rng=rng,
+                pacing=pacing,
+                clock=clock,
+                on_start=on_start,
+                before_network=before_network,
+            )
+
+        return run
 
     def host_allowed(self, host_header: str | None) -> bool:
         """Accept only requests addressed to the bound host or localhost (any IP literal for a
@@ -468,12 +613,13 @@ class DramaFetchServer(ThreadingHTTPServer):
         return host_header_allowed(self.bound_host, host_header)
 
     def served_file(self, job_id: str, number: int, *, cover: bool = False) -> Path | None:
-        """The video (or, with ``cover``, the cover sidecar) a finished job row points at, if it may
-        be served: the row must be ``done`` with a path, and that path — or its first existing
-        ``<stem>.jpg|.jpeg|.png|.webp`` sidecar — must resolve (symlinks followed) to a regular file
-        inside ``out_dir`` that is no ``.part`` (:meth:`_confined_file`). ``None`` otherwise; the
-        caller answers 404 without saying why. The URL only ever selects a row: no part of it
-        touches the file system. A cover embedded in the video is :meth:`served_cover`'s job."""
+        """The video (or, with ``cover``, the cover sidecar) a job row points at, if it may be
+        served: the row must be ``done`` or ``skipped-exists`` (a file an earlier run saved) with a
+        path, and that path — or its first existing ``<stem>.jpg|.jpeg|.png|.webp`` sidecar — must
+        resolve (symlinks followed) to a regular file inside ``out_dir`` that is no ``.part``
+        (:meth:`confined_file`). ``None`` otherwise; the caller answers 404 without saying why. The
+        URL only ever selects a row: no part of it touches the file system. A cover embedded in the
+        video is :meth:`served_cover`'s job."""
         path = self._recorded_path(job_id, number)
         if path is None:
             return None
@@ -482,7 +628,7 @@ class DramaFetchServer(ThreadingHTTPServer):
             if sidecar is None:
                 return None
             path = sidecar
-        return self._confined_file(path)
+        return self.confined_file(path)
 
     def served_cover(self, job_id: str, number: int) -> Path | EmbeddedCover | None:
         """The cover of a finished job row: the sidecar's path when one sits next to the video
@@ -496,7 +642,7 @@ class DramaFetchServer(ThreadingHTTPServer):
             return None
         if cover_sidecar(path) is not None:
             return self.served_file(job_id, number, cover=True)
-        video = self._confined_file(path)
+        video = self.confined_file(path)
         if video is None:
             return None
         from dramafetch.thumbnails import MAX_COVER_BYTES, extract_cover  # lazy: may load mutagen
@@ -510,18 +656,55 @@ class DramaFetchServer(ThreadingHTTPServer):
             return None
         return EmbeddedCover(data, content_type, video.stem + suffix)
 
+    def zip_entries(self, job_id: str) -> tuple[str, list[tuple[str, Path]]]:
+        """What ``GET /api/files/<job>/all`` puts in its ZIP: the folder name — the series name
+        made file-system safe — and ``(name in the ZIP, path)`` for every ``done`` or
+        ``skipped-exists`` row whose video passes :meth:`confined_file`, then the row's cover
+        sidecar when one exists and passes it too, as ``<series name>/<file>``, ascending by
+        episode number (the cover embedded in a video travels inside it). ``HttpError`` 409 while
+        the job is queued or running; the one 404 for an unknown job, or when no row qualifies."""
+        from dramafetch.manifest import safe_filename  # lazy: sibling module, engine side
+
+        snapshot = self.jobs.get(job_id)
+        if snapshot is None:
+            raise _no_such_file()
+        if snapshot["state"] not in FINISHED_STATES:
+            raise HttpError(HTTPStatus.CONFLICT, STILL_RUNNING_MESSAGE)
+        folder = safe_filename(snapshot["series_name"] or f"series-{snapshot['series_id']}")
+        entries: list[tuple[str, Path]] = []
+        names: set[str] = set()
+        for row in sorted(snapshot["results"], key=lambda row: int(row["number"])):
+            if row["status"] not in SERVED_STATUSES or not row["path"]:
+                continue
+            recorded = Path(row["path"])
+            video = self.confined_file(recorded)
+            if video is None:
+                continue
+            files = [video]
+            sidecar = cover_sidecar(recorded)
+            if sidecar is not None and (cover := self.confined_file(sidecar)) is not None:
+                files.append(cover)
+            for path in files:
+                name = f"{folder}/{path.name}"
+                if name not in names:  # two rows can never add one file twice
+                    names.add(name)
+                    entries.append((name, path))
+        if not entries:
+            raise _no_such_file()
+        return folder, entries
+
     def _recorded_path(self, job_id: str, number: int) -> Path | None:
-        """The path a ``done`` row of the job recorded, as recorded (not yet checked), or ``None``
-        for an unknown job, an unknown row, or a row that is not ``done`` with a path."""
+        """The path a ``done`` or ``skipped-exists`` row of the job recorded, as recorded (not yet
+        checked), or ``None`` for an unknown job, an unknown row, or any other row."""
         snapshot = self.jobs.get(job_id)
         if snapshot is None:
             return None
         row = next((row for row in snapshot["results"] if row["number"] == number), None)
-        if row is None or row["status"] != DownloadStatus.DONE.value or not row["path"]:
+        if row is None or row["status"] not in SERVED_STATUSES or not row["path"]:
             return None
         return Path(row["path"])
 
-    def _confined_file(self, path: Path) -> Path | None:
+    def confined_file(self, path: Path) -> Path | None:
         """``path`` resolved (symlinks followed) when it is a regular file inside ``out_dir`` and no
         ``.part`` before or after resolving; ``None`` otherwise. Nothing is opened here: this is
         the check that must pass before any file is read for a response."""
@@ -588,6 +771,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_html(index_html())
         elif path == "/api/doctor":
             self._send_json(HTTPStatus.OK, self._doctor())
+        elif path == "/api/jobs":
+            self._send_json(HTTPStatus.OK, {"jobs": self.app.jobs.summaries()})
         elif path.startswith(_JOBS_PREFIX):
             job_id = path[len(_JOBS_PREFIX) :].strip("/")
             snapshot = self.app.jobs.get(job_id) if job_id else None
@@ -612,6 +797,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/download":
             body = self._read_json_body()
             self._send_json(HTTPStatus.ACCEPTED, self._start_download(body))
+        elif path == "/api/batch":
+            body = self._read_json_body()
+            self._send_json(HTTPStatus.ACCEPTED, self._start_batch(body))
         else:
             raise HttpError(HTTPStatus.NOT_FOUND, f"no such endpoint: {path[:80]}")
 
@@ -769,6 +957,53 @@ class _Handler(BaseHTTPRequestHandler):
             "numbers": [episode.number for episode in episodes],
         }
 
+    def _start_batch(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``POST /api/batch``: parse every entry (:func:`_batch_entry` — no request is made here,
+        not even from the cache) and queue one job per series, all with one ``batch_id``, each
+        holding nothing but its ``SeriesRef``: the worker resolves each series right before its own
+        downloads (:meth:`DramaFetchServer.series_runner`). A series listed twice is queued once
+        (``dropped`` names the others); a cooldown is the same 429 as ``/api/download``."""
+        app = self.app
+        urls = body.get("urls")
+        if not isinstance(urls, list) or not 1 <= len(urls) <= MAX_BATCH_SERIES:
+            raise HttpError(
+                HTTPStatus.BAD_REQUEST,
+                f'"urls" must list 1 to {MAX_BATCH_SERIES} series URLs (or bare series ids)',
+            )
+        if "episodes" in body:
+            raise HttpError(
+                HTTPStatus.BAD_REQUEST,
+                '"episodes" does not apply to a batch: every series is downloaded whole (use '
+                "/api/download for a selection)",
+            )
+        include_locked = body.get("include_locked", app.download_options.include_locked)
+        if not isinstance(include_locked, bool):
+            raise HttpError(HTTPStatus.BAD_REQUEST, '"include_locked" must be true or false')
+        refs: list[SeriesRef] = []
+        dropped: list[dict[str, Any]] = []
+        first_seen: dict[str, int] = {}
+        for index, entry in enumerate(urls):
+            ref = _batch_entry(index, entry)
+            if ref.series_id in first_seen:
+                reason = f"duplicate of entry {first_seen[ref.series_id] + 1}"
+                dropped.append({"index": index, "series_id": ref.series_id, "reason": reason})
+                continue
+            first_seen[ref.series_id] = index
+            refs.append(ref)
+        cooldown = current_cooldown()
+        if cooldown is not None:  # every job would be refused: none is queued
+            raise cooldown_error(cooldown)
+        options = replace(app.download_options, include_locked=include_locked)
+        batch_id, job_ids = app.jobs.start_batch(refs, options, runner=app.series_runner())
+        return {
+            "batch_id": batch_id,
+            "jobs": [
+                {"job_id": job_id, "series_id": ref.series_id}
+                for job_id, ref in zip(job_ids, refs, strict=True)
+            ],
+            "dropped": dropped,
+        }
+
     def _doctor(self) -> dict[str, Any]:
         from dramafetch.cli import doctor_as_dicts  # lazy: the CLI owns the doctor checks
 
@@ -787,8 +1022,11 @@ class _Handler(BaseHTTPRequestHandler):
         """``<job id>/<number>`` or ``<job id>/<number>/cover`` after ``/api/files/``: stream the
         file the job row points at (:meth:`DramaFetchServer.served_file`) — for ``/cover`` the
         sidecar, or the embedded cover sent from memory (:meth:`DramaFetchServer.served_cover`) —
-        or the one 404."""
+        or the one 404; ``<job id>/all`` is the save-all ZIP (:meth:`_send_zip`)."""
         parts = rest.split("/")
+        if len(parts) == 2 and parts[0] and parts[1] == "all":
+            self._send_zip(parts[0])
+            return
         if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] != "cover"):
             raise _no_such_file()
         job_id, number = parts[0], parts[1]
@@ -826,6 +1064,40 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError:  # the client went away mid-download (or the file did)
                 self.close_connection = True
                 log.debug("download of %s was cut short", target.name, exc_info=True)
+
+    def _send_zip(self, job_id: str) -> None:
+        """``GET /api/files/<job>/all``: every file of a finished job
+        (:meth:`DramaFetchServer.zip_entries`; the 409 / 404 come before anything is sent) as one
+        ZIP written straight to the socket — ``ZIP_STORED`` (videos are compressed already: they
+        go in byte for byte, quality untouched), ZIP64 on every entry (a stream cannot seek back
+        to fix a header, so sizes go into data descriptors), each file copied 64 KiB at a time, so
+        memory stays bounded whatever the series weighs. No ``Content-Length`` (unknown until the
+        archive is written) and ``Connection: close``. Each entry passes the confinement check
+        once more right before it is opened; one that fails it, or cannot be opened, is left out.
+        """
+        app = self.app
+        folder, entries = app.zip_entries(job_id)
+        self.close_connection = True
+        self._send_headers(
+            HTTPStatus.OK,
+            [
+                ("Content-Type", "application/zip"),
+                ("Content-Disposition", content_disposition(f"{folder}.zip")),
+                ("Connection", "close"),
+            ],
+        )
+        written = 0
+        try:
+            with zipfile.ZipFile(
+                self.wfile, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+            ) as archive:
+                for name, path in entries:
+                    if _add_to_zip(archive, name, app.confined_file(path)):
+                        written += 1
+        except Exception:  # headers are out: a client gone (or a file) cannot be answered now
+            log.debug("the ZIP of job %s was cut short", job_id[:8], exc_info=True)
+            return
+        log.info("sent %d file(s) of job %s as one ZIP", written, job_id[:8])
 
     # ------------------------------------------------------------------ plumbing
 
@@ -865,7 +1137,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json", extra)
 
     def _send_error(self, error: HttpError) -> None:
-        payload: dict[str, Any] = {"error": redact_secrets(error.message), "kind": error.kind}
+        payload: dict[str, Any] = {
+            **error.fields,
+            "error": redact_secrets(error.message),
+            "kind": error.kind,
+        }
         if error.hint:
             payload["hint"] = error.hint
         extra: list[tuple[str, str]] = list(error.headers)
@@ -897,6 +1173,79 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         # Request lines only (method, path, status): never headers, never bodies, so never a token.
         log.info("%s %s", self.address_string(), format % args)
+
+
+def _batch_entry(index: int, entry: Any) -> SeriesRef:
+    """Entry ``index`` of a ``POST /api/batch`` as a ``SeriesRef`` — parsed, never resolved — or
+    the 400 naming it: ``"entry 3: <why>"`` with ``"index": 2`` (0-based) in the JSON, so the page
+    can point at the line. A single-video URL and unsupported text are refused like on
+    ``/api/resolve``."""
+    from dramafetch.urls import parse_input
+
+    where = {"index": index}
+    if not isinstance(entry, str) or not entry.strip():
+        raise HttpError(
+            HTTPStatus.BAD_REQUEST,
+            f"entry {index + 1}: not a series URL or id",
+            kind="UnsupportedUrlError",
+            fields=where,
+        )
+    try:
+        ref = parse_input(entry)
+    except UnsupportedUrlError as exc:
+        raise HttpError(
+            HTTPStatus.BAD_REQUEST,
+            f"entry {index + 1}: {exc}",
+            kind=type(exc).__name__,
+            fields=where,
+        ) from exc
+    if isinstance(ref, VideoRef):
+        raise HttpError(
+            HTTPStatus.BAD_REQUEST,
+            f"entry {index + 1}: {VIDEO_URL_MESSAGE}",
+            kind="UnsupportedUrlError",
+            fields=where,
+        )
+    return ref
+
+
+def _zip_date_time(mtime: float) -> tuple[int, int, int, int, int, int]:
+    """A file's modification time as a ZIP entry's local date and time, clamped to what an MS-DOS
+    date holds (1980 to 2107)."""
+    try:
+        moment = time.localtime(mtime)
+    except (OverflowError, OSError, ValueError):
+        return _ZIP_EARLIEST
+    stamp = (
+        moment.tm_year,
+        moment.tm_mon,
+        moment.tm_mday,
+        moment.tm_hour,
+        moment.tm_min,
+        moment.tm_sec,
+    )
+    return min(max(stamp, _ZIP_EARLIEST), _ZIP_LATEST)
+
+
+def _add_to_zip(archive: zipfile.ZipFile, name: str, path: Path | None) -> bool:
+    """Write one file into the ZIP as ``name`` — stored, ZIP64, copied 64 KiB at a time, never
+    read whole — and return True; False (left out) when the confinement check failed (``path``
+    None) or the file cannot be opened any more. A failure while writing propagates: the archive
+    cannot be finished then."""
+    if path is None:
+        return False
+    try:
+        source = path.open("rb")
+    except OSError:
+        log.debug("left %s out of the ZIP", path.name, exc_info=True)
+        return False
+    with source:
+        info = zipfile.ZipInfo(name, date_time=_zip_date_time(os.fstat(source.fileno()).st_mtime))
+        info.compress_type = zipfile.ZIP_STORED
+        info.external_attr = _ZIP_FILE_MODE << 16
+        with archive.open(info, "w", force_zip64=True) as target:
+            shutil.copyfileobj(source, target, _CHUNK_BYTES)
+    return True
 
 
 def normalize_host(host: str) -> str:

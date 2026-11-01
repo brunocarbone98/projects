@@ -63,7 +63,7 @@
   .hint { margin: 8px 0 0; }
   form { display: flex; flex-wrap: wrap; gap: 8px; }
   label { font-weight: 600; width: 100%; }
-  input#url, input#token {
+  input#url, input#token, textarea#batch-urls {
     flex: 1 1 240px;
     min-width: 0;
     padding: 10px 12px;
@@ -83,7 +83,9 @@
     color: var(--text);
     cursor: pointer;
   }
+  textarea#batch-urls { flex-basis: 100%; min-height: 6.5em; resize: vertical; }
   button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  button.link { padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
   button:disabled { opacity: 0.55; cursor: progress; }
   button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .status { margin: 10px 0 0; min-height: 1.2em; }
@@ -112,7 +114,7 @@
     background: var(--soft);
     vertical-align: top;
   }
-  td.actions a { display: inline-block; margin-right: 10px; font-weight: 600; white-space: nowrap; }
+  td.actions a, td.actions button.link { display: inline-block; margin-right: 10px; font-weight: 600; white-space: nowrap; }
   .badge {
     display: inline-block;
     padding: 1px 8px;
@@ -125,7 +127,10 @@
   .badge.free, .badge.done { color: var(--ok); border-color: var(--ok); }
   .badge.locked, .badge.skipped { color: var(--warn); border-color: var(--warn); }
   .badge.failed { color: var(--bad); border-color: var(--bad); }
-  .badge.running { color: var(--accent); border-color: var(--accent); }
+  .badge.running, .badge.ondisk { color: var(--accent); border-color: var(--accent); }
+  .badge.complete { color: var(--ok); border-color: var(--ok); }
+  .badge.incomplete { color: var(--warn); border-color: var(--warn); }
+  .badge.queued, .badge.cancelled { color: var(--muted); }
   .hints { display: block; font-size: 0.82rem; color: var(--muted); word-break: break-word; }
   .path { font-size: 0.82rem; color: var(--muted); word-break: break-all; }
   progress { width: 100%; height: 10px; margin: 8px 0 12px; accent-color: var(--accent); }
@@ -184,6 +189,17 @@
     <p id="resolve-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
+  <section class="card" id="batch-card" aria-labelledby="batch-title">
+    <h2 id="batch-title">Several series</h2>
+    <form id="batch-form" autocomplete="off">
+      <label for="batch-urls">Series links, one per line (or bare series ids)</label>
+      <textarea id="batch-urls" name="urls" rows="4" spellcheck="false" placeholder="https://www.tiktok.com/shortdrama/episode/7675706520839033876/1&#10;https://www.tiktok.com/shortdrama/episode/7699393770256782399/1"></textarea>
+      <button type="submit" id="batch-btn" class="primary">Queue all</button>
+    </form>
+    <p class="hint">Every free episode of every series, one series at a time: each series is resolved right before its own downloads (never all the lists up front), with a rest between two series that contact TikTok, and the first sign of trouble — a refusal, a login wall — cancels the series still waiting, without another request. A series already complete on disk costs no request for 24 hours. Up to 50 links; blank lines and lines starting with <code>#</code> are skipped. When a series is done, <strong>Save all (ZIP)</strong> copies the whole series to this device in one file — stored, never recompressed, so picture and sound are untouched.</p>
+    <p id="batch-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+
   <section class="card hidden" id="series-card" aria-labelledby="series-title">
     <h2 id="series-title">2. Episodes</h2>
     <p class="meta" id="series-meta"></p>
@@ -221,6 +237,7 @@
     <h2 id="job-title">3. Progress</h2>
     <p class="meta" id="job-meta"></p>
     <progress id="job-progress" max="1" value="0" aria-label="Download progress"></progress>
+    <div class="toolbar" id="job-zip"></div>
     <div class="table-wrap">
       <table class="stack" id="job-results">
         <thead>
@@ -236,6 +253,26 @@
       </table>
     </div>
     <p class="hint" id="job-note"></p>
+  </section>
+
+  <section class="card hidden" id="jobs-card" aria-labelledby="jobs-title">
+    <h2 id="jobs-title">Jobs</h2>
+    <p class="hint" style="margin-top:0">One job at a time, in the order they were queued (most recent first here); the list refreshes every 2 s while a job is queued or running. <strong>Details</strong> shows a job's episodes above.</p>
+    <div class="table-wrap">
+      <table class="stack" id="jobs">
+        <thead>
+          <tr>
+            <th scope="col">Series</th>
+            <th scope="col">State</th>
+            <th scope="col">Episodes</th>
+            <th scope="col">Report</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="jobs-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
   <section class="card" id="doctor-card" aria-labelledby="doctor-title">
@@ -260,7 +297,9 @@
   var POLL_MS = 2000;
   // How often the cooldown note recounts the minutes left (no request is made for it).
   var COOLDOWN_TICK_MS = 30000;
-  var state = { series: null, jobId: null, pollTimer: null, cooldownUntil: 0, cooldownTimer: null };
+  // POST /api/batch takes at most this many links (the server refuses more).
+  var MAX_BATCH = 50;
+  var state = { series: null, jobId: null, pollTimer: null, jobsTimer: null, cooldownUntil: 0, cooldownTimer: null };
   // While the token form is shown: the promise every refused call waits on, and its resolver.
   var auth = { pending: null, settle: null };
 
@@ -308,6 +347,8 @@
           // The cooldown's 429 says in seconds how long the server refuses to contact TikTok.
           var retryAfter = parseInt(response.headers.get('Retry-After'), 10);
           error.retryAfter = isNaN(retryAfter) ? null : retryAfter;
+          // A refused batch names the entry (0-based) its 400 is about.
+          error.index = data && typeof data.index === 'number' ? data.index : null;
           throw error;
         }
         return data;
@@ -387,6 +428,37 @@
     return typeof value === 'string' && /^https?:\/\//i.test(value);
   }
 
+  function isFinished(job) {
+    return job.state === 'done' || job.state === 'error' || job.state === 'cancelled';
+  }
+
+  function stateBadge(jobState) {
+    var cls = { done: 'done', error: 'failed', running: 'running' }[jobState] || jobState;
+    return el('span', { className: 'badge ' + cls, text: jobState });
+  }
+
+  // complete / incomplete, from the report the server makes when a job ends.
+  function reportBadge(report) {
+    var word = report.complete ? 'complete' : 'incomplete';
+    return el('span', { className: 'badge ' + word, text: word });
+  }
+
+  // The pause a running job is in, as the server reports it (nothing is polled from TikTok).
+  function pauseText(pause) {
+    var seconds = Math.round(pause.seconds);
+    var amount = seconds >= 120 ? Math.round(seconds / 60) + ' min' : seconds + ' s';
+    if (pause.kind === 'job-rest') { return 'resting ' + amount + ' before contacting TikTok again'; }
+    if (pause.kind === 'long-rest') { return 'long break of ' + amount + ' (every 100 episodes)'; }
+    if (pause.kind === 'rest') { return 'resting ' + amount; }
+    return 'pausing ' + amount + ' between episodes';
+  }
+
+  // Every file of a finished job in one ZIP: stored, never recompressed; the session cookie (or
+  // the loopback default) authorises the plain link like the Save links.
+  function zipLink(job) {
+    return el('a', { href: '/api/files/' + encodeURIComponent(job.id) + '/all', download: '', text: 'Save all (ZIP)', title: 'Every file of this job in one ZIP — stored, never recompressed' });
+  }
+
   function clockTime(epochSeconds) {
     var date = new Date(epochSeconds * 1000);
     var h = date.getHours();
@@ -414,12 +486,14 @@
     if (!cooldownActive()) {
       setStatus($('download-status'), 'The cooldown is over: downloads are possible again.', 'ok');
       updateSelectionCount();
+      updateBatchButton();
       return;
     }
     var minutes = Math.ceil((state.cooldownUntil - Date.now()) / 60000);
     setStatus($('download-status'), state.cooldownMessage, 'error',
       'Downloads are disabled for another ' + minutes + ' min' + (minutes === 1 ? '' : 's') + '.');
     updateSelectionCount();
+    updateBatchButton();
     state.cooldownTimer = setTimeout(renderCooldown, COOLDOWN_TICK_MS);
   }
 
@@ -432,6 +506,7 @@
     meta.appendChild(el('strong', { text: series.display_name || ('series ' + series.series_id) }));
     var count = series.episodes.length + ' episode' + (series.episodes.length === 1 ? '' : 's') + ' listed';
     if (series.total_hint) { count += ' (TikTok announces ' + series.total_hint + ')'; }
+    if (series.on_disk_count) { count += ', ' + series.on_disk_count + ' already on disk'; }
     meta.appendChild(document.createTextNode(' — ' + count + ' — series id '));
     meta.appendChild(el('code', { text: series.series_id }));
     // The server keeps a resolved list for 15 minutes (Download reuses it); this fetches it again.
@@ -467,6 +542,11 @@
       }
       var statusCell = el('td', { 'data-label': 'Status' });
       statusCell.appendChild(el('span', { className: 'badge ' + (episode.locked ? 'locked' : 'free'), text: episode.locked ? 'locked' : 'free' }));
+      // Its manifest says it is on disk already: a download skips it without any request.
+      if (episode.on_disk) {
+        statusCell.appendChild(document.createTextNode(' '));
+        statusCell.appendChild(el('span', { className: 'badge ondisk', text: 'on disk', title: 'Already downloaded: downloading again skips it without a request' }));
+      }
       if (episode.locked && episode.lock_hints.length) {
         statusCell.appendChild(el('span', { className: 'hints', text: episode.lock_hints.join(', ') }));
       }
@@ -558,6 +638,7 @@
     }).then(function (job) {
       setStatus($('download-status'), 'Job ' + job.job_id.slice(0, 8) + ' queued: ' + job.total + ' episode' + (job.total === 1 ? '' : 's') + '.', 'ok');
       startPolling(job.job_id);
+      refreshJobs();
     }).catch(function (error) {
       setStatus($('download-status'), error.message, 'error', error.hint);
       if (error.kind === 'cooldown') { startCooldown(error); }
@@ -606,16 +687,31 @@
   function renderJob(job) {
     var meta = $('job-meta');
     clear(meta);
-    meta.appendChild(el('span', { className: 'badge ' + (job.state === 'error' ? 'failed' : job.state === 'done' ? 'done' : 'running'), text: job.state }));
-    meta.appendChild(document.createTextNode(' ' + (job.series_name || job.series_id) + ' — ' + job.results.length + ' / ' + job.total + ' episodes processed'));
+    meta.appendChild(stateBadge(job.state));
+    // A batch job learns its series' name and size only when its turn comes.
+    var total = job.total === null || job.total === undefined ? '?' : job.total;
+    meta.appendChild(document.createTextNode(' ' + (job.series_name || job.series_id) + ' — ' + job.results.length + ' / ' + total + ' episodes processed'));
     if (job.state === 'queued') { meta.appendChild(document.createTextNode(' (waiting for the previous job to finish)')); }
+    if (job.state === 'running' && job.pause) { meta.appendChild(el('span', { className: 'hints', text: pauseText(job.pause) })); }
+    if (job.report) {
+      meta.appendChild(document.createTextNode(' '));
+      meta.appendChild(reportBadge(job.report));
+      meta.appendChild(el('span', { className: 'hints', text: job.report.line }));
+    }
     if (job.error) { meta.appendChild(el('span', { className: 'hints', text: 'Job error: ' + job.error })); }
     var progress = $('job-progress');
-    progress.max = Math.max(job.total, 1);
+    progress.max = Math.max(job.total || 0, job.results.length, 1);
     progress.value = job.results.length;
 
-    var where = state.series && state.series.series_dir ? ' (' + state.series.series_dir + ')' : '';
-    $('job-note').textContent = 'Files are saved on the computer running DramaFetch' + where + '; Save copies one to this device.';
+    var zip = $('job-zip');
+    clear(zip);
+    if (isFinished(job) && job.files > 0) {
+      zip.appendChild(zipLink(job));
+      zip.appendChild(el('span', { className: 'muted', text: job.files + ' episode file' + (job.files === 1 ? '' : 's') + ' (and their covers saved as images), stored, never recompressed' }));
+    }
+
+    var where = state.series && state.series.series_id === job.series_id && state.series.series_dir ? ' (' + state.series.series_dir + ')' : '';
+    $('job-note').textContent = 'Files are saved on the computer running DramaFetch' + where + '; Save copies one to this device, Save all (ZIP) the whole series.';
 
     var tbody = $('job-results').getElementsByTagName('tbody')[0];
     clear(tbody);
@@ -623,10 +719,11 @@
       var detail = el('td', { 'data-label': 'Detail' });
       if (row.file_name) { detail.appendChild(el('span', { className: 'path', text: row.file_name, title: row.path || '' })); }
       if (row.message) { detail.appendChild(el('span', { className: 'hints', text: row.message })); }
-      // Save video / Cover: the server streams the finished file (and its thumbnail) of this row;
-      // the `download` attribute makes the browser save it under the name the server sends.
+      // Save video / Cover: the server streams the file (and its thumbnail) of this row — one this
+      // job downloaded, or one an earlier run saved (skipped-exists); the `download` attribute
+      // makes the browser save it under the name the server sends.
       var save = el('td', { className: 'actions', 'data-label': 'Save' });
-      if (row.status === 'done' && row.path) {
+      if ((row.status === 'done' || row.status === 'skipped-exists') && row.path) {
         save.appendChild(el('a', { href: fileUrl(job, row), download: '', text: 'Save video' }));
         if (row.thumbnail) { save.appendChild(el('a', { href: fileUrl(job, row) + '/cover', download: '', text: 'Cover' })); }
       }
@@ -639,6 +736,107 @@
       ]));
     });
   }
+
+  // ---------------------------------------------------------------- several series
+
+  // One link (or bare series id) per line, the rules of `dramafetch download --from-file`: blank
+  // lines and lines starting with # are skipped, and so is anything after " #".
+  function batchEntries(text) {
+    var entries = [];
+    text.split(/\r?\n/).forEach(function (raw, index) {
+      var cut = raw.indexOf(' #');
+      var line = (cut >= 0 ? raw.slice(0, cut) : raw).trim();
+      if (line && line.charAt(0) !== '#') { entries.push({ url: line, line: index + 1 }); }
+    });
+    return entries;
+  }
+
+  function updateBatchButton() { $('batch-btn').disabled = cooldownActive(); }
+
+  // Nothing is fetched by queueing: the server parses the links and each job resolves its own
+  // series when its turn comes, one series at a time.
+  $('batch-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var entries = batchEntries($('batch-urls').value);
+    if (!entries.length) { setStatus($('batch-status'), 'Paste at least one series link, one per line.', 'error'); return; }
+    if (entries.length > MAX_BATCH) { setStatus($('batch-status'), 'At most ' + MAX_BATCH + ' series at a time (' + entries.length + ' pasted).', 'error'); return; }
+    var button = $('batch-btn');
+    button.disabled = true;
+    setStatus($('batch-status'), 'Queueing ' + entries.length + ' link' + (entries.length === 1 ? '' : 's') + '… nothing is fetched now: each series is resolved right before its own downloads.');
+    api('POST', '/api/batch', { urls: entries.map(function (entry) { return entry.url; }) }).then(function (batch) {
+      var text = 'Queued ' + batch.jobs.length + ' series (batch ' + batch.batch_id.slice(0, 8) + '): they run one after the other — see Jobs below.';
+      if (batch.dropped.length) {
+        var lines = batch.dropped.map(function (drop) { return entries[drop.index] ? entries[drop.index].line : drop.index + 1; });
+        text += ' ' + lines.length + ' duplicate' + (lines.length === 1 ? '' : 's') + ' skipped (line' + (lines.length === 1 ? ' ' : 's ') + lines.join(', ') + ').';
+      }
+      setStatus($('batch-status'), text, 'ok');
+      refreshJobs();
+    }).catch(function (error) {
+      var message = error.message;
+      if (error.index !== null && error.index !== undefined && entries[error.index]) {
+        message = 'Line ' + entries[error.index].line + ': ' + message.replace(/^entry \d+: /, '');
+      }
+      setStatus($('batch-status'), message, 'error', error.hint);
+      if (error.kind === 'cooldown') { startCooldown(error); }
+    }).then(function () { button.disabled = false; updateBatchButton(); });
+  });
+
+  // ---------------------------------------------------------------- jobs panel
+
+  // Polled every 2 s while a job is queued or running, then left alone.
+  function refreshJobs() {
+    if (state.jobsTimer) { clearTimeout(state.jobsTimer); state.jobsTimer = null; }
+    api('GET', '/api/jobs').then(showJobs).catch(function (error) {
+      setStatus($('jobs-status'), 'Could not load the jobs: ' + error.message, 'error');
+      state.jobsTimer = setTimeout(refreshJobs, POLL_MS * 2);
+    });
+  }
+
+  function showJobs(data) {
+    renderJobs(data.jobs);
+    setStatus($('jobs-status'), '');
+    if (state.jobsTimer) { clearTimeout(state.jobsTimer); state.jobsTimer = null; }
+    var active = data.jobs.some(function (job) { return job.state === 'queued' || job.state === 'running'; });
+    if (active) { state.jobsTimer = setTimeout(refreshJobs, POLL_MS); }
+  }
+
+  function renderJobs(jobs) {
+    $('jobs-card').classList.toggle('hidden', jobs.length === 0);
+    var tbody = $('jobs').getElementsByTagName('tbody')[0];
+    clear(tbody);
+    jobs.forEach(function (job) {
+      var name = el('td', { 'data-label': 'Series' }, [el('strong', { text: job.series_name || ('series ' + job.series_id) })]);
+      if (job.batch_id) { name.appendChild(el('span', { className: 'hints', text: 'batch ' + job.batch_id.slice(0, 8) })); }
+      var stateCell = el('td', { 'data-label': 'State' }, [stateBadge(job.state)]);
+      if (job.state === 'running' && job.pause) { stateCell.appendChild(el('span', { className: 'hints', text: pauseText(job.pause) })); }
+      if (job.error) { stateCell.appendChild(el('span', { className: 'hints', text: job.error })); }
+      var total = job.total === null || job.total === undefined ? '–' : String(job.total);
+      var report = el('td', { 'data-label': 'Report' });
+      if (job.report) {
+        report.appendChild(reportBadge(job.report));
+        report.appendChild(el('span', { className: 'hints', text: job.report.line }));
+      }
+      var actions = el('td', { className: 'actions', 'data-label': 'Files' });
+      if (isFinished(job) && job.files > 0) { actions.appendChild(zipLink(job)); }
+      var details = el('button', { type: 'button', className: 'link', text: 'Details' });
+      details.addEventListener('click', function () {
+        startPolling(job.id);
+        $('job-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      actions.appendChild(details);
+      tbody.appendChild(el('tr', null, [
+        name,
+        stateCell,
+        el('td', { className: 'num', 'data-label': 'Episodes', text: job.processed + '/' + total }),
+        report,
+        actions
+      ]));
+    });
+  }
+
+  // A page opened while jobs run (or reloaded) shows them at once; on a token-protected server
+  // without a session yet this stays quiet: the first action asks for the token.
+  rawApi('GET', '/api/jobs').then(showJobs).catch(function () {});
 
   // ---------------------------------------------------------------- doctor
 

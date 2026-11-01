@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -35,6 +36,9 @@ from .fake_tiktok import (
     JPEG_EOI,
     JPEG_SOI,
     MEDIA_SIZE,
+    SECOND_ITEMS,
+    SECOND_SERIES_ID,
+    SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
     TOTAL_EPISODES,
@@ -522,3 +526,146 @@ def test_a_rate_limit_through_the_engine_starts_the_cooldown_and_the_cli_then_re
         assert f"Series: {SERIES_NAME} [{SERIES_ID}]" in out and "720p h264" in out
         assert len(server.item_list_requests) > 0  # the list was fetched again
         assert not (tmp_path / "cli").exists()  # info writes nothing
+
+
+# --------------------------------------------------------------------------- several series
+
+FIRST_FOLDER = f"{SERIES_NAME} [{SERIES_ID}]"
+SECOND_FOLDER = f"{SECOND_SERIES_NAME} [{SECOND_SERIES_ID}]"
+
+
+@pytest.fixture
+def batch_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The seconds the CLI's batch would sleep, recorded instead of slept: `engine.run_batch`
+    gets this `sleep` and hands it down to every series, so no test waits for real."""
+    slept: list[float] = []
+    real = engine.run_batch
+
+    def recorded(*args: Any, **kwargs: Any) -> list[engine.SeriesRun]:
+        kwargs.setdefault("sleep", slept.append)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "run_batch", recorded)
+    return slept
+
+
+def _batch_argv(server: FakeTikTok, out: Path) -> list[str]:
+    """Both series (a URL and a bare id), the browser engine, no pacing but a 1 s series rest."""
+    return [
+        "download",
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1",
+        SECOND_SERIES_ID,
+        "--engine",
+        "browser",
+        "--strategy",
+        "browser",
+        "--base-url",
+        server.base_url,
+        "--browser-path",
+        str(CHROMIUM),
+        "--page-count",
+        "10",
+        "--page-delay",
+        "0",
+        "--delay-min",
+        "0",
+        "--delay-max",
+        "0",
+        "--rest-every",
+        "0",
+        "--rest-min",
+        "1",
+        "--rest-max",
+        "1",
+        "--out",
+        str(out),
+    ]
+
+
+def _table_statuses(out: str) -> list[str]:
+    """The status column of the batch table `download` prints after several series."""
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.lstrip().startswith("series  "))
+    return [re.split(r"\s{2,}", line.strip())[1] for line in lines[start + 1 :]]
+
+
+def test_a_cli_batch_downloads_both_series_one_after_the_other_and_then_costs_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], batch_sleeps: list[float]
+) -> None:
+    """Two series in one `download`: each resolved right before its own downloads (all requests of
+    the first series come before any of the second), one 1 s rest between them, every file named
+    after its own series and complete; the same batch again is skipped as complete with ZERO
+    requests to the server — no list, no media, not even a browser."""
+    out = tmp_path / "out"
+    with FakeTikTok() as server:
+        assert cli.main(_batch_argv(server, out)) == 0
+        first_run = capsys.readouterr()
+        log = server.requests
+        first = {id(record) for record in server.series_requests(SERIES_ID)}
+        second = {id(record) for record in server.series_requests(SECOND_SERIES_ID)}
+        owners = "".join(
+            "1" if id(record) in first else "2" for record in log if id(record) in first | second
+        )
+        assert owners == "1" * len(first) + "2" * len(second)  # never resolved up front
+        assert len(second) > 0
+        assert sorted(r.path for r in server.media_requests) == sorted(
+            [f"/cdn/{item}/0.mp4" for item in (ITEM_1, ITEM_2, "7699400000000000003")]
+            + ["/cdn/7699400000000000004/0.mp4"]
+            + [f"/cdn/{item}/0.mp4" for item in SECOND_ITEMS]
+        )
+        requests_after_first_run = len(server.requests)
+
+        started = time.monotonic()
+        assert cli.main(_batch_argv(server, out)) == 0
+        second_run = capsys.readouterr()
+        assert len(server.requests) == requests_after_first_run  # ZERO requests the second time
+        assert time.monotonic() - started < 5  # no browser was even started
+
+    lines = first_run.out.splitlines()
+    assert lines[0] == f"[1/2] {FIRST_FOLDER}: 5 episode(s) -> {out / FIRST_FOLDER}"
+    assert f"[2/2] {SECOND_FOLDER}: 3 episode(s) -> {out / SECOND_FOLDER}" in lines
+    assert "complete: 4 of 5 (4 downloaded) — 1 locked (5)" in lines
+    assert "complete: 3 of 3 (3 downloaded)" in lines
+    assert _table_statuses(first_run.out) == ["complete", "complete"]
+    assert first_run.err.splitlines().count("  … resting 1 s before the next series") == 1
+    assert batch_sleeps == [1.0]  # exactly one series rest, recorded, never slept
+    for number, item in enumerate((ITEM_1, ITEM_2, "7699400000000000003", "7699400000000000004")):
+        name = f"{SERIES_NAME} - Episode {number + 1:02d}.mp4"
+        _assert_video_file(out / FIRST_FOLDER / name, name, item, embedded=True)
+    for number, item in enumerate(SECOND_ITEMS, start=1):
+        name = f"{SECOND_SERIES_NAME} - Episode {number:02d}.mp4"
+        _assert_video_file(out / SECOND_FOLDER / name, name, item, embedded=True)
+    assert not list((out / FIRST_FOLDER).glob("*Episode 05*"))  # the locked one: never fetched
+
+    again = second_run.out.splitlines()
+    assert f"[1/2] {FIRST_FOLDER}: 4 episode(s) -> {out / FIRST_FOLDER}" in again
+    assert "complete, nothing to do: 4 episodes already on disk (checked just now)" in again
+    assert "complete, nothing to do: 3 episodes already on disk (checked just now)" in again
+    assert _table_statuses(second_run.out) == ["skipped (complete)", "skipped (complete)"]
+    assert "resting" not in second_run.err
+    assert batch_sleeps == [1.0]  # nothing more
+
+
+def test_a_rate_limit_in_the_first_series_stops_the_cli_batch_before_the_second(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], batch_sleeps: list[float]
+) -> None:
+    """`cdn_rate_limit`: the first media request of the first series answers 429, which stops
+    the series and the whole batch (exit 5) and writes the cooldown file; the second series is
+    "not started" and costs nothing — not its page, not its list, not one media request."""
+    with FakeTikTok(cdn_rate_limit=True) as server:
+        assert cli.main(_batch_argv(server, tmp_path / "out")) == 5
+        captured = capsys.readouterr()
+        assert server.series_requests(SECOND_SERIES_ID) == []
+        assert [r.path for r in server.media_requests] == [MEDIA_1]  # the one refused request
+        assert server.cover_requests == []
+    recorded = active_cooldown()
+    assert recorded is not None and recorded.source == "browser"
+    assert (tmp_path / "cooldown.json").is_file()
+    lines = captured.out.splitlines()
+    assert (
+        f"[2/2] {SECOND_SERIES_ID}: not started: batch stopped in {SERIES_NAME} "
+        "(episode 1 failed-rate-limited)"
+    ) in lines
+    assert _table_statuses(captured.out) == ["incomplete", "not started"]
+    assert any(line.endswith("; stopped: episode 1 failed-rate-limited") for line in lines)
+    assert batch_sleeps == [] and "resting" not in captured.err  # no rest: the batch ended

@@ -14,6 +14,7 @@ from dramafetch.manifest import (
     ManifestEntry,
     episode_stem,
     manifest_path,
+    read_manifest,
     safe_filename,
     series_dir,
     validate_name_format,
@@ -443,3 +444,148 @@ def test_relative_paths_survive_moving_the_folder(tmp_path):
         Manifest.load(moved / MANIFEST_FILENAME, "1", None).done_path(1)
         == moved / "x - Episode 01.mp4"
     )
+
+
+# --------------------------------------------------------------------------- completeness
+
+
+WHEN = 1_800_000_000.0  # 2027-01-15T08:00:00Z
+
+
+def _complete_manifest(tmp_path, numbers=(1, 2)):
+    path = tmp_path / MANIFEST_FILENAME
+    manifest = Manifest(path, "123", "Name")
+    for number in numbers:
+        video = tmp_path / f"Name - Episode {number:02d}.mp4"
+        video.write_bytes(b"x")
+        manifest.record(DownloadResult(_episode(number), DownloadStatus.DONE, video, "saved"))
+    manifest.mark_complete(WHEN + 0.75, len(numbers))
+    return manifest
+
+
+def test_mark_complete_is_saved_loaded_and_written_only_while_set(tmp_path):
+    path = tmp_path / MANIFEST_FILENAME
+    plain = Manifest(path, "123", "Name")
+    plain.save()
+    assert "complete_at" not in json.loads(path.read_text(encoding="utf-8"))  # optional keys
+    manifest = _complete_manifest(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["complete_at"] == "2027-01-15T08:00:00Z"  # UTC, whole seconds
+    assert data["complete_episodes"] == 2
+    assert manifest.complete_since() == WHEN
+    loaded = Manifest.load(path, "123", None)
+    assert (loaded.complete_at, loaded.complete_episodes) == ("2027-01-15T08:00:00Z", 2)
+    assert loaded.complete_since() == WHEN
+    assert Manifest(path, "123", None).complete_since() is None  # a new manifest knows nothing
+    loaded.clear_complete()
+    assert "complete_at" not in json.loads(path.read_text(encoding="utf-8"))
+    assert Manifest.load(path, "123", None).complete_at is None
+
+
+@pytest.mark.parametrize(
+    ("status", "clears"),
+    [
+        (DownloadStatus.DONE, True),
+        (DownloadStatus.FAILED, True),
+        (DownloadStatus.FAILED_RATE_LIMITED, True),
+        (DownloadStatus.SKIPPED_EXISTS, False),
+        (DownloadStatus.SKIPPED_LOCKED, False),
+        (DownloadStatus.DRY_RUN, False),
+    ],
+)
+def test_recording_an_attempt_clears_the_complete_mark_and_a_skip_does_not(
+    tmp_path, status, clears
+):
+    manifest = _complete_manifest(tmp_path)
+    path = tmp_path / ("Name - Episode 03.mp4" if status is DownloadStatus.DONE else "none")
+    if status is DownloadStatus.DONE:
+        path.write_bytes(b"x")
+    manifest.record(
+        DownloadResult(_episode(3), status, path if status.ok else None, "a new attempt")
+    )
+    reloaded = Manifest.load(tmp_path / MANIFEST_FILENAME, "123", None)
+    if clears:
+        assert manifest.complete_at is None and reloaded.complete_at is None
+        assert reloaded.complete_episodes is None
+    else:
+        assert reloaded.complete_since() == WHEN and reloaded.complete_episodes == 2
+
+
+def test_done_entries_count_what_is_on_disk_and_missing_files_what_is_gone(tmp_path):
+    manifest = _complete_manifest(tmp_path, numbers=(1, 2, 4))
+    found = tmp_path / "Name - Episode 05.mp4"  # a file a run found already there
+    found.write_bytes(b"x")
+    manifest.record(DownloadResult(_episode(5), DownloadStatus.SKIPPED_EXISTS, found, "exists"))
+    manifest.record(DownloadResult(_episode(6), DownloadStatus.FAILED, None, "boom"))
+    manifest.record(DownloadResult(_episode(7), DownloadStatus.SKIPPED_LOCKED, None, "locked"))
+    assert manifest.done_entries() == [
+        (1, tmp_path / "Name - Episode 01.mp4"),
+        (2, tmp_path / "Name - Episode 02.mp4"),
+        (4, tmp_path / "Name - Episode 04.mp4"),
+        (5, found),
+    ]
+    assert manifest.missing_files() == []
+    (tmp_path / "Name - Episode 02.mp4").unlink()
+    found.unlink()
+    assert [number for number, _ in manifest.done_entries()] == [1, 4]
+    assert manifest.missing_files() == [2, 5]
+
+
+def test_read_manifest_reads_without_side_effects(tmp_path):
+    _complete_manifest(tmp_path)
+    manifest = read_manifest(tmp_path, "123")
+    assert manifest is not None and manifest.series_name == "Name"
+    assert sorted(manifest.entries) == [1, 2] and manifest.complete_episodes == 2
+    assert read_manifest(tmp_path, "other") is None  # another series' manifest
+    assert read_manifest(tmp_path / "missing", "123") is None
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"{not json", b"[]", b'{"version": 2, "series_id": "1", "episodes": {}}', b"\xff\xfe\x00"],
+)
+def test_read_manifest_never_moves_a_corrupt_file(tmp_path, content):
+    path = tmp_path / MANIFEST_FILENAME
+    path.write_bytes(content)
+    assert read_manifest(tmp_path, "1") is None
+    assert path.read_bytes() == content  # untouched
+    assert not (tmp_path / (MANIFEST_FILENAME + ".bak")).exists()
+
+
+def test_load_backs_up_a_manifest_that_is_not_utf8(tmp_path):
+    path = tmp_path / MANIFEST_FILENAME
+    path.write_bytes(b"\xff\xfe\x00 not text")
+    assert Manifest.load(path, "1", None).entries == {}  # no UnicodeDecodeError
+    assert (tmp_path / (MANIFEST_FILENAME + ".bak")).read_bytes() == b"\xff\xfe\x00 not text"
+
+
+@pytest.mark.parametrize(
+    ("complete_at", "complete_episodes"),
+    [
+        ("yesterday", 3),
+        (12345, 3),
+        ("2027-01-15T08:00:00Z", -1),
+        ("2027-01-15T08:00:00Z", True),
+        ("2027-01-15T08:00:00Z", "3"),
+        ("2027-01-15T08:00:00Z", None),
+    ],
+)
+def test_an_odd_complete_mark_is_forgotten_not_a_corrupt_manifest(
+    tmp_path, complete_at, complete_episodes
+):
+    path = tmp_path / MANIFEST_FILENAME
+    data = {
+        "version": 1,
+        "series_id": "1",
+        "series_name": "N",
+        "episodes": {"1": {"status": "failed", "item_id": "i1"}},
+        "complete_at": complete_at,
+        "complete_episodes": complete_episodes,
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+    manifest = Manifest.load(path, "1", None)
+    assert list(manifest.entries) == [1]  # the manifest itself is fine
+    assert manifest.complete_at is None and manifest.complete_episodes is None
+    assert not (tmp_path / (MANIFEST_FILENAME + ".bak")).exists()
+    assert read_manifest(tmp_path, "1").complete_since() is None

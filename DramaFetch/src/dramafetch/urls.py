@@ -16,20 +16,23 @@ from dramafetch.models import TIKTOK_BASE_URL, SeriesRef, VideoRef
 
 _HOST = r"https?://(?:www\.|m\.)?tiktok\.com"
 _TAIL = r"/?(?:[?#].*)?$"
+# Ids and episode numbers are ASCII digits, [0-9] — never \d, which also takes full-width (IME) or
+# Arabic-Indic digits: such text would pass for an id TikTok cannot have and cost a request.
 SERIES_EPISODE_RE = re.compile(
-    rf"^{_HOST}/shortdrama/episode/(?P<id>\d{{15,22}})(?:/(?P<n>\d{{1,4}}))?{_TAIL}", re.IGNORECASE
+    rf"^{_HOST}/shortdrama/episode/(?P<id>[0-9]{{15,22}})(?:/(?P<n>[0-9]{{1,4}}))?{_TAIL}",
+    re.IGNORECASE,
 )
 # Series pages without an episode segment (seen as `/shortdrama/<id>`; accepted defensively).
 SERIES_RE = re.compile(
-    rf"^{_HOST}/shortdrama/(?:detail/|series/)?(?P<id>\d{{15,22}}){_TAIL}", re.IGNORECASE
+    rf"^{_HOST}/shortdrama/(?:detail/|series/)?(?P<id>[0-9]{{15,22}}){_TAIL}", re.IGNORECASE
 )
 VIDEO_RE = re.compile(
-    rf"^{_HOST}/(?:@(?P<user>[\w.-]+)/)?video/(?P<id>\d{{15,22}}){_TAIL}", re.IGNORECASE
+    rf"^{_HOST}/(?:@(?P<user>[\w.-]+)/)?video/(?P<id>[0-9]{{15,22}}){_TAIL}", re.IGNORECASE
 )
 SHORT_LINK_RE = re.compile(
     r"^https?://(?:vm|vt)\.tiktok\.com/|^https?://(?:www\.)?tiktok\.com/t/", re.IGNORECASE
 )
-BARE_ID_RE = re.compile(r"^\d{15,22}$")
+BARE_ID_RE = re.compile(r"^[0-9]{15,22}$")
 
 
 def parse_input(text: str) -> SeriesRef | VideoRef:

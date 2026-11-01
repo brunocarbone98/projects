@@ -10,6 +10,14 @@ episodes are listed and skipped — nothing here unlocks or bypasses anything. D
 like one person watching (see ``engine``): the pauses, rests and early stops are printed on stderr
 as they happen, so stdout stays a clean list of results.
 
+``download`` takes several series (``URL [URL ...]`` and ``--from-file FILE``): every input is
+parsed before any request, then the series run strictly one after the other through
+``engine.run_batch`` — each resolved right before its own downloads, a rest between two series that
+contact TikTok, a long break every 100 network attempts of the run, a series whose manifest says it
+was complete less than 24 h ago skipped without a request (``--recheck`` resolves it anyway), and
+any stop ending the whole batch (the remaining series are "not started"). A batch exits with its
+worst series' code (5 > 3 > 4 > 2 > 0).
+
 Exit codes: 0 ok · 2 usage/unsupported URL/some episode failed · 3 login required ·
 4 discovery failed (captcha: try ``--headful``; an HTTP error for the series page) · 5 blocked
 (HTTP 403, or a captcha met while ``--engine browser`` refreshed the list) or rate limited
@@ -51,6 +59,7 @@ from dramafetch.manifest import NAME_PLACEHOLDERS, series_dir, validate_name_for
 from dramafetch.models import (
     DEFAULT_NAME_FORMAT,
     QUALITY_MODES,
+    RECHECK_AFTER_S,
     THUMBNAIL_MODES,
     DiscoveryOptions,
     DownloadOptions,
@@ -134,13 +143,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_discovery_flags(info)
     info.set_defaults(func=_cmd_info)
 
-    download = commands.add_parser("download", help="resolve a series and download its episodes")
-    download.add_argument("url", metavar="URL", help="series URL (or bare series id)")
+    download = commands.add_parser(
+        "download",
+        help="resolve one or more series and download their episodes, one series at a time",
+    )
+    download.add_argument(
+        "urls",
+        metavar="URL",
+        nargs="*",
+        help="series URL (or bare series id); several are downloaded one after the other, each "
+        "resolved right before its own downloads",
+    )
+    download.add_argument(
+        "--from-file",
+        metavar="FILE",
+        type=Path,
+        default=None,
+        help="also read series from FILE (UTF-8, after the URLs given on the command line): one "
+        "URL or series id per line; blank lines, lines starting with # and anything after ' #' "
+        "are ignored",
+    )
     download.add_argument(
         "--episodes",
         metavar="SPEC",
         default=None,
-        help='which episodes: "all" (default), "1-5,8,10-" (open range = to the last)',
+        help='which episodes of ONE series: "all" (default), "1-5,8,10-" (open range = to the '
+        "last)",
     )
     _add_out_flag(download)
     _add_cookies_flag(download)
@@ -250,6 +278,12 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
             "--include-locked",
             action="store_true",
             help="also try episodes that look locked (they usually have no formats)",
+        )
+        group.add_argument(
+            "--recheck",
+            action="store_true",
+            help="resolve a series even when its manifest says it was complete less than "
+            f"{RECHECK_AFTER_S // 3600} h ago (without it such a series costs no request)",
         )
     group.add_argument(
         "--engine",
@@ -490,6 +524,77 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
             validate_name_format(name_format_for(args))
         except ValueError as exc:
             parser.error(f"--name-format: {exc}")
+    if getattr(args, "command", None) == "download":
+        _collect_series(args, parser)
+
+
+#: In a ``--from-file`` line, whitespace then ``#`` starts a comment (a URL's own ``#fragment``
+#: follows no space, so it stays).
+_INLINE_COMMENT_RE = re.compile(r"\s#")
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _collect_series(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """``download``: every series the command line and ``--from-file`` name — the command line
+    first — parsed before any request into ``args.series_refs``, duplicates dropped (the first
+    one is kept; ``args.series_notes`` says which, see ``engine.dedupe_refs``). Unsupported text or
+    a single-video URL is a usage error (exit 2) naming the argument (``argument 2: …``) or the
+    line (``series.txt:4: …``); so is no series at all, and ``--episodes`` with several series."""
+    urls: list[str] = list(args.urls or [])
+    named = len(urls) > 1 or args.from_file is not None
+    inputs = [(f"argument {n}" if named else "", text) for n, text in enumerate(urls, start=1)]
+    if args.from_file is not None:
+        inputs.extend(_read_series_file(args.from_file, parser))
+    if not inputs:
+        parser.error(
+            "no series given: pass one or more series URLs (or ids), or --from-file FILE with "
+            "one per line"
+        )
+    refs: list[SeriesRef] = []
+    for origin, text in inputs:
+        where = f"{origin}: " if origin else ""
+        try:
+            ref = parse_input(text)
+        except UnsupportedUrlError as exc:
+            parser.error(f"{where}{exc}")
+        if isinstance(ref, VideoRef):
+            parser.error(
+                f"{where}{text.strip()!r} is a single video, not a series: use "
+                "`dramafetch video URL`."
+            )
+        refs.append(ref)
+    kept, notes = engine.dedupe_refs(refs)
+    if args.episodes is not None and len(kept) > 1:
+        parser.error(
+            f"--episodes selects episodes of one series, and {len(kept)} series were given: "
+            "drop --episodes, or download that series on its own"
+        )
+    args.series_refs = kept
+    args.series_notes = notes
+
+
+def _read_series_file(path: Path, parser: argparse.ArgumentParser) -> list[tuple[str, str]]:
+    """``(origin, text)`` for every series line of a ``--from-file`` file — ``origin`` is
+    ``<file>:<line number>`` — skipping blank lines and comments (``# …`` lines, text after
+    `` #``). UTF-8, a byte-order mark tolerated; an unreadable file is a usage error."""
+    shown = _printable(str(path))
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        parser.error(f"--from-file {shown}: not UTF-8 text (byte {exc.start})")
+    except OSError as exc:
+        parser.error(f"--from-file {shown}: {exc.strerror or type(exc).__name__}")
+    lines: list[tuple[str, str]] = []
+    for number, raw in enumerate(_LINE_BREAK_RE.split(text), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        comment = _INLINE_COMMENT_RE.search(line)
+        if comment is not None:
+            line = line[: comment.start()].strip()
+        if line:
+            lines.append((f"{shown}:{number}", line))
+    return lines
 
 
 def name_format_for(args: argparse.Namespace) -> str:
@@ -574,6 +679,7 @@ def _download_options(args: argparse.Namespace) -> DownloadOptions:
         retries=args.retries,
         overwrite=args.overwrite,
         include_locked=getattr(args, "include_locked", False),
+        recheck=getattr(args, "recheck", False),
         dry_run=args.dry_run,
         extractor_args=getattr(args, "extractor_args_parsed", None),
     )
@@ -610,54 +716,48 @@ def _cmd_info(args: argparse.Namespace) -> int:
         return refused
     series = engine.resolve(ref, _discovery_options(args))
     target_dir = series_dir(Path(args.out), series)
+    # What is already on disk, from the manifest of the folder `download` would use (read-only:
+    # info writes nothing), so a ✓ is an episode the download skips without a request.
+    on_disk = engine.on_disk_numbers(Path(args.out), series.series_id, target_dir)
     if args.as_json:
         data = engine.series_to_dict(series)
         data["output_dir"] = str(target_dir)
+        for episode in data["episodes"]:
+            episode["on_disk"] = episode["number"] in on_disk
+        data["on_disk_count"] = sum(1 for episode in data["episodes"] if episode["on_disk"])
         # A non-UTF-8 stdout (Windows pipes default to cp1252) gets \uXXXX escapes: exact JSON.
         print(json.dumps(data, indent=2, ensure_ascii=not _stream_is_utf8(sys.stdout)))
         return EXIT_OK
-    _print_series_table(series, target_dir)
+    _print_series_table(series, target_dir, on_disk)
     return EXIT_OK
 
 
 def _cmd_download(args: argparse.Namespace) -> int:
-    ref = _series_ref(args.url)
+    refs: list[SeriesRef] = args.series_refs  # every input parsed by _validate, duplicates gone
+    for note in args.series_notes:
+        _stderr(f"note: {note} given more than once; it is downloaded once")
     options = _download_options(args)
-    # Even --dry-run resolves the episode list, so the cooldown applies to it too.
+    # Even --dry-run resolves the episode lists, so the cooldown applies to it too.
     if (refused := _refused_by_cooldown()) is not None:
         return refused
-    series = engine.resolve(ref, _discovery_options(args))
-    for warning in series.warnings:
-        _stderr(f"warning: {warning}")
-    if not series.episodes:
-        _stderr(f"no episodes listed for series {series.series_id}; try `info --dump-raw DIR`")
-        return EXIT_DISCOVERY
-    selected = engine.select_episodes(series, args.episodes)
-    missing = engine.missing_from_selection(series, args.episodes)
-    if missing:
-        _stderr(
-            "requested episodes the series does not list (ignored): "
-            + engine.format_ranges(missing)
-        )
-    if not selected:
-        _stderr("no episodes match --episodes; nothing to do")
-        return EXIT_OK
-    target_dir = series_dir(options.out_dir, series)
-    print(
-        _printable(
-            f"{series.display_name} [{series.series_id}]: {len(selected)} episode(s) -> "
-            f"{target_dir}"
-        ),
-        flush=True,
+    pacing = engine.PacingState()  # one run: the long break spans every series of the batch
+    printer = _SeriesPrinter(options, args.episodes, total=len(refs), pacing=pacing)
+    runs = engine.run_batch(
+        refs,
+        _discovery_options(args),
+        options,
+        episodes_spec=args.episodes,
+        pacing=pacing,
+        on_series_start=printer.series_start,
+        on_start=printer.start,
+        on_result=printer.result,
+        on_pause=printer.pause,
+        on_series_done=printer.series_done,
     )
-    if len(selected) > 1 and not options.dry_run:
-        _stderr(f"  pace: {describe_pacing(options)}")
-    printer = _RunPrinter()
-    results = engine.download_series(
-        series, selected, options, on_result=printer.result, on_pause=printer.pause
-    )
-    print(_summary_line(results), flush=True)
-    return engine.exit_code(results)
+    if len(refs) > 1:
+        for line in format_batch_summary(runs):
+            print(_printable(line), flush=True)
+    return engine.batch_exit_code(runs)
 
 
 def _cmd_video(args: argparse.Namespace) -> int:
@@ -796,10 +896,13 @@ def _truncate(text: str, width: int) -> str:
     return text[: max(width - 1, 1)] + "…"
 
 
-def _print_series_table(series: Series, target_dir: Path) -> None:
+def _print_series_table(series: Series, target_dir: Path, on_disk: set[int] | None = None) -> None:
     """The ``info`` table: number, item id, duration, quality (the rendition the default
     ``--quality compatible`` downloads, e.g. ``720p h264``; ``-`` when the list names none),
-    title and free/locked status."""
+    disk (``✓`` — ``yes`` on a stdout that cannot encode it — when the series' manifest says the
+    episode is on disk and its file exists: ``on_disk``), title and free/locked status."""
+    on_disk = on_disk or set()
+    disk_mark = "✓" if _stream_is_utf8(sys.stdout) else "yes"
     episodes = sorted(series.episodes, key=lambda episode: episode.number)
     count = len(episodes)
     header = f"Series: {_printable(series.display_name)} [{series.series_id}] — {count} episode"
@@ -816,14 +919,15 @@ def _print_series_table(series: Series, target_dir: Path) -> None:
     title_width = min(50, max(5, max((len(title) for title in titles.values()), default=5)))
     print(
         f"{'#':>4}  {'item id':<{id_width}}  {'duration':>8}  {'quality':<{quality_width}}  "
-        f"{'title':<{title_width}}  status"
+        f"{'disk':<4}  {'title':<{title_width}}  status"
     )
     for episode in episodes:
         status = "free" if not episode.locked else "locked: " + "; ".join(episode.lock_hints)
+        disk = disk_mark if episode.number in on_disk else ""
         print(
             f"{episode.number:>4}  {_printable(episode.item_id):<{id_width}}  "
             f"{_format_duration(episode.duration_s):>8}  "
-            f"{qualities[episode.item_id]:<{quality_width}}  "
+            f"{qualities[episode.item_id]:<{quality_width}}  {disk:<4}  "
             f"{_truncate(titles[episode.item_id], title_width):<{title_width}}  "
             f"{_printable(status)}"
         )
@@ -869,11 +973,23 @@ def _format_seconds(seconds: float) -> str:
     return f"{seconds:.0f} s" if seconds >= 1 else f"{seconds:.1f} s"
 
 
+def _format_minutes(seconds: float) -> str:
+    return f"{seconds / 60:.0f} min"
+
+
 class _RunPrinter:
     """Prints one line per result on stdout and, on stderr, every pause as it happens and the
-    reason the run stopped early (once), so that a quiet terminal is never a stuck one."""
+    reason the run stopped early (once per series), so that a quiet terminal is never a stuck
+    one: ``… pausing 7 s``, ``… resting 95 s after 10 downloads``, ``… resting 95 s before the next
+    series``, ``… long break 22 min after 100 episodes`` (the run's count, from ``pacing``)."""
 
-    def __init__(self) -> None:
+    def __init__(self, pacing: engine.PacingState | None = None) -> None:
+        self._downloads = 0
+        self._stopped = False
+        self._pacing = pacing
+
+    def reset(self) -> None:
+        """A new series starts: its own download count and stop line."""
         self._downloads = 0
         self._stopped = False
 
@@ -887,10 +1003,169 @@ class _RunPrinter:
             _stderr(f"  … {result.message}")
 
     def pause(self, kind: str, seconds: float) -> None:
-        if kind == "rest":
+        if kind == engine.REST:
             _stderr(f"  … resting {_format_seconds(seconds)} after {self._downloads} downloads")
+        elif kind == engine.SERIES_REST:
+            _stderr(f"  … resting {_format_seconds(seconds)} before the next series")
+        elif kind == engine.LONG_REST:
+            attempts = self._pacing.run_attempts if self._pacing is not None else self._downloads
+            _stderr(f"  … long break {_format_minutes(seconds)} after {attempts} episodes")
         else:
             _stderr(f"  … pausing {_format_seconds(seconds)}")
+
+
+class _SeriesPrinter(_RunPrinter):
+    """The ``download`` output, for one series or several (``total`` > 1, a batch).
+
+    Per series: the warnings and selection notes on stderr, the header on stdout
+    (``<name> [<id>]: N episode(s) -> <dir>``, prefixed ``[2/5] `` in a batch), the pace once,
+    one line per result, then — one series — the ``Summary:`` line and the report line
+    (``engine.report_line``), or — a batch — the report line; errors on stderr (with the login
+    and captcha help), ``not started: …`` on stdout. ``download`` then prints the batch table."""
+
+    def __init__(
+        self,
+        options: DownloadOptions,
+        episodes_spec: str | None,
+        *,
+        total: int,
+        pacing: engine.PacingState,
+    ) -> None:
+        super().__init__(pacing)
+        self._options = options
+        self._spec = episodes_spec
+        self._total = total
+        self._index = 0
+        self._pace_announced = False
+
+    def _prefix(self) -> str:
+        return f"[{self._index}/{self._total}] " if self._total > 1 else ""
+
+    def series_start(self, index: int, total: int, ref: SeriesRef) -> None:
+        self._index = index
+        self.reset()
+
+    def start(self, start: engine.SeriesStart) -> None:
+        series = start.series
+        if series is not None:
+            for warning in series.warnings:
+                _stderr(f"warning: {self._prefix()}{warning}")
+            if not series.episodes:
+                return  # series_done says so
+            missing = engine.missing_from_selection(series, self._spec)
+            if missing:
+                _stderr(
+                    "requested episodes the series does not list (ignored): "
+                    + engine.format_ranges(missing)
+                )
+            if not start.episodes:
+                _stderr("no episodes match --episodes; nothing to do")
+                return
+        print(
+            _printable(
+                f"{self._prefix()}{start.name} [{start.ref.series_id}]: "
+                f"{len(start.episodes)} episode(s) -> {start.directory}"
+            ),
+            flush=True,
+        )
+        if (
+            series is not None
+            and len(start.episodes) > 1
+            and not self._options.dry_run
+            and not self._pace_announced
+        ):
+            self._pace_announced = True
+            pace = describe_pacing(self._options)
+            if self._total > 1:
+                pace += f"; {describe_batch_pacing(self._options)}"
+            _stderr(f"  pace: {pace}")
+
+    def series_done(self, index: int, total: int, run: engine.SeriesRun) -> None:
+        if run.error is not None:
+            self._print_error(run)
+            return
+        if not run.results:
+            return  # nothing matched --episodes: said so already
+        if self._total == 1:
+            print(_summary_line(run.results), flush=True)
+        print(_printable(engine.report_line(run.report)), flush=True)
+
+    def _print_error(self, run: engine.SeriesRun) -> None:
+        prefix = self._prefix()
+        error = run.error or ""
+        if run.error_kind == "not-started":
+            print(_printable(f"{prefix}{run.ref.series_id}: {error}"), flush=True)
+        elif run.error_kind == "empty":
+            _stderr(
+                f"{prefix}no episodes listed for series {run.ref.series_id}; try "
+                "`info --dump-raw DIR`"
+            )
+        elif run.error_kind == "login":
+            _stderr(f"error: {prefix}{error}\n{LOGIN_HELP}")
+        elif run.error_kind == "captcha":
+            _stderr(f"error: {prefix}{error}\n{CHALLENGE_HELP}")
+        else:
+            _stderr(f"error: {prefix}{error}")
+
+
+def batch_status(run: engine.SeriesRun) -> str:
+    """The status of a series in the batch table: ``complete``, ``incomplete``, ``skipped
+    (complete)``, ``failed: <error>`` or ``not started``."""
+    if run.error_kind == "not-started":
+        return "not started"
+    if run.error is not None:
+        return f"failed: {run.error}"
+    if run.report.skipped_complete:
+        return "skipped (complete)"
+    return "complete" if run.report.complete else "incomplete"
+
+
+#: Widest series and status cells of the batch table (longer text is cut with "…").
+_BATCH_SERIES_WIDTH = 60
+_BATCH_STATUS_WIDTH = 40
+
+
+def format_batch_summary(runs: list[engine.SeriesRun]) -> list[str]:
+    """The table ``download`` prints after several series: one row per series with its status
+    (:func:`batch_status`) and counts — ``listed`` is ``-`` for a series whose list was not
+    fetched (skipped as complete, failed, not started)."""
+    statuses = [batch_status(run) for run in runs]
+    tally: dict[str, int] = {}
+    for status in statuses:
+        word = "failed" if status.startswith("failed: ") else status
+        tally[word] = tally.get(word, 0) + 1
+    names = []
+    for run in runs:
+        name = run.report.name or (run.series.display_name if run.series else None)
+        names.append(f"{name} [{run.ref.series_id}]" if name else f"[{run.ref.series_id}]")
+    series_width = min(_BATCH_SERIES_WIDTH, max([6, *(len(name) for name in names)]))
+    status_width = min(_BATCH_STATUS_WIDTH, max([6, *(len(status) for status in statuses)]))
+    counts = ", ".join(f"{count} {word}" for word, count in tally.items())
+    lines = [
+        "",
+        f"Batch: {len(runs)} series — {counts}" if counts else "Batch: no series",
+        f"  {'series':<{series_width}}  {'status':<{status_width}}  listed  done  on disk  "
+        "locked  failed",
+    ]
+    for run, name, status in zip(runs, names, statuses, strict=True):
+        report = run.report
+        listed = str(report.listed) if run.series is not None else "-"
+        lines.append(
+            f"  {_truncate(name, series_width):<{series_width}}  "
+            f"{_truncate(status, status_width):<{status_width}}  {listed:>6}  {report.done:>4}  "
+            f"{report.on_disk:>7}  {report.locked:>6}  {report.failed:>6}"
+        )
+    return lines
+
+
+def describe_batch_pacing(options: DownloadOptions) -> str:
+    """What a batch adds to :func:`describe_pacing`, e.g. ``60-120 s rest between series, a
+    15-30 min break every 100 episodes`` (printed with en dashes, like the ranges there)."""
+    rest = f"{_describe_range(options.rest_min_s, options.rest_max_s)} s rest between series"
+    if options.long_rest_every <= 0:
+        return rest
+    minutes = _describe_range(options.long_rest_min_s / 60, options.long_rest_max_s / 60)
+    return f"{rest}, a {minutes} min break every {options.long_rest_every} episodes"
 
 
 def describe_pacing(options: DownloadOptions | None = None) -> str:

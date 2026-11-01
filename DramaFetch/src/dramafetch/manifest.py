@@ -6,7 +6,11 @@ The file name comes from ``DownloadOptions.name_format`` (see :func:`episode_ste
 ``models.DEFAULT_NAME_FORMAT``). The manifest records one entry per episode number (status, file,
 message, timestamp) so a rerun skips what is already on disk and retries the rest, whatever name
 format the run uses; it never contains cookies or URLs with tokens. Writes are atomic (temp file +
-replace) so a Ctrl+C mid-run leaves a valid file.
+replace) so a Ctrl+C mid-run leaves a valid file. It also remembers when the series was last found
+complete (``complete_at``, ``complete_episodes``): ``engine.run_series`` skips such a series without
+a request for ``models.RECHECK_AFTER_S``, and any new attempt (a result that is not a skip) forgets
+it. :func:`read_manifest` reads a manifest without any side effect (``Manifest.load`` moves a
+corrupt file aside).
 """
 
 from __future__ import annotations
@@ -38,6 +42,9 @@ MAX_STEM_LEN = 150
 _NON_ATTEMPT_STATUSES = frozenset(
     {DownloadStatus.SKIPPED_EXISTS, DownloadStatus.SKIPPED_LOCKED, DownloadStatus.DRY_RUN}
 )
+#: Entry statuses that mean "the episode's file is on disk": downloaded (``done``), or found already
+#: there by a run (``skipped-exists`` with the file it found).
+_ON_DISK_STATUSES = frozenset({DownloadStatus.DONE.value, DownloadStatus.SKIPPED_EXISTS.value})
 
 _RESERVED_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
 # C0 controls except \t \n \v \f \r (those are whitespace and become spaces), plus DEL.
@@ -167,7 +174,11 @@ class Manifest:
 
     Format::
 
-        {"version": 1, "series_id": "...", "series_name": "...", "episodes": {"1": {...}}}
+        {"version": 1, "series_id": "...", "series_name": "...", "episodes": {"1": {...}},
+         "complete_at": "2026-11-01T05:00:00Z", "complete_episodes": 30}
+
+    ``complete_at`` / ``complete_episodes`` are optional (written only while set): when a run
+    last found the series complete and how many episodes were on disk then (:meth:`mark_complete`).
     """
 
     def __init__(self, path: Path, series_id: str, series_name: str | None) -> None:
@@ -175,6 +186,8 @@ class Manifest:
         self.series_id = str(series_id)
         self.series_name = series_name
         self.entries: dict[int, ManifestEntry] = {}
+        self.complete_at: str | None = None
+        self.complete_episodes: int | None = None
 
     @classmethod
     def load(cls, path: Path, series_id: str, series_name: str | None) -> Manifest:
@@ -185,6 +198,9 @@ class Manifest:
             text = manifest.path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return manifest
+        except UnicodeDecodeError:  # not UTF-8: as corrupt as bad JSON
+            _keep_backup(manifest.path)
+            return manifest
         except OSError as exc:
             log.warning("could not read %s: %s", manifest.path, exc)
             return manifest
@@ -192,10 +208,7 @@ class Manifest:
         if parsed is None:
             _keep_backup(manifest.path)
             return manifest
-        stored_name, entries = parsed
-        if manifest.series_name is None:
-            manifest.series_name = stored_name
-        manifest.entries = entries
+        _apply(manifest, parsed)
         return manifest
 
     def save(self) -> None:
@@ -207,6 +220,9 @@ class Manifest:
             "series_name": self.series_name,
             "episodes": {str(n): asdict(entry) for n, entry in sorted(self.entries.items())},
         }
+        if self.complete_at is not None:
+            data["complete_at"] = self.complete_at
+            data["complete_episodes"] = self.complete_episodes
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(
             json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -230,6 +246,52 @@ class Manifest:
         """True when the episode was recorded as done AND the recorded file is still there."""
         return self.done_path(number) is not None
 
+    def done_entries(self) -> list[tuple[int, Path]]:
+        """``(number, file)`` for every episode the manifest knows to be on disk — a ``done``
+        entry, or a ``skipped-exists`` entry with the file a run found already there — whose file
+        still exists, ascending by number."""
+        found: list[tuple[int, Path]] = []
+        for number, entry in sorted(self.entries.items()):
+            if entry.status not in _ON_DISK_STATUSES or not entry.path:
+                continue
+            path = self.resolve_path(entry.path)
+            if path.exists():
+                found.append((number, path))
+        return found
+
+    def missing_files(self) -> list[int]:
+        """Numbers of the entries :meth:`done_entries` would count whose file is gone (deleted or
+        moved since): a series with any of them is not complete any more."""
+        return [
+            number
+            for number, entry in sorted(self.entries.items())
+            if entry.status in _ON_DISK_STATUSES
+            and entry.path
+            and not self.resolve_path(entry.path).exists()
+        ]
+
+    def mark_complete(self, when: float, episodes: int) -> None:
+        """Remember that a run found the series complete at ``when`` (seconds since the epoch)
+        with ``episodes`` episodes on disk, and save. Cleared by the next :meth:`record` of a
+        result that is not a skip."""
+        self.complete_at = _iso_utc(when)
+        self.complete_episodes = int(episodes)
+        self.save()
+
+    def clear_complete(self) -> None:
+        """Forget that the series was complete (a whole run found it incomplete) and save."""
+        if self.complete_at is None and self.complete_episodes is None:
+            return
+        self.complete_at = None
+        self.complete_episodes = None
+        self.save()
+
+    def complete_since(self) -> float | None:
+        """``complete_at`` as seconds since the epoch, None when unset or unreadable."""
+        if self.complete_at is None:
+            return None
+        return _epoch_of(self.complete_at)
+
     def record(self, result: DownloadResult) -> None:
         """Store one result (replacing any earlier entry for the number) and save immediately.
 
@@ -239,6 +301,11 @@ class Manifest:
         """
         if result.status in _NON_ATTEMPT_STATUSES and self.is_done(result.episode.number):
             return
+        if result.status not in _NON_ATTEMPT_STATUSES:
+            # A new attempt means the series changed (a new episode, a failure, an overwrite): it
+            # has to be found complete again before a run may skip it.
+            self.complete_at = None
+            self.complete_episodes = None
         recorded_path: str | None = None
         if result.path is not None:
             recorded_path = _relative_or_absolute(result.path, self.path.parent)
@@ -258,6 +325,42 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _iso_utc(when: float) -> str:
+    """``when`` (seconds since the epoch) as ``YYYY-MM-DDTHH:MM:SSZ``, the fraction dropped."""
+    moment = datetime.fromtimestamp(when, UTC).replace(microsecond=0)
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+def _epoch_of(text: str) -> float | None:
+    """Seconds since the epoch of an ISO 8601 time written by :func:`_iso_utc` (any offset is
+    honoured, a naive time is taken as UTC); None for anything unreadable."""
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.timestamp()
+
+
+def read_manifest(directory: Path, series_id: str) -> Manifest | None:
+    """The manifest of a series directory, read without any side effect: None when there is no
+    ``dramafetch.json``, or it is unreadable, corrupt or another series' — and, unlike
+    :meth:`Manifest.load`, a corrupt file is left exactly where it is (never moved to ``.bak``).
+    Used by the complete skip, ``info``'s ``disk`` column and the web's on-disk badges."""
+    path = manifest_path(directory)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    parsed = _parse_manifest(text, str(series_id))
+    if parsed is None:
+        return None
+    manifest = Manifest(path, str(series_id), None)
+    _apply(manifest, parsed)
+    return manifest
+
+
 def _relative_or_absolute(path: Path, base: Path) -> str:
     try:
         return str(path.resolve().relative_to(base.resolve()))
@@ -265,9 +368,25 @@ def _relative_or_absolute(path: Path, base: Path) -> str:
         return str(path)
 
 
-def _parse_manifest(
-    text: str, series_id: str
-) -> tuple[str | None, dict[int, ManifestEntry]] | None:
+@dataclass
+class _Parsed:
+    """What a valid ``dramafetch.json`` holds (see :func:`_parse_manifest`)."""
+
+    series_name: str | None
+    entries: dict[int, ManifestEntry]
+    complete_at: str | None
+    complete_episodes: int | None
+
+
+def _apply(manifest: Manifest, parsed: _Parsed) -> None:
+    if manifest.series_name is None:
+        manifest.series_name = parsed.series_name
+    manifest.entries = parsed.entries
+    manifest.complete_at = parsed.complete_at
+    manifest.complete_episodes = parsed.complete_episodes
+
+
+def _parse_manifest(text: str, series_id: str) -> _Parsed | None:
     try:
         data = json.loads(text)
     except ValueError:
@@ -286,7 +405,20 @@ def _parse_manifest(
         entry = _parse_entry(key, value)
         if entry is not None:
             entries[entry.number] = entry
-    return name, entries
+    # The completeness memory is optional and never makes a manifest corrupt: an odd value is
+    # simply forgotten (the next complete run writes it again).
+    complete_at = data.get("complete_at")
+    complete_episodes = data.get("complete_episodes")
+    if not isinstance(complete_at, str) or _epoch_of(complete_at) is None:
+        complete_at = None
+    if (
+        complete_at is None
+        or isinstance(complete_episodes, bool)
+        or not isinstance(complete_episodes, int)
+        or complete_episodes < 0
+    ):
+        complete_at, complete_episodes = None, None
+    return _Parsed(name, entries, complete_at, complete_episodes)
 
 
 def _parse_entry(key: Any, value: Any) -> ManifestEntry | None:

@@ -3,20 +3,30 @@ codes, resolve."""
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import random
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
 from dramafetch import engine
-from dramafetch.cooldown import active_cooldown, clear_cooldown, read_cooldown
+from dramafetch.cooldown import (
+    active_cooldown,
+    clear_cooldown,
+    clock_time,
+    cooldown_message,
+    read_cooldown,
+    record_block,
+)
 from dramafetch.downloader import locked_result
 from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError
-from dramafetch.manifest import MANIFEST_FILENAME, Manifest, series_dir
+from dramafetch.manifest import MANIFEST_FILENAME, Manifest, read_manifest, series_dir
 from dramafetch.models import (
     THUMBNAIL_MODES,
     DiscoveryOptions,
@@ -1279,3 +1289,997 @@ def test_resolve_uses_choose_discovery_lazily(monkeypatch):
     assert series.name == NAME
     assert chosen == [options]
     assert discovery.calls[0][0] == SeriesRef(series_id=SERIES_ID)
+
+
+# --------------------------------------------------------------------------- the run's long break
+
+
+class FakeClock:
+    """A monotonic clock that moves only when the fake sleep sleeps (or a test moves it)."""
+
+    def __init__(self, now=10_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class RecordingDownloader(FakeDownloader):
+    """FakeDownloader that also writes ("attempt", series id, number) into a shared event list for
+    every call that would contact TikTok (a locked episode or a dry run would not)."""
+
+    def __init__(self, events, outcomes=None):
+        super().__init__(outcomes)
+        self.events = events
+
+    def download(self, episode, options):
+        if not (episode.locked and not options.include_locked) and not options.dry_run:
+            self.events.append(("attempt", episode.series_id, episode.number))
+        status = self.outcomes.get((episode.series_id, episode.number))
+        if status is not None and status is not DownloadStatus.DONE:
+            return DownloadResult(episode, status, message=f"{status.value} happened")
+        return super().download(episode, options)
+
+
+def _numbered_series(count, series_id=SERIES_ID, name=NAME):
+    episodes = [
+        replace(_episode(n), series_id=series_id, series_name=name) for n in range(1, count + 1)
+    ]
+    return Series(series_id=series_id, name=name, episodes=episodes)
+
+
+def _paced_run(count, options, *, pacing=None, clock=None):
+    """download_series over `count` episodes with a fake clock whose sleep moves it; returns the
+    results and, in order, every pause ("long-rest", s) and attempt ("attempt", id, n)."""
+    series = _numbered_series(count)
+    clock = clock or FakeClock()
+    events = []
+    results = engine.download_series(
+        series,
+        series.episodes,
+        options,
+        downloader=RecordingDownloader(events),
+        sleep=clock.sleep,
+        rng=FixedRandom(),
+        on_pause=lambda kind, seconds: events.append((kind, seconds)),
+        pacing=pacing,
+        clock=clock,
+    )
+    return results, events
+
+
+def _pause_before_each_attempt(events):
+    """{attempt number: kind of the pause right before it}, for the attempts that had one."""
+    before, pending = {}, None
+    for event in events:
+        if event[0] == "attempt":
+            if pending is not None:
+                before[event[2]] = pending
+            pending = None
+        else:
+            pending = event[0]
+    return before
+
+
+def test_the_long_break_comes_before_attempts_101_and_201_and_replaces_that_pause(tmp_path):
+    options = DownloadOptions(out_dir=tmp_path)  # the defaults, which no CLI flag lowers
+    assert (options.long_rest_every, options.long_rest_min_s, options.long_rest_max_s) == (
+        100,
+        900.0,
+        1800.0,
+    )
+    pacing = engine.PacingState()
+    results, events = _paced_run(250, options, pacing=pacing)
+    assert [result.status for result in results] == [DownloadStatus.DONE] * 250
+    before = _pause_before_each_attempt(events)
+    assert sorted(n for n, kind in before.items() if kind == "long-rest") == [101, 201]
+    # exactly one pause before every attempt but the first: the long break REPLACES the rest
+    # that the 100th and 200th attempts would have earned, it does not come on top of it
+    assert sorted(before) == list(range(2, 251))
+    assert sum(1 for event in events if event[0] != "attempt") == 249
+    assert [n for n, kind in before.items() if kind == "rest"] == [
+        n for n in range(11, 251, 10) if n not in (101, 201)
+    ]
+    assert ("long-rest", 1350.0) in events  # the midpoint of 15-30 min
+    assert pacing.run_attempts == 250
+
+
+def test_an_idle_gap_of_15_minutes_counts_as_the_long_break(tmp_path):
+    options = DownloadOptions(out_dir=tmp_path / "a", delay_min_s=0, delay_max_s=0, rest_every=0)
+    clock = FakeClock()
+    pacing = engine.PacingState()
+    _paced_run(100, options, pacing=pacing, clock=clock)
+    assert pacing.run_attempts == 100 and pacing.last_network_at == clock.now
+    # the next series of the same run, 899 s later: its first attempt gets the long break
+    clock.now += 899
+    _, events = _paced_run(2, replace(options, out_dir=tmp_path / "b"), pacing=pacing, clock=clock)
+    assert events[0] == ("long-rest", 1350.0)
+    assert pacing.run_attempts == 102
+    # 15 min of nothing IS the break: the count starts again, no long break
+    idle = engine.PacingState(run_attempts=100, last_network_at=clock.now)
+    clock.now += 900
+    _, events = _paced_run(2, replace(options, out_dir=tmp_path / "c"), pacing=idle, clock=clock)
+    assert [event[0] for event in events] == ["attempt", "attempt"]
+    assert idle.run_attempts == 2
+
+
+def test_skips_never_count_towards_the_long_break(tmp_path):
+    options = DownloadOptions(out_dir=tmp_path, delay_min_s=0, delay_max_s=0, rest_every=0)
+    pacing = engine.PacingState(run_attempts=99, last_network_at=None)
+    series = _numbered_series(3)
+    series.episodes[0].lock_hints = ("isFree=false",)  # a skip: no attempt, no count
+    events = []
+    engine.download_series(
+        series,
+        series.episodes,
+        options,
+        downloader=RecordingDownloader(events),
+        sleep=FakeClock().sleep,
+        rng=FixedRandom(),
+        on_pause=lambda kind, seconds: events.append((kind, seconds)),
+        pacing=pacing,
+        clock=FakeClock(),
+    )
+    # 99 + episode 2 = 100 attempts, so the break comes before episode 3, not before episode 2
+    assert events == [
+        ("attempt", SERIES_ID, 2),
+        ("long-rest", 1350.0),
+        ("attempt", SERIES_ID, 3),
+    ]
+
+
+# --------------------------------------------------------------------------- series and batches
+
+SERIES_2 = "7699393770256782399"
+NAME_2 = "Second Chance Bride"
+WALL = 1_800_000_000.0  # the wall clock of these tests (2027-01-15T08:00:00Z)
+
+
+class BatchDiscovery:
+    """Answers per series id; every call is one resolve, i.e. requests to TikTok."""
+
+    def __init__(self, *series, errors=None, events=None):
+        self.series = {item.series_id: item for item in series}
+        self.errors = errors or {}
+        self.events = events if events is not None else []
+        self.calls = []
+
+    def discover(self, ref, options):
+        self.calls.append(ref.series_id)
+        self.events.append(("resolve", ref.series_id))
+        if ref.series_id in self.errors:
+            raise self.errors[ref.series_id]
+        return copy.deepcopy(self.series[ref.series_id])
+
+
+def _quiet(tmp_path, **overrides):
+    settings = {"out_dir": tmp_path, "delay_min_s": 0, "delay_max_s": 0, "rest_every": 0}
+    settings.update(overrides)
+    return DownloadOptions(**settings)
+
+
+def _run_series(series, options, discovery, *, wall=WALL, **kwargs):
+    kwargs.setdefault("downloader", FakeDownloader())
+    return engine.run_series(
+        SeriesRef(series.series_id),
+        DiscoveryOptions(),
+        options,
+        discovery=discovery,
+        sleep=lambda seconds: None,
+        rng=FixedRandom(),
+        wall_clock=lambda: wall,
+        **kwargs,
+    )
+
+
+def test_run_series_downloads_reports_and_marks_a_complete_series(tmp_path):
+    series = make_series(numbers=(1, 2, 3))
+    discovery = BatchDiscovery(series)
+    starts = []
+    run = _run_series(series, _quiet(tmp_path), discovery, on_start=starts.append)
+    assert discovery.calls == [SERIES_ID]
+    assert run.series is not None and run.error is None and run.error_kind is None
+    assert run.stop is False and run.exit_code == 0 and run.contacted is True
+    assert [result.status for result in run.results] == [DownloadStatus.DONE] * 3
+    assert run.report == engine.series_report(run.series, run.results)
+    assert run.report.complete and run.report.done == 3 and run.report.listed == 3
+    assert engine.report_line(run.report) == "complete: 3 of 3 (3 downloaded)"
+    ((start,),) = [starts]
+    assert start.series is run.series and start.name == NAME and not start.skipped_complete
+    assert start.directory == series_dir(tmp_path, series)
+    assert [episode.number for episode in start.episodes] == [1, 2, 3]
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert manifest.complete_episodes == 3
+    assert manifest.complete_since() == WALL
+    assert manifest.complete_at == "2027-01-15T08:00:00Z"
+
+
+def test_a_series_complete_less_than_24_h_ago_costs_no_request(tmp_path):
+    series = make_series(numbers=(1, 2, 3))
+    discovery = BatchDiscovery(series)
+    _run_series(series, _quiet(tmp_path), discovery)
+    rows, starts = [], []
+    downloader = FakeDownloader()
+    run = _run_series(
+        series,
+        _quiet(tmp_path),
+        discovery,
+        wall=WALL + 2 * 3600,
+        downloader=downloader,
+        on_result=rows.append,
+        on_start=starts.append,
+        before_network=lambda: pytest.fail("no rest: the series makes no request"),
+    )
+    assert discovery.calls == [SERIES_ID]  # the first run only: ZERO requests the second time
+    assert downloader.calls == []
+    assert run.series is None and run.error is None and run.stop is False and run.exit_code == 0
+    assert run.contacted is False
+    assert run.report.skipped_complete and run.report.complete and run.report.listed == 0
+    assert run.report.on_disk == 3 and run.report.checked_ago_s == 2 * 3600
+    target = series_dir(tmp_path, series)
+    assert [(r.episode.number, r.status, r.path) for r in run.results] == [
+        (n, DownloadStatus.SKIPPED_EXISTS, target / f"fake - Episode {n:02d}.mp4")
+        for n in (1, 2, 3)
+    ]
+    assert run.results[0].message == "already downloaded (manifest): fake - Episode 01.mp4"
+    assert run.results[0].episode.item_id == "7699400000000000001"  # from the manifest
+    assert rows == run.results  # on_result saw every row (the web keeps them for its ZIP)
+    ((start,),) = [starts]
+    assert start.skipped_complete and start.series is None and start.directory == target
+    assert start.name == NAME and len(start.episodes) == 3
+    assert engine.report_line(run.report) == (
+        "complete, nothing to do: 3 episodes already on disk (checked 2 h ago)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "overrides", "spec"),
+    [
+        ("25 hours later", {}, None),
+        ("a file was deleted", {}, None),
+        ("--recheck", {"recheck": True}, None),
+        ("--overwrite", {"overwrite": True}, None),
+        ("--include-locked", {"include_locked": True}, None),
+        ("--dry-run", {"dry_run": True}, None),
+        ("an episodes spec", {}, "1-3"),
+        ("even the spec all", {}, "all"),
+    ],
+)
+def test_the_complete_skip_never_fires_when(tmp_path, change, overrides, spec):
+    series = make_series(numbers=(1, 2, 3))
+    discovery = BatchDiscovery(series)
+    _run_series(series, _quiet(tmp_path), discovery)
+    wall = WALL + 3600
+    if change == "25 hours later":
+        wall = WALL + 25 * 3600
+    if change == "a file was deleted":
+        (series_dir(tmp_path, series) / "fake - Episode 02.mp4").unlink()
+    run = _run_series(
+        series, _quiet(tmp_path, **overrides), discovery, wall=wall, episodes_spec=spec
+    )
+    assert discovery.calls == [SERIES_ID, SERIES_ID]  # resolved again
+    assert run.series is not None and not run.report.skipped_complete and run.contacted
+    if change == "a file was deleted":
+        assert [r.status.value for r in run.results] == ["skipped-exists", "done", "skipped-exists"]
+        assert run.report.complete  # downloaded again, so complete again
+
+
+def test_a_new_attempt_clears_the_complete_mark_and_an_incomplete_run_forgets_it(tmp_path):
+    series = make_series(numbers=(1, 2, 3))
+    _run_series(series, _quiet(tmp_path), BatchDiscovery(series))
+    directory = series_dir(tmp_path, series)
+    assert read_manifest(directory, SERIES_ID).complete_episodes == 3
+    # TikTok now lists a fourth episode, and it fails: the series is not complete any more
+    grown = make_series(numbers=(1, 2, 3, 4))
+    run = _run_series(
+        grown,
+        _quiet(tmp_path, recheck=True),
+        BatchDiscovery(grown),
+        downloader=FakeDownloader({4: DownloadStatus.FAILED}),
+    )
+    assert not run.report.complete
+    assert engine.report_line(run.report) == "incomplete: 3 of 4 — 1 failed (4)"
+    manifest = read_manifest(directory, SERIES_ID)
+    assert manifest.complete_at is None and manifest.complete_episodes is None
+    # a recheck that finds a gap forgets the mark too, though nothing was attempted
+    _run_series(
+        series,
+        _quiet(tmp_path, recheck=True),
+        BatchDiscovery(series),
+        downloader=FakeDownloader({4: DownloadStatus.FAILED}),
+    )
+    assert read_manifest(directory, SERIES_ID).complete_episodes == 3  # complete again
+    announced = make_series(numbers=(1, 2, 3), total=4)  # TikTok now announces a 4th
+    downloader = FakeDownloader()
+    run = _run_series(
+        announced, _quiet(tmp_path, recheck=True), BatchDiscovery(announced), downloader=downloader
+    )
+    assert [r.status.value for r in run.results] == ["skipped-exists"] * 3  # no new attempt
+    assert run.report.gaps == (4,) and not run.report.complete
+    assert read_manifest(directory, SERIES_ID).complete_at is None
+
+
+def test_run_series_under_a_cooldown_makes_no_request(tmp_path):
+    record_block("HTTP 429 from the CDN", "browser")
+    series = make_series()
+    discovery = BatchDiscovery(series)
+    run = _run_series(series, _quiet(tmp_path), discovery)
+    assert discovery.calls == []
+    assert run.error_kind == "cooldown" and run.stop and run.exit_code == 5 and not run.contacted
+    assert run.error == cooldown_message(active_cooldown())
+    assert run.report.stopped.startswith("cooldown until ")
+    assert not tmp_path.joinpath(f"{NAME} [{SERIES_ID}]").exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "kind", "code", "stopped"),
+    [
+        (LoginRequiredError("TikTok redirected to /login"), "login", 3, "login required"),
+        (ChallengeError("Verify to continue"), "captcha", 4, "captcha"),
+        (RateLimitedError("HTTP 429 while listing"), "rate-limited", 5, "rate limited (HTTP 429)"),
+        (DiscoveryError("no episode list within 45 s"), "discovery", 4, "the episode list could"),
+    ],
+)
+def test_run_series_maps_every_discovery_error_to_a_stop(tmp_path, error, kind, code, stopped):
+    series = make_series()
+    run = _run_series(series, _quiet(tmp_path), BatchDiscovery(series, errors={SERIES_ID: error}))
+    assert run.series is None and run.results == []
+    assert run.error == str(error) and run.error_kind == kind and run.exit_code == code
+    assert run.stop is True and run.contacted is True
+    assert run.report.stopped.startswith(stopped)
+
+
+def test_run_series_with_nothing_listed_or_nothing_selected(tmp_path):
+    empty = Series(series_id=SERIES_ID, name=NAME, episodes=[])
+    run = _run_series(empty, _quiet(tmp_path), BatchDiscovery(empty))
+    assert run.error == "no episodes listed" and run.error_kind == "empty"
+    assert run.stop is False and run.exit_code == 4 and run.contacted
+    series = make_series()
+    run = _run_series(series, _quiet(tmp_path), BatchDiscovery(series), episodes_spec="9-")
+    assert run.error is None and run.results == [] and run.exit_code == 0
+    assert not series_dir(tmp_path, series).exists()  # nothing selected: nothing written
+    with pytest.raises(ValueError, match="invalid episode spec"):
+        _run_series(series, _quiet(tmp_path), BatchDiscovery(series), episodes_spec="3-1")
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "stopped", "code"),
+    [
+        ({2: DownloadStatus.FAILED_RATE_LIMITED}, "episode 2 failed-rate-limited", 5),
+        ({1: DownloadStatus.FAILED_LOGIN}, "episode 1 failed-login-required", 3),
+        ({1: DownloadStatus.FAILED_BLOCKED}, "episode 1 failed-blocked", 5),
+        # the streak reached on the last episode still stops (nothing is left to mark)
+        (
+            {3: DownloadStatus.FAILED, 4: DownloadStatus.FAILED, 5: DownloadStatus.FAILED},
+            "3 consecutive failures",
+            2,
+        ),
+    ],
+)
+def test_run_series_stops_on_a_stop_status_or_a_failure_streak(tmp_path, outcomes, stopped, code):
+    series = make_series()
+    run = _run_series(
+        series, _quiet(tmp_path), BatchDiscovery(series), downloader=FakeDownloader(outcomes)
+    )
+    assert run.stop is True and run.report.stopped == stopped and run.exit_code == code
+    assert engine.report_line(run.report).endswith(f"; stopped: {stopped}")
+
+
+def test_a_plain_failure_is_not_a_stop(tmp_path):
+    series = make_series()
+    run = _run_series(
+        series,
+        _quiet(tmp_path),
+        BatchDiscovery(series),
+        downloader=FakeDownloader({2: DownloadStatus.FAILED}),
+    )
+    assert run.stop is False and run.report.stopped is None and run.exit_code == 2
+
+
+def _batch(refs, discovery, tmp_path, *, downloader=None, options=None, **kwargs):
+    events = discovery.events
+    clock = kwargs.pop("clock", FakeClock())
+    return engine.run_batch(
+        [SeriesRef(series_id) for series_id in refs],
+        DiscoveryOptions(),
+        options or _quiet(tmp_path, rest_min_s=95, rest_max_s=95),
+        discovery=discovery,
+        downloader=downloader or RecordingDownloader(events),
+        sleep=clock.sleep,
+        rng=FixedRandom(),
+        clock=clock,
+        wall_clock=lambda: WALL,
+        on_pause=lambda kind, seconds: events.append((kind, seconds)),
+        **kwargs,
+    )
+
+
+def test_run_batch_rests_between_two_series_that_contact_tiktok(tmp_path):
+    first, second = make_series(numbers=(1, 2)), _numbered_series(2, SERIES_2, NAME_2)
+    discovery = BatchDiscovery(first, second)
+    runs = _batch([SERIES_ID, SERIES_2], discovery, tmp_path)
+    assert [run.report.complete for run in runs] == [True, True]
+    assert discovery.events == [
+        ("resolve", SERIES_ID),  # the first series needs no rest
+        ("attempt", SERIES_ID, 1),
+        ("attempt", SERIES_ID, 2),
+        ("series-rest", 95.0),  # rested BEFORE the second list was fetched
+        ("resolve", SERIES_2),
+        ("attempt", SERIES_2, 1),
+        ("attempt", SERIES_2, 2),
+    ]
+    assert engine.batch_exit_code(runs) == 0
+
+
+@pytest.mark.parametrize("skipped_first", [True, False])
+def test_no_series_rest_around_a_series_that_makes_no_request(tmp_path, skipped_first):
+    """A series skipped as complete costs nothing, so it needs no rest — but the series after it
+    still rests after the last one that did contact TikTok (the rest is never skipped)."""
+    a, b, c = (
+        make_series(numbers=(1, 2)),
+        _numbered_series(2, SERIES_2, NAME_2),
+        _numbered_series(2, "7699393770256782300", "Third"),
+    )
+    complete = a if skipped_first else b
+    _run_series(complete, _quiet(tmp_path), BatchDiscovery(complete))  # complete on disk
+    discovery = BatchDiscovery(a, b, c)
+    runs = _batch([a.series_id, b.series_id, c.series_id], discovery, tmp_path)
+    kinds = [event[0] for event in discovery.events if event[0] not in ("attempt",)]
+    if skipped_first:
+        assert kinds == ["resolve", "series-rest", "resolve"]  # b (no rest), rest, c
+    else:
+        assert kinds == ["resolve", "series-rest", "resolve"]  # a, (b skipped), rest, c
+    assert [run.report.skipped_complete for run in runs] == [
+        skipped_first,
+        not skipped_first,
+        False,
+    ]
+    assert complete.series_id not in discovery.calls
+
+
+def test_a_stop_ends_the_batch_and_the_rest_is_not_started_without_a_request(tmp_path):
+    first, second, third = (
+        make_series(numbers=(1, 2, 3)),
+        _numbered_series(2, SERIES_2, NAME_2),
+        _numbered_series(2, "7699393770256782300", "Third"),
+    )
+    discovery = BatchDiscovery(first, second, third)
+    events = discovery.events
+    downloader = RecordingDownloader(events, {(SERIES_ID, 2): DownloadStatus.FAILED_RATE_LIMITED})
+    started, done = [], []
+    runs = _batch(
+        [SERIES_ID, SERIES_2, third.series_id],
+        discovery,
+        tmp_path,
+        downloader=downloader,
+        on_series_start=lambda index, total, ref: started.append((index, total, ref.series_id)),
+        on_series_done=lambda index, total, run: done.append((index, run.error_kind)),
+    )
+    assert discovery.calls == [SERIES_ID]  # nothing after the stop: not even a list
+    assert [event for event in events if event[0] == "attempt"] == [
+        ("attempt", SERIES_ID, 1),
+        ("attempt", SERIES_ID, 2),
+    ]
+    assert not any(event[0] == "series-rest" for event in events)
+    assert runs[0].stop and runs[0].exit_code == 5
+    message = f"not started: batch stopped in {NAME} (episode 2 failed-rate-limited)"
+    for run in runs[1:]:
+        assert run.series is None and run.results == [] and run.error == message
+        assert run.error_kind == "not-started" and run.stop is False and run.exit_code == 5
+        assert not run.contacted
+    assert runs[1].report.series_id == SERIES_2
+    assert started == [(1, 3, SERIES_ID), (2, 3, SERIES_2), (3, 3, third.series_id)]
+    assert done == [(1, None), (2, "not-started"), (3, "not-started")]
+    assert engine.batch_exit_code(runs) == 5
+    assert active_cooldown() is not None  # the 429 started the cooldown, once
+
+
+def test_a_failed_resolve_stops_the_batch_too(tmp_path):
+    first, second = make_series(), _numbered_series(2, SERIES_2, NAME_2)
+    discovery = BatchDiscovery(
+        first, second, errors={SERIES_ID: LoginRequiredError("TikTok redirected to /login")}
+    )
+    runs = _batch([SERIES_ID, SERIES_2], discovery, tmp_path)
+    assert discovery.calls == [SERIES_ID]
+    assert runs[1].error == f"not started: batch stopped in {SERIES_ID} (login required)"
+    assert engine.batch_exit_code(runs) == 3
+
+
+def test_the_cooldown_is_checked_before_every_series(tmp_path):
+    """A refusal recorded while the batch runs (here right after the first series, as another
+    DramaFetch process would) turns the next series away with no request, and stops the batch."""
+    series = [
+        make_series(numbers=(1,)),
+        _numbered_series(1, SERIES_2, NAME_2),
+        _numbered_series(1, "7699393770256782300", "Third"),
+    ]
+    discovery = BatchDiscovery(*series)
+
+    def refused_meanwhile(index, total, run):
+        if index == 1:
+            record_block("HTTP 403 from another run", "yt-dlp")
+
+    runs = _batch(
+        [item.series_id for item in series], discovery, tmp_path, on_series_done=refused_meanwhile
+    )
+    assert discovery.calls == [SERIES_ID]
+    assert runs[1].error_kind == "cooldown" and runs[1].stop and runs[1].exit_code == 5
+    assert runs[2].error_kind == "not-started" and runs[2].error.startswith(
+        f"not started: batch stopped in {SERIES_2} (cooldown until "
+    )
+    assert not any(event[0] == "series-rest" for event in discovery.events)
+
+
+def test_nothing_listed_is_no_stop_the_batch_rests_and_goes_on(tmp_path):
+    empty = Series(series_id=SERIES_ID, name=NAME, episodes=[])
+    second = _numbered_series(1, SERIES_2, NAME_2)
+    discovery = BatchDiscovery(empty, second)
+    runs = _batch([SERIES_ID, SERIES_2], discovery, tmp_path)
+    assert discovery.calls == [SERIES_ID, SERIES_2]
+    assert [event[0] for event in discovery.events] == [
+        "resolve",
+        "series-rest",  # the empty list was a request too: rest before the next one
+        "resolve",
+        "attempt",
+    ]
+    assert runs[0].error == "no episodes listed" and not runs[0].stop
+    assert runs[1].report.complete
+    assert engine.batch_exit_code(runs) == 4
+
+
+def test_the_long_break_spans_the_series_of_a_batch(tmp_path):
+    options = _quiet(tmp_path, rest_min_s=95, rest_max_s=95)
+    discovery = BatchDiscovery(_numbered_series(60), _numbered_series(60, SERIES_2, NAME_2))
+    pacing = engine.PacingState()
+    _batch([SERIES_ID, SERIES_2], discovery, tmp_path, options=options, pacing=pacing)
+    events = discovery.events
+    long_break = events.index(("long-rest", 1350.0))
+    assert events[long_break + 1] == ("attempt", SERIES_2, 41)  # the 101st attempt of the run
+    assert events.count(("series-rest", 95.0)) == 1
+    assert pacing.run_attempts == 120
+
+
+def test_a_long_break_due_between_series_replaces_the_series_rest(tmp_path):
+    """When the run's 100th attempt ends a series, the long break is taken before the next
+    resolve — the fresh play URLs then never wait 15-30 minutes — and not again after it."""
+    options = _quiet(tmp_path, rest_min_s=95, rest_max_s=95)
+    discovery = BatchDiscovery(_numbered_series(100), _numbered_series(2, SERIES_2, NAME_2))
+    _batch([SERIES_ID, SERIES_2], discovery, tmp_path, options=options)
+    pauses_and_resolves = [event for event in discovery.events if event[0] != "attempt"]
+    assert pauses_and_resolves == [
+        ("resolve", SERIES_ID),
+        ("long-rest", 1350.0),
+        ("resolve", SERIES_2),
+    ]
+
+
+def test_run_batch_refuses_bad_options_before_any_request(tmp_path):
+    discovery = BatchDiscovery(make_series())
+    with pytest.raises(ValueError, match="rest_max_s"):
+        _batch(
+            [SERIES_ID], discovery, tmp_path, options=_quiet(tmp_path, rest_min_s=5, rest_max_s=1)
+        )
+    with pytest.raises(ValueError, match="invalid episode spec"):
+        _batch([SERIES_ID], discovery, tmp_path, episodes_spec="x")
+    assert discovery.calls == []
+
+
+def test_dedupe_refs_keeps_the_first_of_each_series():
+    refs = [
+        SeriesRef(SERIES_ID, 3, "a"),
+        SeriesRef(SERIES_2),
+        SeriesRef(SERIES_ID, 1, "b"),
+        SeriesRef(SERIES_2),
+    ]
+    kept, notes = engine.dedupe_refs(refs)
+    assert kept == [SeriesRef(SERIES_ID, 3, "a"), SeriesRef(SERIES_2)]
+    assert notes == [f"duplicate: {SERIES_ID}", f"duplicate: {SERIES_2}"]
+    assert engine.dedupe_refs([]) == ([], [])
+
+
+def _run_with_code(code):
+    report = engine.series_report(None, [], series_id=SERIES_ID)
+    return engine.SeriesRun(SeriesRef(SERIES_ID), None, [], report, None, False, code)
+
+
+@pytest.mark.parametrize(
+    ("codes", "worst"),
+    [
+        ([], 0),
+        ([0, 0], 0),
+        ([0, 2], 2),
+        ([2, 4, 0], 4),
+        ([4, 3, 2], 3),
+        ([3, 5, 4], 5),
+        ([5, 0], 5),
+        ([1, 0], 1),
+        ([1, 2], 2),
+    ],
+)
+def test_batch_exit_code_is_the_worst_series(codes, worst):
+    assert engine.batch_exit_code([_run_with_code(code) for code in codes]) == worst
+
+
+# --------------------------------------------------------------------------- series folders
+
+
+def _manifest_in(directory, series_id=SERIES_ID, *, mtime=None):
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = Manifest(directory / MANIFEST_FILENAME, series_id, None)
+    manifest.save()
+    if mtime is not None:
+        os.utime(directory / MANIFEST_FILENAME, (mtime, mtime))
+    return directory
+
+
+def test_find_series_dir_picks_the_newest_manifest_and_never_globs(tmp_path):
+    old = _manifest_in(tmp_path / f"Old Name [{SERIES_ID}]", mtime=1_000_000)
+    new = _manifest_in(tmp_path / f"Love [1-3] [Remastered] [{SERIES_ID}]", mtime=2_000_000)
+    _manifest_in(tmp_path / f"Foreign [{SERIES_ID}]", series_id=SERIES_2, mtime=3_000_000)
+    (tmp_path / f"No manifest [{SERIES_ID}]").mkdir()
+    (tmp_path / f"A file [{SERIES_ID}]").write_text("x", encoding="utf-8")
+    _manifest_in(tmp_path / f"Other [{SERIES_2}]", series_id=SERIES_2, mtime=500_000)
+    assert engine.find_series_dir(tmp_path, SERIES_ID) == new  # "[" in a name is no glob
+    os.utime(old / MANIFEST_FILENAME, (4_000_000, 4_000_000))
+    assert engine.find_series_dir(tmp_path, SERIES_ID) == old  # the newest manifest wins
+    assert engine.find_series_dir(tmp_path, SERIES_2) == tmp_path / f"Other [{SERIES_2}]"
+    assert engine.find_series_dir(tmp_path, "7699393770256782300") is None
+    assert engine.find_series_dir(tmp_path / "missing", SERIES_ID) is None
+    assert not (tmp_path / "missing").exists()
+
+
+def test_find_series_dir_leaves_a_corrupt_manifest_alone(tmp_path):
+    broken = tmp_path / f"{NAME} [{SERIES_ID}]"
+    broken.mkdir()
+    (broken / MANIFEST_FILENAME).write_text("{not json", encoding="utf-8")
+    assert engine.find_series_dir(tmp_path, SERIES_ID) is None
+    assert (broken / MANIFEST_FILENAME).read_text(encoding="utf-8") == "{not json"
+    assert not (broken / (MANIFEST_FILENAME + ".bak")).exists()
+    assert engine.on_disk_numbers(tmp_path, SERIES_ID) == set()
+
+
+def test_on_disk_numbers_come_from_the_manifest_and_the_files(tmp_path):
+    series = make_series(numbers=(1, 2, 3))
+    _run_series(series, _quiet(tmp_path), BatchDiscovery(series))
+    assert engine.on_disk_numbers(tmp_path, SERIES_ID) == {1, 2, 3}
+    (series_dir(tmp_path, series) / "fake - Episode 03.mp4").unlink()
+    assert engine.on_disk_numbers(tmp_path, SERIES_ID) == {1, 2}
+    assert engine.on_disk_numbers(tmp_path, SERIES_2) == set()
+
+
+# --------------------------------------------------------------------------- series reports
+
+
+def _rows(series, statuses):
+    """Results for `series`: `statuses` maps numbers to statuses; the rest are DONE."""
+    rows = []
+    for episode in sorted(series.episodes, key=lambda episode: episode.number):
+        status = statuses.get(episode.number, DownloadStatus.DONE)
+        path = Path(f"/x/{episode.number}.mp4") if status.ok else None
+        rows.append(DownloadResult(episode, status, path, ""))
+    return rows
+
+
+def test_report_lines_for_complete_skipped_and_incomplete_series():
+    full = make_series(numbers=range(1, 31), total=30)
+    rows = _rows(full, {29: DownloadStatus.SKIPPED_EXISTS, 30: DownloadStatus.SKIPPED_EXISTS})
+    report = engine.series_report(full, rows)
+    assert report.complete and (report.done, report.on_disk, report.listed) == (28, 2, 30)
+    assert engine.report_line(report) == "complete: 30 of 30 (28 downloaded, 2 already on disk)"
+
+    on_disk = [
+        DownloadResult(_episode(n), DownloadStatus.SKIPPED_EXISTS, Path(f"/x/{n}.mp4"))
+        for n in range(1, 31)
+    ]
+    skipped = engine.series_report(None, on_disk, skipped_complete=True, checked_ago_s=7300)
+    assert skipped.series_id == SERIES_ID and skipped.name == NAME  # from the rows
+    assert skipped.complete and skipped.listed == 0 and skipped.on_disk == 30
+    assert engine.report_line(skipped) == (
+        "complete, nothing to do: 30 episodes already on disk (checked 2 h ago)"
+    )
+
+    gappy = make_series(numbers=[n for n in range(1, 31) if n != 17], locked=(5, 6), total=30)
+    rows = _rows(
+        gappy,
+        {
+            5: DownloadStatus.SKIPPED_LOCKED,
+            6: DownloadStatus.SKIPPED_LOCKED,
+            12: DownloadStatus.FAILED,
+        },
+    )
+    report = engine.series_report(gappy, rows)
+    assert not report.complete and report.gaps == (17,) and report.failed_numbers == (12,)
+    assert engine.report_line(report) == (
+        "incomplete: 26 of 30 — 2 locked (5, 6), 1 failed (12); episode 17 missing from "
+        "TikTok's list"
+    )
+
+
+def test_locked_episodes_do_not_make_a_series_incomplete_but_failures_and_gaps_do():
+    series = make_series(numbers=(1, 2, 3), locked=(3,))
+    locked_skip = {3: DownloadStatus.SKIPPED_LOCKED}
+    report = engine.series_report(series, _rows(series, locked_skip))
+    assert report.complete and report.locked_numbers == (3,)
+    assert engine.report_line(report) == "complete: 2 of 3 (2 downloaded) — 1 locked (3)"
+    # a locked episode tried with --include-locked that fails is a failure
+    report = engine.series_report(series, _rows(series, {3: DownloadStatus.FAILED_UNAVAILABLE}))
+    assert not report.complete and report.failed == 1
+    # a free episode that was not selected is not on disk
+    report = engine.series_report(series, _rows(series, locked_skip)[1:])
+    assert not report.complete
+    assert engine.report_line(report) == "incomplete: 1 of 3 — 1 locked (3), 1 not downloaded"
+    # TikTok announces more than it lists: the missing numbers are the gaps
+    short = make_series(numbers=(1, 2, 3), total=5)
+    report = engine.series_report(short, _rows(short, {}))
+    assert report.gaps == (4, 5) and not report.complete
+    assert (
+        engine.report_line(report)
+        == "incomplete: 3 of 5 — episodes 4, 5 missing from TikTok's list"
+    )
+    # ... or lists more than it announces
+    long = make_series(numbers=(1, 2, 3, 4), total=3)
+    report = engine.series_report(long, _rows(long, {}))
+    assert report.gaps == () and not report.complete
+    assert engine.report_line(report) == (
+        "incomplete: 4 of 4 — TikTok announces 3 episodes, 4 listed"
+    )
+    # nothing listed at all
+    report = engine.series_report(Series(SERIES_ID, NAME, []), [])
+    assert not report.complete and engine.report_line(report) == (
+        "incomplete: 0 of 0 — no episodes listed"
+    )
+
+
+def test_report_numbers_are_compact_and_an_absurd_episode_number_costs_nothing():
+    series = make_series(numbers=(1, 2, 3, 4, 5, 6, 8))
+    rows = _rows(series, dict.fromkeys((1, 2, 3, 5, 6, 8), DownloadStatus.FAILED))
+    report = engine.series_report(series, rows)
+    assert engine.report_line(report) == (
+        "incomplete: 1 of 8 — 6 failed (1-3, 5, 6, 8); episode 7 missing from TikTok's list"
+    )
+    hostile = make_series(numbers=(1, 10**12))
+    report = engine.series_report(hostile, _rows(hostile, {}))
+    assert len(report.gaps) == engine.MAX_EPISODE_NUMBER - 1  # bounded, not a trillion numbers
+    assert "episodes 2-10000 missing from TikTok's list" in engine.report_line(report)
+    odd = make_series(numbers=range(1, 42, 2))  # every even number missing: 20 single gaps
+    line = engine.report_line(engine.series_report(odd, _rows(odd, {})))
+    assert line.endswith(
+        "episodes 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, … missing from TikTok's list"
+    )
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [(0, "just now"), (59, "just now"), (60, "1 min ago"), (3599, "59 min ago"), (7200, "2 h ago")],
+)
+def test_report_line_says_when_the_series_was_checked(seconds, text):
+    rows = [DownloadResult(_episode(1), DownloadStatus.SKIPPED_EXISTS, Path("/x/1.mp4"))]
+    report = engine.series_report(None, rows, skipped_complete=True, checked_ago_s=seconds)
+    assert engine.report_line(report) == (
+        f"complete, nothing to do: 1 episode already on disk (checked {text})"
+    )
+
+
+def test_report_to_dict_is_json_ready():
+    series = make_series(numbers=(1, 3), locked=(3,))
+    report = engine.series_report(series, _rows(series, {3: DownloadStatus.SKIPPED_LOCKED}))
+    data = engine.report_to_dict(report)
+    assert data["gaps"] == [2] and data["locked_numbers"] == [3] and data["complete"] is False
+    assert data["line"] == engine.report_line(report)
+    assert json.loads(json.dumps(data)) == data
+
+
+# --------------------------------------------------------------------------- what a run carries
+# Build 6 review: the cooldown is asked before every request, the failure streak belongs to the
+# run, a cookies file every download would refuse costs no list, a selection reports on the whole
+# series, and --dump-raw keeps the series of a batch apart.
+
+
+def test_a_cooldown_recorded_during_a_pause_stops_the_run_before_its_next_request(tmp_path):
+    """Another front end (a resolve of the web server, a second CLI) meets a refusal while this
+    run sleeps through its 15-30 min long break: the next episode is never requested."""
+    clock, events, stops = FakeClock(), [], []
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if events[-1][0] == "long-rest":
+            record_block("HTTP 429 met by the web server", "web")
+
+    series = _numbered_series(5)
+    results = engine.download_series(
+        series,
+        series.episodes,
+        _quiet(tmp_path),
+        downloader=RecordingDownloader(events),
+        sleep=sleep,
+        rng=FixedRandom(),
+        on_pause=lambda kind, seconds: events.append((kind, seconds)),
+        pacing=engine.PacingState(run_attempts=98),
+        clock=clock,
+        on_stop=stops.append,
+    )
+    assert events == [
+        ("attempt", SERIES_ID, 1),
+        ("attempt", SERIES_ID, 2),
+        ("long-rest", 1350.0),  # the run's 100th attempt is behind it: then nothing more
+    ]
+    until = clock_time(active_cooldown().until)
+    assert [(result.status, result.message) for result in results[2:]] == [
+        (DownloadStatus.FAILED_RATE_LIMITED, f"stopped: cooldown until {until}")
+    ] * 3
+    assert stops == [f"cooldown until {until}"]  # once
+    assert engine.exit_code(results) == 5
+    assert read_cooldown().source == "web"  # the refusal is not recorded a second time
+
+
+def test_a_cooldown_met_right_before_an_episode_ends_the_batch(tmp_path):
+    """No pause is needed for the check: a refusal recorded by another DramaFetch process while
+    episode 1 downloads stops the run before episode 2, and the batch with it."""
+    events = []
+
+    class RefusedMeanwhile(RecordingDownloader):
+        def download(self, episode, options):
+            result = super().download(episode, options)
+            record_block("HTTP 403 met by another DramaFetch process", "yt-dlp")
+            return result
+
+    discovery = BatchDiscovery(
+        _numbered_series(3), _numbered_series(2, SERIES_2, NAME_2), events=events
+    )
+    runs = _batch([SERIES_ID, SERIES_2], discovery, tmp_path, downloader=RefusedMeanwhile(events))
+    assert [event for event in events if event[0] == "attempt"] == [("attempt", SERIES_ID, 1)]
+    assert discovery.calls == [SERIES_ID]  # the second series is never resolved
+    assert runs[0].stop and runs[0].exit_code == 5
+    assert runs[0].report.stopped.startswith("cooldown until ")
+    assert [result.status for result in runs[0].results] == [
+        DownloadStatus.DONE,
+        DownloadStatus.FAILED_RATE_LIMITED,
+        DownloadStatus.FAILED_RATE_LIMITED,
+    ]
+    assert runs[1].error.startswith(f"not started: batch stopped in {NAME} (cooldown until ")
+    assert engine.batch_exit_code(runs) == 5
+
+
+def test_three_failures_in_a_row_stop_a_batch_across_its_series(tmp_path):
+    """Each series has two episodes left and every request fails: the streak is the run's, so
+    the third failure — the first episode of the second series — ends the batch."""
+    third = "7699393770256782300"
+    ids = [SERIES_ID, SERIES_2, third]
+    discovery = BatchDiscovery(
+        *(_numbered_series(2, series_id, f"Series {n}") for n, series_id in enumerate(ids, 1))
+    )
+    failing = {(series_id, n): DownloadStatus.FAILED for series_id in ids for n in (1, 2)}
+    pacing = engine.PacingState()
+    runs = _batch(
+        ids,
+        discovery,
+        tmp_path,
+        downloader=RecordingDownloader(discovery.events, failing),
+        pacing=pacing,
+    )
+    attempts = [event[1:] for event in discovery.events if event[0] == "attempt"]
+    assert attempts == [(SERIES_ID, 1), (SERIES_ID, 2), (SERIES_2, 1)]
+    assert discovery.calls == [SERIES_ID, SERIES_2]  # the third series is never resolved
+    assert [run.stop for run in runs] == [False, True, False]
+    assert runs[1].report.stopped == "3 consecutive failures"
+    assert runs[1].results[1].message == "stopped: 3 consecutive failures (last: failed happened)"
+    assert runs[2].error == "not started: batch stopped in Series 2 (3 consecutive failures)"
+    assert runs[2].error_kind == "not-started" and runs[2].results == []
+    assert engine.batch_exit_code(runs) == 2
+    assert pacing.consecutive_failures == 0  # the stop was acted on: a later run starts afresh
+
+
+def test_the_run_streak_resets_on_a_done_and_after_an_idle_gap_not_between_series(tmp_path):
+    clock, pacing = FakeClock(), engine.PacingState()
+    failed, done = DownloadStatus.FAILED, DownloadStatus.DONE
+
+    def series_run(series_id, statuses):
+        series = _numbered_series(len(statuses), series_id)
+        return engine.download_series(
+            series,
+            series.episodes,
+            _quiet(tmp_path / series_id),
+            downloader=FakeDownloader(dict(enumerate(statuses, start=1))),
+            sleep=clock.sleep,
+            rng=FixedRandom(),
+            pacing=pacing,
+            clock=clock,
+        )
+
+    series_run(SERIES_ID, [failed, failed])
+    assert pacing.consecutive_failures == 2  # kept for the next series of the run
+    series_run(SERIES_2, [done, failed])
+    assert pacing.consecutive_failures == 1  # a done resets it
+    clock.now += 900  # 15 minutes without a request: like the long break, the streak is over
+    results = series_run("7699393770256782300", [failed, failed])
+    assert pacing.consecutive_failures == 2
+    assert not any(result.message.startswith("stopped: ") for result in results)
+
+
+def test_a_malformed_cookies_file_ends_the_batch_before_any_request(tmp_path):
+    """Every download would refuse that file (yt-dlp would print its lines, values included), so
+    the first series that needs TikTok stops the batch before its list is even loaded."""
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n.tiktok.com\tTRUE\t/\n", encoding="utf-8")
+    discovery = BatchDiscovery(make_series(numbers=(1, 2)), _numbered_series(2, SERIES_2, NAME_2))
+    options = _quiet(tmp_path, cookies_file=cookies)
+    runs = _batch([SERIES_ID, SERIES_2], discovery, tmp_path, options=options)
+    assert discovery.events == []  # no resolve, no rest, no attempt
+    first = runs[0]
+    assert first.error_kind == "cookies" and first.stop and first.exit_code == 2
+    assert not first.contacted and first.results == [] and first.series is None
+    assert first.error == (
+        "cookies file cookies.txt has malformed lines (line 2: 3 fields (expected 7)); yt-dlp "
+        "would print them, cookie values included: fix or re-export the file"
+    )
+    assert first.report.stopped == engine.COOKIES_STOP == "malformed cookies file"
+    assert runs[1].error == f"not started: batch stopped in {SERIES_ID} (malformed cookies file)"
+    assert engine.batch_exit_code(runs) == 2
+    # A dry run downloads nothing: it lists the series as usual.
+    series = make_series(numbers=(1, 2))
+    dry = _quiet(tmp_path / "dry", cookies_file=cookies, dry_run=True)
+    run = _run_series(series, dry, BatchDiscovery(series))
+    assert run.error is None and [r.status for r in run.results] == [DownloadStatus.DRY_RUN] * 2
+
+
+def test_on_disk_numbers_of_the_folder_the_download_would_use(tmp_path):
+    """info and the web's badges pass the folder a download would write to: after a rename the
+    old folder's episodes are not "on disk" there — the download would fetch them again."""
+    series = make_series(numbers=(1, 2, 3))
+    _run_series(series, _quiet(tmp_path), BatchDiscovery(series))
+    renamed = make_series(numbers=(1, 2, 3), name="The Heiress")
+    assert engine.on_disk_numbers(tmp_path, SERIES_ID) == {1, 2, 3}  # found by id
+    assert engine.on_disk_numbers(tmp_path, SERIES_ID, series_dir(tmp_path, series)) == {1, 2, 3}
+    assert engine.on_disk_numbers(tmp_path, SERIES_ID, series_dir(tmp_path, renamed)) == set()
+    assert not series_dir(tmp_path, renamed).exists()  # read-only
+
+
+def test_the_report_of_a_selection_covers_the_whole_series(tmp_path):
+    """`download --episodes 3` once the other free episodes are saved: the rows are the
+    selection's, the report the series' — what an earlier run saved is on disk, the locked
+    episode is locked, nothing is "not downloaded" — and a selection never marks it complete."""
+    series = make_series(numbers=(1, 2, 3, 4, 5), locked=(5,), total=5)
+    _run_series(series, _quiet(tmp_path), BatchDiscovery(series), episodes_spec="1-2,4")
+    run = _run_series(series, _quiet(tmp_path), BatchDiscovery(series), episodes_spec="3")
+    assert [(result.episode.number, result.status) for result in run.results] == [
+        (3, DownloadStatus.DONE)
+    ]
+    assert (run.report.done, run.report.on_disk, run.report.locked) == (1, 3, 1)
+    assert engine.report_line(run.report) == (
+        "complete: 4 of 5 (1 downloaded, 3 already on disk) — 1 locked (5)"
+    )
+    assert read_manifest(series_dir(tmp_path, series), SERIES_ID).complete_at is None
+    (series_dir(tmp_path, series) / "fake - Episode 04.mp4").unlink()
+    run = _run_series(series, _quiet(tmp_path), BatchDiscovery(series), episodes_spec="1")
+    assert engine.report_line(run.report) == "incomplete: 3 of 5 — 1 locked (5), 1 not downloaded"
+    rows = [DownloadResult(_episode(2), DownloadStatus.DONE, Path("/x/2.mp4"))]
+    assert engine.report_rows(series, rows, None)[1:] == [locked_result(series.episodes[4])]
+
+
+def test_dump_raw_gives_each_series_of_a_batch_its_own_folder(tmp_path):
+    """--dump-raw writes fixed file names (item_list_1.json, detail.json, …): in a batch each
+    series gets DIR/<series id>/, so no series overwrites another's payloads."""
+
+    class DumpingDiscovery(BatchDiscovery):
+        def discover(self, ref, options):
+            self.events.append(("dump", options.dump_dir))
+            return super().discover(ref, options)
+
+    raw = tmp_path / "raw"
+    discovery = DumpingDiscovery(make_series(numbers=(1,)), _numbered_series(1, SERIES_2, NAME_2))
+    common = {
+        "discovery": discovery,
+        "downloader": FakeDownloader(),
+        "sleep": lambda seconds: None,
+        "rng": FixedRandom(),
+    }
+    refs = [SeriesRef(SERIES_ID), SeriesRef(SERIES_2)]
+    engine.run_batch(refs, DiscoveryOptions(dump_dir=raw), _quiet(tmp_path / "a"), **common)
+    dumps = [event[1] for event in discovery.events if event[0] == "dump"]
+    assert dumps == [raw / SERIES_ID, raw / SERIES_2]
+    discovery.events.clear()
+    engine.run_batch(refs[:1], DiscoveryOptions(dump_dir=raw), _quiet(tmp_path / "b"), **common)
+    assert [event[1] for event in discovery.events if event[0] == "dump"] == [raw]  # one: DIR
