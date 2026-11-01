@@ -38,14 +38,14 @@ RUNTIME_PARTS = ("manifest.json", "_locales", "icons", "src")
 CHROMIUM = Path(os.environ.get("DRAMAFETCH_CHROMIUM") or "/opt/pw-browsers/chromium")
 TEST_HOST_PERMISSION = "http://127.0.0.1/*"
 APP_PATH = "src/app/app.html"
-#: Test pacing: no pause between episodes, a short (announced) rest between series and jobs.
+#: Test pacing: no pause between episodes, a short (announced) rest between series and jobs. The
+#: long break keeps its defaults: it is due only every 100 attempts, and a shorter
+#: `longRestMinS` would make every gap an "idle break" that resets the failure streak.
 TEST_PACING: dict[str, float] = {
     "delayMinS": 0,
     "delayMaxS": 0,
     "restMinS": 0.2,
     "restMaxS": 0.3,
-    "longRestMinS": 0,
-    "longRestMaxS": 0,
     "pageDelayS": 0,
     "discoveryTimeoutS": 15,
     "activateAfterS": 2,

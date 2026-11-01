@@ -521,6 +521,7 @@ export class Downloader {
     try {
       return await this.downloadEpisode(episode, context);
     } catch (error) {
+      if (error instanceof Error && error.name === "StopRequested") throw error; // the user's Stop
       let status = /** @type {import("../lib/messages.js").Status} */ (FAILED);
       if (error instanceof LoginRequiredError) status = FAILED_LOGIN;
       else if (error instanceof RateLimitedError) status = FAILED_RATE_LIMITED;
