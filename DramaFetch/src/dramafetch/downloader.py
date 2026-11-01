@@ -17,8 +17,9 @@ FAILED_UNAVAILABLE with ``models.DRM_MESSAGE`` — also when yt-dlp failed after
 when a run finds it already under the episode's name (:func:`existing_file_result`, shared with
 the browser engine), so that no encrypted file is ever adopted as the episode. yt-dlp's own "This
 video is DRM protected" maps to the same status and message
-(:meth:`YtDlpDownloader.classify_error`, :func:`describe_failure`), and
-``allow_unplayable_formats`` is never set. Then every file is verified
+(:meth:`YtDlpDownloader.classify_error`, :func:`describe_failure`) — unless the message also
+names a refusal (login, HTTP 429, HTTP 403): that stops the run first, and is never remembered as
+DRM —, and ``allow_unplayable_formats`` is never set. Then every file is verified
 (``dramafetch.media.verify_video``: an MP4 that parses, is not cut short, has an audio track and
 lasts about ``Episode.duration_s``) unless ``DownloadOptions.verify`` is off; a file that fails is
 renamed ``<name> (incomplete).<ext>`` (``media.quarantine``; one the OS will not rename is deleted
@@ -82,6 +83,10 @@ MAX_MESSAGE_LEN = 300
 #: refusal every retry is one more request against the same address, which is what trips TikTok's
 #: protection. The CLI rejects larger values up front.
 MAX_RETRIES = 3
+#: The message of a payload-flagged DRM episode without hints (``locked_result``; the catalog always
+#: gives hints): never :data:`~dramafetch.models.DRM_MESSAGE`, the verdict of a download, which the
+#: manifest remembers.
+PAYLOAD_DRM_MESSAGE = f"{DRM_MARK} (flagged in the episode list): DramaFetch does not decrypt it"
 #: Prefix of the message of a FAILED_BLOCKED result (HTTP 403 / forbidden / access denied).
 BLOCKED_MESSAGE = (
     "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again"
@@ -212,10 +217,15 @@ def locked_result(episode: Episode) -> DownloadResult:
     """The SKIPPED_LOCKED result for a locked episode (``Episode.locked``: the payload says this
     session cannot play it): ``"looks locked: <hints>"``, or — the payload itself flags DRM
     (``Episode.drm``) — ``"protected by DRM (<hints>): DramaFetch does not decrypt it"``
-    (:data:`~dramafetch.models.DRM_MARK` first, as every DRM message)."""
+    (:data:`~dramafetch.models.DRM_MARK` first, as every DRM message; without hints
+    :data:`PAYLOAD_DRM_MESSAGE`). A payload flag is never the verdict of a download, so the
+    manifest does not remember it (``Manifest.drm_protected``): the next run reads the payload
+    again."""
     hints = "; ".join(episode.lock_hints)
-    if episode.drm:
-        message = f"{DRM_MARK} ({hints}): DramaFetch does not decrypt it" if hints else DRM_MESSAGE
+    if episode.drm and hints:
+        message = f"{DRM_MARK} ({hints}): DramaFetch does not decrypt it"
+    elif episode.drm:
+        message = PAYLOAD_DRM_MESSAGE
     else:
         message = f"looks locked: {hints}" if hints else "looks locked"
     return DownloadResult(episode=episode, status=DownloadStatus.SKIPPED_LOCKED, message=message)
@@ -572,16 +582,16 @@ class YtDlpDownloader:
     def classify_error(message: str) -> DownloadStatus:
         """Map a yt-dlp error message to the closest DownloadStatus (case-insensitive).
 
-        DRM comes first (``\\bdrm\\b``: yt-dlp's "This video is DRM protected" ->
-        FAILED_UNAVAILABLE, whatever else the message says: no retry, login or wait can change
-        it; :func:`describe_failure` then puts :data:`~dramafetch.models.DRM_MESSAGE` first). Then
-        login wording, then HTTP 429 (``\\b429\\b``, "too many requests", "rate limit"), then
-        HTTP 403 ("HTTP Error 403", "forbidden", "access denied" -> FAILED_BLOCKED), then the
-        "unavailable" family; anything else is a plain FAILED.
+        The anti-bot rules come first, so that a refusal always stops the run (and HTTP 403 / 429
+        start the cooldown) even when the message also names DRM: login wording ->
+        FAILED_LOGIN, then HTTP 429 (``\\b429\\b``, "too many requests", "rate limit") ->
+        FAILED_RATE_LIMITED, then HTTP 403 ("HTTP Error 403", "forbidden", "access denied") ->
+        FAILED_BLOCKED. Then DRM wording (``\\bdrm\\b``: yt-dlp's "This video is DRM protected")
+        -> FAILED_UNAVAILABLE — no retry or wait changes it; :func:`describe_failure` then puts
+        :data:`~dramafetch.models.DRM_MESSAGE` first, which is how the manifest remembers it —,
+        then the "unavailable" family; anything else is a plain FAILED.
         """
         text = message.lower()
-        if mentions_drm(text):
-            return DownloadStatus.FAILED_UNAVAILABLE
         if any(
             marker in text
             for marker in ("requiring login", "login required", "log in", "logged-in", "logged in")
@@ -591,6 +601,8 @@ class YtDlpDownloader:
             return DownloadStatus.FAILED_RATE_LIMITED
         if _BLOCKED_RE.search(text):
             return DownloadStatus.FAILED_BLOCKED
+        if mentions_drm(text):
+            return DownloadStatus.FAILED_UNAVAILABLE
         if any(
             marker in text
             for marker in (

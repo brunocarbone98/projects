@@ -3,6 +3,8 @@
 Routes::
 
     GET  /                          the page (static/index.html, read through importlib.resources)
+    GET  /favicon.ico               -> 204, no body (also HEAD; the page has no icon, and the
+                                    browser's automatic request needs no token)
     POST /api/session  {"token"}    -> 204 + the session cookie, or 401 (needs no token itself)
     POST /api/resolve  {"url", "refresh"?}  -> the series and its episodes (each with its
                                     cover_url and on_disk) plus "on_disk_count", "from_cache" and
@@ -25,9 +27,10 @@ Routes::
 Rules: the server binds to the host it is given and nothing else (the CLI defaults to 127.0.0.1; an
 empty host is refused), and binding to anything but loopback requires an access token
 (``DramaFetchServer(..., token=...)``; ``dramafetch serve --token``). With a token, every request
-except ``GET /`` and ``POST /api/session`` must carry ``Authorization: Bearer <token>`` or the
-cookie ``dramafetch_session=<token>`` (compared with ``hmac.compare_digest``); otherwise it is
-answered 401 ``{"error": "token required", "kind": "auth", ...}`` before anything else happens — in
+except ``GET /``, ``GET /favicon.ico`` (an empty 204, answered before the check) and ``POST
+/api/session`` must carry ``Authorization: Bearer <token>`` or the cookie
+``dramafetch_session=<token>`` (compared with ``hmac.compare_digest``); otherwise it is answered
+401 ``{"error": "token required", "kind": "auth", ...}`` before anything else happens — in
 particular before any request to TikTok. ``POST /api/session`` with the right token sets that cookie
 (``HttpOnly; SameSite=Strict; Path=/; Max-Age=30 days``). Without a token (the loopback default)
 nothing is checked. JSON bodies are capped at 64 KiB (413). POSTs must carry ``Content-Type:
@@ -168,8 +171,14 @@ TOKEN_MIN_CHARS = 8
 TOKEN_REQUIRED_MESSAGE = "token required"
 TOKEN_HINT = "enter the token the server was started with"
 #: The only requests a token does not protect: the page itself and the endpoint that turns the
-#: token into the session cookie (which checks the token it is given).
+#: token into the session cookie (which checks the token it is given) — besides
+#: :data:`FAVICON_PATH`, answered before the token check.
 _PUBLIC_ROUTES = frozenset({("GET", "/"), ("GET", "/index.html"), ("POST", "/api/session")})
+#: The page has no icon, but a browser asks for this path on every page load: ``GET`` / ``HEAD``
+#: of exactly this path is answered ``204 No Content`` — no body, no file read — before the token
+#: check, so that the automatic request costs no 401 (a console error on every page load).
+FAVICON_PATH = "/favicon.ico"
+_FAVICON_METHODS = frozenset({"GET", "HEAD"})
 # RFC 6265 cookie-octets (visible ASCII without space, double quote, comma, semicolon or
 # backslash): the token travels back in `dramafetch_session=<token>` and after `Bearer `.
 _TOKEN_RE = re.compile(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+")
@@ -777,11 +786,23 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._dispatch("POST")
 
+    def do_HEAD(self) -> None:
+        """Only the favicon answers ``HEAD``; every other path keeps the stdlib's answer to a
+        method the server does not implement (501), as before."""
+        if urlsplit(self.path).path == FAVICON_PATH:
+            self._dispatch("HEAD")
+        else:
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
+
     def _dispatch(self, method: str) -> None:
         path = urlsplit(self.path).path
         try:
             if not self.app.host_allowed(self.headers.get("Host")):
                 raise HttpError(HTTPStatus.FORBIDDEN, "unexpected Host header")
+            if path == FAVICON_PATH and method in _FAVICON_METHODS:
+                # The browser's automatic request: an empty answer, before the token check.
+                self._send_headers(HTTPStatus.NO_CONTENT)
+                return
             self._require_token(method, path)
             if method == "GET":
                 self._get(path)
@@ -1194,7 +1215,8 @@ class _Handler(BaseHTTPRequestHandler):
     ) -> None:
         headers = [("Content-Type", content_type), ("Content-Length", str(len(body))), *extra]
         self._send_headers(status, headers)
-        self.wfile.write(body)
+        if self.command != "HEAD":  # an answer to HEAD (the favicon's 403) carries no body
+            self.wfile.write(body)
 
     def _send_headers(self, status: int, headers: Iterable[tuple[str, str]] = ()) -> None:
         """The status line, ``headers`` and the fixed security headers; no body (a 204 has none)."""

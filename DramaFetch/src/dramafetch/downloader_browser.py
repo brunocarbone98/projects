@@ -523,8 +523,10 @@ class BrowserDownloader:
         not this session's to play, so unless ``options.include_locked`` it is NOT adopted:
         ``episode.raw`` stays as it was, none of its URLs is requested, and the FAILED_UNAVAILABLE
         result to return is ``"<UNAVAILABLE_MESSAGE> (locked in a fresh episode list: <hints>)"``
-        (``"protected by DRM (in a fresh episode list: <hints>): …"`` for a DRM flag, which the
-        manifest then remembers like any DRM verdict).
+        (``"protected by DRM (in a fresh episode list: <hints>): …"`` for a DRM flag). Such a DRM
+        flag is the PAYLOAD's, not the verdict of a download, so the manifest does not remember it
+        (``Manifest.drm_protected``): the next run reads the episode list again and goes by what
+        it says then.
         """
         fresh = self._fresh_items.get(episode.series_id)
         if fresh is None or self._cache_spent(fresh.get(episode.item_id), stale):
