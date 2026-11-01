@@ -294,7 +294,7 @@
             font-size: 0.78rem; color: var(--accent-2);
             background: rgba(34, 211, 238, 0.08); padding: 4px 10px; border-radius: 6px;
         }
-        /* Status line under each project card: maintained around the clock by agents */
+        /* Status line under each project card: how Claude Code agents work on it */
         .project-ops {
             display: flex; align-items: flex-start; gap: 9px;
             font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.45;
@@ -514,6 +514,7 @@
                 <div class="pills">
                     <span class="pill">Java</span>
                     <span class="pill">TypeScript</span>
+                    <span class="pill">JavaScript</span>
                     <span class="pill">Python</span>
                     <span class="pill">SQL</span>
                     <span class="pill">C#</span>
@@ -521,6 +522,10 @@
                     <span class="pill">Node.js/Express</span>
                     <span class="pill">Next.js/React</span>
                     <span class="pill">FastAPI</span>
+                    <span class="pill">Chrome Extensions (Manifest V3)</span>
+                    <span class="pill">yt-dlp</span>
+                    <span class="pill">mutagen</span>
+                    <span class="pill">FFmpeg</span>
                 </div>
             </div>
             <div class="skill-cat reveal">
@@ -533,9 +538,13 @@
                     <span class="pill">REST Assured</span>
                     <span class="pill">Postman/Newman</span>
                     <span class="pill">JUnit</span>
+                    <span class="pill">pytest</span>
+                    <span class="pill">node:test</span>
                     <span class="pill">Cypress</span>
                     <span class="pill">Playwright</span>
                     <span class="pill">Page Object Model (POM)</span>
+                    <span class="pill">mypy</span>
+                    <span class="pill">Ruff</span>
                 </div>
             </div>
             <div class="skill-cat reveal">
@@ -578,6 +587,7 @@
                 <div class="pills">
                     <span class="pill">LLM Integration (OpenAI API, Claude)</span>
                     <span class="pill">AI Coding Assistants (GitHub Copilot)</span>
+                    <span class="pill">Claude Code (multi-agent workflows)</span>
                     <span class="pill">AI-driven Workflow Automation</span>
                 </div>
             </div>
@@ -661,6 +671,29 @@
                     <span>FastAPI</span>
                     <span>Docker</span>
                     <span>Railway</span>
+                </div>
+            </article>
+
+            <article class="project reveal">
+                <div class="icon">🎬</div>
+                <h3>DramaFetch</h3>
+                <p>
+                    Downloads whole short-drama series — several in one run — that your own
+                    TikTok account can already watch, for personal offline viewing, from a Python
+                    CLI, a local web page or a Chrome extension. It paces itself like one person
+                    watching, saves each episode exactly as served with its cover embedded,
+                    verifies every file and resumes interrupted runs — and it never unlocks paid
+                    episodes or bypasses DRM.
+                </p>
+                <div class="project-ops"><span class="dot"></span>Built with Claude Code multi-agent workflows — implementers, adversarial reviewers and a fixer per build</div>
+                <div class="tech-tags">
+                    <span>Python</span>
+                    <span>Playwright</span>
+                    <span>yt-dlp</span>
+                    <span>mutagen</span>
+                    <span>JavaScript</span>
+                    <span>Chrome Extension</span>
+                    <span>pytest</span>
                 </div>
             </article>
 

@@ -78,6 +78,15 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: DramaFetch/pyproject.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Chrome extension unit tests (node --test, no npm dependencies)
+        working-directory: DramaFetch/extension
+        run: node --test
+      - name: Chrome extension type check (checkJs, strict)
+        working-directory: DramaFetch/extension
+        run: npx -y -p typescript@5.9.3 tsc -p jsconfig.json
       - name: Install DramaFetch with the impersonate and dev extras
         run: pip install -e ".[impersonate,dev]"
       - name: Ruff lint
@@ -94,3 +103,13 @@ jobs:
         run: echo "DRAMAFETCH_CHROMIUM=$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')" >> "$GITHUB_ENV"
       - name: Integration test (real Chromium against the fake TikTok server)
         run: pytest -m integration
+      - name: Upload the Chrome extension (Load unpacked in chrome://extensions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dramafetch-extension
+          path: |
+            DramaFetch/extension/manifest.json
+            DramaFetch/extension/_locales
+            DramaFetch/extension/icons
+            DramaFetch/extension/src
+          if-no-files-found: error

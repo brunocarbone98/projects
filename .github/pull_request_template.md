@@ -36,6 +36,7 @@ Tick what you ran and paste the real results. Failing is failing (with the outpu
 
 - [ ] `.venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/mypy && .venv/bin/pytest` — unit tests against the fixtures and the local fake TikTok server; nothing reaches tiktok.com
 - [ ] `DRAMAFETCH_CHROMIUM=<path to a Chromium binary> .venv/bin/pytest -m integration` — a real Chromium against the fake server; skipped (not passed) when no Chromium is available
+- [ ] Chrome extension, from `extension/` (Node 22, no npm dependencies): `node --test` — unit tests of every module plus the manifest (permissions) and locales tests — and `npx -y -p typescript@5.9.3 tsc -p jsconfig.json` (strict `checkJs`); its parity tests run inside `pytest`, its end-to-end scenarios inside `pytest -m integration`
 
 **Not applicable**
 
