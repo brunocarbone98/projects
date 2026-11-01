@@ -39,7 +39,20 @@ import {
   verifyVideo,
 } from "../src/lib/mp4.js";
 
-/** @typedef {{op: string, path?: string, length?: number, expected?: number | null, contentType?: string, size?: number, video?: string, image?: string, kind?: string | null, name?: string, out?: string}} Case */
+/**
+ * @typedef {object} Case
+ * @property {string} op
+ * @property {string} [path]
+ * @property {number} [length]
+ * @property {number | null} [expected]
+ * @property {string} [contentType]
+ * @property {number} [size]
+ * @property {string} [video]
+ * @property {string} [image]
+ * @property {string | null} [kind]
+ * @property {string} [name]
+ * @property {string} [out]
+ */
 
 /** @type {Map<string, Uint8Array>} */
 const files = new Map();
@@ -84,7 +97,12 @@ function run(item) {
       return formatSize(Number(item.size));
     case "embed": {
       if (typeof item.out !== "string") throw new TypeError("an embed case needs an out path");
-      const embedded = embedCover(bytesOf(item.video), bytesOf(item.image), item.kind ?? null, item.name);
+      const embedded = embedCover(
+        bytesOf(item.video),
+        bytesOf(item.image),
+        item.kind ?? null,
+        item.name,
+      );
       writeFileSync(item.out, embedded);
       return { size: embedded.length };
     }

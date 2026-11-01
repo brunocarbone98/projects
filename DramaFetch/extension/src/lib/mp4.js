@@ -13,7 +13,7 @@
  * stream info (`MP4Info.load`: the length of the first `soun` track's `mdhd`, else the `mvhd`'s;
  * the codec of that track's first sample entry, `_as_entry.py` down to the AAC
  * AudioSpecificConfig), the tag list (`MP4Tags.load`: every `ilst` child must be readable, and
- * the parsers that can make the load fail — `covr`, `----`, `trkn`, `disk` — run as mutagen runs
+ * the parsers that can fail the load — `covr`, `----`, `trkn`, `disk` — run as mutagen runs
  * them) and the chapters' checks (`MP4Chapters`), all with mutagen's — and Python's — own error
  * texts. `verifyVideo` therefore gives the verdict `media.verify_video` gives, word for word:
  * `tests/test_extension_media.py` compares them on the fixture, every truncation of it, hostile
@@ -44,16 +44,16 @@ import { DRM_MESSAGE } from "./messages.js";
 
 // --------------------------------------------------------------------------------- constants
 
-/** A real episode is megabytes; a body under this is an error page (`downloader_browser.MIN_VIDEO_BYTES`). */
+/** A real episode is megabytes: a body under this is an error page (`downloader_browser`). */
 export const MIN_VIDEO_BYTES = 64 * 1024;
 /** A cover is kilobytes; a body under this is an error body (`thumbnails.MIN_IMAGE_BYTES`). */
 export const MIN_IMAGE_BYTES = 200;
-/** Bigger "covers" are error pages or abuse: never kept, never embedded (`thumbnails.MAX_COVER_BYTES`). */
+/** Bigger "covers" are error pages or abuse: never kept, never embedded (`thumbnails`). */
 export const MAX_COVER_BYTES = 5 * 1024 * 1024;
 /** Duration tolerance: `max(3 s, 5 %)` of the listed duration (`media.DURATION_TOLERANCE_*`). */
 export const DURATION_TOLERANCE_S = 3.0;
 export const DURATION_TOLERANCE_RATIO = 0.05;
-/** Top-level atoms a real MP4 is made of: the truncation walk trusts no other header (`media.KNOWN_ATOMS`). */
+/** Top-level atoms a real MP4 is made of: the truncation walk trusts no other (`media`). */
 export const KNOWN_ATOMS = /** @type {ReadonlySet<string>} */ (
   new Set([
     "ftyp",
@@ -76,8 +76,10 @@ export const KNOWN_ATOMS = /** @type {ReadonlySet<string>} */ (
 export const MAX_ATOMS = 1024;
 /** Box headers one DRM walk reads at most, every level together (`media._MAX_DRM_BOXES`). */
 export const MAX_DRM_BOXES = MAX_ATOMS;
-/** Sample-entry types of an encrypted track (`media.ENCRYPTED_SAMPLE_ENTRIES`, Common Encryption). */
-export const ENCRYPTED_SAMPLE_ENTRIES = /** @type {ReadonlySet<string>} */ (new Set(["encv", "enca"]));
+/** Sample-entry types of an encrypted track (`media.ENCRYPTED_SAMPLE_ENTRIES`, CENC). */
+export const ENCRYPTED_SAMPLE_ENTRIES = /** @type {ReadonlySet<string>} */ (
+  new Set(["encv", "enca"])
+);
 /** The Protection System Specific Header box (`media.PSSH_BOX`). */
 export const PSSH_BOX = "pssh";
 /** Nesting depth of the atom tree beyond which the reader gives up (no mutagen counterpart). */
@@ -115,12 +117,23 @@ const CONTENT_TYPES = /** @type {ReadonlyMap<string, ImageKind>} */ (
   ])
 );
 /** The atoms mutagen descends into (`mutagen/mp4/_atom.py` `_CONTAINERS`). */
-const CONTAINERS = new Set(["moov", "udta", "trak", "mdia", "meta", "ilst", "stbl", "minf", "moof", "traf"]);
+const CONTAINERS = new Set([
+  "moov",
+  "udta",
+  "trak",
+  "mdia",
+  "meta",
+  "ilst",
+  "stbl",
+  "minf",
+  "moof",
+  "traf",
+]);
 /** The boxes from a `trak` down to its sample descriptions (`media._TRACK_PATH`). */
 const TRACK_PATH = ["mdia", "minf", "stbl", "stsd"];
 /** mutagen's tag parse errors, which only mark one tag as failed (`MP4Tags.load`). */
 const SWALLOWED = new Set(["MP4MetadataError", "MP4MetadataValueError"]);
-/** mutagen's own exception classes: `MP4.load` lets them through unchanged (`except error: raise`). */
+/** mutagen's own exception classes: `MP4.load` lets them through (`except error: raise`). */
 const MUTAGEN_ERRORS = new Set([
   "error",
   "MP4MetadataError",
@@ -129,7 +142,9 @@ const MUTAGEN_ERRORS = new Set([
   "MP4MetadataValueError",
 ]);
 /** `DecoderSpecificInfo._FREQS`. */
-const FREQS = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+const FREQS = [
+  96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
 /** AAC object types with a GASpecificConfig (`DecoderSpecificInfo._parse`). */
 const GA_TYPES = new Set([1, 2, 3, 4, 6, 7, 17, 19, 20, 21, 22, 23]);
 /** AAC object types followed by an epConfig (`DecoderSpecificInfo._parse`). */
@@ -143,7 +158,7 @@ const EMPTY = new Uint8Array(0);
 
 // ------------------------------------------------------------------------------- the errors
 
-/** A body that is not an MP4 mutagen could read (`errors.MediaError`): `not a valid MP4 (<detail>)`. */
+/** Bytes that are not an MP4 mutagen could read (`errors.MediaError`): `not a valid MP4 (…)`. */
 export class MediaError extends Error {
   /** @param {string} message */
   constructor(message) {
@@ -490,10 +505,15 @@ function utf8DecodeError(data) {
       continue;
     }
     const reason =
-      error === 1 ? "invalid start byte" : error === 5 ? "unexpected end of data" : "invalid continuation byte";
+      error === 1
+        ? "invalid start byte"
+        : error === 5
+          ? "unexpected end of data"
+          : "invalid continuation byte";
     const stop = error === 1 ? s + 1 : error === 5 ? end : s + error - 1;
     return stop - s === 1
-      ? `'utf-8' codec can't decode byte 0x${data[s].toString(16).padStart(2, "0")} in position ${s}: ${reason}`
+      ? `'utf-8' codec can't decode byte 0x${data[s].toString(16).padStart(2, "0")} ` +
+          `in position ${s}: ${reason}`
       : `'utf-8' codec can't decode bytes in position ${s}-${stop - 1}: ${reason}`;
   }
   return null;
@@ -594,7 +614,8 @@ function concat(...parts) {
  */
 function sameBytes(left, right) {
   if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return false;
+  for (let index = 0; index < left.length; index += 1)
+    if (left[index] !== right[index]) return false;
   return true;
 }
 
@@ -605,7 +626,8 @@ function sameBytes(left, right) {
  */
 function startsWith(data, prefix) {
   if (data.length < prefix.length) return false;
-  for (let index = 0; index < prefix.length; index += 1) if (data[index] !== prefix[index]) return false;
+  for (let index = 0; index < prefix.length; index += 1)
+    if (data[index] !== prefix[index]) return false;
   return true;
 }
 
@@ -705,7 +727,8 @@ class Atom {
    * @param {number} level
    */
   constructor(file, level) {
-    if (level > MAX_NESTING) throw new PyError("maximum recursion depth exceeded", "RecursionError");
+    if (level > MAX_NESTING)
+      throw new PyError("maximum recursion depth exceeded", "RecursionError");
     file.atoms += 1;
     if (file.atoms > MAX_PARSED_ATOMS) throw new PyError("too many atoms", "AtomError");
     /** @type {number} */
@@ -724,7 +747,8 @@ class Atom {
       if (large.length < 8) throw new PyError("truncated data", "AtomError");
       exact = u64(large, 0);
       this.dataOffset += 8;
-      if (exact < 16n) throw new PyError("64 bit atom length can only be 16 and higher", "AtomError");
+      if (exact < 16n)
+        throw new PyError("64 bit atom length can only be 16 and higher", "AtomError");
       length = Number(exact);
     } else if (length === 0) {
       if (level !== 0) throw new PyError("only a top-level atom can have zero length", "AtomError");
@@ -787,7 +811,8 @@ function parseAtoms(file) {
 function child(atom, names) {
   let current = atom;
   for (const name of names) {
-    if (current.children === null) throw keyError(`${pyBytesRepr(current.name)} is not a container`);
+    if (current.children === null)
+      throw keyError(`${pyBytesRepr(current.name)} is not a container`);
     const found = current.children.find((candidate) => candidate.name === name);
     if (found === undefined) throw keyError(`${pyBytesRepr(name)} not found`);
     current = found;
@@ -1133,7 +1158,8 @@ function parseDescriptor(file, parse) {
   let done = false;
   for (let index = 0; index < 4 && !done; index += 1) {
     const one = file.read(1);
-    if (one.length !== 1) throw new PyError("unpack requires a buffer of 1 bytes", "DescriptorError");
+    if (one.length !== 1)
+      throw new PyError("unpack requires a buffer of 1 bytes", "DescriptorError");
     length = length * 128 + (one[0] & 0x7f);
     done = one[0] >> 7 === 0;
   }
@@ -1417,9 +1443,11 @@ function* dataAtoms(atom, data) {
   let pos = 0;
   while (pos < atom.length - 8) {
     const head = data.subarray(pos, pos + 12);
-    if (head.length !== 12) throw new PyError(`truncated atom ${pyBytesRepr(atom.name)}`, "MP4MetadataError");
+    if (head.length !== 12)
+      throw new PyError(`truncated atom ${pyBytesRepr(atom.name)}`, "MP4MetadataError");
     const length = u32(head, 0);
-    if (length < 1) throw new PyError(`atom ${pyBytesRepr(atom.name)} has a length of zero`, "MP4MetadataError");
+    if (length < 1)
+      throw new PyError(`atom ${pyBytesRepr(atom.name)} has a length of zero`, "MP4MetadataError");
     const name = latin1(head.subarray(4, 8));
     if (name !== "data") {
       throw new PyError(
@@ -1428,7 +1456,8 @@ function* dataAtoms(atom, data) {
       );
     }
     const chunk = data.subarray(pos + 16, pos + length);
-    if (chunk.length !== length - 16) throw new PyError(`truncated atom ${pyBytesRepr(atom.name)}`, "MP4MetadataError");
+    if (chunk.length !== length - 16)
+      throw new PyError(`truncated atom ${pyBytesRepr(atom.name)}`, "MP4MetadataError");
     yield chunk;
     pos += length;
   }
@@ -1453,14 +1482,17 @@ function parseCover(atom, data) {
     if (name !== "data") {
       if (name === "name") {
         // mutagen loops forever on a `name` atom of length 0; here the tag is failed instead.
-        if (length === 0) throw new PyError("a 'name' atom of length 0 inside 'covr'", "MP4MetadataError");
+        if (length === 0)
+          throw new PyError("a 'name' atom of length 0 inside 'covr'", "MP4MetadataError");
         pos += length;
         continue;
       }
       throw new PyError(`unexpected atom ${pyBytesRepr(name)} inside 'covr'`, "MP4MetadataError");
     }
-    if (length < 1) throw new PyError(`atom ${pyBytesRepr(atom.name)} has a length of zero`, "MP4MetadataError");
-    if (imageformat !== COVER_FORMATS.jpeg && imageformat !== COVER_FORMATS.png) imageformat = COVER_FORMATS.jpeg;
+    if (length < 1)
+      throw new PyError(`atom ${pyBytesRepr(atom.name)} has a length of zero`, "MP4MetadataError");
+    if (imageformat !== COVER_FORMATS.jpeg && imageformat !== COVER_FORMATS.png)
+      imageformat = COVER_FORMATS.jpeg;
     values.push({ data: data.subarray(pos + 16, pos + length), imageformat });
     pos += length;
   }
@@ -1492,7 +1524,8 @@ function checkFreeform(atom, data) {
         "MP4MetadataError",
       );
     }
-    if (length < 1) throw new PyError(`atom ${pyBytesRepr(atom.name)} has a length of zero`, "MP4MetadataError");
+    if (length < 1)
+      throw new PyError(`atom ${pyBytesRepr(atom.name)} has a length of zero`, "MP4MetadataError");
     if (data.subarray(pos + 8, pos + 9).length === 0) {
       throw new PyError("ord() expected a character, but string of length 0 found", "TypeError");
     }
@@ -1534,12 +1567,15 @@ function checkChapters(atoms, file) {
     const titleLength = chapters[pos];
     pos += 1;
     const problem = utf8DecodeError(chapters.subarray(pos, pos + titleLength));
-    if (problem !== null) throw new PyError(`chapter ${index} title: ${problem}`, "MP4MetadataError");
+    if (problem !== null)
+      throw new PyError(`chapter ${index} title: ${problem}`, "MP4MetadataError");
     pos += titleLength;
   }
 }
 
-/** @typedef {{length: number, codec: string, covers: CoverValue[] | null, atoms: Atom[]}} Mp4Read */
+/**
+ * @typedef {{length: number, codec: string, covers: CoverValue[] | null, atoms: Atom[]}} Mp4Read
+ */
 
 /**
  * `mutagen.mp4.MP4(file)`: the atom tree, the stream info and the covers, or the PyError
@@ -1646,7 +1682,8 @@ export function atomProblem(input) {
  * @returns {string}
  */
 function cutShort(kind, have, need) {
-  if (need === null) return `truncated MP4 (${kind} atom cut short: ${have} bytes left for its header)`;
+  if (need === null)
+    return `truncated MP4 (${kind} atom cut short: ${have} bytes left for its header)`;
   return `truncated MP4 (${kind} atom cut short: ${have} of ${need} bytes)`;
 }
 
@@ -1826,8 +1863,12 @@ export function drmProblem(input) {
 export function bodyProblem(input, contentType = "") {
   const body = bytesOf(input);
   const kind = mediaType(contentType) || "an untyped body";
-  if (body.length < MIN_VIDEO_BYTES) return `${formatSize(body.length)} of ${kind} instead of a video`;
-  if (!VIDEO_CONTENT_TYPES.some((prefix) => kind.startsWith(prefix)) && !contains(body.subarray(0, 32), MP4_MAGIC)) {
+  if (body.length < MIN_VIDEO_BYTES)
+    return `${formatSize(body.length)} of ${kind} instead of a video`;
+  if (
+    !VIDEO_CONTENT_TYPES.some((prefix) => kind.startsWith(prefix)) &&
+    !contains(body.subarray(0, 32), MP4_MAGIC)
+  ) {
     return `${kind} instead of a video`;
   }
   return null;
@@ -1866,7 +1907,8 @@ export function imageKind(input, contentType = "") {
 export function imageProblem(input, contentType = "") {
   const data = bytesOf(input);
   const kind = mediaType(contentType) || "an untyped body";
-  if (data.length < MIN_IMAGE_BYTES) return `${formatSize(data.length)} of ${kind} instead of an image`;
+  if (data.length < MIN_IMAGE_BYTES)
+    return `${formatSize(data.length)} of ${kind} instead of an image`;
   return `${kind} instead of an image`;
 }
 
@@ -1958,7 +2000,10 @@ function rebuiltIlst(video, ilst, covr) {
   let placed = false;
   for (const tag of ilst.children ?? []) {
     if (tag.offset + tag.length > ilst.offset + ilst.length) {
-      throw new PyError(`${pyBytesRepr(tag.name)} runs past the end of its ilst`, "MP4MetadataError");
+      throw new PyError(
+        `${pyBytesRepr(tag.name)} runs past the end of its ilst`,
+        "MP4MetadataError",
+      );
     }
     if (tag.name === "covr") {
       if (!placed) parts.push(covr);
@@ -1983,12 +2028,14 @@ function grow(out, atom, delta) {
   if (size === 0) return;
   if (size === 1) {
     const grown = u64(out, atom.offset + 8) + BigInt(delta);
-    if (grown < 16n || grown > U64_MAX) throw new PyError(`${pyBytesRepr(atom.name)} atom too large`, "MP4MetadataError");
+    if (grown < 16n || grown > U64_MAX)
+      throw new PyError(`${pyBytesRepr(atom.name)} atom too large`, "MP4MetadataError");
     setU64(out, atom.offset + 8, grown);
     return;
   }
   const grown = size + delta;
-  if (grown < 8 || grown > U32_MAX) throw new PyError(`${pyBytesRepr(atom.name)} atom too large`, "MP4MetadataError");
+  if (grown < 8 || grown > U32_MAX)
+    throw new PyError(`${pyBytesRepr(atom.name)} atom too large`, "MP4MetadataError");
   setU32(out, atom.offset, grown);
 }
 
@@ -2004,7 +2051,8 @@ function grow(out, atom, delta) {
  * @param {Atom} moov
  */
 function shiftChunkOffsets(out, table, at, removed, delta, moov) {
-  if (removed > 0 && table.offset >= at && table.offset < at + removed) return; // a tag, not a table
+  // A box called `stco` inside the replaced `ilst` is a tag, not a table.
+  if (removed > 0 && table.offset >= at && table.offset < at + removed) return;
   if (table.offset + table.length > moov.offset + moov.length) throw wrongOffset(table.name);
   const width = table.name === "co64" ? 8 : 4;
   const position = table.offset > at ? table.offset + delta : table.offset;
@@ -2041,13 +2089,18 @@ function shiftChunkOffsets(out, table, at, removed, delta, moov) {
  * @returns {Uint8Array}
  */
 function writeCover(video, image, format) {
-  const before = readMp4(video); // what `MP4(copy)` loads first: a file mutagen cannot read fails here
+  // What `MP4(copy)` loads first: a file mutagen cannot read fails here.
+  const before = readMp4(video);
   const atoms = before.atoms;
   if (atoms.some((atom) => atom.name === "moof")) {
-    throw new PyError("a fragmented MP4 (moof): its absolute offsets are not rewritten", "MP4MetadataError");
+    throw new PyError(
+      "a fragmented MP4 (moof): its absolute offsets are not rewritten",
+      "MP4MetadataError",
+    );
   }
   const moov = top(atoms, ["moov"]);
-  if (moov.offset + moov.length > video.length) throw new PyError("the moov atom is cut short", "MP4MetadataError");
+  if (moov.offset + moov.length > video.length)
+    throw new PyError("the moov atom is cut short", "MP4MetadataError");
   const covr = coverAtom(image, format);
   /** @type {{at: number, removed: number, insert: Uint8Array, parents: Atom[]}} */
   let edit;
@@ -2055,7 +2108,12 @@ function writeCover(video, image, format) {
   const udtaPath = pathOf(atoms, ["moov", "udta"]);
   if (ilstPath !== null) {
     const [, udta, meta, ilst] = ilstPath;
-    edit = { at: ilst.offset, removed: ilst.length, insert: rebuiltIlst(video, ilst, covr), parents: [moov, udta, meta] };
+    edit = {
+      at: ilst.offset,
+      removed: ilst.length,
+      insert: rebuiltIlst(video, ilst, covr),
+      parents: [moov, udta, meta],
+    };
   } else {
     const hdlr = render("hdlr", MDIR_HDLR_PAYLOAD);
     const meta = render("meta", concat(new Uint8Array(4), hdlr, render("ilst", covr)));
@@ -2064,7 +2122,12 @@ function writeCover(video, image, format) {
       edit = { at: udtaPath[1].dataOffset, removed: 0, insert: meta, parents: [moov, udtaPath[1]] };
     } else {
       // A new `udta` goes last in the `moov` (mutagen puts it first): the tracks keep their order.
-      edit = { at: moov.offset + moov.length, removed: 0, insert: render("udta", meta), parents: [moov] };
+      edit = {
+        at: moov.offset + moov.length,
+        removed: 0,
+        insert: render("udta", meta),
+        parents: [moov],
+      };
     }
   }
   for (const parent of edit.parents) {
@@ -2079,8 +2142,10 @@ function writeCover(video, image, format) {
   out.set(video.subarray(edit.at + edit.removed), edit.at + edit.insert.length);
   if (delta !== 0) {
     for (const parent of edit.parents) grow(out, parent, delta);
-    for (const table of findAll(moov, "stco", true)) shiftChunkOffsets(out, table, edit.at, edit.removed, delta, moov);
-    for (const table of findAll(moov, "co64", true)) shiftChunkOffsets(out, table, edit.at, edit.removed, delta, moov);
+    for (const table of findAll(moov, "stco", true))
+      shiftChunkOffsets(out, table, edit.at, edit.removed, delta, moov);
+    for (const table of findAll(moov, "co64", true))
+      shiftChunkOffsets(out, table, edit.at, edit.removed, delta, moov);
   }
   const after = readMp4(out);
   const back = after.covers === null ? undefined : after.covers[0];
