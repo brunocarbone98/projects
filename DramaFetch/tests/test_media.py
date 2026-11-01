@@ -1,11 +1,13 @@
-"""media: the integrity check of a saved video — mutagen probe, atom walk, audio, duration — and
-the `(incomplete)` quarantine naming."""
+"""media: the integrity check of a saved video — mutagen probe, atom walk, audio, duration — the
+`(incomplete)` quarantine naming, and the structural DRM check (encrypted tracks) with the deletion
+of an encrypted file."""
 
 from __future__ import annotations
 
 import errno
 import logging
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -17,18 +19,33 @@ from dramafetch.errors import MediaError
 from dramafetch.media import (
     DURATION_TOLERANCE_RATIO,
     DURATION_TOLERANCE_S,
+    ENCRYPTED_SAMPLE_ENTRIES,
     INCOMPLETE_MARK,
     INCOMPLETE_PREFIX,
+    PSSH_BOX,
     RENAME_RETRIES,
     RENAME_RETRY_DELAY_S,
     VideoProbe,
     atom_problem,
+    discard,
+    discard_note,
+    drm_problem,
+    drm_problem_in,
     probe_video,
     quarantine,
     quarantine_note,
     verify_video,
 )
-from dramafetch.models import DownloadOptions, Episode
+from dramafetch.models import DRM_MARK, DRM_MESSAGE, DownloadOptions, Episode
+from encrypted_mp4 import (
+    child,
+    encrypted_mp4,
+    pssh_box,
+    sample_entries,
+    with_drm_words_in_mdat,
+    with_moov_pssh,
+    with_top_level_pssh,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny.mp4"
 TINY_MP4 = FIXTURE.read_bytes()  # 3 s of 160x120 H.264 + silent AAC; `moov` before `mdat`

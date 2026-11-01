@@ -86,26 +86,41 @@ class Episode:
     # One of ACCESS_MODES: "free", "unlocked" (paid, and playable with THIS session: the user's own
     # account bought it or subscribes) or "locked" (skipped unless --include-locked). ``""`` derives
     # it in ``__post_init__`` — "locked" when ``lock_hints`` (or ``drm``) is set, else "free" — so a
-    # caller that sets only ``lock_hints`` keeps the old meaning; ``catalog.episode_from_item``
-    # always passes an explicit value.
+    # caller that sets only ``lock_hints`` keeps the old meaning, also when it assigns them later;
+    # ``catalog.episode_from_item`` always passes an explicit value. Any other value: ValueError.
     access: str = ""
     # A pricing or entitlement clue is present (the episode is sold, whether or not this account
     # has unlocked it). Set by catalog.
     paid: bool = False
     # The payload itself says the episode is DRM-protected / encrypted (set by catalog). Such an
-    # episode is always "locked": DramaFetch never decrypts anything.
+    # episode is always "locked" (ValueError otherwise): DramaFetch never decrypts anything.
     drm: bool = False
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    # True while ``access`` is derived (no explicit value was given): assigning ``lock_hints`` or
+    # ``drm`` afterwards derives it again, the way ``locked`` always followed ``lock_hints``.
+    _access_derived: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.access:
-            self.access = "locked" if self.lock_hints or self.drm else "free"
+            object.__setattr__(self, "access", _derived_access(self.lock_hints, self.drm))
+            object.__setattr__(self, "_access_derived", True)
         if self.access not in ACCESS_MODES:
             raise ValueError(
                 f"Episode.access must be one of {', '.join(ACCESS_MODES)}, not {self.access!r}"
             )
         if self.drm and self.access != "locked":
             raise ValueError("a DRM-protected episode is always locked: DramaFetch never decrypts")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        object.__setattr__(self, name, value)
+        if "_access_derived" not in self.__dict__:
+            return  # still inside __init__: __post_init__ derives and checks
+        if name == "access":
+            object.__setattr__(self, "_access_derived", not value)
+            if not value:
+                object.__setattr__(self, "access", _derived_access(self.lock_hints, self.drm))
+        elif name in ("lock_hints", "drm") and self._access_derived:
+            object.__setattr__(self, "access", _derived_access(self.lock_hints, self.drm))
 
     @property
     def locked(self) -> bool:
@@ -115,6 +130,12 @@ class Episode:
     def page_url(self) -> str:
         """The ordinary video page yt-dlp understands. TikTok ignores the username segment."""
         return f"{TIKTOK_BASE_URL}/@{self.author or '_'}/video/{self.item_id}"
+
+
+def _derived_access(lock_hints: tuple[str, ...], drm: bool) -> str:
+    """The access of an Episode built without one: any hint (or DRM) meant "locked" before the
+    access model, so it still does; nothing at all means "free"."""
+    return "locked" if lock_hints or drm else "free"
 
 
 @dataclass
