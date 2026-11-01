@@ -60,7 +60,7 @@ _DRM_STATUSES = frozenset(
     {DownloadStatus.FAILED_UNAVAILABLE.value, DownloadStatus.SKIPPED_LOCKED.value}
 )
 #: How a DRM verdict of a DOWNLOAD starts: ``models.DRM_MESSAGE`` (an encrypted file, both engines;
-#: yt-dlp's own "DRM protected", which ``downloader.describe_failure`` puts it before) or
+#: yt-dlp's own "DRM protected", which ``downloader.describe_failure`` prefixes with it) or
 #: ``models.DRM_REMEMBERED_MESSAGE`` (a run that skipped the episode for that verdict). A payload's
 #: DRM flag (``protected by DRM (<hints>): …``, also from a fresh episode list) is none of them: the
 #: payload is read again on every run, so remembering it would add nothing and would keep skipping
