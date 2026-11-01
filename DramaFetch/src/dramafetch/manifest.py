@@ -63,8 +63,8 @@ _DRM_STATUSES = frozenset(
 #: yt-dlp's own "DRM protected", which ``downloader.describe_failure`` prefixes with it) or
 #: ``models.DRM_REMEMBERED_MESSAGE`` (a run that skipped the episode for that verdict). A payload's
 #: DRM flag (``protected by DRM (<hints>): …``, also from a fresh episode list) is none of them: the
-#: payload is read again on every run, so remembering it would add nothing and would keep skipping
-#: the episode after TikTok stopped flagging it.
+#: payload is read again whenever the series is listed, so remembering it would add nothing and
+#: would keep skipping the episode after TikTok stopped flagging it.
 _DRM_VERDICTS = (DRM_MESSAGE, DRM_REMEMBERED_MESSAGE)
 
 _RESERVED_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
@@ -309,7 +309,7 @@ class Manifest:
         Retrying does not change that verdict, so ``engine.download_series`` skips such an
         episode without a request unless ``include_locked``. A row written for a payload's DRM
         flag (``downloader.locked_result``, a fresh list's refusal in the browser engine) is not
-        remembered: the next run reads the payload again."""
+        remembered: the payload is read again whenever the series is listed."""
         entry = self.entries.get(number)
         return (
             entry is not None

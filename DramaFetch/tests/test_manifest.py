@@ -615,7 +615,8 @@ def test_drm_protected_needs_a_download_verdict_in_a_failed_unavailable_or_skipp
     message, and ``drm_protected`` reads it back — from the two statuses a DRM outcome is recorded
     with, and only for a message that starts with ``DRM_MESSAGE`` (an encrypted file, both
     engines; yt-dlp's own "DRM protected") or ``DRM_REMEMBERED_MESSAGE`` (the memory's own skip).
-    A payload's DRM flag is not remembered: the payload is read again on every run."""
+    A payload's DRM flag is not remembered: the payload is read again whenever the series is
+    listed."""
     manifest = Manifest(tmp_path / MANIFEST_FILENAME, "123", "Show")
     flagged = Episode(9, "id9", "t", "123", lock_hints=("isDrm=True",), drm=True)
     yt_dlp = describe_failure(DownloadStatus.FAILED_UNAVAILABLE, YT_DLP_DRM)

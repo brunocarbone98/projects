@@ -38,7 +38,7 @@ DRM_MESSAGE = f"{DRM_MARK} (encrypted tracks): DramaFetch does not decrypt it"
 #: The message of an episode skipped because an earlier run's DOWNLOAD found it protected by DRM
 #: (``Manifest.drm_protected``): no request — retrying cannot change that verdict — unless
 #: ``--include-locked``. A row with it keeps the memory; a payload's DRM flag is never remembered
-#: (the payload is read again on every run).
+#: (the payload is read again whenever the series is listed).
 DRM_REMEMBERED_MESSAGE = (
     f"{DRM_MARK} (found by an earlier run): DramaFetch does not decrypt it; "
     "--include-locked tries again"

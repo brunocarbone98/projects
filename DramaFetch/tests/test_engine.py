@@ -2626,7 +2626,8 @@ def test_the_report_of_a_selection_counts_a_remembered_drm_episode_as_locked(tmp
 
 
 # --------------------------------------------------------------------------- build 7b
-# The DRM memory holds only what a DOWNLOAD found (a payload flag is read again on every run);
+# The DRM memory holds only what a DOWNLOAD found (a payload flag is read again whenever the
+# series is listed);
 # what cannot be downloaded is left out of completeness, so a series whose only missing episodes
 # are DRM-protected is marked complete and skipped; and a refusal wins over DRM wording.
 
@@ -2755,9 +2756,9 @@ def _payload_series(*items):
 
 
 def test_a_payload_drm_flag_is_not_remembered_the_next_run_reads_the_payload_again(tmp_path):
-    """The payload is read again on every run, so its DRM flag is never remembered: a run that
-    still finds it skips the episode for the payload's reason, and once TikTok stops flagging it
-    the next run asks for it — with the same session."""
+    """The payload is read again whenever the series is listed, so its DRM flag is never
+    remembered: a run that still finds it skips the episode for the payload's reason, and once
+    TikTok stops flagging it the next run asks for it — with the same session."""
     flagged = _payload_series(_payload_item(1), _payload_item(2, isDrm=True))
     assert [episode.drm for episode in flagged.episodes] == [False, True]
     events = []
@@ -2780,6 +2781,28 @@ def test_a_payload_drm_flag_is_not_remembered_the_next_run_reads_the_payload_aga
     results, _, _ = _run(clear, _quiet(tmp_path), RecordingDownloader(events))
     assert events == [("attempt", SERIES_ID, 2)]  # 1 is on disk
     assert [result.status for result in results] == [ON_DISK, DONE]
+
+
+def test_no_spelling_of_a_lock_flag_is_ever_requested(tmp_path):
+    """Build 7b reads lock flags more precisely, never more loosely: a `lockStatus` number, bool
+    or a string that spells one, and a `…Lock…` key whose previous word merely ends in b, still
+    keep the episode from being asked for — only the free one and the one whose flag is about
+    BLOCKING (no lock) are requested."""
+    series = _payload_series(
+        _payload_item(1),
+        _payload_item(2, lockStatus="1"),
+        _payload_item(3, lockStatus=1),
+        _payload_item(4, subLockStatus=1),
+        _payload_item(5, isLocked=True),
+        _payload_item(6, lockStatus="true"),
+        _payload_item(7, webLockStatus="locked"),
+        _payload_item(8, blockStatus=1),
+    )
+    assert [episode.locked for episode in series.episodes] == [False, *[True] * 6, False]
+    events = []
+    results, _, _ = _run(series, _quiet(tmp_path), RecordingDownloader(events))
+    assert events == [("attempt", SERIES_ID, 1), ("attempt", SERIES_ID, 8)]
+    assert [result.status for result in results] == [DONE, *[SKIPPED_LOCKED] * 6, DONE]
 
 
 class _FailingYdl:
@@ -2841,3 +2864,28 @@ def test_yt_dlps_drm_error_is_remembered_and_a_403_naming_drm_stops_with_the_coo
     )
     assert [result.status for result in results[1:]] == [UNAVAILABLE, UNAVAILABLE]
     assert active_cooldown() is None
+
+
+def test_yt_dlps_ip_block_stops_the_run_and_records_the_cooldown(tmp_path):
+    """TikTok's status 10204 — yt-dlp: "Your IP address is blocked from accessing this post" — is
+    a refusal like a 403: FAILED_BLOCKED, the run stops at once (no request for the rest, no
+    failure streak to wait for) and the 30-minute cooldown is recorded, source yt-dlp."""
+    from yt_dlp.utils import DownloadError
+
+    from dramafetch.downloader import BLOCKED_MESSAGE, YtDlpDownloader
+
+    error = (
+        "ERROR: [TikTok] 7699400000000000001: Your IP address is blocked from accessing this post"
+    )
+    asked = []
+    downloader = YtDlpDownloader(lambda params: _FailingYdl([DownloadError(error)], asked))
+    series = make_series(numbers=(1, 2, 3))
+    results, sleeps, _ = _run(series, _quiet(tmp_path), downloader)
+    assert [result.status for result in results] == [BLOCKED, BLOCKED, BLOCKED]
+    assert results[0].message == f"{BLOCKED_MESSAGE}: {error}"
+    assert results[1].message.startswith("stopped: episode 1 failed-blocked")
+    assert asked == [series.episodes[0].page_url]  # 2 and 3: no request
+    assert sleeps == []  # no pause either: nothing more is asked
+    recorded = active_cooldown()
+    assert recorded is not None and recorded.source == "yt-dlp"
+    assert "Your IP address is blocked" in recorded.reason
