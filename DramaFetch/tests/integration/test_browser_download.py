@@ -834,7 +834,9 @@ def test_an_encrypted_episode_is_refused_kept_nowhere_and_skipped_next_time_with
     writing anything: failed-unavailable with the DRM message, nothing of it on disk (no video, no
     `.part`, no cover), neither its second rendition nor its cover requested; the run goes on (one
     failure is no streak). The manifest remembers the verdict, so the next run — which lists the
-    series again, as it is not complete — skips episode 3 as locked without one media request."""
+    series again, as it is not complete — skips episode 3 as locked without one media request.
+    That run finds the series complete (build 7b: what cannot be downloaded is left out, like a
+    locked episode) and marks it so, and the run after it costs no request at all."""
     out = tmp_path / "out"
     folder = out / THIRD_FOLDER
     third = THIRD_ITEMS[2]
@@ -847,6 +849,10 @@ def test_an_encrypted_episode_is_refused_kept_nowhere_and_skipped_next_time_with
         assert cli.main(argv) == 0
         second = capsys.readouterr()
         rerun = server.requests[before:]
+        before = len(server.requests)
+        assert cli.main(argv) == 0
+        third_run = capsys.readouterr()
+        last = server.requests[before:]
 
     lines = first.out.splitlines()
     assert _row(3, "failed-unavailable", DRM_MESSAGE) in lines
@@ -864,11 +870,21 @@ def test_an_encrypted_episode_is_refused_kept_nowhere_and_skipped_next_time_with
     assert _row(3, "skipped-locked", REMEMBERED_DRM) in again
     assert any(r.path == "/api/drama/episode/item_list/" for r in rerun)  # listed again
     assert _media_paths(rerun) == []  # and not one media or cover request
+    assert "complete: 2 of 4 (2 already on disk) — 2 locked (3, 4)" in again
     assert sorted(p.name for p in folder.iterdir()) == [
         _third_name(1),
         _third_name(2),
         "dramafetch.json",
     ]
+    marked = read_manifest(folder, THIRD_SERIES_ID)
+    assert marked is not None and marked.complete_episodes == 2 and marked.drm_protected(3)
+
+    # complete less than 24 h ago, every file still there: skipped without a single request
+    assert last == []
+    assert (
+        "complete, nothing to do: 2 episodes already on disk, 2 locked (3, 4) (checked just now) "
+        f"— {RECHECK}"
+    ) in third_run.out.splitlines()
 
 
 def test_a_cli_batch_of_all_three_series_with_the_session_then_costs_nothing(
