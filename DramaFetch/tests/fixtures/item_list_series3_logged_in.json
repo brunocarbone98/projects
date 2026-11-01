@@ -1,0 +1,221 @@
+{
+  "statusCode": 0,
+  "status_code": 0,
+  "cursor": 4,
+  "hasMore": false,
+  "itemList": [
+    {
+      "id": "7699400000000000201",
+      "desc": "Paid Love Story | Episode 1",
+      "createTime": 1761300001,
+      "author": {
+        "id": "6900000000000000002",
+        "uniqueId": "lovestory_drama",
+        "nickname": "Love Story Drama"
+      },
+      "video": {
+        "id": "7699400000000000201",
+        "duration": 74,
+        "ratio": "720p",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLSaAQIEgDmAkCeIBhjqfAEz7tSiBu1~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=pls1a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLSaAQIEgDmAkCeIBhjqfAEz7tSiBu1~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=pls1b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls1/?a=1988&expire=1761400000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 1088000,
+            "QualityType": 2,
+            "GearName": "normal_720_0",
+            "CodecType": "h264",
+            "PlayAddr": {
+              "DataSize": "8041000",
+              "Width": 720,
+              "Height": 1280,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls1/?a=1988&expire=1761400000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 1530000,
+            "QualityType": 1,
+            "GearName": "adapt_lower_1080_1",
+            "CodecType": "bytevc1",
+            "PlayAddr": {
+              "DataSize": "11301000",
+              "Width": 1080,
+              "Height": 1920,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls1-1080/?a=1988&expire=1761400000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782388",
+        "dramaName": "Paid Love Story",
+        "DramaVideoData": {
+          "EpisodeNumber": 1,
+          "isFree": true
+        }
+      },
+      "stats": {
+        "playCount": 56900
+      }
+    },
+    {
+      "id": "7699400000000000202",
+      "desc": "Paid Love Story | Episode 2",
+      "createTime": 1761300002,
+      "author": {
+        "id": "6900000000000000002",
+        "uniqueId": "lovestory_drama",
+        "nickname": "Love Story Drama"
+      },
+      "video": {
+        "id": "7699400000000000202",
+        "duration": 76,
+        "ratio": "720p",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLSbIAgEkDmBfCeAIhjqAfEz7tSuB2~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=pls2a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLSbIAgEkDmBfCeAIhjqAfEz7tSuB2~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=pls2b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls2/?a=1988&expire=1761400000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 1088000,
+            "QualityType": 2,
+            "GearName": "normal_720_0",
+            "CodecType": "h264",
+            "PlayAddr": {
+              "DataSize": "8042000",
+              "Width": 720,
+              "Height": 1280,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls2/?a=1988&expire=1761400000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 1530000,
+            "QualityType": 1,
+            "GearName": "adapt_lower_1080_1",
+            "CodecType": "bytevc1",
+            "PlayAddr": {
+              "DataSize": "11302000",
+              "Width": 1080,
+              "Height": 1920,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls2-1080/?a=1988&expire=1761400000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782388",
+        "dramaName": "Paid Love Story",
+        "DramaVideoData": {
+          "EpisodeNumber": 2,
+          "isFree": true
+        }
+      },
+      "stats": {
+        "playCount": 49800
+      }
+    },
+    {
+      "id": "7699400000000000203",
+      "desc": "Paid Love Story | Episode 3",
+      "createTime": 1761300003,
+      "author": {
+        "id": "6900000000000000002",
+        "uniqueId": "lovestory_drama",
+        "nickname": "Love Story Drama"
+      },
+      "video": {
+        "id": "7699400000000000203",
+        "duration": 79,
+        "ratio": "720p",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLScEIQgDkmBfCeAIhjqAfEz7tSuB3~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=pls3a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLScEIQgDkmBfCeAIhjqAfEz7tSuB3~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=pls3b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls3/?a=1988&expire=1761400000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 1088000,
+            "QualityType": 2,
+            "GearName": "normal_720_0",
+            "CodecType": "h264",
+            "PlayAddr": {
+              "DataSize": "8043000",
+              "Width": 720,
+              "Height": 1280,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls3/?a=1988&expire=1761400000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 1530000,
+            "QualityType": 1,
+            "GearName": "adapt_lower_1080_1",
+            "CodecType": "bytevc1",
+            "PlayAddr": {
+              "DataSize": "11303000",
+              "Width": 1080,
+              "Height": 1920,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/pls3-1080/?a=1988&expire=1761400000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782388",
+        "dramaName": "Paid Love Story",
+        "DramaVideoData": {
+          "EpisodeNumber": 3,
+          "isFree": false,
+          "unlockPrice": 30,
+          "isLocked": false,
+          "isUnlocked": true
+        }
+      },
+      "stats": {
+        "playCount": 42700
+      }
+    },
+    {
+      "id": "7699400000000000204",
+      "desc": "Paid Love Story | Episode 4",
+      "createTime": 1761300004,
+      "isLocked": true,
+      "author": {
+        "id": "6900000000000000002",
+        "uniqueId": "lovestory_drama",
+        "nickname": "Love Story Drama"
+      },
+      "video": {
+        "id": "7699400000000000204",
+        "duration": 81,
+        "ratio": "720p",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLSdQIEgDmAkCeIBhjqfAEz7tSiBu4~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=pls4a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oPLSdQIEgDmAkCeIBhjqfAEz7tSiBu4~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=pls4b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "",
+        "bitrateInfo": []
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782388",
+        "dramaName": "Paid Love Story",
+        "DramaVideoData": {
+          "EpisodeNumber": 4,
+          "isFree": false,
+          "unlockPrice": 30,
+          "isLocked": true
+        }
+      },
+      "stats": {
+        "playCount": 35600
+      }
+    }
+  ]
+}
