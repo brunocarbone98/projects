@@ -4,7 +4,8 @@
 `src`) to a temporary directory and adds, to that COPY's manifest only, the two things the shipped
 manifest must never have: `"dramafetch_test": true` (test overrides are honoured only then) and
 the host permission `http://127.0.0.1/*` (the fake server). It writes `Default/Preferences` with
-the download directory before launch, launches Chromium (`DRAMAFETCH_CHROMIUM` or
+the download directory (and any `preferences` a scenario passes: third-party cookies blocked, say)
+before launch, launches Chromium (`DRAMAFETCH_CHROMIUM` or
 `/opt/pw-browsers/chromium`) headless with `--disable-extensions-except` / `--load-extension`,
 resets Playwright's download interception with a CDP `Browser.setDownloadBehavior {"behavior":
 "default"}` (so `chrome.downloads` saves under the real relative names), opens the extension's
@@ -28,7 +29,7 @@ import shutil
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page, Playwright
@@ -89,12 +90,17 @@ class ExtensionHarness:
         *,
         test_settings: dict[str, Any] | None = None,
         profile: Path | None = None,
+        preferences: dict[str, Any] | None = None,
     ) -> None:
+        """`preferences`: more top-level keys of the profile's `Default/Preferences`, written with
+        the download directory before the first launch (e.g. `{"profile": {"cookie_controls_mode":
+        1, "block_third_party_cookies": True}}`: third-party cookies blocked)."""
         self.tmp_path = tmp_path
         self.base_url = base_url
         self.extension_dir = make_test_copy(tmp_path / "extension")
         self.profile = profile or tmp_path / "profile"
         self.downloads = tmp_path / "downloads"
+        self.preferences: dict[str, Any] = dict(preferences or {})
         self.settings: dict[str, Any] = {
             "baseUrl": base_url,
             **TEST_PACING,
@@ -118,11 +124,12 @@ class ExtensionHarness:
             preferences.write_text(
                 json.dumps(
                     {
+                        **self.preferences,
                         "download": {
                             "default_directory": str(self.downloads),
                             "prompt_for_download": False,
                             "directory_upgrade": True,
-                        }
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -271,9 +278,23 @@ class ExtensionHarness:
         )
         return page
 
-    def add_session_cookie(self, value: str) -> None:
-        """A `sessionid` cookie for the fake TikTok (the value is never printed or asserted on)."""
-        self.context.add_cookies([{"name": "sessionid", "value": value, "url": self.base_url}])
+    def add_session_cookie(
+        self, value: str, *, same_site: Literal["Lax", "Strict"] | None = None
+    ) -> None:
+        """A `sessionid` cookie for the fake TikTok (the value is never printed or asserted on);
+        `same_site` sets its SameSite attribute (Chrome's default, Lax, without one)."""
+        # Playwright types it with its private SetCookieParam
+        cookie: Any = {"name": "sessionid", "value": value, "url": self.base_url}
+        if same_site is not None:
+            cookie["sameSite"] = same_site
+        self.context.add_cookies([cookie])
+
+    def session_rules(self) -> list[dict[str, Any]]:
+        """The extension's declarativeNetRequest session rules, as Chrome holds them."""
+        rules: list[dict[str, Any]] = self.page.evaluate(
+            "() => chrome.declarativeNetRequest.getSessionRules()"
+        )
+        return rules
 
     def _run(self, click: str, timeout_s: float) -> dict[str, Any]:
         before = self.finished_jobs()

@@ -35,6 +35,7 @@ import {
 } from "../src/lib/state.js";
 import { afterResult, longRestDue, pauseBeforeAttempt, pauseBetweenJobs, pauseBetweenSeries } from "../src/lib/pacing.js";
 import { completeSkip, reportRows, reportToDict, seriesReport } from "../src/lib/report.js";
+import { Downloader } from "../src/app/downloader.js";
 
 /** @typedef {{fn: string, args?: unknown[], omit?: string[]}} Call */
 
@@ -191,7 +192,8 @@ function stateRun(plan) {
 }
 
 /**
- * Calls whose answer must include the state they changed (the PacingState, the series state).
+ * Calls whose answer must include the state they changed (the PacingState, the series state), and
+ * `cacheSpent`, a method of the app's Downloader (`src/app/downloader.js`, pure in what it decides).
  * @type {Record<string, (args: unknown[]) => unknown>}
  */
 const ADAPTERS = {
@@ -280,6 +282,16 @@ const ADAPTERS = {
       /** @type {Parameters<typeof seriesReport>[2]} */ (options),
     );
     return reportToDict(report);
+  },
+  /** `Downloader.cacheSpent` (`BrowserDownloader._cache_spent`) at wall-clock second `now`. */
+  cacheSpent([item, stale, now]) {
+    const config = /** @type {import("../src/app/downloader.js").DownloaderConfig} */ (
+      /** @type {unknown} */ ({ now: () => Number(now), redirects: null })
+    );
+    return new Downloader(config).cacheSpent(
+      /** @type {Record<string, unknown> | null} */ (item),
+      new Set(/** @type {string[]} */ (stale)),
+    );
   },
 };
 

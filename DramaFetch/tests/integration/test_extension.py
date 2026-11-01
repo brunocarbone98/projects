@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from mutagen.mp4 import MP4, MP4Cover
@@ -39,6 +39,9 @@ from .fake_tiktok import (
     cover_bytes,
     media_bytes,
 )
+
+if TYPE_CHECKING:
+    from conftest import Tools
 
 pytestmark = [
     pytest.mark.integration,
@@ -144,7 +147,7 @@ def _streams(lines: list[str], keep: set[int]) -> list[str]:
 # ------------------------------------------------------------------------------ scenarios
 
 
-def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path) -> None:
+def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path, tools: Tools) -> None:
     """E01-E04 saved as `DramaFetch/<Name> [<id>]/<Name> - Episode 0N.mp4`, each with the fake
     CDN's cover embedded as `covr`, 3 s long with audio, decoding frame for frame like the CDN's
     original bytes; E05 (locked) skipped without a single request; the exact report line; the
@@ -195,8 +198,8 @@ def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path) -> No
     assert len(server.media_requests) == 4 and all(r.with_referer for r in server.media_requests)
     assert len(_downloader_covers(server)) == 4
     assert not _media_of(server, MAIN_ITEMS[5]) and not _downloader_covers(server, MAIN_ITEMS[5])
-    if ffmpeg is None:
-        pytest.skip("saved and verified; no ffmpeg that decodes H.264 + AAC for the framemd5 check")
+    no_ffmpeg = "saved and verified; no ffmpeg that decodes H.264 + AAC for the framemd5 check"
+    tools.need("ffmpeg", ffmpeg is not None, no_ffmpeg)  # CI installs one: a failure there
 
 
 def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:

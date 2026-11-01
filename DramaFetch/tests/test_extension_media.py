@@ -17,7 +17,9 @@ points at the same sample bytes, and ffmpeg decodes every original stream to the
 
 The JavaScript runs in `node extension/tests/media_runner.js` (one process per test, every case
 on stdin). Only a missing `node` skips this module; only a missing ffmpeg (one that decodes
-H.264 and AAC, on PATH or in /opt/pw-browsers/ffmpeg-*/) skips the ffmpeg checks.
+H.264 and AAC, and writes a JPEG, on PATH or in /opt/pw-browsers/ffmpeg-*/) skips the ffmpeg
+checks. Under `DRAMAFETCH_REQUIRE_TOOLS=1` (CI, which installs both) either one missing fails the
+tests that need it instead, naming the tool (`tests/conftest.py`).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ import zlib
 from collections.abc import Iterator, Sequence
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from mutagen.mp4 import MP4, MP4Cover
@@ -63,6 +65,9 @@ from encrypted_mp4 import (
     with_top_level_pssh,
 )
 
+if TYPE_CHECKING:
+    from conftest import Tools
+
 EXTENSION = Path(__file__).resolve().parents[1] / "extension"
 RUNNER = EXTENSION / "tests" / "media_runner.js"
 NODE = shutil.which("node")
@@ -83,9 +88,19 @@ TOO = 3358  # the `©too` tag in moov/udta/meta/ilst
 #: The containers between `moov` and the chunk offset tables.
 TABLE_CONTAINERS = frozenset({b"moov", b"trak", b"mdia", b"minf", b"stbl"})
 
-pytestmark = pytest.mark.skipif(
-    NODE is None, reason="node is not installed: the extension's media checks run in Node 22"
-)
+#: Why the ffmpeg proofs cannot run (a skip, or a failure under DRAMAFETCH_REQUIRE_TOOLS=1).
+NO_FFMPEG = "no ffmpeg that decodes H.264 + AAC on PATH or in /opt/pw-browsers/ffmpeg-*/"
+
+
+@pytest.fixture(autouse=True)
+def _node_installed(tools: Tools) -> None:
+    """Every test here runs the JavaScript in Node: without it they skip (fail when CI requires
+    its tools, ``DRAMAFETCH_REQUIRE_TOOLS=1``)."""
+    tools.need(
+        "node",
+        NODE is not None,
+        "node is not installed: the extension's media checks run in Node 22",
+    )
 
 
 # --------------------------------------------------------------------------- the runner
@@ -934,16 +949,15 @@ def test_embedded_covers_read_back_in_every_layout(tmp_path: Path) -> None:
     assert sources["faststart, existing ilst"] == TINY_MP4  # the input is never modified
 
 
-def test_embedded_covers_decode_like_the_original_with_ffmpeg(tmp_path: Path) -> None:
+def test_embedded_covers_decode_like_the_original_with_ffmpeg(tmp_path: Path, tools: Tools) -> None:
     """`framemd5` of every stream of the original equals the embedded file's (audio and video
     decode to the same frames, interleaved the same way: nothing moved out of sync); the cover is
     one more stream (an attached picture: one frame of the image's size); ffmpeg decodes every
     file silently."""
-    if _ffmpeg() is None:
-        pytest.skip("no ffmpeg that decodes H.264 + AAC on PATH or in /opt/pw-browsers/ffmpeg-*/")
+    tools.need("ffmpeg", _ffmpeg() is not None, NO_FFMPEG)
     jpeg = _real_jpeg(tmp_path, _png(64, 48))
-    if jpeg is None:
-        pytest.skip(f"{_ffmpeg()} cannot write a JPEG for the cover stream to decode")
+    tools.need("ffmpeg", jpeg is not None, f"{_ffmpeg()} cannot write a JPEG for the cover stream")
+    assert jpeg is not None
     images = [("jpeg", jpeg), ("png", _png(48, 64))]
     dimensions = {"jpeg": "64x48", "png": "48x64"}
     original = tmp_path / "original.mp4"
@@ -958,7 +972,7 @@ def test_embedded_covers_decode_like_the_original_with_ffmpeg(tmp_path: Path) ->
         _assert_decodes_like(reference, _framemd5(out), dimensions[image_name])
 
 
-def test_an_existing_cover_is_replaced(tmp_path: Path) -> None:
+def test_an_existing_cover_is_replaced(tmp_path: Path, tools: Tools) -> None:
     """A cover over the extension's own, and over one mutagen embedded (with its padding): one
     `covr` holds the new image only, every other tag stays, the samples stay put, and (with
     ffmpeg) the media decodes the same."""
@@ -985,7 +999,7 @@ def test_an_existing_cover_is_replaced(tmp_path: Path) -> None:
         _assert_samples_untouched(source.read_bytes(), out.read_bytes())
     # the cover box was replaced in place: the file changed by the difference of the two images
     assert made[0][3].stat().st_size == jpeg_embedded.stat().st_size - len(jpeg) + len(png)
-    if _ffmpeg() is not None:
+    if tools.want("ffmpeg", _ffmpeg() is not None, NO_FFMPEG):
         reference = _framemd5(tmp_path / "tiny.mp4")
         for _, _, _, out, _ in made:
             _assert_decodes_like(reference, _framemd5(out), "48x64")

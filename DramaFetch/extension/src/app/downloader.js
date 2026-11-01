@@ -6,13 +6,17 @@
  *
  * The item_list payload TikTok served to the user's own session already carries every episode's
  * signed play URLs; this module fetches them directly, one GET at a time and at most
- * {@link MAX_GETS_PER_EPISODE} per episode (an in-run re-discovery included), with the session's
- * cookies (`credentials: "include"` — the extension never reads them) and `Referer:
- * https://www.tiktok.com/`, which a declarativeNetRequest SESSION rule scoped to the extension's
- * own requests sets ({@link applyRefererRule}; what `downloader_browser` sends). A URL whose host
- * the manifest does not cover is never requested, and no redirect is ever followed (`redirect:
- * "manual"`: its target could be any host) — such a URL counts like a refused one, the next
- * candidate is tried. The body is judged in memory, in this order:
+ * {@link MAX_GETS_PER_EPISODE} requested URLs per episode (an in-run re-discovery included), with
+ * the session's cookies (`credentials: "include"` — the extension never reads them), `Referer:
+ * https://www.tiktok.com/` and no `Origin`, which a declarativeNetRequest SESSION rule scoped to
+ * the extension's own requests sees to ({@link applyRefererRule}; what `downloader_browser`'s
+ * Playwright request and yt-dlp send). A URL whose host the manifest does not cover is never
+ * requested. A redirect is followed only to a target `onBeforeRedirect` named and the manifest
+ * covers (the test origin in test mode), never from https down to http, never in a loop, at most
+ * five hops, each requested the same way so the rule applies to it too (`./redirects.js`; the
+ * hops are no further candidates: the budget counts requested URLs, as Python's `tried` does);
+ * any other redirect counts like a refused URL — the next candidate is tried. The body is judged
+ * in memory, in this order:
  * the transfer (a body shorter or longer than an identity-encoded `Content-Length`, or cut off →
  * `failed`, no next mirror), the content (`lib/mp4.bodyProblem` → next URL), encrypted tracks
  * (`lib/mp4.drmProblem` → `failed-unavailable` with `DRM_MESSAGE`, nothing saved, no other
@@ -56,8 +60,9 @@ import { downloadFilename, episodeStem, fileBaseName } from "../lib/naming.js";
 import { EXPIRY_MARGIN_S, MAX_GETS_PER_EPISODE, sleepSeconds } from "../lib/pacing.js";
 import { lockedResult } from "../lib/report.js";
 import { ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError } from "./discovery.js";
+import { RedirectRefused, fetchFollowing, hostOf, isRedirect, pageRedirects } from "./redirects.js";
 
-export { MAX_GETS_PER_EPISODE };
+export { MAX_GETS_PER_EPISODE, hostOf, isRedirect };
 
 /** Answers that mean "not this URL": try the next candidate, then a fresh list (`_DENIED_STATUSES`). */
 const DENIED_STATUSES = new Set([403, 404, 410]);
@@ -65,9 +70,15 @@ const DENIED_STATUSES = new Set([403, 404, 410]);
 const IDENTITY_ENCODINGS = new Set(["", "identity"]);
 /** A transfer that delivers nothing for this long is cut off (`REQUEST_TIMEOUT_MS`, 120 s). */
 export const IDLE_TIMEOUT_MS = 120_000;
-/** The declarativeNetRequest session rule that sets the Referer on the extension's own requests. */
+/**
+ * The declarativeNetRequest session rule of the extension's own requests: `Referer` set, `Origin`
+ * removed ({@link applyRefererRule}).
+ */
 export const REFERER_RULE_ID = 1;
-/** The domains of the manifest's host permissions (the rule's `requestDomains`). */
+/**
+ * The domains of the manifest's host permissions, exactly (the rule's `requestDomains`; a unit test
+ * compares them with `manifest.json`): every host the extension may contact is covered by the rule.
+ */
 export const TIKTOK_DOMAINS = Object.freeze([
   "tiktok.com",
   "tiktokcdn.com",
@@ -105,19 +116,6 @@ const MAX_MESSAGE_LEN = 300;
 // ------------------------------------------------------------------------ pure helpers
 
 /**
- * The host of a URL — the only part of a signed play URL a message may name (`_host`).
- * @param {string} url
- * @returns {string}
- */
-export function hostOf(url) {
-  try {
-    return new URL(url).hostname || "unknown host";
-  } catch {
-    return "unknown host";
-  }
-}
-
-/**
  * Whether a URL is covered by one of the manifest's host permission patterns
  * (`<scheme>://<host>/<path>`; `*` scheme = http or https, `*.` host prefix = that domain and its
  * subdomains; the port is not part of a pattern). A URL outside them is never requested.
@@ -149,6 +147,25 @@ export function hostCovered(url, patterns) {
     }
   }
   return false;
+}
+
+/**
+ * Whether a redirect target may be requested: a host the manifest covers that the rule of the
+ * extension's own requests ({@link applyRefererRule}) covers as well — for TikTok's origin one of
+ * {@link TIKTOK_DOMAINS} or a subdomain, for the test server's (test mode) that origin itself.
+ * Without `base`, the manifest's hosts alone decide.
+ * @param {string} url
+ * @param {readonly string[]} patterns the manifest's host permissions
+ * @param {string} [base] TikTok's origin, or the test server's
+ * @returns {boolean}
+ */
+export function redirectTargetAllowed(url, patterns, base) {
+  if (!hostCovered(url, patterns)) return false;
+  if (base === undefined) return true;
+  const origin = base.replace(/\/+$/, "");
+  if (origin !== TIKTOK_BASE_URL) return url.startsWith(`${origin}/`);
+  const host = hostOf(url).toLowerCase();
+  return TIKTOK_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
 /**
@@ -258,28 +275,27 @@ export async function readBody(response, limits = {}) {
 }
 
 /**
- * Whether a `redirect: "manual"` answer is a redirect the browser did not follow (an
- * `opaqueredirect`: status 0, no headers, no body — the target stays unknown and is never
- * requested).
- * @param {Response} response
- * @returns {boolean}
- */
-export function isRedirect(response) {
-  return response.type === "opaqueredirect" || response.status === 0;
-}
-
-/**
  * @typedef {{ok: true, data: Uint8Array, kind: import("../lib/mp4.js").ImageKind} | {ok: false, note: string}} ImageResult
+ *
+ * @typedef {object} ImageOptions
+ * @property {typeof fetch} fetch
+ * @property {readonly string[]} hostPatterns the manifest's host permissions
+ * @property {number} [idleMs]
+ * @property {import("./redirects.js").RedirectTracker | null} [redirects] where redirects are learnt
+ *   (default: the page's tracker, `pageRedirects()`); null: none is followed
+ * @property {string} [baseUrl] TikTok's origin, or the test server's: a redirect is followed only
+ *   where the rule of the extension's own requests applies ({@link redirectTargetAllowed})
  */
 
 /**
  * One image GET of the extension's own (the downloader's cover, a thumbnail of the episode list):
- * only to a host the manifest covers, never following a redirect (its target could be any host),
- * with the session's cookies; at most {@link MAX_COVER_BYTES} read, accepted per
- * `thumbnails.image_kind` (the bytes first) from {@link MIN_IMAGE_BYTES} on. Never throws: a
- * failure is `{ok: false, note: "; cover: <reason>"}`, host names only.
+ * only to a host the manifest covers, a redirect followed only the safe way (`./redirects.js`:
+ * a known, allowed target, at most five hops, each requested like the first), with the session's
+ * cookies; at most {@link MAX_COVER_BYTES} read, accepted per `thumbnails.image_kind` (the bytes
+ * first) from {@link MIN_IMAGE_BYTES} on. Never throws: a failure is `{ok: false, note: "; cover:
+ * <reason>"}`, host names only.
  * @param {string} url
- * @param {{fetch: typeof fetch, hostPatterns: readonly string[], idleMs?: number}} options
+ * @param {ImageOptions} options
  * @returns {Promise<ImageResult>}
  */
 export async function fetchImage(url, options) {
@@ -288,13 +304,18 @@ export async function fetchImage(url, options) {
     return { ok: false, note: `; cover: ${host} is not a host this extension may contact` };
   }
   try {
-    const response = await options.fetch(url, {
-      credentials: "include",
-      cache: "no-store",
-      redirect: "manual",
-      headers: { Accept: "image/*,*/*" },
-    });
-    if (isRedirect(response)) return { ok: false, note: `; cover: a redirect from ${host}, not followed` };
+    let response;
+    try {
+      ({ response } = await fetchFollowing(url, {
+        fetch: options.fetch,
+        init: { credentials: "include", cache: "no-store", redirect: "manual", headers: { Accept: "image/*,*/*" } },
+        redirects: options.redirects === undefined ? pageRedirects() : options.redirects,
+        allowed: (target) => redirectTargetAllowed(target, options.hostPatterns, options.baseUrl),
+      }));
+    } catch (error) {
+      if (error instanceof RedirectRefused) return { ok: false, note: `; cover: ${error.message}` };
+      throw error;
+    }
     if (response.status !== 200) {
       await response.body?.cancel().catch(() => undefined);
       return { ok: false, note: `; cover: HTTP ${response.status} from ${host}` };
@@ -313,13 +334,17 @@ export async function fetchImage(url, options) {
 }
 
 /**
- * Install (or replace) the session rule that sets `Referer: <base>/` on the requests the
- * extension's own pages make to TikTok's hosts — never on TikTok's page's requests (the rule's
- * initiator is the extension itself). Called before every job; session rules end with the browser.
+ * The session rule of the extension's own requests to TikTok's hosts: `Referer: <base>/` set and
+ * `Origin` removed — what the Python browser engine's Playwright request and yt-dlp send (no
+ * `Origin`). Chrome may add `Origin: chrome-extension://<id>` to a request of an extension page (it
+ * does to a POST; its GETs to a host the extension may contact carry none today): with the rule,
+ * TikTok's CDN never sees one, whatever Chrome does. Its initiator is the extension itself, so no
+ * request of TikTok's page is ever touched; production covers every one of {@link TIKTOK_DOMAINS},
+ * test mode the test origin.
  * @param {string} base TikTok's origin (the fake server's in test mode)
- * @returns {Promise<void>}
+ * @returns {chrome.declarativeNetRequest.Rule}
  */
-export async function applyRefererRule(base) {
+export function refererRule(base) {
   const origin = base.replace(/\/+$/, "");
   /** @type {chrome.declarativeNetRequest.RuleCondition} */
   const condition = {
@@ -328,16 +353,30 @@ export async function applyRefererRule(base) {
   };
   if (origin === TIKTOK_BASE_URL) condition.requestDomains = [...TIKTOK_DOMAINS];
   else condition.urlFilter = `|${origin}/`;
+  return {
+    id: REFERER_RULE_ID,
+    priority: 1,
+    action: {
+      type: "modifyHeaders",
+      requestHeaders: [
+        { header: "Referer", operation: "set", value: `${origin}/` },
+        { header: "Origin", operation: "remove" },
+      ],
+    },
+    condition,
+  };
+}
+
+/**
+ * Install (or replace) {@link refererRule}. Called before every job; session rules end with the
+ * browser.
+ * @param {string} base TikTok's origin (the fake server's in test mode)
+ * @returns {Promise<void>}
+ */
+export async function applyRefererRule(base) {
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [REFERER_RULE_ID],
-    addRules: [
-      {
-        id: REFERER_RULE_ID,
-        priority: 1,
-        action: { type: "modifyHeaders", requestHeaders: [{ header: "Referer", operation: "set", value: `${origin}/` }] },
-        condition,
-      },
-    ],
+    addRules: [refererRule(base)],
   });
 }
 
@@ -547,6 +586,8 @@ export async function saveFile(bytes, mime, filename, api = chrome.downloads) {
  * @property {(bytes: Uint8Array, mime: string, filename: string) => Promise<chrome.downloads.DownloadItem>} [save]
  * @property {(text: string) => void} [onStatus] what the downloader is doing (for the UI)
  * @property {number} [idleMs]
+ * @property {import("./redirects.js").RedirectTracker | null} [redirects] where the redirects of its
+ *   requests are learnt (default: the page's tracker, `pageRedirects()`); null: none is followed
  */
 
 /** Downloads one episode at a time from the play URLs its item carries (`BrowserDownloader`). */
@@ -557,10 +598,11 @@ export class Downloader {
     this.now = config.now ?? (() => Date.now() / 1000);
     this.fetch = config.fetch ?? ((input, init) => fetch(input, init));
     this.save = config.save ?? ((bytes, mime, filename) => saveFile(bytes, mime, filename));
-    /** @type {Map<string, Map<string, Record<string, unknown>>>} series id → item id → fresh item */
+    this.redirects = config.redirects === undefined ? pageRedirects() : config.redirects;
+    /** @type {Map<string, Map<string, Record<string, unknown>>>} series id → item id → its newest fresh item */
     this.freshItems = new Map();
-    /** @type {Set<string>} series re-discovered in this run (at most once each) */
-    this.refreshed = new Set();
+    /** @type {Set<string>} series whose re-discovery failed in this run: never asked again */
+    this.failedRefreshes = new Set();
     /** in-run re-discoveries made so far */
     this.refreshes = 0;
   }
@@ -651,7 +693,7 @@ export class Downloader {
     let candidates = this.usableCandidates(episode.raw);
     if (candidates.length === 0) {
       refreshed = true;
-      const refused = await this.refresh(episode);
+      const refused = await this.refresh(episode, tried);
       if (refused !== null) return refused;
       candidates = this.usableCandidates(episode.raw);
       if (candidates.length === 0) {
@@ -665,7 +707,7 @@ export class Downloader {
     if (!refreshed && attempt.unavailable && tried.size < MAX_GETS_PER_EPISODE) {
       let refused;
       try {
-        refused = await this.refresh(episode);
+        refused = await this.refresh(episode, tried);
       } catch (error) {
         if (error instanceof LoginRequiredError || error instanceof RateLimitedError || error instanceof ChallengeError) {
           throw error;
@@ -708,25 +750,24 @@ export class Downloader {
         last = { reason: `${host} is not a host this extension may contact`, unavailable: true };
         continue; // never requested, so not counted either
       }
-      tried.add(url);
+      tried.add(url); // a requested URL: the hops of its redirects are no further candidates
       this.config.onStatus?.(`E${String(episode.number).padStart(2, "0")}: ${host}`);
       /** @type {Response} */
       let response;
       try {
-        // never follow a redirect: its target could be any host, and none but the manifest's is contacted
-        response = await this.fetch(url, {
-          credentials: "include",
-          cache: "no-store",
-          redirect: "manual",
-          headers: { Accept: "*/*" },
-        });
+        ({ response } = await fetchFollowing(url, {
+          fetch: this.fetch,
+          init: { credentials: "include", cache: "no-store", redirect: "manual", headers: { Accept: "*/*" } },
+          redirects: this.redirects,
+          allowed: (target) => this.redirectAllowed(target),
+        }));
       } catch (error) {
-        last = { reason: `no response (${oneLine(error)}) from ${host}`, unavailable: true };
+        // a redirect not followed counts like a denied URL: the next candidate (this URL is spent)
+        last =
+          error instanceof RedirectRefused
+            ? { reason: error.message, unavailable: true }
+            : { reason: `no response (${oneLine(error)}) from ${host}`, unavailable: true };
         continue;
-      }
-      if (isRedirect(response)) {
-        last = { reason: `a redirect from ${host}, not followed`, unavailable: true };
-        continue; // like a denied URL: the next candidate (this GET counts in the budget)
       }
       const status = response.status;
       if (status === 429) {
@@ -854,7 +895,23 @@ export class Downloader {
    * @returns {Promise<ImageResult>}
    */
   fetchCover(url) {
-    return fetchImage(url, { fetch: this.fetch, hostPatterns: this.config.hostPatterns, idleMs: this.config.idleMs });
+    return fetchImage(url, {
+      fetch: this.fetch,
+      hostPatterns: this.config.hostPatterns,
+      idleMs: this.config.idleMs,
+      redirects: this.redirects,
+      baseUrl: this.config.baseUrl ?? TIKTOK_BASE_URL,
+    });
+  }
+
+  /**
+   * Whether a redirect of one of its requests may be followed to `url` ({@link redirectTargetAllowed}
+   * for its base: TikTok's hosts, or the test origin).
+   * @param {string} url
+   * @returns {boolean}
+   */
+  redirectAllowed(url) {
+    return redirectTargetAllowed(url, this.config.hostPatterns, this.config.baseUrl ?? TIKTOK_BASE_URL);
   }
 
   /**
@@ -879,26 +936,36 @@ export class Downloader {
   }
 
   /**
-   * `_refresh`: replace `episode.raw` with the item of a fresh episode list and return null — at
-   * most ONE re-discovery per series and run (cached for the run). A fresh entry that reads as
-   * `locked` (a lapsed entitlement, a lock, preview or paywall flag, DRM) is not adopted unless
-   * includeLocked: FAILED_UNAVAILABLE, none of its URLs requested.
+   * `_refresh`: replace `episode.raw` with the item of a fresh episode list and return null. The
+   * series is listed again only when this run holds no fresh list for it yet, or when that list's
+   * entry for the episode is spent ({@link cacheSpent}: it names play URLs, and every one was
+   * tried for this episode — `stale` — or has expired); the newest list is cached for the run, so a
+   * long series is listed again only as often as its play URLs run out. The extension's own extra:
+   * a re-discovery that FAILED is not tried again for that series in the run. A fresh entry that
+   * reads as `locked` (a lapsed entitlement, a lock, preview or paywall flag, DRM) is not adopted
+   * unless includeLocked: FAILED_UNAVAILABLE, none of its URLs requested.
    * @param {Episode} episode
+   * @param {ReadonlySet<string>} stale the URLs requested for this episode so far
    * @returns {Promise<DownloadResult | null>}
    */
-  async refresh(episode) {
+  async refresh(episode, stale) {
     let fresh = this.freshItems.get(episode.seriesId);
-    if (fresh === undefined) {
-      if (this.refreshed.has(episode.seriesId)) return null; // the one re-discovery failed already
-      this.refreshed.add(episode.seriesId);
+    if (fresh === undefined || this.cacheSpent(fresh.get(episode.itemId) ?? null, stale)) {
+      if (this.failedRefreshes.has(episode.seriesId)) return null; // it failed once in this run: not again
       this.refreshes += 1;
       this.config.onStatus?.(`E${String(episode.number).padStart(2, "0")}: fresh episode list`);
-      const series = await this.config.rediscover({
-        kind: "series",
-        seriesId: episode.seriesId,
-        episodeHint: episode.number,
-        sourceUrl: episode.seriesId,
-      });
+      let series;
+      try {
+        series = await this.config.rediscover({
+          kind: "series",
+          seriesId: episode.seriesId,
+          episodeHint: episode.number,
+          sourceUrl: episode.seriesId,
+        });
+      } catch (error) {
+        this.failedRefreshes.add(episode.seriesId);
+        throw error;
+      }
       fresh = new Map();
       for (const item of series.episodes) if (item.raw !== null) fresh.set(item.itemId, item.raw);
       this.freshItems.set(episode.seriesId, fresh);
@@ -916,6 +983,22 @@ export class Downloader {
     episode.raw = cached;
     return null;
   }
+
+  /**
+   * `_cache_spent`: whether the fresh list's entry for an episode calls for a newer list — it names
+   * play URLs, but every one of them was tried for this episode (`stale`) or has expired. An entry
+   * without any play URL (a locked episode) and an episode the fresh list does not carry at all are
+   * final — one more listing would add no URL — so they never cost one.
+   * @param {Record<string, unknown> | null} item
+   * @param {ReadonlySet<string>} stale
+   * @returns {boolean}
+   */
+  cacheSpent(item, stale) {
+    if (item === null) return false;
+    const candidates = playUrlCandidates(item);
+    if (candidates.length === 0) return false;
+    return candidates.every((url) => stale.has(url) || !this.usable(url));
+  }
 }
 
 /**
@@ -931,23 +1014,46 @@ function failure(episode, status, message) {
 // ---------------------------------------------------------------- the list's thumbnails
 
 /**
+ * How far outside the window a cover cell already counts as in view, in CSS pixels, above and
+ * below (the `rootMargin` of the loader's IntersectionObserver): about one row ahead, so a slow
+ * scroll finds the next thumbnail there — no more, so nobody's unseen rows cost a request.
+ */
+export const COVER_MARGIN_PX = 64;
+
+/**
+ * @typedef {object} CoverWatcher What {@link CoverLoader} needs of an IntersectionObserver.
+ * @property {(target: Element) => void} observe
+ * @property {(target: Element) => void} unobserve
+ * @property {() => void} disconnect
+ *
+ * @typedef {(callback: (entries: readonly {target: Element, isIntersecting: boolean}[]) => void,
+ *   init: {rootMargin: string}) => CoverWatcher} CoverWatcherFactory
+ *
  * @typedef {object} CoverLoaderOptions
  * @property {readonly string[]} hostPatterns the manifest's host permissions
  * @property {() => Promise<boolean>} allowed whether a request may go out now — no job running or
  *   waiting, no cooldown in force — asked before each pause and again right before each request
  * @property {() => Promise<void>} pause the pause before each request (the list-page pause)
  * @property {(itemId: string, url: string) => void} onCover a thumbnail is ready (an object URL)
+ * @property {() => string} [baseUrl] TikTok's origin (the test server's in test mode): a redirect
+ *   is followed only where the rule of the extension's own requests applies ({@link fetchImage})
  * @property {typeof fetch} [fetch]
  * @property {(blob: Blob) => string} [objectUrl] `URL.createObjectURL`
+ * @property {CoverWatcherFactory} [watcher] how cover cells are watched: an IntersectionObserver
+ *   with a {@link COVER_MARGIN_PX} root margin by default
  */
 
 /**
  * The cover thumbnails of the episode list (**Load list**), fetched by the extension itself — not
  * by the page's own `<img>` loads, which go out all at once, follow a redirect to any host and know
- * nothing of a cooldown or a running job: ONE request at a time, each after its pause, only while
- * `allowed()`, through {@link fetchImage} (the manifest's hosts, no redirect followed). Each
- * thumbnail is kept by item id for the page's life, so showing the list again costs no request;
- * one that failed is not asked for again.
+ * nothing of a cooldown or a running job — and only for the rows someone can see: a row's
+ * thumbnail is wanted once its cover cell comes into view ({@link watch}: an IntersectionObserver,
+ * {@link COVER_MARGIN_PX} around the window), and no longer once it leaves before its request went
+ * out. The wanted ones go out in the list's order, ONE request at a time, each after its pause,
+ * only while `allowed()` — asked before the pause and again right before the request, so nothing
+ * goes out during a job or a cooldown — through {@link fetchImage} (the manifest's hosts, the
+ * extension's own request rule). Each thumbnail is kept by item id for the page's life, so showing
+ * the list again costs no request; one that failed is not asked for again.
  */
 export class CoverLoader {
   /** @param {CoverLoaderOptions} options */
@@ -955,26 +1061,94 @@ export class CoverLoader {
     this.options = options;
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.objectUrl = options.objectUrl ?? ((blob) => URL.createObjectURL(blob));
-    /** @type {Map<string, string>} item id → object URL */
+    /** @type {CoverWatcherFactory} */
+    this.makeWatcher = options.watcher ?? ((callback, init) => new IntersectionObserver(callback, init));
+    /** @type {Map<string, string>} item id → object URL, for the page's life */
     this.loaded = new Map();
     /** @type {Set<string>} item ids asked for already (shown or failed): never twice */
     this.asked = new Set();
-    /** @type {{itemId: string, url: string}[]} still to fetch, in order */
-    this.wanted = [];
+    /** @type {string[]} the item ids of the list shown that have a cover URL, in its order */
+    this.order = [];
+    /** @type {Map<string, string>} item id → cover URL, of the list shown */
+    this.urls = new Map();
+    /** @type {Set<string>} the item ids whose cover cell is in view now */
+    this.visible = new Set();
+    /** @type {Map<string, Element>} item id → its cover cell, while watched */
+    this.cells = new Map();
+    /** @type {WeakMap<Element, string>} cover cell → item id */
+    this.itemOf = new WeakMap();
+    /** @type {CoverWatcher | null} the list's watcher, once a cell is watched */
+    this.watcher = null;
     /** @type {Promise<void> | null} the loop, while it runs */
     this.running = null;
   }
 
   /**
-   * The thumbnails a list wants, in order (instead of an earlier list's), and start fetching.
+   * The list shown now (instead of an earlier one's): its covers, in order. Nothing is wanted
+   * until a row's cover cell comes into view ({@link watch}).
    * @param {readonly {itemId: string, coverUrl: string | null}[]} episodes
    */
   show(episodes) {
-    this.wanted = [];
+    this.watcher?.disconnect();
+    this.watcher = null;
+    this.order = [];
+    this.urls = new Map();
+    this.visible = new Set();
+    this.cells = new Map();
+    this.itemOf = new WeakMap();
     for (const episode of episodes) {
-      if (episode.coverUrl && !this.asked.has(episode.itemId)) this.wanted.push({ itemId: episode.itemId, url: episode.coverUrl });
+      if (!episode.coverUrl || this.urls.has(episode.itemId)) continue;
+      this.urls.set(episode.itemId, episode.coverUrl);
+      this.order.push(episode.itemId);
     }
+  }
+
+  /**
+   * Watch a row's cover cell: its thumbnail is wanted while the cell is in view. A thumbnail
+   * fetched already, asked for already, or without a URL needs no watching.
+   * @param {Element} cell
+   * @param {string} itemId
+   */
+  watch(cell, itemId) {
+    if (!this.urls.has(itemId) || this.loaded.has(itemId) || this.asked.has(itemId)) return;
+    if (this.watcher === null) {
+      this.watcher = this.makeWatcher(
+        (entries) => {
+          for (const entry of entries) {
+            const id = this.itemOf.get(entry.target);
+            if (id !== undefined) this.setVisible(id, entry.isIntersecting);
+          }
+        },
+        { rootMargin: `${COVER_MARGIN_PX}px 0px` },
+      );
+    }
+    this.cells.set(itemId, cell);
+    this.itemOf.set(cell, itemId);
+    this.watcher.observe(cell);
+  }
+
+  /**
+   * A row's cover cell came into view (or left it): wanted, and fetching goes on — or no longer.
+   * @param {string} itemId
+   * @param {boolean} visible
+   */
+  setVisible(itemId, visible) {
+    if (!this.urls.has(itemId)) return;
+    if (!visible) {
+      this.visible.delete(itemId);
+      return;
+    }
+    this.visible.add(itemId);
     this.resume();
+  }
+
+  /**
+   * The thumbnails wanted now, in the order they go out: the rows in view, in the list's order,
+   * not asked for yet.
+   * @returns {string[]} item ids
+   */
+  wanted() {
+    return this.order.filter((id) => this.visible.has(id) && !this.asked.has(id));
   }
 
   /**
@@ -985,9 +1159,9 @@ export class CoverLoader {
     return this.loaded.get(itemId) ?? null;
   }
 
-  /** Go on fetching what the list wants (after a job, after a cooldown); one loop at a time. */
+  /** Go on fetching what is wanted (a row came into view, a job ended, a cooldown ran out); one loop at a time. */
   resume() {
-    if (this.running !== null || this.wanted.length === 0) return;
+    if (this.running !== null || this.next() === null) return;
     this.running = this.loop()
       .catch(() => undefined)
       .finally(() => {
@@ -1000,26 +1174,51 @@ export class CoverLoader {
     while (this.running !== null) await this.running;
   }
 
+  /**
+   * The next thumbnail to ask for, or null; one whose host the manifest does not cover is marked
+   * asked on the way (never requested, so no pause either).
+   * @returns {string | null}
+   */
+  next() {
+    for (const id of this.wanted()) {
+      if (hostCovered(/** @type {string} */ (this.urls.get(id)), this.options.hostPatterns)) return id;
+      this.asked.add(id);
+      this.forget(id);
+    }
+    return null;
+  }
+
+  /**
+   * Stop watching a row whose thumbnail needs no more looking at.
+   * @param {string} itemId
+   */
+  forget(itemId) {
+    const cell = this.cells.get(itemId);
+    if (cell === undefined) return;
+    this.cells.delete(itemId);
+    this.watcher?.unobserve(cell);
+  }
+
   /** @returns {Promise<void>} */
   async loop() {
-    for (let next = this.wanted[0]; next !== undefined; next = this.wanted[0]) {
-      if (this.asked.has(next.itemId) || !hostCovered(next.url, this.options.hostPatterns)) {
-        this.wanted.shift(); // never requested: no pause either
-        this.asked.add(next.itemId);
-        continue;
-      }
+    while (this.next() !== null) {
       if (!(await this.options.allowed())) return;
       await this.options.pause();
       if (!(await this.options.allowed())) return; // asked again right before the request
-      if (this.wanted[0] !== next) continue; // another list was shown meanwhile
-      this.wanted.shift();
-      this.asked.add(next.itemId);
-      const image = await fetchImage(next.url, { fetch: this.fetch, hostPatterns: this.options.hostPatterns });
+      const id = this.next(); // what is in view NOW: the list may have scrolled during the pause
+      if (id === null) return;
+      const url = /** @type {string} */ (this.urls.get(id));
+      this.asked.add(id);
+      this.forget(id);
+      /** @type {ImageOptions} */
+      const request = { fetch: this.fetch, hostPatterns: this.options.hostPatterns };
+      if (this.options.baseUrl !== undefined) request.baseUrl = this.options.baseUrl();
+      const image = await fetchImage(url, request);
       if (!image.ok) continue;
       const blob = new Blob([/** @type {Uint8Array<ArrayBuffer>} */ (image.data)], { type: mimeTypeFor(image.kind) });
-      const url = this.objectUrl(blob);
-      this.loaded.set(next.itemId, url);
-      this.options.onCover(next.itemId, url);
+      const objectUrl = this.objectUrl(blob);
+      this.loaded.set(id, objectUrl);
+      this.options.onCover(id, objectUrl);
     }
   }
 }

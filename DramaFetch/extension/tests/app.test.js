@@ -26,6 +26,7 @@ import {
 } from "../src/app/discovery.js";
 import { CoverLoader, DownloadsView, Downloader, contentLength, sanitizeError } from "../src/app/downloader.js";
 import { downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
+import { TabKeeper } from "../src/app/tabkeeper.js";
 
 const TINY = readFileSync(new URL("../../tests/fixtures/tiny.mp4", import.meta.url));
 const SERIES_ID = "7699393770256782354";
@@ -766,7 +767,7 @@ test("the discovery tab: muted, sent on only once about:blank has loaded, record
   }
 });
 
-test("the list's thumbnails: one request at a time, only while allowed, each kept by item id", async () => {
+test("the list's thumbnails: one request at a time, only while allowed, only rows in view, each kept by item id", async () => {
   /** @type {string[]} */
   const log = [];
   let inFlight = 0;
@@ -803,8 +804,11 @@ test("the list's thumbnails: one request at a time, only while allowed, each kep
     { itemId: "i5", coverUrl: "https://p16.tiktokcdn.com/moved/5.jpeg" }, // a redirect: not followed
     { itemId: "i6", coverUrl: null },
   ];
-  loader.show(list); // a job runs or waits, or a cooldown: nothing goes out
+  loader.show(list); // nothing is wanted before its row is in view
   await loader.idle();
+  assert.deepEqual(log, []);
+  for (const { itemId } of list) loader.setVisible(itemId, true); // every row in view
+  await loader.idle(); // a job runs or waits, or a cooldown: nothing goes out
   assert.deepEqual(log, []);
   allowed = true;
   loader.resume();
@@ -816,6 +820,39 @@ test("the list's thumbnails: one request at a time, only while allowed, each kep
   assert.equal(loader.urlOf("i2"), "blob:image/jpeg:600");
   assert.equal(loader.urlOf("i5"), null);
   loader.show(list); // the list shown again: every thumbnail asked for once already
+  for (const { itemId } of list) loader.setVisible(itemId, true);
   await loader.idle();
   assert.equal(log.length, 4);
+});
+
+test("the app tab is never discarded while a job runs or waits, discardable again once nothing does", async () => {
+  /** @type {[number, chrome.tabs.UpdateProperties][]} */
+  const updates = [];
+  let refuse = false;
+  /** @type {unknown[]} */
+  const errors = [];
+  const keeper = new TabKeeper({
+    tabs: {
+      update: async (tabId, properties) => {
+        if (refuse) throw new Error("No tab with id: 5");
+        updates.push([tabId, properties]);
+        return undefined;
+      },
+    },
+    onError: (error) => void errors.push(error),
+  });
+  await keeper.keep(undefined, true); // no tab known yet: nothing to tell
+  assert.deepEqual(updates, []);
+  await keeper.keep(5, false); // the page starts idle: Chrome's default, said once
+  await keeper.keep(5, true); // a job queued
+  await keeper.keep(5, true); // it runs, another waits: no second call
+  assert.deepEqual(updates, [[5, { autoDiscardable: true }], [5, { autoDiscardable: false }]]);
+  // the last state asked for wins, in order, even when asked faster than Chrome answers
+  void keeper.keep(5, false);
+  void keeper.keep(5, true);
+  await keeper.keep(5, false); // a Stop or an error ends the job: the queue is empty again
+  assert.deepEqual(updates.slice(2), [[5, { autoDiscardable: true }], [5, { autoDiscardable: false }], [5, { autoDiscardable: true }]]);
+  refuse = true; // the tab is gone: noted, never thrown
+  await keeper.keep(5, true);
+  assert.equal(errors.length, 1);
 });

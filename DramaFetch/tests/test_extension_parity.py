@@ -6,14 +6,17 @@ gives it the same inputs it gives the Python functions and compares the answers 
 shared constants and texts, ``access_of`` on every fixture item and on a seeded fuzz corpus of
 generated items that covers every clue class, ``key_words`` / ``is_drm_key`` (the DRM key "must"
 and "must not" lists), ``parse_item_list_payload`` on every fixture page, the renditions, play URLs
-and ``url_expiry``, ``parse_input``, the naming functions, ``series_report`` / ``report_line`` over
-a table of reports (the complete-skip line with ``RECHECK_HINT`` and the paid line included),
-``dedupe_refs``, the cooldown texts, the pacing decisions and the manifest's semantics.
+and ``url_expiry``, the in-run re-discovery's spent rule (``BrowserDownloader._cache_spent`` against
+the app's ``Downloader.cacheSpent``), ``parse_input``, the naming functions, ``series_report`` /
+``report_line`` over a table of reports (the complete-skip line with ``RECHECK_HINT`` and the paid
+line included), ``dedupe_refs``, the cooldown texts, the pacing decisions and the manifest's
+semantics.
 
 JavaScript cannot tell ``1`` from ``1.0`` and holds integers exactly up to 2**53 only, and it
 enumerates integer-like keys (``"1"``) first: the corpora use integers in that range, fractional
 floats and no integer-like keys; everything else is compared exactly. Nothing here sleeps or
-touches the network. The tests are skipped, with the reason, only when ``node`` is not installed.
+touches the network. The tests are skipped, with the reason, only when ``node`` is not installed
+— and fail instead, naming it, under ``DRAMAFETCH_REQUIRE_TOOLS=1`` (CI: ``tests/conftest.py``).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -33,7 +36,7 @@ from dramafetch import catalog, cli, cooldown, engine, manifest, models, urls
 from dramafetch.catalog import Rendition
 from dramafetch.downloader import BLOCKED_MESSAGE, PAYLOAD_DRM_MESSAGE, locked_result
 from dramafetch.downloader_browser import RATE_LIMIT_MESSAGE as MEDIA_RATE_LIMIT_MESSAGE
-from dramafetch.downloader_browser import UNAVAILABLE_MESSAGE
+from dramafetch.downloader_browser import UNAVAILABLE_MESSAGE, BrowserDownloader
 from dramafetch.errors import UnsupportedUrlError
 from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import (
@@ -45,16 +48,26 @@ from dramafetch.models import (
     SeriesRef,
 )
 
+if TYPE_CHECKING:
+    from conftest import Tools
+
 EXTENSION = Path(__file__).resolve().parent.parent / "extension"
 RUNNER = EXTENSION / "tests" / "parity_runner.js"
 FIXTURES = Path(__file__).parent / "fixtures"
 NODE = shutil.which("node")
 
-pytestmark = pytest.mark.skipif(
-    NODE is None,
-    reason="node is not installed: the Chrome extension's parity with the Python functions "
-    "cannot be checked without Node.js 22 (https://nodejs.org)",
-)
+
+@pytest.fixture(autouse=True)
+def _node_installed(tools: Tools) -> None:
+    """Every test here runs the JavaScript in Node: without it they skip (fail when CI requires
+    its tools, ``DRAMAFETCH_REQUIRE_TOOLS=1``)."""
+    tools.need(
+        "node",
+        NODE is not None,
+        "node is not installed: the Chrome extension's parity with the Python functions "
+        "cannot be checked without Node.js 22 (https://nodejs.org)",
+    )
+
 
 SERIES_ID = "7699393770256782354"
 SECOND_SERIES_ID = "7699393770256782399"
@@ -1212,6 +1225,38 @@ def test_url_expiry_matches_on_tiktok_urls_and_every_urlsplit_corner() -> None:
         [(url, catalog.url_expiry(url), value) for url, value in zip(inputs, values, strict=True)]
     )
     assert sum(1 for value in values if value is not None) >= 20
+
+
+def test_the_spent_rule_of_the_in_run_rediscovery_matches() -> None:
+    """``Downloader.cacheSpent`` against ``BrowserDownloader._cache_spent`` — whether a fresh list's
+    entry calls for a newer list: on every fixture item and part of the fuzz corpus, with nothing,
+    one, every or more than every play URL tried, at clock values around the 60 s expiry margin of
+    the item's URLs; ``None`` and an entry without a play URL never do."""
+    items: list[Any] = [None, {}, {"video": {"playAddr": ""}}, *fixture_items()]
+    items += fuzz_corpus()[:200]
+    cases: list[tuple[Any, list[str], float]] = []
+    for item in items:
+        urls = catalog.play_url_candidates(item) if isinstance(item, dict) else []
+        expiries = sorted(
+            {
+                expiry
+                for expiry in (catalog.url_expiry(url) for url in urls)
+                if expiry is not None and 0 < expiry < 2**52
+            }
+        )
+        clocks = [1_700_000_000.0]
+        for expiry in expiries[:2]:
+            clocks += [expiry - 61.0, expiry - 60.0, expiry - 59.5, expiry + 1.0]
+        for stale in ([], urls[:1], urls, [*urls, "https://elsewhere.example/x.mp4"]):
+            cases += [(item, list(stale), now) for now in clocks]
+    values = js_values([call("parity.cacheSpent", item, stale, now) for item, stale, now in cases])
+    rows: list[tuple[Any, Any, Any]] = []
+    for (item, stale, now), value in zip(cases, values, strict=True):
+        downloader = BrowserDownloader(clock=lambda now=now: now)
+        rows.append(((item, stale, now), downloader._cache_spent(item, set(stale)), value))
+    assert_same(rows)
+    assert sum(1 for value in values if value is True) >= 20
+    assert sum(1 for value in values if value is False) >= 20
 
 
 # --------------------------------------------------------------------------- urls

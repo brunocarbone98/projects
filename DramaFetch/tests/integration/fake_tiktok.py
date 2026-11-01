@@ -74,7 +74,24 @@ Routes (all GET):
                                  with a 302 to `http://localhost:<port>/elsewhere<path>` — a host
                                  the extension's test copy does not cover — which serves what the
                                  CDN would have (`elsewhere_requests`: whoever followed it).
-The request log keeps method, path and query plus three booleans; never headers or cookie values.
+                                 `media_hops` / `cover_hops` = n answer `/cdn/…` / `/cover/…` with a
+                                 302 chain on the SAME origin first: `/hop/1/cdn/…` (path and
+                                 query kept), …, `/hop/<n>/cdn/…`, which serves what `/cdn/…` would
+                                 have (`hop_requests`); with `hops_then_elsewhere` the last hop
+                                 redirects to `localhost` (`elsewhere_url`) instead.
+                                 No answer of the fake carries a CORS header (`Access-Control-*`):
+                                 the Chrome extension reaches it through its host permissions, as
+                                 it reaches TikTok's CDN, never through CORS.
+  /cookie-control/set            (`cookie_control`) sets `dramafetch_control=1; SameSite=None;
+                                 Secure` for the host it is asked on; `/cookie-control/cross-site`
+                                 is a page whose image is `http://localhost:<port>/cookie-control/
+                                 pixel`, so loaded from 127.0.0.1 it is a THIRD-PARTY request: it
+                                 carries that cookie (`control_cookie`) only while the profile
+                                 allows third-party cookies.
+  POST /origin-probe             (`origin_probe`) 204, recorded like any request: what `Origin` a
+                                 request of the Chrome extension's page carries.
+The request log keeps method, path and query, five booleans, the `Origin` and `Referer` values and
+the NAMES of the headers sent; never another header's value, never a cookie value.
 """
 
 from __future__ import annotations
@@ -132,8 +149,17 @@ THIRD_ITEMS = tuple(str(item["id"]) for item in THIRD_PAGES_LOGGED_IN["0"]["item
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
 CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
 COVER_PATH_RE = re.compile(r"^/cover/(?P<id>\d+)\.jpg$")
+#: A hop of `media_hops` / `cover_hops`: `/hop/<k>` + the CDN path it stands for.
+HOP_PATH_RE = re.compile(r"^/hop/(?P<k>[1-9][0-9]*)(?P<path>/.*)$")
 #: The path prefix a `redirect_media` / `redirect_covers` redirect points below (on `localhost`).
 ELSEWHERE_PREFIX = "/elsewhere"
+#: The third-party control of `cookie_control` (its cookie's name; never a session cookie).
+CONTROL_COOKIE = "dramafetch_control"
+CONTROL_PREFIX = "/cookie-control/"
+#: A 1x1 transparent GIF: the control page's image.
+PIXEL_GIF = bytes.fromhex(
+    "47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"
+)
 MEDIA_URL_PREFIX = "https://v16-webapp-prime.tiktok.com/"
 COVER_URL_PREFIX = "https://p16-sign-sg.tiktokcdn.com/"
 #: 20 531 bytes: 3 s of 160x120 H.264 with silent AAC, `moov` before `mdat` (faststart).
@@ -251,6 +277,15 @@ class FakeOptions:
     # the CDN would have, so a client that followed the redirect shows up in `elsewhere_requests`.
     redirect_media: bool = False
     redirect_covers: bool = False
+    # A 302 chain on this origin before `/cdn/…` / `/cover/…` answers: `/hop/1/…` … `/hop/<n>/…`
+    # (the last one serves the CDN's answer, or — `hops_then_elsewhere` — redirects to `localhost`).
+    media_hops: int = 0
+    cover_hops: int = 0
+    hops_then_elsewhere: bool = False
+    # `POST /origin-probe` answers 204 (what Origin a request of the extension's page carries).
+    origin_probe: bool = False
+    # The `/cookie-control/…` routes: does the profile send a third-party cookie at all?
+    cookie_control: bool = False
 
     @property
     def page_scrolls(self) -> bool:
@@ -264,6 +299,11 @@ class RequestRecord:
     logged_in: bool = False  # a `sessionid` cookie was present (its value is never stored)
     from_scroll: bool = False  # carried the page's `X-Requested-By: scroll` header
     with_referer: bool = False  # carried the download engine's `Referer: <base>/` header
+    origin: str | None = None  # the `Origin` header's value, None without one
+    referer: str | None = None  # the `Referer` header's value, None without one
+    header_names: tuple[str, ...] = ()  # the names of the headers sent, lower-cased and sorted
+    control_cookie: bool = False  # the `cookie_control` cookie was present (never a session one)
+    method: str = "GET"
 
 
 class FakeTikTokServer(ThreadingHTTPServer):
@@ -287,6 +327,12 @@ class FakeTikTokServer(ThreadingHTTPServer):
         host name (`localhost`), below `ELSEWHERE_PREFIX`."""
         return f"http://localhost:{self.server_address[1]}{ELSEWHERE_PREFIX}{path_and_query}"
 
+    @property
+    def control_pixel_url(self) -> str:
+        """The `cookie_control` image under the OTHER site's name (`localhost`): a third-party
+        request from a page of 127.0.0.1."""
+        return f"http://localhost:{self.server_address[1]}{CONTROL_PREFIX}pixel"
+
     def record(self, record: RequestRecord) -> None:
         with self.lock:
             self.requests.append(record)
@@ -297,29 +343,62 @@ class FakeTikTokServer(ThreadingHTTPServer):
 
 
 class _Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        server = self.server
-        assert isinstance(server, FakeTikTokServer)
-        options = server.options
+    def _record(self, server: FakeTikTokServer) -> tuple[str, dict[str, str], bool]:
+        """Log this request (no header value but Origin's and Referer's, no cookie value); its
+        path, its query and whether it carried the session cookie."""
         parts = urlsplit(self.path)
         query = {
             key: values[-1] for key, values in parse_qs(parts.query, keep_blank_values=True).items()
         }
-        logged_in = self._has_session_cookie()
-        from_scroll = self.headers.get("X-Requested-By") == "scroll"
-        with_referer = self.headers.get("Referer") == server.base_url + "/"
-        server.record(RequestRecord(parts.path, query, logged_in, from_scroll, with_referer))
+        cookies = self._cookie_names()
+        logged_in = "sessionid" in cookies
+        referer = self.headers.get("Referer")
+        server.record(
+            RequestRecord(
+                parts.path,
+                query,
+                logged_in,
+                from_scroll=self.headers.get("X-Requested-By") == "scroll",
+                with_referer=referer == server.base_url + "/",
+                origin=self.headers.get("Origin"),
+                referer=referer,
+                header_names=tuple(sorted({name.lower() for name in self.headers})),
+                control_cookie=CONTROL_COOKIE in cookies,
+                method=self.command,
+            )
+        )
+        return parts.path, query, logged_in
 
-        if (match := SERIES_PATH_RE.match(parts.path)) is not None:
+    def do_POST(self) -> None:
+        server = self.server
+        assert isinstance(server, FakeTikTokServer)
+        length = self.headers.get("Content-Length", "0")
+        self.rfile.read(int(length) if length.isdigit() else 0)
+        path, _, _ = self._record(server)
+        if server.options.origin_probe and path == "/origin-probe":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+
+    def do_GET(self) -> None:
+        server = self.server
+        assert isinstance(server, FakeTikTokServer)
+        options = server.options
+        path, query, logged_in = self._record(server)
+        from_scroll = self.headers.get("X-Requested-By") == "scroll"
+
+        if (match := SERIES_PATH_RE.match(path)) is not None:
             if options.require_login and not logged_in:
-                self._redirect("/login?redirect_url=" + parts.path)
+                self._redirect("/login?redirect_url=" + path)
             elif options.challenge:
                 self._send(HTTPStatus.OK, CHALLENGE_PAGE.encode(), "text/html; charset=utf-8")
             else:
                 page = PAGE_TEMPLATE.replace("__SERIES_ID__", match.group("id"))
                 page = page.replace("__LAZY__", "true" if options.page_scrolls else "false")
                 self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
-        elif parts.path == "/api/drama/episode/item_list/":
+        elif path == "/api/drama/episode/item_list/":
             ours = (query.get("cursor", "0") or "0") != "0" and not from_scroll
             if ours and options.slow_pagination_s > 0:
                 server.release.wait(options.slow_pagination_s)
@@ -332,19 +411,28 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 payload = self._item_list(options, query, logged_in, from_scroll)
                 self._json(self._with_media_urls(server, payload))
-        elif parts.path.startswith(ELSEWHERE_PREFIX):
-            self._elsewhere(parts.path[len(ELSEWHERE_PREFIX) :])
-        elif (match := CDN_PATH_RE.match(parts.path)) is not None:
+        elif path.startswith(ELSEWHERE_PREFIX):
+            self._elsewhere(path[len(ELSEWHERE_PREFIX) :])
+        elif (match := HOP_PATH_RE.match(path)) is not None:
+            hop = int(match.group("k"))
+            self._hop(server, hop, self.path[len(f"/hop/{hop}") :], query, logged_in)
+        elif (match := CDN_PATH_RE.match(path)) is not None:
             if options.redirect_media:
                 self._redirect(server.elsewhere_url(self.path))
+            elif options.media_hops > 0:
+                self._redirect(f"/hop/1{self.path}")
             else:
                 self._media(options, query, logged_in, match.group("id"), match.group("n"))
-        elif (match := COVER_PATH_RE.match(parts.path)) is not None:
+        elif (match := COVER_PATH_RE.match(path)) is not None:
             if options.redirect_covers:
                 self._redirect(server.elsewhere_url(self.path))
+            elif options.cover_hops > 0:
+                self._redirect(f"/hop/1{self.path}")
             else:
                 self._cover(options, match.group("id"))
-        elif parts.path == "/api/drama/detail/":
+        elif options.cookie_control and path.startswith(CONTROL_PREFIX):
+            self._control(server, path[len(CONTROL_PREFIX) :])
+        elif path == "/api/drama/detail/":
             if query.get("dramaID") == SECOND_SERIES_ID:
                 name, total = SECOND_SERIES_NAME, SECOND_TOTAL_EPISODES
             elif query.get("dramaID") == THIRD_SERIES_ID:
@@ -352,7 +440,7 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 name, total = SERIES_NAME, TOTAL_EPISODES
             self._json({"dramaInfo": {"dramaName": name, "totalEpisode": total}})
-        elif parts.path.startswith("/login"):
+        elif path.startswith("/login"):
             self._send(HTTPStatus.OK, LOGIN_PAGE.encode(), "text/html; charset=utf-8")
         else:
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
@@ -447,10 +535,50 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
 
-    def _has_session_cookie(self) -> bool:
+    def _hop(
+        self, server: FakeTikTokServer, hop: int, rest: str, query: dict[str, str], logged_in: bool
+    ) -> None:
+        """Hop `hop` of `media_hops` / `cover_hops`; `rest` is the CDN path (and query) it stands
+        for: the next hop, else the CDN's answer — or, `hops_then_elsewhere`, `localhost`."""
+        options = server.options
+        original = urlsplit(rest).path
+        media = CDN_PATH_RE.match(original)
+        cover = COVER_PATH_RE.match(original)
+        hops = options.media_hops if media else options.cover_hops if cover else 0
+        if hop > hops:
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+        elif hop < hops:
+            self._redirect(f"/hop/{hop + 1}{rest}")
+        elif options.hops_then_elsewhere:
+            self._redirect(server.elsewhere_url(rest))
+        elif media is not None:
+            self._media(options, query, logged_in, media.group("id"), media.group("n"))
+        elif cover is not None:
+            self._cover(options, cover.group("id"))
+
+    def _control(self, server: FakeTikTokServer, name: str) -> None:
+        """The `cookie_control` routes (see the module docstring)."""
+        if name == "set":
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Set-Cookie", f"{CONTROL_COOKIE}=1; SameSite=None; Secure; Path=/")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "3")
+            self.end_headers()
+            self.wfile.write(b"set")
+        elif name == "cross-site":
+            image = f'<img src="{server.control_pixel_url}" alt="">'
+            page = f"<!DOCTYPE html><html><body>{image}</body></html>"
+            self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
+        elif name == "pixel":
+            self._send(HTTPStatus.OK, PIXEL_GIF, "image/gif")
+        else:
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+
+    def _cookie_names(self) -> set[str]:
+        """The names of the cookies sent (never a value)."""
         jar: SimpleCookie = SimpleCookie()
         jar.load(self.headers.get("Cookie", ""))
-        return "sessionid" in jar
+        return set(jar)
 
     def _json(self, payload: dict[str, Any]) -> None:
         self._send(HTTPStatus.OK, json.dumps(payload).encode(), "application/json")
@@ -653,6 +781,21 @@ class FakeTikTok:
     def elsewhere_requests(self) -> list[RequestRecord]:
         """Requests that followed a `redirect_media` / `redirect_covers` redirect."""
         return [r for r in self.requests if r.path.startswith(ELSEWHERE_PREFIX)]
+
+    @property
+    def hop_requests(self) -> list[RequestRecord]:
+        """Requests of the `/hop/<k>/…` chain of `media_hops` / `cover_hops`."""
+        return [r for r in self.requests if HOP_PATH_RE.match(r.path)]
+
+    @property
+    def control_requests(self) -> list[RequestRecord]:
+        """Requests of the `cookie_control` image (`control_cookie`: the third-party cookie)."""
+        return [r for r in self.requests if r.path == f"{CONTROL_PREFIX}pixel"]
+
+    @property
+    def probe_requests(self) -> list[RequestRecord]:
+        """`POST /origin-probe` requests (`origin_probe`)."""
+        return [r for r in self.requests if r.path == "/origin-probe"]
 
     def series_requests(self, series_id: str) -> list[RequestRecord]:
         """Every request about one series: its page, its `item_list` / `detail` (by `dramaID`)
