@@ -207,7 +207,9 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
         media = len(server.media_requests)
         covers = len(_downloader_covers(server))
 
+        ext.watch_tabs()  # chrome.tabs.onCreated: Playwright never sees the extension's own tabs
         again = ext.download_all(MAIN_LINK, recheck=True)
+        assert len(ext.opened_tabs()) == 1  # the recheck lists the series in a tab of its own
         (series,) = again["series"]
         assert _statuses(series) == ["skipped-exists"] * 4 + ["skipped-locked"]
         assert all(
@@ -232,8 +234,7 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
         assert len(server.media_requests) == media and len(_downloader_covers(server)) == covers
 
         requests = len(server.requests)
-        opened: list[str] = []
-        ext.context.on("page", lambda page: opened.append(page.url))
+        tabs = len(ext.opened_tabs())
         third = ext.download_all(MAIN_LINK)
         (skipped,) = third["series"]
         assert skipped["status"] == "skipped (complete)"
@@ -242,7 +243,7 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
             " — unlocked more in the TikTok app since? --recheck looks again"
         )
         assert len(server.requests) == requests
-        assert opened == []
+        assert len(ext.opened_tabs()) == tabs  # the complete skip opens no tab
         assert len(ext.saved_files()) == 4
 
 
