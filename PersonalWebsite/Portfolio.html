@@ -55,8 +55,8 @@
         .nav-links{display:flex;align-items:center;gap:24px}
         .nav-links a{color:var(--muted);text-decoration:none;font-size:14px;transition:color .2s}
         .nav-links a:hover{color:var(--accent)}
-        @media(max-width:680px){.nav-links{gap:12px}.nav-links a{font-size:12.5px}}
-        @media(max-width:540px){.nav-inner{flex-wrap:wrap;height:auto;min-height:60px;padding:10px 0;row-gap:4px}.nav-links{width:100%;justify-content:space-between;gap:8px}}
+        @media(max-width:720px){.nav-links{gap:12px}.nav-links a{font-size:12.5px}}
+        @media(max-width:640px){.nav-inner{flex-wrap:wrap;height:auto;min-height:60px;padding:10px 0;row-gap:4px}.nav-links{width:100%;justify-content:space-between;gap:8px;flex-wrap:wrap}}
 
         /* HERO */
         header{padding:110px 0 56px;animation:fadeUp .8s ease both}
@@ -115,6 +115,7 @@
         <div class="nav-links">
             <a onclick="document.getElementById('securegate').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">SecureGate</a>
             <a onclick="document.getElementById('fullstack-hub').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">Full-Stack Hub</a>
+            <a onclick="document.getElementById('dramafetch').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">DramaFetch</a>
             <a onclick="document.getElementById('portfolio-web').scrollIntoView({behavior:'smooth'})" style="cursor:pointer">Web Portfolio</a>
             <a href="MainPage.html">← Home</a>
         </div>
@@ -208,9 +209,49 @@
 </section>
 
 <!-- PROJECT 03 -->
-<section class="project" id="portfolio-web">
+<section class="project" id="dramafetch">
     <div class="wrap">
         <div class="pnum">03</div>
+        <div class="ptag">BROWSER AUTOMATION · MEDIA INTEGRITY</div>
+        <h2>DramaFetch</h2>
+        <p class="psummary">A carefully paced tool that downloads whole short-drama series your own TikTok account can already watch, for personal offline viewing — it never unlocks paid episodes or bypasses DRM.</p>
+        <div style="margin-bottom:40px;display:flex;flex-wrap:wrap;gap:14px">
+            <a href="https://github.com/brunocarbone98/projects/tree/main/DramaFetch" target="_blank" rel="noopener" class="btn">See repository ↗</a>
+        </div>
+
+        <div class="pgrid">
+            <div>
+                <div class="block">
+                    <div class="block-label">What it is</div>
+                    <p>A downloader for whole short-drama series that your own TikTok account can already watch — several series in one run — for personal offline viewing, with three front ends: a Python CLI, a small local web page (usable from a phone or TV on the home network with an access token) and a Chrome extension for Windows, macOS and Linux. Episodes are saved as “&lt;Series&gt; - Episode NN.mp4”, exactly as served (nothing is re-encoded), with the cover embedded in the MP4; every file is verified — complete, with an audio track, the expected length — before it counts, and interrupted runs resume. Paid episodes the account has unlocked download like free ones; locked ones are listed and skipped. It never unlocks paid episodes or bypasses DRM or access controls: encrypted media is detected and never kept.</p>
+                </div>
+                <div class="block">
+                    <div class="block-label">Purpose</div>
+                    <p>To demonstrate careful automation against a platform that protects itself: it behaves like one person watching — one request at a time, randomized pauses, rests, a hard stop on any refusal and a 30-minute cooldown — and treats media integrity and testability as features, tested against fixtures and a local fake server, never the real site.</p>
+                </div>
+            </div>
+
+            <div class="spec">
+                <div class="spec-head">Stack used</div>
+                <div class="spec-row"><div class="tech">Python · mypy · Ruff</div><div class="role">CLI and shared engine, type hints everywhere, mypy --strict and Ruff</div></div>
+                <div class="spec-row"><div class="tech">Playwright · Chromium</div><div class="role">Reads the episode list the way TikTok's web app does</div></div>
+                <div class="spec-row"><div class="tech">yt-dlp</div><div class="role">Default download engine, one episode at a time</div></div>
+                <div class="spec-row"><div class="tech">mutagen</div><div class="role">Cover art embedded into the MP4; integrity checks on every file</div></div>
+                <div class="spec-row"><div class="tech">Python http.server</div><div class="role">Standard-library local web UI, reachable from a phone or TV with an access token</div></div>
+                <div class="spec-row"><div class="tech">JavaScript · Chrome Extensions (Manifest V3)</div><div class="role">The extension: zero dependencies, @ts-check, type-checked with TypeScript's checker</div></div>
+                <div class="spec-row"><div class="tech">pytest · node:test</div><div class="role">Unit tests, a local fake TikTok server, Python–JavaScript parity tests and real-Chromium integration tests</div></div>
+                <div class="spec-row"><div class="tech">FFmpeg</div><div class="role">In the tests: a frame-checksum proof that embedding a cover changes no frame</div></div>
+                <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI on every change: Ruff, mypy, unit and real-Chromium integration tests</div></div>
+                <div class="spec-row"><div class="tech">Claude Code agents</div><div class="role">Built with multi-agent workflows: implementers, adversarial reviewers and a fixer per build</div></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- PROJECT 04 -->
+<section class="project" id="portfolio-web">
+    <div class="wrap">
+        <div class="pnum">04</div>
         <div class="ptag">FRONTEND · VANILLA WEB</div>
         <h2>Personal Web Portfolio</h2>
         <p class="psummary">This very site: a two-page portfolio built from scratch without frameworks — pure web technologies only.</p>
