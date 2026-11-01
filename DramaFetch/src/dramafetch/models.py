@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 TIKTOK_BASE_URL = "https://www.tiktok.com"
+#: Default file name of an episode (without extension); see ``manifest.episode_stem`` for the
+#: placeholders: {series} {number} {n} {title} {id}.
+DEFAULT_NAME_FORMAT = "{series} - Episode {number}"
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,8 @@ class Episode:
     # Human-readable reasons to believe the episode is locked/paid/unplayable, e.g. "isFree=false".
     # Empty means "nothing in the payload says it is locked" — not a guarantee it will download.
     lock_hints: tuple[str, ...] = ()
+    # The episode cover (thumbnail): video.originCover, else video.cover, else video.dynamicCover.
+    cover_url: str | None = None
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -127,6 +132,11 @@ class DownloadOptions:
     browser_executable: Path | None = None  # browser engine: explicit Chromium binary
     browser_headful: bool = False
     base_url: str = TIKTOK_BASE_URL  # browser engine refreshes expired play URLs from here (tests)
+    # File names: placeholders {series} {number} (zero-padded) {n} {title} {id}; see
+    # ``manifest.episode_stem``. Validated by ``engine.validate_naming`` before anything is written.
+    name_format: str = DEFAULT_NAME_FORMAT
+    thumbnails: bool = True  # save the episode cover next to the video as <stem>.<jpg|png|webp>
+    series_name: str | None = None  # filled by engine.download_series; expands {series}
     impersonate: bool = True  # yt-dlp + curl_cffi browser impersonation when installed
     prefer_h264: bool = True
     retries: int = 3
