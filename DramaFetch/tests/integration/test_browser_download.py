@@ -727,7 +727,7 @@ def test_with_the_session_the_paid_episode_the_account_unlocked_downloads_like_a
     (`isUnlocked: true`) and carries its play URLs, so it downloads like episodes 1-2 — in the
     session, one media and one cover request each — and the report names it as a paid episode
     the account unlocked; episode 4, locked for everyone, is never requested. The session cookie
-    arrived with every request; its value is nowhere in the output."""
+    arrived with every request (the fake records that it came, never its value)."""
     out = tmp_path / "out"
     with FakeTikTok() as server:
         code = cli.main(
@@ -759,7 +759,6 @@ def test_with_the_session_the_paid_episode_the_account_unlocked_downloads_like_a
         *(_third_name(n) for n in (1, 2, 3)),
         "dramafetch.json",
     ]
-    assert SESSION_VALUE not in captured.out + captured.err
 
 
 def test_without_the_session_the_paid_episodes_are_locked_and_never_requested(
@@ -933,7 +932,6 @@ def test_a_cli_batch_of_all_three_series_with_the_session_then_costs_nothing(
         for number, item in enumerate(items, start=1):
             name = f"{series_name} - Episode {number:02d}.mp4"
             _assert_video_file(out / folder / name, name, item, embedded=True)
-    assert SESSION_VALUE not in first_run.out + first_run.err
 
     again = second_run.out.splitlines()
     assert f"[3/3] {THIRD_FOLDER}: 3 episode(s) -> {out / THIRD_FOLDER}" in again

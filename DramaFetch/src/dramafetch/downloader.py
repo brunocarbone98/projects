@@ -517,7 +517,7 @@ class YtDlpDownloader:
             except OSError as exc:
                 log.debug("could not delete %s: %s", leftover.name, exc.strerror)
         note = discard_note(produced)
-        log.debug("episode %s: %s; the file was %s", episode.number, problem, note or "deleted")
+        log.debug("episode %s: %s (%s)", episode.number, problem, note or "deleted")
         return DownloadResult(
             episode=episode,
             status=DownloadStatus.FAILED_UNAVAILABLE,

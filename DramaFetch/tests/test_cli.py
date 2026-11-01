@@ -18,7 +18,7 @@ import pytest
 from mutagen import version_string as mutagen_version
 
 from dramafetch import __version__, cli, engine
-from dramafetch.catalog import catalog_warnings
+from dramafetch.catalog import catalog_warnings, parse_item_list_payload
 from dramafetch.cooldown import active_cooldown, clear_cooldown, record_block
 from dramafetch.downloader import locked_result
 from dramafetch.errors import (
@@ -2145,3 +2145,91 @@ def test_serve_accepts_a_bracketed_ipv6_host(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(web_server.DramaFetchServer, "serve_forever", interrupted)
     assert cli.main(["serve", "--host", "[::1]", "--port", "0", "--out", str(tmp_path)]) == 0
     assert "DramaFetch web UI on http://[::1]:" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- build 7: access
+
+PAID_SERIES_ID = "7699393770256782388"
+PAID_NAME = "Paid Love Story"
+PAID_URL = f"https://www.tiktok.com/shortdrama/episode/{PAID_SERIES_ID}/1"
+
+
+def make_paid_series(logged_in=True):
+    """The fake TikTok's third series as the catalog reads its unit fixtures."""
+    name = "logged_in" if logged_in else "logged_out"
+    fixture = Path(__file__).parent / "fixtures" / f"item_list_series3_{name}.json"
+    episodes = parse_item_list_payload(
+        json.loads(fixture.read_text("utf-8")), PAID_SERIES_ID
+    ).episodes
+    series = Series(series_id=PAID_SERIES_ID, name=PAID_NAME, episodes=episodes, total_hint=4)
+    series.warnings = catalog_warnings(episodes, 4)
+    return series
+
+
+def test_access_status_is_free_unlocked_or_locked_with_its_hints():
+    assert cli.access_status(_episode(1)) == "free"
+    bought = Episode(1, "1", "t", "s", lock_hints=("isFree=false",), access="unlocked", paid=True)
+    assert cli.access_status(bought) == "unlocked (paid)"
+    assert cli.access_status(_episode(5, ("isFree=false", "isLocked=True"))) == (
+        "locked: isFree=false; isLocked=True"
+    )
+
+
+def test_info_names_the_paid_episodes_your_account_unlocked(fake_discovery, tmp_path, capsys):
+    fake_discovery.series = make_paid_series()
+    assert cli.main(["info", PAID_URL, "--out", str(tmp_path)]) == 0
+    rows = {
+        int(line.split()[0]): line
+        for line in capsys.readouterr().out.splitlines()
+        if line[:4].strip().isdigit()
+    }
+    assert rows[1].endswith("  free") and rows[2].endswith("  free")
+    assert rows[3].endswith("  unlocked (paid)")
+    assert rows[4].endswith(
+        "  locked: isLocked=True; isFree=false; unlockPrice=30; no play address"
+    )
+
+
+def test_info_json_carries_access_paid_and_drm(fake_discovery, tmp_path, capsys):
+    fake_discovery.series = make_paid_series(logged_in=False)
+    assert cli.main(["info", PAID_SERIES_ID, "--json", "--out", str(tmp_path)]) == 0
+    episodes = json.loads(capsys.readouterr().out)["episodes"]
+    assert [episode["access"] for episode in episodes] == ["free", "free", "locked", "locked"]
+    assert [episode["paid"] for episode in episodes] == [False, False, True, True]
+    assert [episode["drm"] for episode in episodes] == [False] * 4
+    assert [episode["locked"] for episode in episodes] == [False, False, True, True]  # kept
+
+
+def test_download_reports_the_unlocked_episodes_and_the_complete_skip_points_at_recheck(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    fake_discovery.series = make_paid_series()
+    flags = ["--out", str(tmp_path), "--delay-min", "0", "--delay-max", "0"]
+    assert cli.main(["download", PAID_URL, *flags]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[3].startswith("E03  done") and lines[4].startswith("E04  skipped-locked")
+    assert lines[-2] == "Summary: 3 done, 1 skipped-locked"
+    assert lines[-1] == (
+        "complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked (3), 1 locked (4)"
+    )
+    (downloader,) = fake_downloader.instances
+    assert [episode.access for episode, _ in downloader.calls] == [
+        "free",
+        "free",
+        "unlocked",
+        "locked",
+    ]
+    # run again the same day: no request at all, and the line says what is still locked
+    assert cli.main(["download", PAID_URL, *flags]) == 0
+    assert len(fake_discovery.calls) == 1
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "complete, nothing to do: 3 episodes already on disk, 1 locked (4) (checked just now) — "
+        "unlocked more in the TikTok app since? --recheck looks again"
+    )
+
+
+def test_the_include_locked_help_says_tiktok_decides(capsys):
+    assert cli.main(["download", "--help"]) == 0  # main returns argparse's exit code
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--include-locked" in help_text
+    assert "TikTok decides; nothing is unlocked" in help_text

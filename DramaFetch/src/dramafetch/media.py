@@ -216,11 +216,11 @@ def drm_problem(path: Path) -> str | None:
     """:data:`~dramafetch.models.DRM_MESSAGE` when the saved file carries encrypted tracks, else
     None.
 
-    A STRUCTURAL walk of the MP4 boxes that reads box headers only, with ``seek`` — never a byte
-    of a box's payload, so never the samples in ``mdat``: a top-level ``pssh``, a ``pssh`` among
-    the ``moov`` children, or an ``encv`` / ``enca`` sample entry
-    (:data:`ENCRYPTED_SAMPLE_ENTRIES`) in ``moov/trak/mdia/minf/stbl/stsd`` means DRM. Bytes
-    that merely spell ``encv`` somewhere — inside the samples, say — are not a box and mean
+    A STRUCTURAL walk of the MP4 boxes that reads box headers only (plus an ``stsd``'s version,
+    flags and entry count), 8 bytes at a time with ``seek`` — never the samples in ``mdat``: a
+    top-level ``pssh``, a ``pssh`` among the ``moov`` children, or an ``encv`` / ``enca`` sample
+    entry (:data:`ENCRYPTED_SAMPLE_ENTRIES`) in ``moov/trak/mdia/minf/stbl/stsd`` means DRM.
+    Bytes that merely spell ``encv`` somewhere — inside the samples, say — are not a box and mean
     nothing. At most :data:`_MAX_DRM_BOXES` headers are read. Never raises: a file that cannot be
     read or does not parse is "no DRM found" (judging a malformed file is :func:`verify_video`'s
     job). Both engines run it on every video they save, whatever ``DownloadOptions.verify``
