@@ -6,10 +6,16 @@ ordinary video at ``https://www.tiktok.com/@<user>/video/<item_id>`` (the userna
 checked), which yt-dlp downloads as a single progressive file — no merging, so ffmpeg is optional.
 Without a logged-in session TikTok returns no formats ("No video formats found") or redirects to
 ``/login``, so a Netscape ``cookies.txt`` (or ``--cookies-from-browser``) is the normal way to run.
-Locked (paid) episodes are skipped before any network access; nothing here unlocks or bypasses
-anything. Cookie values are never logged; error messages are redacted just in case.
+Locked episodes (``Episode.locked``: not unlocked by this account) are skipped before any network
+access; nothing here unlocks or bypasses anything. Cookie values are never logged; error messages
+are redacted just in case.
 
-Every file yt-dlp produces is verified before anything else happens to it
+Every file yt-dlp produces is first checked for encrypted tracks (``dramafetch.media.drm_problem``,
+ALWAYS, ``--no-verify`` or not): an encrypted file can never play and DramaFetch never decrypts, so
+it is deleted with the cover and any partial file next to it, and the episode is
+FAILED_UNAVAILABLE with ``models.DRM_MESSAGE``. yt-dlp's own "This video is DRM protected" maps to
+the same status and message (:meth:`YtDlpDownloader.classify_error`, :func:`describe_failure`), and
+``allow_unplayable_formats`` is never set. Then every file is verified
 (``dramafetch.media.verify_video``: an MP4 that parses, is not cut short, has an audio track and
 lasts about ``Episode.duration_s``) unless ``DownloadOptions.verify`` is off; a file that fails is
 renamed ``<name> (incomplete).<ext>`` (``media.quarantine``; one the OS will not rename is deleted
@@ -35,8 +41,21 @@ from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.discovery.static import redact_tokens, safe_url
 from dramafetch.errors import ThumbnailError
 from dramafetch.manifest import episode_stem
-from dramafetch.media import INCOMPLETE_PREFIX, quarantine_note, verify_video
-from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode
+from dramafetch.media import (
+    INCOMPLETE_PREFIX,
+    discard_note,
+    drm_problem,
+    quarantine_note,
+    verify_video,
+)
+from dramafetch.models import (
+    DRM_MARK,
+    DRM_MESSAGE,
+    DownloadOptions,
+    DownloadResult,
+    DownloadStatus,
+    Episode,
+)
 from dramafetch.thumbnails import (
     COVER_SUFFIXES,
     MAX_COVER_BYTES,
@@ -89,6 +108,10 @@ _RATE_LIMIT_RE = re.compile(r"\b429\b|too many requests|rate limit")
 # HTTP 403 and its wordings. A 403 from TikTok is the protection saying no, not a missing video:
 # the run must stop and wait, so it gets its own status rather than FAILED/FAILED_UNAVAILABLE.
 _BLOCKED_RE = re.compile(r"http error 403|\b403\b\s*:?\s*forbidden|\bforbidden\b|access denied")
+# DRM in yt-dlp's words: "This video is DRM protected" (every format flagged `has_drm`, which yt-dlp
+# drops while `allow_unplayable_formats` is off — and DramaFetch never turns it on). A whole token,
+# so that no id or word that merely contains the letters counts. No retry can change the verdict.
+_DRM_RE = re.compile(r"\bdrm\b")
 
 
 def curl_cffi_available() -> bool:
@@ -181,12 +204,16 @@ def cookies_file_problem(cookies_file: Path | None) -> str | None:
 
 
 def locked_result(episode: Episode) -> DownloadResult:
-    """The SKIPPED_LOCKED result for an episode whose payload says it is locked/paid."""
-    return DownloadResult(
-        episode=episode,
-        status=DownloadStatus.SKIPPED_LOCKED,
-        message="looks locked: " + "; ".join(episode.lock_hints),
-    )
+    """The SKIPPED_LOCKED result for a locked episode (``Episode.locked``: the payload says this
+    session cannot play it): ``"looks locked: <hints>"``, or — the payload itself flags DRM
+    (``Episode.drm``) — ``"protected by DRM (<hints>): DramaFetch does not decrypt it"``
+    (:data:`~dramafetch.models.DRM_MARK` first, as every DRM message)."""
+    hints = "; ".join(episode.lock_hints)
+    if episode.drm:
+        message = f"{DRM_MARK} ({hints}): DramaFetch does not decrypt it" if hints else DRM_MESSAGE
+    else:
+        message = f"looks locked: {hints}" if hints else "looks locked"
+    return DownloadResult(episode=episode, status=DownloadStatus.SKIPPED_LOCKED, message=message)
 
 
 def redact_secrets(text: str) -> str:
@@ -212,10 +239,20 @@ def sanitize_error(message: str) -> str:
 
 def describe_failure(status: DownloadStatus, message: str) -> str:
     """The user-facing message for a classified failure: a FAILED_BLOCKED result is prefixed with
-    :data:`BLOCKED_MESSAGE` (what happened and what to do), the others keep yt-dlp's words."""
+    :data:`BLOCKED_MESSAGE` (what happened and what to do), a FAILED_UNAVAILABLE one that names DRM
+    with :data:`~dramafetch.models.DRM_MESSAGE` (so it starts with ``DRM_MARK``, which is how the
+    manifest remembers it), the others keep yt-dlp's words."""
     if status is DownloadStatus.FAILED_BLOCKED:
         return f"{BLOCKED_MESSAGE}: {message}" if message else BLOCKED_MESSAGE
+    if status is DownloadStatus.FAILED_UNAVAILABLE and mentions_drm(message):
+        return f"{DRM_MESSAGE}: {message}"
     return message
+
+
+def mentions_drm(message: str) -> bool:
+    """Whether an error message names DRM as a whole word (yt-dlp: "This video is DRM
+    protected"), case-insensitively."""
+    return _DRM_RE.search(message.lower()) is not None
 
 
 def _written_cover(video: Path) -> Path | None:
@@ -226,6 +263,24 @@ def _written_cover(video: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _leftovers(video: Path) -> list[Path]:
+    """What a download left next to ``video`` besides the video itself: every cover
+    ``<stem>.<ext>`` for the extensions in :data:`WRITTEN_COVER_SUFFIXES`, and yt-dlp's in-progress
+    files of that very video (``<name>.part``, ``<name>.ytdl``, ``<name>.part-Frag3``, …: the
+    whole file name first, so another episode's files never match)."""
+    found = [video.with_suffix(suffix) for suffix in WRITTEN_COVER_SUFFIXES]
+    found = [path for path in found if path.is_file()]
+    try:
+        found += [
+            path
+            for path in video.parent.iterdir()
+            if path.name.startswith(video.name) and is_partial_file(path.name) and path.is_file()
+        ]
+    except OSError as exc:
+        log.debug("could not list %s: %s", video.parent, exc.strerror)
+    return found
 
 
 def _finish_cover(video: Path, options: DownloadOptions) -> str:
@@ -314,7 +369,9 @@ class YtDlpDownloader:
         cover URL's extension (``<stem>.jpeg`` for TikTok's covers), tries the next cover the
         extractor listed when one fails, and says nothing when none can be had. What DramaFetch
         then does with that file — embed it into the MP4, keep it, both — is
-        :func:`_finish_cover`'s job, after the download.
+        :func:`_finish_cover`'s job, after the download. ``allow_unplayable_formats`` is never
+        set: yt-dlp keeps dropping the formats it knows to be DRM-protected (its default), and
+        DramaFetch never asks for media it could not play without decrypting it.
         """
         del episode  # the caller already folded the episode into outtmpl
         params: dict[str, Any] = {
@@ -355,7 +412,10 @@ class YtDlpDownloader:
     def download(self, episode: Episode, options: DownloadOptions) -> DownloadResult:
         """Download into ``options.out_dir`` (already the SERIES directory). Never raises.
 
-        After yt-dlp returns, the produced file is verified (``options.verify``, see
+        After yt-dlp returns, the produced file is checked for encrypted tracks first — always,
+        whatever ``options.verify`` says (:func:`~dramafetch.media.drm_problem`): an encrypted
+        file is deleted with its cover and partial files (see :meth:`_discard_encrypted`) and the
+        episode is FAILED_UNAVAILABLE. Then it is verified (``options.verify``, see
         :func:`~dramafetch.media.verify_video`) BEFORE the cover step: a file that fails is
         quarantined (see :meth:`_quarantine`) and the episode is FAILED; a file that passes gets
         its cover handled by :func:`_finish_cover`.
@@ -405,6 +465,9 @@ class YtDlpDownloader:
                 status=DownloadStatus.FAILED,
                 message="yt-dlp finished but no file appeared in the series directory",
             )
+        encrypted = drm_problem(produced)  # always, whatever options.verify says
+        if encrypted is not None:
+            return self._discard_encrypted(episode, produced, encrypted)
         if options.verify:
             problem = verify_video(produced, episode.duration_s)
             if problem is not None:
@@ -440,14 +503,41 @@ class YtDlpDownloader:
         )
 
     @staticmethod
+    def _discard_encrypted(episode: Episode, produced: Path, problem: str) -> DownloadResult:
+        """The FAILED_UNAVAILABLE result for a file with encrypted tracks
+        (:func:`~dramafetch.media.drm_problem`): DramaFetch never keeps encrypted media, so the
+        video is deleted — not quarantined: no rerun makes it play — and so are the cover yt-dlp
+        wrote next to it and any partial file of that download (:func:`_leftovers`); no cover is
+        embedded or kept. The message is ``problem`` (:data:`~dramafetch.models.DRM_MESSAGE`),
+        followed by ``(could not delete <name>: …)`` only when the OS refused to delete the video
+        (:func:`~dramafetch.media.discard_note`)."""
+        for leftover in _leftovers(produced):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError as exc:
+                log.debug("could not delete %s: %s", leftover.name, exc.strerror)
+        note = discard_note(produced)
+        log.debug("episode %s: %s; the file was %s", episode.number, problem, note or "deleted")
+        return DownloadResult(
+            episode=episode,
+            status=DownloadStatus.FAILED_UNAVAILABLE,
+            message=problem if note is None else f"{problem} ({note})",
+        )
+
+    @staticmethod
     def classify_error(message: str) -> DownloadStatus:
         """Map a yt-dlp error message to the closest DownloadStatus (case-insensitive).
 
-        Login wording wins, then HTTP 429 (``\\b429\\b``, "too many requests", "rate limit"),
-        then HTTP 403 ("HTTP Error 403", "forbidden", "access denied" -> FAILED_BLOCKED), then
-        the "unavailable" family; anything else is a plain FAILED.
+        DRM comes first (``\\bdrm\\b``: yt-dlp's "This video is DRM protected" ->
+        FAILED_UNAVAILABLE, whatever else the message says: no retry, login or wait can change
+        it; :func:`describe_failure` then puts :data:`~dramafetch.models.DRM_MESSAGE` first). Then
+        login wording, then HTTP 429 (``\\b429\\b``, "too many requests", "rate limit"), then
+        HTTP 403 ("HTTP Error 403", "forbidden", "access denied" -> FAILED_BLOCKED), then the
+        "unavailable" family; anything else is a plain FAILED.
         """
         text = message.lower()
+        if mentions_drm(text):
+            return DownloadStatus.FAILED_UNAVAILABLE
         if any(
             marker in text
             for marker in ("requiring login", "login required", "log in", "logged-in", "logged in")

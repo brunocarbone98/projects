@@ -11,10 +11,15 @@ TikTok facts this module encodes (verified October 2026):
   and the only reliable order: series are published in batches, so ``createTime`` is a shuffle.
   Items without a number (trailers) are skipped; items whose ``dramaInfo.dramaID`` names another
   series are dropped.
-- TikTok sells later episodes for coins. The field that marks a locked episode is undocumented, so
-  :func:`lock_hints` applies key-name heuristics (``isLocked``, ``unlockPrice``, ``isFree=false``)
-  and treats an item without any play address as locked too. Locked episodes are listed and
-  skipped; nothing here unlocks, buys or bypasses anything.
+- TikTok sells later episodes (coins, a purchase, a subscription). The fields that say whether
+  THIS session may play one are undocumented, so :func:`access_of` applies key-name heuristics to
+  the payload TikTok served to the user's own session and sorts each episode into ``free``,
+  ``unlocked`` (sold, and this account may play it: an entitlement flag such as ``isUnlocked``,
+  or a play address TikTok gave this session for a sold episode) or ``locked`` (a lock, preview,
+  trial, paywall or DRM flag, or no play address at all); :func:`lock_hints` lists every clue it
+  found. Locked episodes are listed and skipped. Nothing here unlocks, buys, fakes entitlement or
+  bypasses anything: the decision only reads what TikTok already sent to that session. The field
+  names were inferred without access to TikTok; ``--dump-raw`` from a real run confirms them.
 - ``GET /api/drama/detail/`` carries the series name and announced total; its exact shape is
   unknown, so :func:`parse_detail_payload` is best-effort.
 - Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
@@ -46,10 +51,46 @@ from dramafetch.models import QUALITY_MODES, Episode
 
 #: How deep the recursive searches descend into a payload before giving up.
 MAX_DEPTH = 12
+#: The hint of an item THIS session's payload gives no play address for.
+NO_PLAY_ADDRESS = "no play address"
 
 _ITEM_LIST_KEYS = ("itemList", "item_list")
+#: The key-name heuristic of the builds before the access model; it still catches the leftovers
+#: (``unlockType: 1``) as pricing clues, see :func:`access_of`.
 _LOCK_KEY_RE = re.compile(r"lock|paid|needpay|unlock|price|coin|vip|preview", re.IGNORECASE)
 _FREE_KEY_RE = re.compile(r"free", re.IGNORECASE)
+# The clue classes of :func:`access_of` and the key patterns behind them (case-insensitive).
+_DRM = "drm"
+_ENTITLED = "entitled"
+_VIEWER_LOCK = "viewer-lock"
+_AMBIGUOUS = "ambiguous"
+_PRICING = "pricing"
+_DRM_KEY_RE = re.compile(r"drm|encrypt", re.IGNORECASE)
+#: Matched against the FULL key: ``isUnlocked``, ``is_purchased``, ``hasPaid``, ``paidByUser``, …
+_ENTITLED_KEY_RE = re.compile(
+    r"(?:is_?)?(?:unlocked|purchased|bought|entitled)"
+    r"|has_?(?:paid|purchased|unlocked|bought|access)"
+    r"|paid_?by_?(?:user|viewer|me)",
+    re.IGNORECASE,
+)
+#: Matched against the FULL key: ``isLocked``, ``is_locked``, ``locked``.
+_LOCKED_KEY_RE = re.compile(r"(?:is_?)?locked", re.IGNORECASE)
+#: Anywhere in the key: a payment still needed, a preview or trial clip (not the episode), a
+#: paywall.
+_VIEWER_LOCK_KEY_RE = re.compile(
+    r"need_?(?:pay|unlock|buy|purchase)|preview|trial|paywall", re.IGNORECASE
+)
+#: ``lockStatus`` / ``lock_status`` — not ``unlockStatus``, which is a :data:`_STATUS_KEY_RE`.
+_LOCK_STATUS_KEY_RE = re.compile(r"(?<!un)lock_?status", re.IGNORECASE)
+#: ``unlockStatus`` / ``payStatus`` / ``purchaseStatus``: only a STRING value decides (one of the
+#: two sets below); a bool or a number is a hint only (1 can mean either).
+_STATUS_KEY_RE = re.compile(r"(?:unlock|pay|purchase)_?status", re.IGNORECASE)
+_ENTITLED_STATUS_VALUES = frozenset({"unlocked", "paid", "purchased", "bought", "entitled"})
+_LOCKED_STATUS_VALUES = frozenset(
+    {"locked", "lock", "need_pay", "needpay", "unpaid", "unpurchased"}
+)
+_PRICE_KEY_RE = re.compile(r"price|coin|cost|charge", re.IGNORECASE)
+_SOLD_KEY_RE = re.compile(r"vip|paid", re.IGNORECASE)
 _SERIES_ID_KEYS = ("dramaID", "dramaId", "DramaID", "albumId")
 _EPISODE_NUMBER_KEYS = ("EpisodeNumber", "episodeNumber", "episode_number")
 _NAME_KEYS = ("dramaName", "title", "name")
@@ -100,51 +141,160 @@ def _walk_item_lists(
             _walk_item_lists(value, depth + 1, max_depth, found)
 
 
-def lock_hints(item: dict[str, Any]) -> tuple[str, ...]:
-    """Heuristic reasons to believe an item is locked, paid or unplayable (deterministic order).
+def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
+    """``(access, paid, drm, hints)`` of an item: what THIS session may do with the episode.
 
-    ``item["dramaInfo"]`` is scanned recursively and ``item["video"]`` at its top level: a key
-    matching ``lock|paid|needpay|unlock|price|coin|vip|preview`` with a truthy scalar value gives
-    ``"key=value"``; a key matching ``free`` with a falsy scalar value gives ``"isFree=false"``; a
-    missing or empty ``video.playAddr`` together with an empty ``video.bitrateInfo`` gives
-    ``"no play address"``. An empty tuple means nothing in the payload says "locked".
+    Pure and deterministic; never raises on junk. ``access`` is one of ``models.ACCESS_MODES``,
+    decided from the payload TikTok served to the user's own session — nothing here unlocks,
+    buys, fakes or sends anything. Scanned: the item's top-level scalar keys (those of an
+    ``itemStruct`` wrapper too), ``dramaInfo`` recursively (``MAX_DEPTH``) and ``video``'s
+    top-level scalar keys; values are bools, numbers and strings only (``_truthy`` as ever: ``0``,
+    ``""``, ``"false"``, ``"no"``, ``"none"``, ``"null"`` are falsy). Keys match
+    case-insensitively; every clue gives the hint ``<key>=<value>`` (a falsy ``free`` key gives
+    ``isFree=false``). The clue classes:
+
+    - DRM: a key containing ``drm`` or ``encrypt``, truthy.
+    - ENTITLED (the account may play it): a FULL key ``(is_?)?(unlocked|purchased|bought|
+      entitled)``, ``has_?(paid|purchased|unlocked|bought|access)`` or
+      ``paid_?by_?(user|viewer|me)``, truthy; or an ``(unlock|pay|purchase)_?status`` key whose
+      string value is ``unlocked``, ``paid``, ``purchased``, ``bought`` or ``entitled``.
+    - VIEWER-LOCK (this session cannot play it): a FULL key ``(is_?)?locked``; a key containing
+      ``need_?(pay|unlock|buy|purchase)``, ``preview``, ``trial`` or ``paywall`` (a preview or
+      trial clip is not the episode); a ``lock_?status`` key (not ``unlock…``) — all truthy; or an
+      ``(unlock|pay|purchase)_?status`` key whose string value is ``locked``, ``lock``,
+      ``need_pay``, ``needpay``, ``unpaid`` or ``unpurchased``.
+    - AMBIGUOUS: an ``(unlock|pay|purchase)_?status`` key with a bool or numeric value (1 can mean
+      either): a hint, it NEVER decides.
+    - PRICING (the episode is sold): a key containing ``free`` with a falsy value; a key containing
+      ``price``, ``coin``, ``cost`` or ``charge`` with a number above 0 (or a truthy string); a key
+      containing ``vip`` or ``paid`` that is not an ENTITLED full key, truthy; and any other truthy
+      key the old ``lock|paid|needpay|unlock|price|coin|vip|preview`` heuristic matched and no
+      class above turned into a clue (``unlockType: 1``).
+    - PLAY: no ``video.playAddr`` and an empty ``video.bitrateInfo`` (or no ``video`` at all) in
+      this session's payload: the hint :data:`NO_PLAY_ADDRESS`.
+
+    Decision, first match wins: a DRM clue -> ``locked`` with ``drm`` (DramaFetch never decrypts);
+    an ENTITLED clue -> ``unlocked`` (even without a play address: the account is entitled, and
+    the downloader finds out what TikTok serves); a VIEWER-LOCK clue -> ``locked``; no play address
+    -> ``locked`` (free-looking items included); a PRICING clue -> ``unlocked``; else ``free``.
+    ``paid`` is any PRICING or ENTITLED clue. Why a sold episode WITH a play address counts as
+    unlocked: a client that is to show a paywall or a preview needs a flag for it, and with none
+    the address is what TikTok's own web player plays for this session. Should it ever turn out to
+    be a preview after all, the integrity check of every download (``media.verify_video``: the
+    duration) quarantines it.
     """
-    hints: list[str] = []
+    if not isinstance(item, dict):
+        item = {}
+    clues: list[tuple[str, str]] = []
+    for key, value in _top_level_scalars(item):
+        clues.extend(_clues(key, value))
     drama_info = _field(item, "dramaInfo")
     if isinstance(drama_info, dict):
-        _collect_lock_hints(drama_info, 0, hints)
+        _collect_clues(drama_info, 0, clues)
     video = _field(item, "video")
     if isinstance(video, dict):
         for key, value in video.items():
-            _hint_for(str(key), value, hints)
-        if not _has_play_address(video):
-            hints.append("no play address")
+            clues.extend(_clues(str(key), value))
+    playable = isinstance(video, dict) and _has_play_address(video)
+    classes = {kind for kind, _ in clues}
+    hints = [hint for _, hint in clues]
+    if not playable:
+        hints.append(NO_PLAY_ADDRESS)
+    drm = _DRM in classes
+    if drm:
+        access = "locked"
+    elif _ENTITLED in classes:
+        access = "unlocked"
+    elif _VIEWER_LOCK in classes or not playable:
+        access = "locked"
+    elif _PRICING in classes:
+        access = "unlocked"
     else:
-        hints.append("no play address")
-    return tuple(dict.fromkeys(hints))
+        access = "free"
+    paid = _PRICING in classes or _ENTITLED in classes
+    return access, paid, drm, tuple(dict.fromkeys(hints))
 
 
-def _collect_lock_hints(node: Any, depth: int, hints: list[str]) -> None:
+def lock_hints(item: dict[str, Any]) -> tuple[str, ...]:
+    """Every pricing, lock, entitlement and DRM clue of an item, deterministic order (the fourth
+    element of :func:`access_of`): ``"key=value"``, ``"isFree=false"``, ``"no play address"``.
+    Informational — ``Episode.access`` decides; an empty tuple means the payload says nothing
+    about a price or a lock."""
+    return access_of(item)[3]
+
+
+def _top_level_scalars(item: dict[str, Any]) -> list[tuple[str, Any]]:
+    """The item's own scalar ``(key, value)`` pairs, then those of an ``itemStruct`` wrapper whose
+    key the item itself lacks (the outer key wins, as in :func:`_field`)."""
+    pairs = [(key, value) for key, value in item.items() if not isinstance(value, dict | list)]
+    inner = item.get("itemStruct")
+    if isinstance(inner, dict):
+        pairs.extend(
+            (key, value)
+            for key, value in inner.items()
+            if key not in item and not isinstance(value, dict | list)
+        )
+    return [(str(key), value) for key, value in pairs]
+
+
+def _collect_clues(node: Any, depth: int, clues: list[tuple[str, str]]) -> None:
     if depth > MAX_DEPTH:
         return
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(value, dict | list):
-                _collect_lock_hints(value, depth + 1, hints)
+                _collect_clues(value, depth + 1, clues)
             else:
-                _hint_for(str(key), value, hints)
+                clues.extend(_clues(str(key), value))
     elif isinstance(node, list):
         for value in node:
-            _collect_lock_hints(value, depth + 1, hints)
+            _collect_clues(value, depth + 1, clues)
 
 
-def _hint_for(key: str, value: Any, hints: list[str]) -> None:
-    if value is None or not isinstance(value, bool | int | float | str):
-        return
-    if _LOCK_KEY_RE.search(key) and _truthy(value):
-        hints.append(f"{key}={_format_hint_value(value)}")
-    elif _FREE_KEY_RE.search(key) and not _truthy(value):
-        hints.append("isFree=false")
+def _clues(key: str, value: Any) -> list[tuple[str, str]]:
+    """The ``(class, hint)`` clues one scalar ``key: value`` gives (the table of
+    :func:`access_of`); empty for a value that is not a bool, a number or a string."""
+    if not isinstance(value, bool | int | float | str):
+        return []
+    hint = f"{key}={_format_hint_value(value)}"
+    truthy = _truthy(value)
+    entitled_key = _ENTITLED_KEY_RE.fullmatch(key) is not None
+    status_key = _STATUS_KEY_RE.search(key) is not None
+    status = value.strip().lower() if status_key and isinstance(value, str) else None
+    found: list[tuple[str, str]] = []
+    if truthy and _DRM_KEY_RE.search(key):
+        found.append((_DRM, hint))
+    if (truthy and entitled_key) or status in _ENTITLED_STATUS_VALUES:
+        found.append((_ENTITLED, hint))
+    viewer_lock_key = (
+        _LOCKED_KEY_RE.fullmatch(key) is not None
+        or _VIEWER_LOCK_KEY_RE.search(key) is not None
+        or _LOCK_STATUS_KEY_RE.search(key) is not None
+    )
+    if (truthy and viewer_lock_key) or status in _LOCKED_STATUS_VALUES:
+        found.append((_VIEWER_LOCK, hint))
+    if status_key and not isinstance(value, str):
+        found.append((_AMBIGUOUS, hint))
+    sold = (
+        (_PRICE_KEY_RE.search(key) is not None and _positive(value))
+        or (truthy and not entitled_key and _SOLD_KEY_RE.search(key) is not None)
+        # the old heuristic's leftovers, for a key no class above turned into a clue
+        or (truthy and not found and _LOCK_KEY_RE.search(key) is not None)
+    )
+    if _FREE_KEY_RE.search(key) and not truthy:
+        found.append((_PRICING, "isFree=false"))
+    elif sold:
+        found.append((_PRICING, hint))
+    return found
+
+
+def _positive(value: Any) -> bool:
+    """A price that means "sold": a number above 0, ``true``, or a truthy string."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value > 0
+    return _truthy(value)
 
 
 def _truthy(value: Any) -> bool:
@@ -158,7 +308,10 @@ def _truthy(value: Any) -> bool:
 
 
 def _format_hint_value(value: Any) -> str:
-    text = str(value).strip() if isinstance(value, str) else str(value)
+    try:
+        text = value.strip() if isinstance(value, str) else str(value)
+    except ValueError:  # an int with more digits than str() converts (Python's safety limit)
+        text = "…"
     if len(text) > _MAX_HINT_VALUE_LEN:
         return text[: _MAX_HINT_VALUE_LEN - 1] + "…"
     return text
@@ -182,6 +335,8 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     ``video.dynamicCover`` (see :func:`cover_url_of`), None when the item has none.
     ``quality_hint`` is the label of the rendition the default quality mode takes
     (:func:`choose_rendition` with ``"compatible"``, e.g. ``"720p h264"``), None without one.
+    ``access`` / ``paid`` / ``drm`` / ``lock_hints`` come from :func:`access_of`, always passed
+    explicitly (``Episode`` derives ``access`` from ``lock_hints`` only for other callers).
     """
     item_id = _as_id(_field(item, "id"))
     if item_id is None:
@@ -210,6 +365,7 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     duration = _as_int(video.get("duration")) if isinstance(video, dict) else None
     if duration is not None and duration < 0:
         duration = None
+    access, paid, drm, hints = access_of(item)
 
     return Episode(
         number=number,
@@ -219,9 +375,12 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
         series_name=series_name,
         author=author,
         duration_s=duration,
-        lock_hints=lock_hints(item),
+        lock_hints=hints,
         cover_url=cover_url_of(item),
         quality_hint=chosen.label if (chosen := choose_rendition(item)) is not None else None,
+        access=access,
+        paid=paid,
+        drm=drm,
         raw=item,
     )
 

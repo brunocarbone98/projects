@@ -21,7 +21,11 @@ identity-encoded body: under ``gzip``/``br`` the header counts the encoded strea
 Node's) — or a transfer the server cut short, which Playwright reports as ``aborted`` — fails the
 episode at once (``FAILED``, "download looks incomplete or wrong: truncated body …"), whatever
 ``DownloadOptions.verify`` says: a truncation is the network, not the URL, so no other mirror is
-tried and no list is refreshed, and nothing is written. Every written video is then verified
+tried and no list is refreshed, and nothing is written. A body with encrypted tracks
+(``dramafetch.media.drm_problem_in``: an ``encv``/``enca`` sample entry or a ``pssh`` box, checked
+in memory, ``--no-verify`` or not) is never written either: the episode is FAILED_UNAVAILABLE with
+``models.DRM_MESSAGE``, no other mirror, no fresh list, no cover — DramaFetch never decrypts and
+never keeps encrypted media. Every written video is then verified
 (``dramafetch.media.verify_video``, unless ``DownloadOptions.verify`` is off) BEFORE the cover
 step: a file that fails is renamed ``<name> (incomplete).mp4`` (one the OS will not rename is
 deleted rather than left under the episode's name) and the episode is FAILED, so a rerun tries it
@@ -60,7 +64,7 @@ from dramafetch.errors import (
     ThumbnailError,
 )
 from dramafetch.manifest import episode_stem
-from dramafetch.media import INCOMPLETE_PREFIX, quarantine_note, verify_video
+from dramafetch.media import INCOMPLETE_PREFIX, drm_problem_in, quarantine_note, verify_video
 from dramafetch.models import (
     DiscoveryOptions,
     DownloadOptions,
@@ -293,7 +297,11 @@ class BrowserDownloader:
         the verification (DONE) or the server rate-limits (FAILED_RATE_LIMITED). A denied status or
         a non-video body moves on to the next URL; any other status stops, and so does a truncated
         transfer (a body shorter than the ``Content-Length``, or one Playwright aborted) — the
-        network's fault, not the URL's. A written video that fails
+        network's fault, not the URL's. A body with encrypted tracks
+        (:func:`~dramafetch.media.drm_problem_in`, checked in memory whatever ``options.verify``
+        says) is FAILED_UNAVAILABLE with :data:`~dramafetch.models.DRM_MESSAGE` at once: nothing
+        is written, no other mirror is tried, no list refreshed and no cover requested — every
+        mirror serves the same encrypted file. A written video that fails
         :func:`~dramafetch.media.verify_video` is quarantined and the episode FAILED at once (the
         same preview would come from every mirror). Otherwise return why the last one was no good.
         """
@@ -362,6 +370,19 @@ class BrowserDownloader:
                 log.debug("episode %s: %s from %s", episode.number, problem, host)
                 last = _Attempt(f"{problem} from {host}", True)
                 continue
+            encrypted = drm_problem_in(body)  # always, whatever options.verify says
+            if encrypted is not None:
+                # Every mirror and every fresh list serve the same encrypted file: no next URL,
+                # no refresh, nothing written, no cover. DramaFetch never keeps encrypted media.
+                log.debug("episode %s: encrypted media from %s, not written", episode.number, host)
+                return (
+                    DownloadResult(
+                        episode=episode,
+                        status=DownloadStatus.FAILED_UNAVAILABLE,
+                        message=encrypted,
+                    ),
+                    None,
+                )
             _write_atomically(target, body)
             if options.verify:
                 failure = verify_video(target, episode.duration_s)
