@@ -103,7 +103,7 @@ jobs:
               '1. Railway → the app service → **Deployments** → read the latest deploy log. If it says `FATAL: DATABASE_URL is empty`, fix the variable by picking the Postgres service from Railway\'s variable-reference dropdown (never type the reference by hand) and redeploy — `DEPLOY.md` → Environment variables.',
               '2. Otherwise **Restart** the latest deployment (or redeploy) and watch the log until the web answers on `/en`. The container already restarts itself when a process exits, so a persistent incident usually means configuration or the database.',
               '3. If the database is the problem, open the Postgres service in Railway and check its status.',
-              '4. Nothing to do on GitHub: the first green run closes this issue automatically.',
+              '4. Nothing to do on GitHub: the next healthy run closes this issue automatically.',
               '',
               `Every further failing run adds one comment with the new probe table. The **SRE patrol** shift reads this issue every 6 hours and comments its diagnosis once. See [OPERATIONS.md → Incident flow](${blob}/OPERATIONS.md#8-incident-flow) and [DEPLOY.md → Monitoring & incidents](${blob}/DEPLOY.md#monitoring--incidents).`,
             ].join('\n');
@@ -152,7 +152,7 @@ jobs:
           {
             echo "### The patrol could not observe the app"
             echo
-            echo "Railway's edge answered every probe with its bot-protection browser check (\"Checking your browser…\", server \`railway-hikari\`) instead of the app, so this run proves nothing about Shipping Hub. No incident was opened or closed."
+            echo "Railway's edge answered one or more probes with its bot-protection browser check (\"Checking your browser…\", server \`railway-hikari\`) instead of the app, so this run gives no verdict on Shipping Hub. No incident was opened or closed."
             echo
             echo "What a human can do: open <${BASE_URL}/en> in a browser to see the real state; in Railway, check the service's networking / bot-protection settings and decide whether automated monitors should be allowed; see \`DEPLOY.md\` → Monitoring & incidents."
           } >> "$GITHUB_STEP_SUMMARY"

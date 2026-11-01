@@ -9,7 +9,7 @@ You own SecureGate's pipeline and gates. The workflow lives at the repository ro
 
 ## What the pipeline does (job `qa-suite`, ubuntu-latest)
 
-1. PostgreSQL 16 service (`shipping`/`shipping`, database `shipping_hub`), pnpm 10 + Node 22, Temurin Java 21 with the Maven cache, Chrome + chromedriver via `browser-actions/setup-chrome@v1`.
+1. PostgreSQL 16 service (`shipping`/`shipping`, database `shipping_hub`), pnpm 10 + Node 22, Temurin Java 21 with the Maven cache, Chrome + chromedriver via `browser-actions/setup-chrome@v2`.
 2. `pnpm install --frozen-lockfile`, `db:deploy` + `db:seed`, API on :4000 (`pnpm --filter @shipping-hub/api start`, waits for `/health`), web build + start on :3000.
 3. `./mvnw -B verify -Pui -Dheadless.mode=true -Dwebdriver.chrome.driver=...` — Karate API (28 scenarios) + Serenity/Screenplay UI (6 scenarios).
 4. Newman runs the Postman collection (`continue-on-error`, non-blocking smoke); `./mvnw -B -q serenity:aggregate`; the `securegate-reports` artifact uploads `target/site/serenity/`, `target/karate-reports/`, `target/screenshots/` and `target/surefire-reports/`.

@@ -114,7 +114,7 @@ dramafetch doctor                     # … or skip it and use the Chrome/Edge y
 
 1. Log in to tiktok.com in your browser and open an episode of the series to make sure you can watch it — for paid episodes, with the account that unlocked them ([Paid episodes](#paid-episodes)).
 2. Export the site's cookies in Netscape `cookies.txt` format with a browser extension such as "Get cookies.txt LOCALLY" (Chrome/Edge) or "cookies.txt" (Firefox). Export only tiktok.com.
-3. Save the file where you run DramaFetch (`cookies.txt` is gitignored here) and pass `--cookies cookies.txt` to every command.
+3. Save the file as `cookies.txt` where you run DramaFetch (any `*cookies*.txt` is gitignored in this repository) and pass `--cookies cookies.txt` to every command.
 
 The file is a key to your TikTok account: keep it private, never share or commit it, and expect it to expire after some weeks — when discovery starts failing with login errors, export a fresh one. `dramafetch doctor --cookies cookies.txt` reports its age, how many `.tiktok.com` lines it has and whether a session cookie (`sessionid` / `sid_tt`) is present — names only, never values. It also flags malformed lines (not seven tab-separated fields, or a non-numeric expiry) by line number: yt-dlp would skip such a line with a warning that quotes it whole, cookie value included, so `download` and `video` refuse a file with malformed lines until it is fixed or re-exported. For the download step yt-dlp can alternatively read cookies straight from a browser profile with `--cookies-from-browser chrome`; the discovery step still needs the file.
 

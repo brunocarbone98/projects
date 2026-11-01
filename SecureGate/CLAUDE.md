@@ -2,7 +2,7 @@
 
 Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../FullStackHub), live at <https://shipping-hub.up.railway.app/>). The full phased plan lives in `ROADMAP.md`: when starting a phase, read its corresponding section.
 
-**Current stack (modernized):** **Karate** for the API (Gherkin-native: tracking, quote, auth, shipments, wallet — `match` contracts + security negatives), **Serenity BDD + Screenplay** over **Selenium** for UI E2E (Actors performing Tasks / asking Questions — replaces the Page Object Model), **Cucumber/Gherkin** for the UI journeys (Serenity living documentation), and a **Postman/Newman** API collection. Java 21 (OOP), JUnit 5, Maven; **SonarQube** quality gate (token-gated). A GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) stands up the API + web + Chrome and runs everything on every PR and nightly. **34 scenarios** (28 Karate API · 6 Serenity/Screenplay UI), plus an opt-in rate-limit check.
+**Current stack (modernized):** **Karate** for the API (Gherkin-native: tracking, quote, auth, shipments, wallet — `match` contracts + security negatives), **Serenity BDD + Screenplay** over **Selenium** for UI E2E (Actors performing Tasks / asking Questions — replaces the Page Object Model), **Cucumber/Gherkin** for the UI journeys (Serenity living documentation), and a **Postman/Newman** API collection. Java 21 (OOP), JUnit 5, Maven; **SonarQube** quality gate (token-gated). A GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) stands up the API + web + Chrome and runs everything on PRs touching `SecureGate/**` or `FullStackHub/**` and nightly at 06:00 UTC. **34 scenarios** (28 Karate API · 6 Serenity/Screenplay UI), plus an opt-in rate-limit check.
 
 ## Structure
 

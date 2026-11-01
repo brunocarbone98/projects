@@ -9,5 +9,7 @@ build/
 dist/
 downloads/
 .dramafetch/
-cookies.txt
-*.cookies.txt
+# TikTok session cookies under any exporter's name (cookies.txt, www.tiktok.com_cookies.txt, …)
+*cookies*.txt
+# --dump-raw output (anchored, so a future tests/fixtures/raw/ is not ignored)
+/raw/

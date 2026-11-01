@@ -148,7 +148,9 @@ Shipping Hub is maintained around the clock by Claude Code agents; a human revie
 PR. **CI** (lint, format:check, typecheck, Vitest) runs on every push to `main` and every PR,
 **Uptime patrol** probes the live app every 30 minutes and opens an `incident` issue when it is
 unhealthy, **SecureGate CI** runs the black-box suite nightly and on PRs, and Dependabot opens
-weekly grouped dependency PRs for npm and pip (label `dependencies`).
+weekly grouped dependency PRs for npm (label `dependencies`); the services' `requirements.txt` are
+unpinned, so it has nothing to bump there and the weekly security review runs `pip-audit` on them
+instead.
 
 - Shifts covering this project ([`../.claude/shifts/`](../.claude/shifts)): **nightly maintenance**
   (daily 08:40 UTC — every check plus the Karate API suite against a locally started stack, at most

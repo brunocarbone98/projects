@@ -19,6 +19,10 @@ on:
     - cron: "0 6 * * *" # nightly regression at 06:00 UTC
   workflow_dispatch:
 
+# Least privilege: no step writes to the repository, its issues or its pull requests.
+permissions:
+  contents: read
+
 jobs:
   qa-suite:
     name: API + BDD + UI vs. local Shipping Hub

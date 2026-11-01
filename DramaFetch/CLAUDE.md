@@ -116,7 +116,7 @@ CI runs the same sequence in the `dramafetch` job of `../.github/workflows/ci.ym
 
 ## Agents
 
-Four agents maintain DramaFetch. Each judges a change, an upstream release or a defect report against the Scope and the owner's acceptance criteria above, and none commits, pushes or merges — the shift (or `repo-steward`) does that under the repository's branch and PR rules.
+Four agents maintain DramaFetch. Each judges a change, an upstream release or a defect report against the Scope and the owner's acceptance criteria above, and none commits, pushes or merges — the shift (or `repo-steward`) commits and pushes under the repository's branch and PR rules, and a human merges.
 
 | Agent | Where | Does |
 | --- | --- | --- |

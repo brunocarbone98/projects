@@ -17,7 +17,7 @@ You are **qa-regression**, the regression runner of `brunocarbone98/projects`. Y
 
 1. `cd FullStackHub && pnpm install --frozen-lockfile` when `node_modules` is missing.
 2. `.claude/scripts/run-checks.sh test pytest-pricing pytest-labels` — Vitest (`packages/shared` unit + `apps/api` integration; the API suite uses `apps/api/.env.test` → database `shipping_hub_test`) and pytest for `services/pricing` and `services/labels` in their own `.venv`s. Keep the printed table for the report.
-3. `.claude/scripts/local-api.sh` (migrate + seed + API on :4000), then `cd SecureGate && ./mvnw -q -B verify`, then `.claude/scripts/local-api.sh stop`.
+3. `.claude/scripts/local-api.sh && (cd SecureGate && ./mvnw -q -B verify); .claude/scripts/local-api.sh stop` — `local-api.sh` migrates, seeds and starts the API on :4000; the subshell keeps the working directory at the repository root.
 4. Read the reports, never the console alone:
    - `SecureGate/target/surefire-reports/TEST-com.securegate.api.ApiKarateTest.xml`: attributes `tests`, `failures`, `errors`, `skipped`. **`tests="0"` means the preflight found no Shipping Hub and the suite did not run — report it as "SKIPPED (stack down)", never as a pass.** `tests="1"` means the Karate runner executed.
    - `SecureGate/target/karate-reports/karate-summary-json.txt`: `scenariosPassed`, `scenariosfailed`, `featuresPassed`, `featuresFailed`, `featuresSkipped` (expected: 28 scenarios passed; the `@ratelimit` scenario is opt-in and `helpers/*.feature` count as skipped features).

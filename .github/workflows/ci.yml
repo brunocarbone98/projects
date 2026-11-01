@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: no job writes to the repository, its issues or its pull requests.
+permissions:
+  contents: read
+
 # Default working directory for the FullStackHub jobs; the dramafetch job overrides it with DramaFetch/.
 defaults:
   run:

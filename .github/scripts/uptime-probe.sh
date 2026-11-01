@@ -38,8 +38,9 @@
 # Railway's edge (server "railway-hikari") can answer automated clients with its bot
 # protection instead of the app: HTTP 429, or an HTTP 200 "Checking your browser…" page. A
 # probe that gets that page is reported as "challenged" — it is neither a pass nor a product
-# failure, because the app was not observed. When every probe is challenged the overall state
-# is `unknown` (the workflow then ends green with a warning annotation and opens no incident).
+# failure, because the app was not observed. When no probe failed and at least one was
+# challenged the overall state is `unknown` (the workflow then ends green with a warning
+# annotation and opens no incident).
 #
 # The report is always printed to stdout too. Exit code: 0 whenever the probes could run,
 # whatever the state — the workflow's last step fails the job only when healthy is 'false'. Non-zero

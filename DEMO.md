@@ -63,7 +63,7 @@ Say: "Everything you see is one container on Railway — Next.js web, Express AP
 
 ### Act 3 — quality (2:30)
 
-1. **Karate feature** (tab 7): Gherkin-native HTTP tests with `match` contracts — contract, 400, 404, 429 for public tracking. 28 API scenarios plus one opt-in `@ratelimit` check.
+1. **Karate feature** (tab 7): Gherkin-native HTTP tests with `match` contracts — contract, 400 and 404 for public tracking (the 429 lives in the opt-in `ratelimit.feature`). 28 API scenarios plus one opt-in `@ratelimit` check.
 2. **Screenplay task** (tab 8): `TrackParcel` — an Actor performs Tasks and asks Questions; no selectors in step definitions, explicit waits only; 6 UI scenarios written in Gherkin under `features/ui`.
 3. **Actions → SecureGate CI** (tab 9): the pipeline stands up Postgres + API + web + Chrome, runs Karate + Serenity UI + Newman, and uploads `securegate-reports` — open the latest run → Artifacts (Serenity living documentation + Karate HTML report). Mention: the suite *skips*, it does not fail, when no Shipping Hub is reachable, so "0 failures" alone is never read as a pass — the agents check the `tests` count.
 
