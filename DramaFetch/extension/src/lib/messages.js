@@ -348,3 +348,24 @@ export function pyDecimalInt(text) {
   const value = Number(digits);
   return negative ? -value : value;
 }
+
+/**
+ * Python's `f"{x:.{digits}f}"`: like `toFixed`, except that an exact decimal tie rounds to even
+ * (`f"{6.5:.0f}"` is `6`, `f"{0.25:.1f}"` is `0.2`), as Python rounds the binary value exactly.
+ * @param {number} x
+ * @param {number} digits 0-20
+ * @returns {string}
+ */
+export function pyFormatFixed(x, digits) {
+  if (!Number.isFinite(x)) return pyNumberText(x);
+  const text = x.toFixed(digits);
+  if (Math.abs(x) >= 1e21) return text;
+  const exact = Math.abs(x).toFixed(20); // the binary value's digits, exact for a tie
+  const dot = exact.indexOf(".");
+  const tail = exact.slice(dot + 1 + digits);
+  if (!/^50*$/.test(tail)) return text; // not a tie: toFixed rounded like Python
+  const kept = exact.slice(0, dot + 1 + digits).replace(/\.$/, "");
+  const last = Number(kept[kept.length - 1]);
+  if (last % 2 !== 0) return text; // the tie rounds up to an even digit: toFixed did the same
+  return `${x < 0 ? "-" : ""}${kept}`; // round down to the even digit
+}
