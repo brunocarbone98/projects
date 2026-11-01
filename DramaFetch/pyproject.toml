@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Bruno Carbone" }]
 dependencies = [
   "yt-dlp>=2026.10.26",
-  "playwright>=1.50",
+  "playwright>=1.64.1",
   # Pure Python; writes the cover into the MP4 (the `covr` atom). yt-dlp uses it for the same job.
   "mutagen>=1.47",
 ]
