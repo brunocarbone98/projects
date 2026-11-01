@@ -3,10 +3,15 @@
 
 from __future__ import annotations
 
+import base64
 import errno
+import hashlib
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, NoReturn
 
 import pytest
 from mutagen.mp4 import MP4
@@ -15,11 +20,14 @@ from dramafetch import media as media_module
 from dramafetch.downloader import (
     BEST_FORMAT,
     BLOCKED_MESSAGE,
+    CHALLENGE_STOPPED_MESSAGE,
     COMPATIBLE_FORMAT,
     H264_FORMAT,
     MAX_RETRIES,
     PAYLOAD_DRM_MESSAGE,
     VIDEO_SUFFIXES,
+    YTDLP_CHALLENGE_MARKERS,
+    YtDlpChallengeGuard,
     YtDlpDownloader,
     cookies_file_problem,
     curl_cffi_available,
@@ -34,6 +42,7 @@ from dramafetch.downloader import (
     redact_secrets,
     sanitize_error,
 )
+from dramafetch.engine import BLOCK_STATUSES
 from dramafetch.manifest import episode_stem
 from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import DRM_MARK, DRM_MESSAGE, DownloadOptions, DownloadStatus, Episode
@@ -161,7 +170,7 @@ def test_build_options_full(tmp_path):
     assert params["extractor_args"] == {
         "tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}
     }
-    # curl_cffi is installed in the venv, so impersonation is on by default
+    # curl_cffi is installed in the venv, in a version this yt-dlp supports: impersonation is on
     assert curl_cffi_available()
     from yt_dlp.networking.impersonate import ImpersonateTarget
 
@@ -214,6 +223,25 @@ def test_writethumbnail_follows_the_thumbnail_mode():
 def test_build_options_omits_impersonation_when_curl_cffi_is_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "curl_cffi", None)  # makes `import curl_cffi` fail
     assert not curl_cffi_available()
+    assert impersonate_target() is None
+    params = YtDlpDownloader(lambda p: None).build_options(EPISODE, DownloadOptions(), "o.%(ext)s")
+    assert "impersonate" not in params
+
+
+def test_impersonation_is_off_when_yt_dlp_cannot_use_the_installed_curl_cffi(monkeypatch):
+    """A curl_cffi outside the range yt-dlp supports leaves yt-dlp without an impersonation
+    handler; asked to impersonate anyway, its YoutubeDL refuses to start, so every episode would
+    fail. DramaFetch asks yt-dlp first and downloads without impersonation instead."""
+    import yt_dlp
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+
+    monkeypatch.setattr(
+        yt_dlp.YoutubeDL, "_impersonate_target_available", lambda self, target: False
+    )
+    assert curl_cffi_available()
+    # what DramaFetch avoids: yt-dlp refuses to start
+    with pytest.raises(yt_dlp.utils.YoutubeDLError, match="is not available"):
+        yt_dlp.YoutubeDL({"quiet": True, "impersonate": ImpersonateTarget("chrome")})
     assert impersonate_target() is None
     params = YtDlpDownloader(lambda p: None).build_options(EPISODE, DownloadOptions(), "o.%(ext)s")
     assert "impersonate" not in params
@@ -1269,3 +1297,108 @@ def test_a_paid_episode_the_account_unlocked_downloads_like_a_free_one(tmp_path)
     result = YtDlpDownloader(factory).download(unlocked, DownloadOptions(out_dir=tmp_path))
     assert result.status is DownloadStatus.DONE and len(log) == 1
     assert result.message == f"saved {STEM}.mp4 + cover embedded"
+
+
+# --------------------------------------------------------------------------- TikTok's JS challenge
+
+
+def _challenge_pages() -> tuple[str, str]:
+    """TikTok's JS challenge page, in the shape yt-dlp's TikTok extractor reads it
+    (`TikTokBaseIE._solve_challenge_and_set_cookies`: the base64 JSON of `#cs`, the cookie name in
+    `#wci`; a proof of work over SHA-256, here a synthetic one), and the video page it would fetch
+    again with the answer as a cookie."""
+    seed = b"synthetic-challenge"
+    digest = hashlib.sha256(seed + b"7").digest()
+    encoded = {"a": base64.b64encode(seed).decode(), "c": base64.b64encode(digest).decode()}
+    challenge = {"v": encoded}
+    data = base64.b64encode(json.dumps(challenge).encode()).decode().rstrip("=")
+    challenge_page = (
+        f'<html><body>Please wait...<p id="cs" class="{data}"></p>'
+        '<p id="wci" class="_wafchallengeid"></p></body></html>'
+    )
+    detail = {"statusCode": 0, "itemInfo": {"itemStruct": {"id": EPISODE.item_id, "video": {}}}}
+    universal = {"__DEFAULT_SCOPE__": {"webapp.video-detail": detail}}
+    video_page = (
+        '<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+        f"{json.dumps(universal)}</script></html>"
+    )
+    return challenge_page, video_page
+
+
+def test_yt_dlp_s_tiktok_extractor_never_solves_tiktok_s_js_challenge(tmp_path: Path) -> None:
+    """The installed yt-dlp's own TikTok extractor (its page fetches stubbed: no network) meets
+    TikTok's JS challenge on the video page. Without DramaFetch's guard it solves the challenge in
+    Python, sets `_wafchallengeid` and fetches the page again — the control; with DramaFetch's own
+    options it stops before computing the answer: one fetch, no challenge cookie, nothing written,
+    and the episode is FAILED_BLOCKED, a stop status that starts the cooldown."""
+    import yt_dlp
+
+    challenge_page, video_page = _challenge_pages()
+
+    def run(params: dict[str, Any]) -> tuple[Any, list[str]]:
+        ydl = yt_dlp.YoutubeDL(params)
+        fetches: list[str] = []
+
+        def webpage(
+            url: str, video_id: str, note: object = None, *args: object, **kwargs: object
+        ) -> tuple[str, SimpleNamespace]:
+            fetches.append(str(note))
+            page = challenge_page if len(fetches) == 1 else video_page
+            return page, SimpleNamespace(url=url, extensions={})
+
+        def offline(*args: object, **kwargs: object) -> NoReturn:
+            raise AssertionError("no request may leave this test")
+
+        ydl.get_info_extractor("TikTok")._download_webpage_handle = webpage
+        ydl.urlopen = offline
+        return ydl, fetches
+
+    options = DownloadOptions(out_dir=tmp_path, impersonate=False, thumbnail="none")
+    unguarded = YtDlpDownloader().build_options(EPISODE, options, str(tmp_path / "x.%(ext)s"))
+    del unguarded["logger"]
+    control, fetched = run(unguarded)
+    with pytest.raises(yt_dlp.utils.DownloadError):  # the stub's page has no formats
+        control.extract_info(EPISODE.page_url, download=False)
+    assert fetched == ["Downloading webpage", "Downloading webpage with challenge cookie"]
+
+    made: list[tuple[Any, list[str]]] = []
+
+    def factory(params: dict[str, Any]) -> Any:
+        made.append(run(params))
+        return made[-1][0]
+
+    result = YtDlpDownloader(factory).download(EPISODE, options)
+    assert (result.status, result.message) == (
+        DownloadStatus.FAILED_BLOCKED,
+        CHALLENGE_STOPPED_MESSAGE,
+    )
+    assert result.status in BLOCK_STATUSES  # the run stops, the cooldown starts
+    ((ydl, fetches),) = made
+    assert fetches == ["Downloading webpage"]  # never again with an answer
+    assert [c.name for c in ydl.cookiejar if c.domain.endswith("tiktok.com")] == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == []
+
+
+def test_the_challenge_guard_keeps_yt_dlp_quiet_and_stops_only_at_the_challenge() -> None:
+    """Every other line yt-dlp would print goes to DEBUG, redacted; the challenge's lines raise
+    yt-dlp's DownloadCancelled (once: yt-dlp prints the cancellation itself on its way out)."""
+    import yt_dlp
+
+    guard = YtDlpChallengeGuard()
+    guard.debug("[TikTok] 7699400000000000003: Downloading webpage")
+    guard.info("[info] 7699400000000000003: Downloading 1 format(s): h264_540p")
+    guard.warning("[TikTok] sessionid=SECRETSESSIONVALUE not used")
+    guard.error("ERROR: something")
+    assert guard.stopped is False
+    with pytest.raises(yt_dlp.utils.DownloadCancelled, match="does not solve"):
+        guard.debug("[TikTok] Solving JS challenge using native Python implementation")
+    assert guard.stopped is True
+    guard.debug(f"[info] {CHALLENGE_STOPPED_MESSAGE}")  # yt-dlp's own report of the stop
+    other = YtDlpChallengeGuard()
+    with pytest.raises(yt_dlp.utils.DownloadCancelled):
+        other.debug("[TikTok] 7699400000000000003: Downloading webpage with challenge cookie")
+    downloader = YtDlpDownloader(lambda p: None)
+    first = downloader.build_options(EPISODE, OPTIONS, "o.%(ext)s")["logger"]
+    second = downloader.build_options(EPISODE, OPTIONS, "o.%(ext)s")["logger"]
+    assert isinstance(first, YtDlpChallengeGuard) and first is not second  # one per run
+    assert all(marker == marker.lower() for marker in YTDLP_CHALLENGE_MARKERS)

@@ -322,7 +322,98 @@ def test_main_prints_a_report_and_exits_0_even_when_nothing_answers(tmp_path: Pa
     assert status == 0
     text = out.getvalue()
     assert "## Unreachable" in text and "network is unreachable" in text
-    assert "## Attention\n\nnothing new" in text
+    attention = text.split("## Attention", 1)[1].split("## Python dependencies", 1)[0]
+    # an outage is never an all-clear: every source that did not answer, and what it would have
+    # shown, is named where the agents look first
+    assert "nothing new" not in attention
+    assert (
+        "- not an all-clear: pypi.org, raw.githubusercontent.com, versionhistory.googleapis.com "
+        "did not answer — see Unreachable; what they serve was not compared"
+    ) in attention
+    assert "not checked against PyPI's vulnerability data" in attention
+    assert "yt-dlp's TikTok extractor not compared: raw.githubusercontent.com did not answer" in (
+        attention
+    )
+    assert "Chrome Stable not read for win, mac, linux" in attention
+    assert "installed distributions checked against PyPI." in text
+
+
+def test_nothing_new_only_when_everything_was_compared(tmp_path: Path) -> None:
+    """Every source answers, nothing changed: the one case in which the list says so."""
+    sources = _fake_sources()
+    raw = "https://raw.githubusercontent.com/yt-dlp/yt-dlp/"
+    sources[raw + "master/yt_dlp/extractor/tiktok.py"] = OLD_EXTRACTOR.encode()
+    sources["https://pypi.org/pypi/yt-dlp/json"] = json.dumps(
+        {"info": {"version": "2026.10.26"}, "urls": []}
+    ).encode()
+    sources["https://pypi.org/pypi/curl-cffi/0.15.0/json"] = json.dumps({"info": {}}).encode()
+    sources["https://pypi.org/pypi/curl-cffi/json"] = json.dumps(
+        {"info": {"version": "0.15.0"}, "urls": []}
+    ).encode()
+    sources[raw + "master/Changelog.md"] = CHANGELOG.split("### 2026.12.01", 1)[0].encode()
+    chrome = "https://versionhistory.googleapis.com/v1/chrome/platforms/linux/channels/stable/versions?pageSize=1"
+    sources[chrome] = json.dumps({"versions": [{"version": "157.0.3"}]}).encode()
+
+    def fetch(url: str) -> bytes:
+        if url in sources:
+            return sources[url]
+        raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+
+    installed = {
+        "yt-dlp": "2026.10.26",
+        "playwright": "1.64.1",
+        "mutagen": "1.48.1",
+        "curl-cffi": "0.15.0",
+    }
+    text = uw.build_report(
+        _project(tmp_path), installed=installed, fetch=fetch, now=datetime(2026, 12, 2, tzinfo=UTC)
+    )
+    assert "## Attention\n\nnothing new" in text, text.split("## Python dependencies", 1)[0]
+    assert "4 of 4 installed distributions checked against PyPI." in text
+
+
+def test_the_extractor_is_read_at_the_installed_release_s_git_tag(tmp_path: Path) -> None:
+    """PyPI and the wheel's metadata call yt-dlp 2026.08.19 `2026.8.19`; its git tag keeps the
+    zeros. The extractor is fetched at the tag — `yt_dlp.version.__version__` of the inspected
+    interpreter, else the version zero-padded — and a missing file there is an Attention item."""
+    assert uw.tag_of("2026.8.19") == "2026.08.19"
+    assert uw.tag_of("2026.10.26") == "2026.10.26"
+    assert uw.tag_of("2026.1.2.1") == "2026.01.02.1"
+    assert uw.tag_of("1.64") == "1.64" and uw.tag_of("garbage") == "garbage"
+    import yt_dlp.version
+
+    assert uw.installed_ytdlp_tag(Path(sys.executable)) == yt_dlp.version.__version__
+    assert uw.installed_ytdlp_tag(tmp_path / "no-python") is None
+
+    asked: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        asked.append(url)
+        raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+
+    project = _project(tmp_path)
+
+    def report(**tag: str) -> str:
+        return uw.build_report(
+            project,
+            installed={"yt-dlp": "2026.8.19"},
+            fetch=fetch,
+            now=datetime(2026, 12, 2, tzinfo=UTC),
+            **tag,
+        )
+
+    text = report()
+    raw = "https://raw.githubusercontent.com/yt-dlp/yt-dlp/"
+    assert raw + "2026.08.19/yt_dlp/extractor/tiktok.py" in asked
+    assert raw + "2026.8.19/yt_dlp/extractor/tiktok.py" not in asked
+    attention = text.split("## Attention", 1)[1].split("## Python dependencies", 1)[0]
+    assert (
+        "- yt-dlp's TikTok extractor not compared: no yt_dlp/extractor/tiktok.py at tag 2026.08.19"
+    ) in attention
+    assert "nothing new" not in attention
+    asked.clear()
+    report(ytdlp_tag="2026.08.19-custom")
+    assert raw + "2026.08.19-custom/yt_dlp/extractor/tiktok.py" in asked
 
 
 def test_main_refuses_a_directory_without_pyproject(tmp_path: Path) -> None:

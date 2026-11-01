@@ -6,6 +6,7 @@
 **/*.pyc
 PersonalWebsite
 SecureGate
+DramaFetch
 FullStackHub/screenshots
 **/*.log
 # Claude Code agents, shifts, scripts and hooks are not part of the image

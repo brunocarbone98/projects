@@ -9,6 +9,7 @@
 
 import { isLocked } from "../lib/catalog.js";
 import { COOLDOWN_STORAGE_KEY, activeCooldown, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
+import { displayText, statusLabel } from "../lib/display.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import {
   PAGE_DELAY_S,
@@ -25,8 +26,9 @@ import { doneEntries, readState } from "../lib/state.js";
 import { parseSeriesList } from "../lib/urls.js";
 import { closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
 import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine } from "./downloader.js";
+import { initPageRedirects } from "./redirects.js";
 import { StopRequested, checkCooldown, episodeContext, resolve, restBetweenJobs, runBatch, runSelectionJob } from "./engine.js";
-import { localize, t } from "./i18n.js";
+import { displayLabels, displayLanguage, localize, t } from "./i18n.js";
 import {
   DEFAULT_SETTINGS,
   appendHistory,
@@ -42,6 +44,7 @@ import {
   saveTestSettings,
   writeSeriesState,
 } from "./storage.js";
+import { TabKeeper } from "./tabkeeper.js";
 
 /** The Web Lock that makes this tab the only engine of the browser. */
 const ENGINE_LOCK = "dramafetch-engine";
@@ -102,6 +105,25 @@ const app = {
   pauseUntil: null,
   pauseText: "",
 };
+
+/**
+ * How the engine's texts are shown: their language and the UI's names of the controls they point
+ * to (set once the page is localized, {@link main}).
+ * @type {import("../lib/display.js").DisplayOptions}
+ */
+const shown = { lang: "en", labels: {} };
+
+/**
+ * An engine text (stored in English, byte for byte the Python tool's) as this page shows it.
+ * @param {string} text
+ * @returns {string}
+ */
+function shownText(text) {
+  return displayText(text, shown);
+}
+
+/** Keeps Chrome from discarding this tab while a job runs or waits (Memory Saver would end the run). */
+const keeper = new TabKeeper();
 
 // ------------------------------------------------------------------------ DOM helpers
 
@@ -339,7 +361,7 @@ function renderPause() {
   }
   const left = Math.max(0, Math.ceil(app.pauseUntil - now()));
   element.hidden = false;
-  element.textContent = t("pauseInForce", [app.pauseText, left]);
+  element.textContent = t("pauseInForce", [shownText(app.pauseText), left]);
 }
 
 /**
@@ -352,6 +374,21 @@ function statusClass(status) {
   return "failed";
 }
 
+/**
+ * A status badge: a short label in the page's language, the status code itself in its title.
+ * @param {string} status
+ * @param {string} message the result's message (a row the run stopped before reads “stopped”)
+ * @returns {HTMLElement}
+ */
+function statusBadge(status, message) {
+  return el("span", {
+    className: `badge ${statusClass(status)}`,
+    text: statusLabel(status, { lang: shown.lang, message }),
+    title: status,
+    attrs: { "data-status": status },
+  });
+}
+
 /** @param {DownloadResult} result */
 function renderResult(result) {
   const body = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
@@ -361,8 +398,8 @@ function renderResult(result) {
     { attrs: { "data-key": key, "data-series-id": result.episode.seriesId, "data-number": String(result.episode.number), "data-status": result.status } },
     [
       el("td", { text: `E${String(result.episode.number).padStart(2, "0")}` }),
-      el("td", {}, [el("span", { className: `badge ${statusClass(result.status)}`, text: result.status })]),
-      el("td", { className: "message", text: result.message }),
+      el("td", {}, [statusBadge(result.status, result.message)]),
+      el("td", { className: "message", text: shownText(result.message) }),
     ],
   );
   const existing = body.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
@@ -373,7 +410,7 @@ function renderResult(result) {
 /** @param {SeriesRun} run */
 function renderReportLine(run) {
   const name = run.report.name || run.series?.name || run.ref.seriesId;
-  const text = run.error !== null ? `${name}: ${run.error}` : `${name}: ${reportLine(run.report)}`;
+  const text = `${name}: ${shownText(run.error !== null ? run.error : reportLine(run.report))}`;
   $("report-lines").append(el("li", { text, attrs: { "data-series-id": run.ref.seriesId } }));
 }
 
@@ -384,10 +421,11 @@ function renderBatchTable(runs) {
   body.textContent = "";
   for (const run of runs) {
     const report = run.report;
+    const status = batchStatus({ ...run, errorKind: run.errorKind });
     body.append(
       el("tr", { attrs: { "data-series-id": run.ref.seriesId } }, [
         el("td", { text: report.name || run.series?.name || run.ref.seriesId }),
-        el("td", { text: batchStatus({ ...run, errorKind: run.errorKind }) }),
+        el("td", { text: shownText(status), attrs: { "data-status": status } }), // the stored English: data, not shown
         el("td", { text: String(report.listed) }),
         el("td", { text: String(report.done) }),
         el("td", { text: String(report.onDisk) }),
@@ -425,10 +463,18 @@ function renderAppStatus() {
   for (const job of app.queue) list.append(el("li", { text: job.label }));
   $("queue-card").hidden = app.queue.length === 0;
   updateButtons();
+  // never discarded while a job runs or waits; discardable again once the queue is done (a Stop
+  // and an error end the job too). Only the engine's tab ever runs one: a read-only tab stays
+  // discardable.
+  void keeper.keep(app.tabId, app.owner && (running || app.queue.length > 0));
 }
 
-/** @param {Omit<Job, "id">} job */
+/**
+ * Queue a job — in the engine's tab only: a read-only tab could never run it.
+ * @param {Omit<Job, "id">} job
+ */
 function enqueue(job) {
+  if (!app.owner) return;
   app.queue.push({ ...job, id: app.nextJobId++ });
   renderAppStatus();
   void pump();
@@ -524,7 +570,7 @@ async function runJob(job) {
     const cooldown = await checkCooldown(engine); // the gate, before the job's first request
     if (cooldown !== null) {
       entry["error"] = stop = cooldownMessage(cooldown, { now: now() });
-      setStatus($("input-status"), stop, "error");
+      setStatus($("input-status"), shownText(stop), "error");
       return;
     }
     await applyRefererRule(baseUrl());
@@ -554,16 +600,16 @@ async function runJob(job) {
       }
     }
     entry["refreshes"] = engine.downloader.refreshes;
-    const shown = app.loaded;
-    if (job.kind !== "load" && shown !== null && job.refs.some((ref) => ref.seriesId === shown.series.seriesId)) {
-      await renderSeries(shown.series, engine.view); // the "on disk" badges now (Chrome's history only)
+    const listed = app.loaded;
+    if (job.kind !== "load" && listed !== null && job.refs.some((ref) => ref.seriesId === listed.series.seriesId)) {
+      await renderSeries(listed.series, engine.view); // the "on disk" badges now (Chrome's history only)
     }
   } catch (error) {
     if (error instanceof StopRequested) {
-      entry["error"] = stop = t("stoppedByYou");
+      entry["error"] = stop = error.message; // stored in English, like every engine text
     } else {
       entry["error"] = stop = oneLine(error);
-      setStatus($("input-status"), oneLine(error), "error");
+      setStatus($("input-status"), shownText(stop), "error");
     }
   } finally {
     clearPause();
@@ -594,7 +640,7 @@ async function runLoad(job, engine, entry) {
   const refused = await checkCooldown(engine);
   if (refused !== null) {
     const message = cooldownMessage(refused, { now: now() });
-    setStatus($("input-status"), message, "error");
+    setStatus($("input-status"), shownText(message), "error");
     entry["error"] = message;
     return message;
   }
@@ -604,7 +650,7 @@ async function runLoad(job, engine, entry) {
   } catch (error) {
     if (error instanceof StopRequested) throw error;
     const message = oneLine(error);
-    setStatus($("input-status"), message, "error");
+    setStatus($("input-status"), shownText(message), "error");
     entry["error"] = message;
     entry["series"] = [{ series_id: ref.seriesId, name: null, error: message, episodes: 0 }];
     return null;
@@ -645,10 +691,11 @@ async function renderSeries(series, view) {
   $("series-meta").textContent = t("seriesMeta", [series.episodes.length, available, onDisk.size]);
   const warnings = $("series-warnings");
   warnings.textContent = "";
-  for (const warning of series.warnings) warnings.append(el("li", { text: warning }));
+  for (const warning of series.warnings) warnings.append(el("li", { text: shownText(warning) }));
   const body = /** @type {HTMLTableSectionElement} */ ($("episode-table").querySelector("tbody"));
   body.textContent = "";
   const episodes = [...series.episodes].sort((a, b) => a.number - b.number);
+  covers.show(episodes); // this list's thumbnails, once their rows come into view
   for (const episode of episodes) {
     const box = /** @type {HTMLInputElement} */ (
       el("input", { attrs: { type: "checkbox", "data-number": String(episode.number), "data-locked": isLocked(episode) ? "1" : "0" } })
@@ -657,10 +704,12 @@ async function renderSeries(series, view) {
     box.addEventListener("change", updateSelection);
     const cover = el("td", { className: "cover-cell" });
     const thumbnail = covers.urlOf(episode.itemId); // fetched already: no request
-    if (thumbnail !== null) cover.append(coverImage(thumbnail));
+    cover.append(thumbnail !== null ? coverImage(thumbnail) : el("span", { className: "cover placeholder" }));
     const access = el("td", {}, [accessBadge(episode)]);
     if (onDisk.has(episode.number)) access.append(el("span", { className: "badge ondisk", text: t("badgeOnDisk"), title: t("badgeOnDiskTitle") }));
-    if (isLocked(episode) && episode.lockHints.length > 0) access.append(el("span", { className: "hints", text: episode.lockHints.join("; ") }));
+    if (isLocked(episode) && episode.lockHints.length > 0) {
+      access.append(el("span", { className: "hints", text: episode.lockHints.map(shownText).join("; ") }));
+    }
     body.append(
       el("tr", { attrs: { "data-number": String(episode.number), "data-access": episode.access, "data-item-id": episode.itemId } }, [
         el("td", {}, [box]),
@@ -672,9 +721,9 @@ async function renderSeries(series, view) {
         access,
       ]),
     );
+    if (thumbnail === null) covers.watch(cover, episode.itemId); // wanted once the row is in view
   }
   updateSelection();
-  covers.show(episodes); // the missing thumbnails, one at a time, while no job runs
 }
 
 /**
@@ -686,21 +735,26 @@ function coverImage(url) {
 }
 
 /**
- * A thumbnail arrived: into its row, when the list still shows that episode.
+ * A thumbnail arrived: into its row (in place of the empty frame), when the list still shows that
+ * episode.
  * @param {string} itemId
  * @param {string} url
  */
 function showCover(itemId, url) {
   const cell = $("episode-table").querySelector(`tbody tr[data-item-id="${CSS.escape(itemId)}"] td.cover-cell`);
-  if (cell !== null && cell.querySelector("img") === null) cell.append(coverImage(url));
+  if (cell !== null && cell.querySelector("img") === null) cell.replaceChildren(coverImage(url));
 }
 
-/** The list's thumbnails: the extension's own requests, one at a time, never during a job or a cooldown. */
+/**
+ * The list's thumbnails: the extension's own requests, only for the rows in view, one at a time,
+ * never during a job or a cooldown.
+ */
 const covers = new CoverLoader({
   hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
   allowed: async () => app.owner && app.running === null && app.queue.length === 0 && (await checkCooldownNow()) === null,
   pause: () => sleepSeconds(pagePause(defaultRng, app.testMode ? (app.testSettings.pageDelayS ?? PAGE_DELAY_S) : PAGE_DELAY_S)),
   onCover: showCover,
+  baseUrl,
 });
 
 /** @returns {HTMLInputElement[]} */
@@ -739,14 +793,14 @@ function parsedLinks() {
   const parsed = parseSeriesList(textarea("links").value);
   const status = $("input-status");
   if (parsed.errors.length > 0) {
-    setStatus(status, parsed.errors.map((error) => error.message).join(" · "), "error");
+    setStatus(status, parsed.errors.map((error) => shownText(error.message)).join(" · "), "error");
     return null;
   }
   if (parsed.refs.length === 0) {
     setStatus(status, t("noLinks"), "error");
     return null;
   }
-  setStatus(status, parsed.notes.join(" · "));
+  setStatus(status, parsed.notes.map(shownText).join(" · "));
   return { refs: parsed.refs, notes: parsed.notes };
 }
 
@@ -771,7 +825,7 @@ function onDownloadAll() {
   const label =
     parsed.refs.length === 1 ? t("jobSeries", /** @type {SeriesRef} */ (parsed.refs[0]).seriesId) : t("jobBatch", [parsed.refs.length]);
   enqueue({ kind: "batch", label, refs: parsed.refs, series: null, numbers: [], includeLocked, recheck });
-  if (parsed.notes.length > 0) setStatus($("input-status"), parsed.notes.join(" · "));
+  if (parsed.notes.length > 0) setStatus($("input-status"), parsed.notes.map(shownText).join(" · "));
 }
 
 /**
@@ -822,7 +876,7 @@ async function refreshCooldown() {
     banner.hidden = true;
   } else {
     banner.hidden = false;
-    $("cooldown-text").textContent = cooldownMessage(app.cooldown, { now: now() });
+    $("cooldown-text").textContent = shownText(cooldownMessage(app.cooldown, { now: now() }));
   }
   tickCooldown();
   updateButtons();
@@ -857,7 +911,8 @@ function fillSettings() {
   input("setting-rest-every").value = String(settings.restEvery);
   input("setting-rest-min").value = String(settings.restMinS);
   input("setting-rest-max").value = String(settings.restMaxS);
-  $("pacing-line").textContent = `${describePacing(effectivePacing())}; ${describeBatchPacing(effectivePacing())}`;
+  const pacing = effectivePacing();
+  $("pacing-line").textContent = `${shownText(describePacing(pacing))}; ${shownText(describeBatchPacing(pacing))}`;
 }
 
 /** @param {SubmitEvent} event */
@@ -880,7 +935,7 @@ async function onSaveSettings(event) {
     app.settings = settings;
     setStatus($("settings-status"), t("settingsSaved"), "ok");
   } catch (error) {
-    setStatus($("settings-status"), t("settingsRefused", oneLine(error)), "error");
+    setStatus($("settings-status"), t("settingsRefused", shownText(oneLine(error))), "error");
   }
   fillSettings();
 }
@@ -900,12 +955,17 @@ async function renderHistory() {
   for (const entry of await readHistory()) {
     const finished = typeof entry["finished_at"] === "string" ? new Date(entry["finished_at"]).toLocaleString() : "";
     const item = el("li", {}, [el("strong", { text: `${finished} — ${String(entry["label"] ?? "")}` })]);
-    if (typeof entry["error"] === "string") item.append(el("div", { className: "meta", text: entry["error"] }));
+    if (typeof entry["error"] === "string") item.append(el("div", { className: "meta", text: shownText(entry["error"]) }));
     const series = Array.isArray(entry["series"]) ? entry["series"] : [];
     for (const run of series) {
       if (run === null || typeof run !== "object") continue;
       const record = /** @type {Record<string, unknown>} */ (run);
-      const line = typeof record["line"] === "string" ? record["line"] : String(record["error"] ?? "");
+      // as the report lines show it: the error of a series that failed or never started, else its line
+      let line;
+      if (typeof record["error"] === "string") line = shownText(record["error"]);
+      else if (typeof record["line"] === "string") line = shownText(record["line"]);
+      else if (typeof record["episodes"] === "number") line = t("loaded", [record["episodes"]]); // a listing
+      else line = "";
       item.append(el("div", { text: `${String(record["name"] ?? record["series_id"] ?? "")}: ${line}` }));
     }
     list.append(item);
@@ -933,10 +993,12 @@ async function setupTestMode() {
 // ------------------------------------------------------------------------------- start
 
 /**
- * Put a link into the box and list it (the popup's "Download this series").
+ * Put a link into the box and list it (the popup's "Download this series") — in the engine's tab
+ * only: the popup's request reaches every DramaFetch tab, and the engine's lists it.
  * @param {string} link
  */
 function loadFromOutside(link) {
+  if (!app.owner) return;
   textarea("links").value = link;
   onLoad();
 }
@@ -951,8 +1013,28 @@ function acquireEngine() {
   });
 }
 
+/**
+ * The downloader's activity line (`E01: <host>`, `E01: fresh episode list`) is written straight
+ * into `#progress-activity`; shown in the page's language all the same, whoever writes it.
+ */
+function translateActivity() {
+  const element = $("progress-activity");
+  let written = "";
+  new MutationObserver(() => {
+    const text = element.textContent ?? "";
+    if (text === written) return; // the translation this observer wrote itself
+    const translated = shownText(text);
+    if (translated === text) return;
+    written = translated;
+    element.textContent = translated;
+  }).observe(element, { childList: true, characterData: true, subtree: true });
+}
+
 async function main() {
   localize();
+  shown.lang = displayLanguage();
+  shown.labels = displayLabels();
+  translateActivity();
   app.testMode = isTestMode();
   app.owner = await acquireEngine();
   $("duplicate-banner").hidden = app.owner;
@@ -961,6 +1043,7 @@ async function main() {
   const tab = await chrome.tabs.getCurrent().catch(() => undefined);
   app.tabId = tab?.id;
   app.windowId = tab?.windowId;
+  initPageRedirects(app.tabId); // the redirects of this tab's own requests, before its first one
   app.settings = await loadSettings();
   app.testSettings = await loadTestSettings();
   const stored = await loadPacing();

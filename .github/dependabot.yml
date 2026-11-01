@@ -1,7 +1,10 @@
-# Dependabot — grouped version updates for every package ecosystem in the monorepo.
+# Dependabot — version updates for every package ecosystem in the monorepo.
 # Every PR carries the `dependencies` label and the `chore(deps)` commit prefix. The nightly
-# maintenance shift reviews them (CI state + changelog, a one-paragraph verdict); a human merges.
-# Minor and patch updates arrive as one grouped PR per ecosystem; majors come one by one.
+# maintenance shift reviews them (CI state + changelog, a one-paragraph verdict); the merge gate merges
+# the ones that pass its gate, a human the rest.
+# npm, Maven and the services' pip: minor and patch updates arrive as one grouped PR per
+# directory entry, majors one by one; GitHub Actions: one grouped PR for everything;
+# /DramaFetch: one PR per floor (below).
 version: 2
 updates:
   # Shipping Hub — pnpm workspaces (apps/web, apps/api, packages/shared); one lockfile at the root.
@@ -54,10 +57,13 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
-  # DramaFetch — the floors in pyproject.toml (yt-dlp, playwright, mutagen; the extras curl_cffi,
-  # pytest, ruff, mypy). `increase` raises a floor to the new release, so a TikTok fix in yt-dlp
-  # reaches every install; the nightly shift's download-guardian tries each bump against the fake
-  # TikTok before its verdict.
+  # DramaFetch — the floors in pyproject.toml: yt-dlp, playwright and mutagen; the extras
+  # curl_cffi, pytest, ruff and mypy; setuptools in [build-system]. A `>=` floor has no current
+  # version Dependabot can classify as a minor or patch update, so a group never matches and
+  # every floor bump is its own PR — hence no group here and room for all eight floors at once.
+  # `increase` raises a floor to the new release, so a TikTok fix in yt-dlp reaches every
+  # install; CI's dramafetch job runs each bump against the fake TikTok (pytest -m integration),
+  # and the nightly shift's verdict reads that CI run.
   - package-ecosystem: pip
     directory: /DramaFetch
     schedule:
@@ -65,15 +71,11 @@ updates:
       day: monday
       time: "04:00"
       timezone: America/Panama
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     versioning-strategy: increase
     labels: [dependencies]
     commit-message:
       prefix: "chore(deps)"
-    groups:
-      minor-and-patch:
-        patterns: ["*"]
-        update-types: [minor, patch]
 
   # SecureGate — Maven (pom.xml: Karate, Serenity, Selenium, Cucumber, JUnit 5).
   - package-ecosystem: maven

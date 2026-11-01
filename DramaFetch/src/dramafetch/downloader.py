@@ -8,7 +8,12 @@ Without a logged-in session TikTok returns no formats ("No video formats found")
 ``/login``, so a Netscape ``cookies.txt`` (or ``--cookies-from-browser``) is the normal way to run.
 Locked episodes (``Episode.locked``: not unlocked by this account) are skipped before any network
 access; nothing here unlocks or bypasses anything. Cookie values are never logged; error messages
-are redacted just in case.
+are redacted just in case. yt-dlp's TikTok extractor solves TikTok's JS challenge itself when the
+video page answers with one (yt-dlp 2026.01.29 and later); DramaFetch does not let it: every run
+gets a :class:`YtDlpChallengeGuard` as its ``logger``, which stops yt-dlp the moment the extractor
+announces the challenge — before the answer is computed or sent — and the episode is
+FAILED_BLOCKED with :data:`CHALLENGE_STOPPED_MESSAGE`, which stops the run and starts the
+cooldown like a 403.
 
 Every file yt-dlp produces is first checked for encrypted tracks (``dramafetch.media.drm_problem``,
 ALWAYS, ``--no-verify`` or not): an encrypted file can never play and DramaFetch never decrypts, so
@@ -91,6 +96,20 @@ PAYLOAD_DRM_MESSAGE = f"{DRM_MARK} (flagged in the episode list): DramaFetch doe
 BLOCKED_MESSAGE = (
     "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again"
 )
+#: What yt-dlp's TikTok extractor says (``to_screen``, lower-cased here) right before it solves
+#: the JS challenge TikTok's protection serves instead of a video page — a proof of work it
+#: computes in Python — and before it fetches the page again with the cookie that answer makes
+#: (``_wafchallengeid``): ``TikTokBaseIE._solve_challenge_and_set_cookies`` in yt-dlp 2026.01.29
+#: and later ("Solving JS challenge using native Python implementation", then "Downloading
+#: webpage with challenge cookie"; read in the installed 2026.10.26 on 2026-11-01). Passing an
+#: anti-bot check that way is outside DramaFetch's Scope: :class:`YtDlpChallengeGuard` stops there.
+YTDLP_CHALLENGE_MARKERS = ("solving js challenge", "with challenge cookie")
+#: The message of the FAILED_BLOCKED result of that stop (a stop status: the run ends, and the
+#: cooldown starts with this reason).
+CHALLENGE_STOPPED_MESSAGE = (
+    "blocked (verification): TikTok answered the video page with a JS challenge, which "
+    "DramaFetch does not solve; wait 30-60 minutes before trying again"
+)
 #: Extensions yt-dlp's ``writethumbnail`` can give the cover — always the cover URL's own:
 #: ``.jpeg`` for TikTok's ``cover``/``originCover``, ``.image`` for its ``dynamicCover`` URLs
 #: (``…~tplv-tiktokx-origin.image``), written only when the preferred covers fail; a URL without
@@ -138,14 +157,31 @@ def curl_cffi_available() -> bool:
 
 
 def impersonate_target() -> Any | None:
-    """``ImpersonateTarget("chrome")`` when both curl_cffi and yt-dlp's impersonation exist."""
+    """``ImpersonateTarget("chrome")`` when yt-dlp can impersonate Chrome, else None (off).
+
+    curl_cffi importing is not enough: yt-dlp supports a range of curl_cffi versions only (0.10
+    through 0.17.x in yt-dlp 2026.10.26, ``yt_dlp/networking/_curlcffi.py``). Outside it, yt-dlp's
+    curl_cffi handler does not load, and a YoutubeDL asked to impersonate refuses to start
+    (``Impersonate target "chrome" is not available``): every episode would fail. So the target
+    is returned only when yt-dlp's own check, the one its constructor runs on ``impersonate``,
+    accepts it; otherwise impersonation is off, as without curl_cffi.
+    """
     if not curl_cffi_available():
         return None
     try:
+        import yt_dlp
         from yt_dlp.networking.impersonate import ImpersonateTarget
     except Exception:
         return None
-    return ImpersonateTarget("chrome")
+    target = ImpersonateTarget("chrome")
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as probe:
+            available = getattr(probe, "_impersonate_target_available", None)
+            if available is not None and not available(target):
+                return None
+    except Exception:
+        return None
+    return target
 
 
 def format_for(quality: str) -> str:
@@ -431,6 +467,43 @@ def _default_ydl_factory(params: dict[str, Any]) -> Any:
     return yt_dlp.YoutubeDL(params)
 
 
+class YtDlpChallengeGuard:
+    """The ``logger`` of every yt-dlp run (:meth:`YtDlpDownloader.build_options`).
+
+    yt-dlp hands a logger what it would print: its ``to_screen`` lines arrive at :meth:`debug`,
+    warnings at :meth:`warning`, errors at :meth:`error`; DramaFetch keeps them at DEBUG level,
+    redacted (:func:`sanitize_error`), as quiet as ``quiet`` and ``no_warnings`` kept them. Its one
+    decision: a line announcing TikTok's JS challenge (:data:`YTDLP_CHALLENGE_MARKERS`) stops
+    yt-dlp right there — before the answer is computed or sent — by raising yt-dlp's
+    ``DownloadCancelled``, which its extractor and its download loop let through;
+    :attr:`stopped` then tells :meth:`YtDlpDownloader.download` why the run ended.
+    """
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def debug(self, msg: str) -> None:
+        self._screen(msg)
+
+    def info(self, msg: str) -> None:
+        self._screen(msg)
+
+    def warning(self, msg: str) -> None:
+        log.debug("yt-dlp warning: %s", sanitize_error(msg))
+
+    def error(self, msg: str) -> None:
+        log.debug("yt-dlp error: %s", sanitize_error(msg))
+
+    def _screen(self, msg: str) -> None:
+        text = msg.lower()
+        if not self.stopped and any(marker in text for marker in YTDLP_CHALLENGE_MARKERS):
+            self.stopped = True
+            from yt_dlp.utils import DownloadCancelled  # lazy, like every yt-dlp import here
+
+            raise DownloadCancelled(CHALLENGE_STOPPED_MESSAGE)
+        log.debug("yt-dlp: %s", sanitize_error(msg))
+
+
 class YtDlpDownloader:
     """Downloads one episode with yt-dlp; ``ydl_factory`` is injectable for tests."""
 
@@ -452,10 +525,12 @@ class YtDlpDownloader:
         then does with that file — embed it into the MP4, keep it, both — is
         :func:`_finish_cover`'s job, after the download. ``allow_unplayable_formats`` is never
         set: yt-dlp keeps dropping the formats it knows to be DRM-protected (its default), and
-        DramaFetch never asks for media it could not play without decrypting it.
+        DramaFetch never asks for media it could not play without decrypting it. ``logger`` is a
+        new :class:`YtDlpChallengeGuard`: yt-dlp never solves TikTok's JS challenge for DramaFetch.
         """
         del episode  # the caller already folded the episode into outtmpl
         params: dict[str, Any] = {
+            "logger": YtDlpChallengeGuard(),
             "outtmpl": outtmpl,
             "noplaylist": True,
             "retries": min(options.retries, MAX_RETRIES),
@@ -502,7 +577,9 @@ class YtDlpDownloader:
         by a later run. Then the file is verified (``options.verify``, see
         :func:`~dramafetch.media.verify_video`) BEFORE the cover step: a file that fails is
         quarantined (see :meth:`_quarantine`) and the episode is FAILED; a file that passes gets
-        its cover handled by :func:`_finish_cover`.
+        its cover handled by :func:`_finish_cover`. A JS challenge TikTok serves instead of the
+        video page ends the run at once, unanswered (:class:`YtDlpChallengeGuard`): FAILED_BLOCKED
+        with :data:`CHALLENGE_STOPPED_MESSAGE`.
         """
         out_dir = options.out_dir
         if episode.locked and not options.include_locked:
@@ -521,17 +598,25 @@ class YtDlpDownloader:
         if problem is not None:
             return DownloadResult(episode=episode, status=DownloadStatus.FAILED, message=problem)
         params = self.build_options(episode, options, output_template(out_dir, episode, options))
+        guard = params.get("logger")
+        challenged = DownloadResult(
+            episode=episode, status=DownloadStatus.FAILED_BLOCKED, message=CHALLENGE_STOPPED_MESSAGE
+        )
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             with self._ydl_factory(params) as ydl:
                 retcode = ydl.download([episode.page_url])
         except Exception as exc:
+            if isinstance(guard, YtDlpChallengeGuard) and guard.stopped:
+                return _unless_encrypted_left(challenged, options)  # a stop, and the cooldown
             message = sanitize_error(str(exc) or exc.__class__.__name__)
             status = self.classify_error(message)
             failed = DownloadResult(
                 episode=episode, status=status, message=describe_failure(status, message)
             )
             return _unless_encrypted_left(failed, options)
+        if isinstance(guard, YtDlpChallengeGuard) and guard.stopped:
+            return _unless_encrypted_left(challenged, options)  # stopped, whatever yt-dlp returned
         if retcode not in (0, None):
             failed = DownloadResult(
                 episode=episode,

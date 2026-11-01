@@ -60,7 +60,8 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--bord
 th { color: var(--muted); font-weight: 600; }
 td.message, .report li, .history li, .banner { overflow-wrap: anywhere; }
 tr.series-row td { font-weight: 600; background: var(--bg); }
-img.cover { width: 40px; height: 54px; object-fit: cover; border-radius: 4px; background: var(--badge); display: block; }
+/* a thumbnail, or the empty frame it fills once its row has been in view (so no row ever jumps) */
+.cover { width: 40px; height: 54px; object-fit: cover; border-radius: 4px; background: var(--badge); display: block; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--badge); font-size: 0.8rem; white-space: nowrap; margin-right: 4px; }
 .badge.free, .badge.done, .badge.complete { color: var(--ok); }
 .badge.unlocked { color: var(--accent); }

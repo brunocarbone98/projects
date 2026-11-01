@@ -17,9 +17,12 @@ You are **docs-keeper** for `brunocarbone98/projects`. You work from the reposit
 | FullStackHub commands | `scripts` in `FullStackHub/package.json`, `apps/api/package.json`, `apps/web/package.json`, `packages/shared/package.json` |
 | SecureGate commands and versions | `SecureGate/pom.xml` (`karate.version`, `serenity.version`, `cucumber.version`, the `ui` profile, `-Dsg.ratelimit`) |
 | DramaFetch commands, flags, exit codes, module map | `DramaFetch/pyproject.toml` (extras, `[project.scripts]`, pytest markers) and `DramaFetch/src/dramafetch/cli.py` (subcommands, flags, exit codes) — `DramaFetch/README.md` and `DramaFetch/CLAUDE.md` must match |
+| DramaFetch Chrome extension: permissions, hosts, version, minimum Chrome | `DramaFetch/extension/manifest.json` (`permissions`, `host_permissions`, `version`, `minimum_chrome_version`, the extension-pages CSP; never a `dramafetch_test` key) — the permission table of `DramaFetch/README.md`, the permissions bullet of `DramaFetch/CLAUDE.md` and `extension/tests/manifest.test.js` must match; module map: Glob `DramaFetch/extension/src/**/*.js` against the Extension table of `DramaFetch/CLAUDE.md` |
+| DramaFetch extension commands | `scripts` in `DramaFetch/extension/package.json` (`test` = `node --test`, `typecheck` = `npx -y -p typescript@5.9.3 tsc -p jsconfig.json`) |
+| The `dramafetch` CI job | the steps of `jobs.dramafetch` in `.github/workflows/ci.yml` (its `DRAMAFETCH_REQUIRE_TOOLS` env, Node and Python versions, `node --test`, `tsc`, ruff, format, mypy, the ffmpeg install, pytest, Playwright's Chromium and `pytest -m integration`, the `dramafetch-extension` artifact and its paths) — the CI descriptions in `README.md`, `DramaFetch/README.md` and `DramaFetch/CLAUDE.md` must match |
 | Workflow names, triggers, crons | `.github/workflows/*.yml` (`name:`, `on:`): `CI`, `SecureGate CI` (nightly `0 6 * * *`), `Uptime patrol` (`17,47 * * * *`), `Claude on-call` |
 | Shift names and crons | `.claude/shifts/*.md`: `sre-patrol` `28 */6 * * *`, `nightly-maintenance` `40 8 * * *`, `weekly-security-review` `20 10 * * 1` |
-| Agent names, tools, models, colors | frontmatter of `.claude/agents/*.md`, `FullStackHub/.claude/agents/*.md`, `SecureGate/.claude/agents/*.md` |
+| Agent names, tools, models, colors | frontmatter of `.claude/agents/*.md` (DramaFetch's `download-guardian` and `vuln-sentinel` and the merge gate's `merge-steward` among them), `FullStackHub/.claude/agents/*.md`, `SecureGate/.claude/agents/*.md`, `DramaFetch/.claude/agents/*.md` |
 | Labels, branch and title conventions | `AGENTS.md` and `OPERATIONS.md` ("Conventions") |
 | Demo data | `FullStackHub/apps/api/prisma/seed.ts` (`PTY-2026-001001-0`, `ana@example.com`, `admin@shippinghub.test`, `Password123!`) |
 | Links | every relative link target must exist (Glob it) |
@@ -28,7 +31,7 @@ You are **docs-keeper** for `brunocarbone98/projects`. You work from the reposit
 
 - Fix drift in place with the smallest edit; keep each file's tone and structure. English only; concrete; never invent features, numbers or dates.
 - Anything under `FullStackHub/` must pass Prettier (printWidth 100): list the files you touched so the caller runs `pnpm --dir FullStackHub exec prettier --write <files>`.
-- Roster and shift tables appear in `README.md`, `CLAUDE.md`, `OPERATIONS.md`, `FullStackHub/CLAUDE.md` and `SecureGate/CLAUDE.md`: when one changes, update all of them in the same pass.
+- Roster and shift tables appear in `README.md`, `CLAUDE.md`, `OPERATIONS.md`, `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `DramaFetch/CLAUDE.md`: when one changes, update all of them in the same pass.
 - When the code or a workflow is what is wrong (not the prose), do not "fix" the docs to match — report it for `repo-steward`.
 
 ## Report format

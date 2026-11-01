@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from mutagen.mp4 import MP4, MP4Cover
@@ -39,6 +39,9 @@ from .fake_tiktok import (
     cover_bytes,
     media_bytes,
 )
+
+if TYPE_CHECKING:
+    from conftest import Tools
 
 pytestmark = [
     pytest.mark.integration,
@@ -144,7 +147,7 @@ def _streams(lines: list[str], keep: set[int]) -> list[str]:
 # ------------------------------------------------------------------------------ scenarios
 
 
-def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path) -> None:
+def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path, tools: Tools) -> None:
     """E01-E04 saved as `DramaFetch/<Name> [<id>]/<Name> - Episode 0N.mp4`, each with the fake
     CDN's cover embedded as `covr`, 3 s long with audio, decoding frame for frame like the CDN's
     original bytes; E05 (locked) skipped without a single request; the exact report line; the
@@ -195,8 +198,8 @@ def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path) -> No
     assert len(server.media_requests) == 4 and all(r.with_referer for r in server.media_requests)
     assert len(_downloader_covers(server)) == 4
     assert not _media_of(server, MAIN_ITEMS[5]) and not _downloader_covers(server, MAIN_ITEMS[5])
-    if ffmpeg is None:
-        pytest.skip("saved and verified; no ffmpeg that decodes H.264 + AAC for the framemd5 check")
+    no_ffmpeg = "saved and verified; no ffmpeg that decodes H.264 + AAC for the framemd5 check"
+    tools.need("ffmpeg", ffmpeg is not None, no_ffmpeg)  # CI installs one: a failure there
 
 
 def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
@@ -230,8 +233,13 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
             assert row.locator(".badge.ondisk").count() == (1 if number < 5 else 0)
             assert row.locator("input[type=checkbox]").is_checked() is False  # on disk, or locked
         assert table.locator("tr[data-number='5']").get_attribute("data-access") == "locked"
-        # the list's thumbnails: the extension's own requests, one per episode, then none again
-        ext.wait_for(lambda: table.locator("img.cover").count() == 5, 20, "no thumbnails shown")
+        # the list's thumbnails: the extension's own requests, one per episode, each once its row
+        # is in view (scrolled to, row by row), then none again
+        for number in range(1, 6):
+            row = table.locator(f"tr[data-number='{number}']")
+            row.locator("td.cover-cell").scroll_into_view_if_needed()
+            ext.wait_for(lambda row=row: row.locator("img.cover").count() == 1, 20, "no thumbnail")
+        assert table.locator("img.cover").count() == 5
         assert len(_downloader_covers(server)) == covers + 5
         covers += 5
         selection = ext.download_available()
@@ -480,6 +488,15 @@ def test_j_a_redirect_is_never_followed(tmp_path: Path) -> None:
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         ext.load(MAIN_LINK)
+        for number, item in MAIN_ITEMS.items():  # each row's thumbnail is asked for once in view
+            row = ext.page.locator(f"#episode-table tbody tr[data-number='{number}']")
+            row.locator("td.cover-cell").scroll_into_view_if_needed()
+            asked = f"/cover/{item}.jpg"
+            ext.wait_for(
+                lambda asked=asked: any(r.path == asked for r in server.cover_requests),
+                20,
+                "no thumbnail was asked for",
+            )
         ext.wait_for(lambda: len(server.cover_requests) == 5, 20, "no thumbnail was asked for")
         entry = ext.download_all(MAIN_LINK)
         (series,) = entry["series"]

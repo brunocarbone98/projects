@@ -1,5 +1,5 @@
 name: Bug report
-description: Something is broken in Shipping Hub, SecureGate or the portfolio site.
+description: Something is broken in Shipping Hub, SecureGate, DramaFetch or the portfolio site.
 title: "[bug] "
 labels: [bug]
 body:
@@ -11,6 +11,7 @@ body:
       options:
         - FullStackHub
         - SecureGate
+        - DramaFetch
         - PersonalWebsite
         - repo
     validations:
@@ -25,7 +26,7 @@ body:
     id: steps
     attributes:
       label: Steps to reproduce
-      description: Numbered, from a fresh page or a fresh command. Mention the account used (demo accounts only, never real credentials).
+      description: Numbered, from a fresh page or a fresh command. Mention the account used (demo accounts only, never real credentials). For DramaFetch never attach cookies.txt or paste cookie values; review `--dump-raw` files before attaching them.
       value: |
         1.
         2.

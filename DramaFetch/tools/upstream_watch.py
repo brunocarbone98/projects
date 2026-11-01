@@ -16,18 +16,25 @@ What it reads — public, primary sources, all reachable from the Claude Code cl
   distribution installed in DramaFetch's virtual environment;
 - yt-dlp's own repository files, raw: ``Changelog.md`` (the entries about TikTok and the security
   notes of the releases newer than the installed one) and ``yt_dlp/extractor/tiktok.py`` at the
-  installed version's tag and at ``master`` (how many lines changed, and which of the names
-  DramaFetch reads in TikTok's payload the extractor stopped or started using);
+  installed version's git tag (``yt_dlp.version.__version__`` of the inspected interpreter, which
+  keeps the zeros PyPI's version drops: ``2026.08.19``, not ``2026.8.19``) and at ``master`` (how
+  many lines changed, and which of the names DramaFetch reads in TikTok's payload the extractor
+  stopped or started using);
 - Google's Chrome version history API: the current Stable version per desktop platform, next to
   the extension's ``minimum_chrome_version``.
 
 It never contacts TikTok and never installs anything. A source that does not answer is listed
 under "Unreachable" and the report goes on (one failure per host is enough: that host is skipped
 for the rest of the run). Exit status 0 whenever a report was printed, 2 for bad arguments.
+Whatever could not be checked — a host that did not answer, a direct dependency not installed or
+not checked, the extractor not compared, Chrome Stable not read — is an Attention item too, so
+"nothing new" is printed only when everything was compared and nothing changed: a skipped check
+is never an all-clear.
 
 The report is evidence, not a decision: the agents still read the cited sources, and nothing
 found upstream may move the line in ``DramaFetch/CLAUDE.md`` (yt-dlp's TikTok extractor, for
-instance, solves TikTok's challenges; DramaFetch stops at one).
+instance, solves TikTok's JS challenges; DramaFetch's guard, ``downloader.YtDlpChallengeGuard``,
+stops yt-dlp at one).
 """
 
 from __future__ import annotations
@@ -109,6 +116,9 @@ class Report:
     """What one run gathered: the Markdown sections, the URLs read, what did not answer."""
 
     attention: list[str] = field(default_factory=list)
+    #: what could not be checked (a host that did not answer, a dependency not installed or not
+    #: checked, a comparison not made): Attention items too — never an all-clear
+    gaps: list[str] = field(default_factory=list)
     sections: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
     unreachable: list[str] = field(default_factory=list)
@@ -136,6 +146,17 @@ def version_key(version: str) -> tuple[int, ...]:
         if match.end() != len(piece):
             break
     return tuple(parts)
+
+
+def tag_of(version: str) -> str:
+    """yt-dlp's git tag for one of its release versions: PEP 440 (PyPI, the wheel's metadata)
+    drops the zeros of its date — ``2026.8.19`` — while the tag keeps them, ``2026.08.19``. The
+    month and the day get two digits, a further part (``2026.08.19.1``) stays as it is; anything
+    else is returned unchanged."""
+    parts = version.strip().split(".")
+    if len(parts) < 3 or not all(part.isdigit() for part in parts[:3]):
+        return version.strip()
+    return ".".join([parts[0], f"{int(parts[1]):02d}", f"{int(parts[2]):02d}", *parts[3:]])
 
 
 def one_line(text: str, limit: int = _MAX_TEXT) -> str:
@@ -339,6 +360,20 @@ def installed_distributions(python: Path) -> dict[str, str]:
     return {normalize(name): version for name, version in json.loads(done.stdout)}
 
 
+def installed_ytdlp_tag(python: Path) -> str | None:
+    """``yt_dlp.version.__version__`` as the interpreter ``python`` sees it — the git tag of the
+    installed release, zeros kept (``2026.08.19``) — or None when it cannot be read."""
+    code = "import yt_dlp.version as v; print(v.__version__)"
+    try:
+        done = subprocess.run(
+            [str(python), "-c", code], capture_output=True, text=True, check=False, timeout=120
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    tag = done.stdout.strip()
+    return tag if done.returncode == 0 and re.fullmatch(r"[0-9][0-9.]*", tag) else None
+
+
 # ------------------------------------------------------------------------------- report
 
 
@@ -357,13 +392,15 @@ def _python_section(
         "| --- | --- | --- | --- | --- |",
     ]
     others: list[str] = []
-    checked = 0
+    checked = total = unchecked_others = 0
+    direct = {normalize(name) for name in DIRECT}
     for name in sorted(installed):
         if name == normalize(own_name):
             continue
         version = installed[name]
         release = fetch_json(fetch, PYPI_RELEASE.format(name=name, version=version), report)
         vulns = vulnerabilities_of(release) if release is not None else []
+        total += 1
         checked += release is not None
         described = "; ".join(
             f"[{v.id}]({v.link or 'https://osv.dev/vulnerability/' + v.id})"
@@ -376,10 +413,13 @@ def _python_section(
                 f"{name} {version}: {len(vulns)} known vulnerabilit"
                 f"{'y' if len(vulns) == 1 else 'ies'} ({', '.join(v.id for v in vulns)})"
             )
-        if name not in {normalize(direct) for direct in DIRECT}:
+        if name not in direct:
             if vulns:
                 others.append(f"- {name} {version}: {described}")
+            unchecked_others += release is None
             continue
+        if release is None:
+            report.gaps.append(f"{name} {version}: not checked against PyPI's vulnerability data")
         latest = fetch_json(fetch, PYPI_LATEST.format(name=name), report)
         latest_text = "?"
         if isinstance(latest, dict):
@@ -388,26 +428,51 @@ def _python_section(
             latest_text = newest + (f" ({uploads[0]})" if uploads and uploads[0] else "")
             if version_key(newest) > version_key(version):
                 report.attention.append(f"{name} {newest} is out (installed {version})")
+        else:
+            report.gaps.append(f"{name}: its latest release on PyPI not read")
         rows.append(
             f"| {name} | {version} | {floors.get(name, '-')} | {latest_text} | "
             f"{described or ('none' if release is not None else 'not checked')} |"
         )
-    for name in (normalize(direct) for direct in DIRECT):
+    for name in (normalize(name) for name in DIRECT):
         if name not in installed:
             rows.append(f"| {name} | not installed | {floors.get(name, '-')} | - | - |")
+            report.gaps.append(
+                f"{name}: not installed in the inspected environment "
+                f"(floor {floors.get(name, '-')}): nothing compared"
+            )
+    if unchecked_others:
+        report.gaps.append(
+            f"{unchecked_others} other installed distribution{'' if unchecked_others == 1 else 's'}"
+            " not checked against PyPI's vulnerability data"
+        )
     rows += ["", "### Other installed distributions with known vulnerabilities", ""]
-    rows += others or [f"none ({checked} distributions checked against PyPI)"]
+    rows += others or ["none"]
+    rows += ["", f"{checked} of {total} installed distributions checked against PyPI."]
     report.sections.append("\n".join(rows))
 
 
-def _ytdlp_section(fetch: Fetch, report: Report, installed: str | None, watched: set[str]) -> None:
+def _ytdlp_section(
+    fetch: Fetch,
+    report: Report,
+    installed: str | None,
+    watched: set[str],
+    tag: str | None = None,
+) -> None:
+    """The yt-dlp section; ``tag`` is the installed release's git tag (``tag_of(installed)`` when
+    not given: PyPI's version drops the zeros the tag keeps)."""
     rows = ["## yt-dlp"]
     if installed is None:
         rows.append("\nyt-dlp is not installed in the inspected environment: nothing compared.")
         report.sections.append("\n".join(rows))
         return
+    ref = tag or tag_of(installed)
+    raw_host = urllib.parse.urlsplit(YTDLP_RAW).hostname or "?"
     changelog = fetch_text(fetch, YTDLP_RAW.format(ref="master", path=YTDLP_CHANGELOG), report)
-    if changelog is not None:
+    if changelog is None:
+        rows += ["", "### Changelog", "", "not read"]
+        report.gaps.append("yt-dlp's changelog not read: its TikTok entries and security notes")
+    else:
         entries = changelog_entries(changelog, newer_than=installed)
         notes = security_notes(changelog, newer_than=installed)
         rows += ["", f"### Changelog entries about TikTok since {installed}", ""]
@@ -421,24 +486,29 @@ def _ytdlp_section(fetch: Fetch, report: Report, installed: str | None, watched:
             )
         if notes:
             report.attention.append(f"yt-dlp's changelog has security notes newer than {installed}")
-    old = fetch_text(fetch, YTDLP_RAW.format(ref=installed, path=YTDLP_TIKTOK), report)
+    old = fetch_text(fetch, YTDLP_RAW.format(ref=ref, path=YTDLP_TIKTOK), report)
     new = fetch_text(fetch, YTDLP_RAW.format(ref="master", path=YTDLP_TIKTOK), report)
-    rows += ["", f"### The TikTok extractor: {installed} -> master", ""]
+    rows += ["", f"### The TikTok extractor: {ref} -> master", ""]
     if old is None or new is None:
-        rows.append("not compared (a version of the file could not be read)")
+        if raw_host in report.failed_hosts:
+            why = f"{raw_host} did not answer"
+        else:  # an answer all the same: no such file at that ref
+            why = f"no {YTDLP_TIKTOK} at {'tag ' + ref if old is None else 'master'}"
+        rows.append(f"not compared ({why})")
+        report.gaps.append(f"yt-dlp's TikTok extractor not compared: {why}")
     else:
         gone, added = literal_drift(watched, old, new)
         count = changed_lines(old, new)
         rows += [
             f"- {count} changed lines.",
             "- Names DramaFetch reads that the extractor quoted at "
-            f"{installed} but no longer quotes at master: {', '.join(gone) or 'none'}.",
+            f"{ref} but no longer quotes at master: {', '.join(gone) or 'none'}.",
             "- Names DramaFetch reads that the extractor quotes at master but did not at "
-            f"{installed}: {', '.join(added) or 'none'}.",
+            f"{ref}: {', '.join(added) or 'none'}.",
         ]
         if count:
             report.attention.append(
-                f"yt-dlp's TikTok extractor changed ({count} lines) since {installed}"
+                f"yt-dlp's TikTok extractor changed ({count} lines) since {ref}"
             )
         if gone:
             report.attention.append(
@@ -449,13 +519,17 @@ def _ytdlp_section(fetch: Fetch, report: Report, installed: str | None, watched:
 
 def _chrome_section(fetch: Fetch, report: Report, minimum: str | None) -> None:
     rows = ["## Chrome Stable", "", "| Platform | Version |", "| --- | --- |"]
+    unread: list[str] = []
     for platform in CHROME_PLATFORMS:
         data = fetch_json(fetch, CHROME_STABLE.format(platform=platform), report)
         try:
             version = str(data["versions"][0]["version"])
         except (TypeError, KeyError, IndexError):
             version = "not read"
+            unread.append(platform)
         rows.append(f"| {platform} | {version} |")
+    if unread:
+        report.gaps.append(f"Chrome Stable not read for {', '.join(unread)}")
     rows += ["", f"The extension's `minimum_chrome_version`: {minimum or 'not set'}."]
     report.sections.append("\n".join(rows))
 
@@ -466,8 +540,12 @@ def build_report(
     installed: dict[str, str],
     fetch: Fetch,
     now: datetime,
+    ytdlp_tag: str | None = None,
 ) -> str:
-    """The whole Markdown report for the DramaFetch checkout ``project``."""
+    """The whole Markdown report for the DramaFetch checkout ``project``; ``ytdlp_tag`` is the
+    installed yt-dlp's git tag (:func:`installed_ytdlp_tag`; else derived from its version).
+    Attention lists what changed, then what could not be checked; "nothing new" only when it is
+    empty."""
     report = Report()
     pyproject = (project / "pyproject.toml").read_text(encoding="utf-8")
     own_name = str(tomllib.loads(pyproject).get("project", {}).get("name", "dramafetch"))
@@ -477,7 +555,7 @@ def build_report(
         for path in WATCHED_SOURCES
         if (project / path).is_file()
     ]
-    _ytdlp_section(fetch, report, installed.get("yt-dlp"), watched_literals(sources))
+    _ytdlp_section(fetch, report, installed.get("yt-dlp"), watched_literals(sources), ytdlp_tag)
     manifest_path = project / "extension" / "manifest.json"
     minimum = None
     if manifest_path.is_file():
@@ -485,6 +563,14 @@ def build_report(
             "minimum_chrome_version"
         )
     _chrome_section(fetch, report, None if minimum is None else str(minimum))
+    unreachable_urls = (item.split(" ", 1)[0] for item in report.unreachable)
+    silent = sorted({urllib.parse.urlsplit(url).hostname or "?" for url in unreachable_urls})
+    if silent:
+        report.gaps.insert(
+            0,
+            f"not an all-clear: {', '.join(silent)} did not answer — see Unreachable; what "
+            f"{'it serves' if len(silent) == 1 else 'they serve'} was not compared",
+        )
     stamp = now.strftime("%Y-%m-%d %H:%M UTC")
     head = [
         f"# DramaFetch upstream watch — {stamp}",
@@ -494,7 +580,7 @@ def build_report(
         "",
         "## Attention",
         "",
-        *([f"- {item}" for item in report.attention] or ["nothing new"]),
+        *([f"- {item}" for item in [*report.attention, *report.gaps]] or ["nothing new"]),
     ]
     tail = [
         "## Unreachable",
@@ -529,7 +615,11 @@ def main(argv: Sequence[str] | None = None, fetch: Fetch = http_fetch) -> int:
     if not python.exists():
         python = Path(sys.executable)
     installed = installed_distributions(python)
-    sys.stdout.write(build_report(project, installed=installed, fetch=fetch, now=datetime.now(UTC)))
+    tag = installed_ytdlp_tag(python) if "yt-dlp" in installed else None
+    report = build_report(
+        project, installed=installed, fetch=fetch, now=datetime.now(UTC), ytdlp_tag=tag
+    )
+    sys.stdout.write(report)
     return 0
 
 

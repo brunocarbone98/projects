@@ -25,6 +25,7 @@
       "Read(./**/.env)",
       "Read(./**/.env.local)",
       "Read(./**/.env.production)",
+      "Read(./**/*cookies*.txt)",
       "Bash(git push --force*)",
       "Bash(git push -f *)",
       "Bash(git push * --force*)",

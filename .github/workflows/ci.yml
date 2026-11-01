@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: no job writes to the repository, its issues or its pull requests.
+permissions:
+  contents: read
+
 # Default working directory for the FullStackHub jobs; the dramafetch job overrides it with DramaFetch/.
 defaults:
   run:
@@ -68,6 +72,10 @@ jobs:
 
   dramafetch:
     runs-on: ubuntu-latest
+    env:
+      # Every test that would skip for a tool this job installs (node, a full ffmpeg, Chromium)
+      # fails instead, naming the tool: a green run never silently left a proof out.
+      DRAMAFETCH_REQUIRE_TOOLS: "1"
     defaults:
       run:
         working-directory: DramaFetch
@@ -95,6 +103,8 @@ jobs:
         run: ruff format --check .
       - name: Mypy (strict)
         run: mypy
+      - name: Install a full ffmpeg (the framemd5 proofs of the embedded covers)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Unit tests (fixtures + local fake TikTok server, no network)
         run: pytest
       - name: Install Chromium for the integration test

@@ -19,6 +19,10 @@
     "message": "Series completas de microdramas de TikTok, para verlas sin conexión",
     "description": "Subtitle under the page title."
   },
+  "uiLanguage": {
+    "message": "es",
+    "description": "The language of this catalog, \"en\" or \"es\" (not a text to translate): the page shows the engine's texts in it."
+  },
   "statusIdle": {
     "message": "en espera",
     "description": "Engine state badge: nothing running."
@@ -36,7 +40,7 @@
     "description": "Cooldown banner title."
   },
   "cooldownLeft": {
-    "message": "Faltan $minutes$ min — nada contacta a TikTok hasta entonces.",
+    "message": "Tiempo restante: $minutes$ min — nada contacta a TikTok hasta entonces.",
     "description": "Cooldown countdown.",
     "placeholders": {
       "minutes": {
@@ -182,7 +186,7 @@
     }
   },
   "pauseInForce": {
-    "message": "$text$ — faltan $seconds$ s",
+    "message": "$text$ — tiempo restante: $seconds$ s",
     "description": "The pause in force (the text is the engine's).",
     "placeholders": {
       "text": {
@@ -196,10 +200,6 @@
   "stopButton": {
     "message": "Detener",
     "description": "Button: stop the run at the next pause."
-  },
-  "stoppedByYou": {
-    "message": "detenido por ti",
-    "description": "Why a run ended."
   },
   "queueHeading": {
     "message": "En espera",

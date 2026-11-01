@@ -21,7 +21,8 @@ worst series' code (5 > 3 > 4 > 2 > 0).
 
 Exit codes: 0 ok · 2 usage/unsupported URL/some episode failed · 3 login required ·
 4 discovery failed (captcha: try ``--headful``; an HTTP error for the series page) · 5 blocked
-(HTTP 403, or a captcha met while ``--engine browser`` refreshed the list) or rate limited
+(HTTP 403, a JS challenge the default engine met on a video page — never answered —, or a captcha
+met while ``--engine browser`` refreshed the list) or rate limited
 (HTTP 429): wait 30-60 min, then run again to resume — and, with the same code, a refusal of
 ``info``/``download``/``video`` to contact TikTok at all while the global cooldown that such a
 block starts is in force (``dramafetch.cooldown``; no flag skips it, deleting its file does) ·
@@ -47,7 +48,7 @@ from typing import Any
 from dramafetch import __version__, engine
 from dramafetch.cooldown import cooldown_message, cooldown_summary
 from dramafetch.discovery.cookies import cookie_file_problems
-from dramafetch.downloader import MAX_RETRIES, curl_cffi_available
+from dramafetch.downloader import MAX_RETRIES, curl_cffi_available, impersonate_target
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -1271,14 +1272,21 @@ def _check_yt_dlp() -> DoctorCheck:
 
 
 def _check_curl_cffi() -> DoctorCheck:
-    if curl_cffi_available():
+    if not curl_cffi_available():
         return DoctorCheck(
-            "curl_cffi", "ok", "importable: yt-dlp impersonates Chrome's TLS fingerprint"
+            "curl_cffi",
+            "skip",
+            "not installed: impersonation off (optional: pip install 'dramafetch[impersonate]')",
+        )
+    if impersonate_target() is None:
+        return DoctorCheck(
+            "curl_cffi",
+            "skip",
+            "installed, but this yt-dlp does not support its version: impersonation off "
+            "(pip install -U 'yt-dlp[curl-cffi]' installs one it supports)",
         )
     return DoctorCheck(
-        "curl_cffi",
-        "skip",
-        "not installed: impersonation off (optional: pip install 'dramafetch[impersonate]')",
+        "curl_cffi", "ok", "importable: yt-dlp impersonates Chrome's TLS fingerprint"
     )
 
 

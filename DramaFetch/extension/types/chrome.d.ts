@@ -57,6 +57,9 @@ declare namespace chrome {
       title?: string;
       status?: "unloaded" | "loading" | "complete";
       mutedInfo?: { muted: boolean };
+      /** Whether Chrome may discard the tab when short of memory (Memory Saver). */
+      autoDiscardable?: boolean;
+      discarded?: boolean;
     }
     interface CreateProperties {
       url?: string;
@@ -69,6 +72,8 @@ declare namespace chrome {
       url?: string;
       active?: boolean;
       muted?: boolean;
+      /** false: Chrome never discards the tab on its own (the DramaFetch tab while a job runs or waits). */
+      autoDiscardable?: boolean;
     }
     interface QueryInfo {
       url?: string | string[];
@@ -167,6 +172,12 @@ declare namespace chrome {
       error: string;
       fromCache: boolean;
     }
+    /** A redirect answered to a request (the extension's own: `src/app/redirects.js`). */
+    interface RedirectDetails extends RequestDetails {
+      redirectUrl: string;
+      statusCode: number;
+      fromCache: boolean;
+    }
     /** Observation only: DramaFetch never passes "blocking" / "requestBody" / "extraHeaders". */
     interface WebRequestEvent<Details> {
       addListener(callback: (details: Details) => void, filter: RequestFilter): void;
@@ -176,6 +187,7 @@ declare namespace chrome {
     const onBeforeRequest: WebRequestEvent<RequestDetails>;
     const onCompleted: WebRequestEvent<CompletedDetails>;
     const onErrorOccurred: WebRequestEvent<ErrorDetails>;
+    const onBeforeRedirect: WebRequestEvent<RedirectDetails>;
   }
 
   // ----------------------------------------------------------------- declarativeNetRequest

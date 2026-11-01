@@ -95,13 +95,13 @@ the run's step summary, and the run fails when any probe fails, so the README ba
 **Incident issue lifecycle.** When a probe fails, the workflow opens
 `🚨 Production incident: Shipping Hub is unhealthy` (label `incident`) with the probe table,
 the run link and what a human should check. Every further failing run adds one comment with
-the new table — never a second issue. The first green run afterwards comments
+the new table — never a second issue. The next healthy run (every probe passed) comments
 `Recovered — all probes green at <UTC time>` with the run link and closes the issue as completed.
 
 **Unobserved runs.** Railway's edge (server `railway-hikari`) may answer automated clients with
 its bot protection instead of the app: HTTP 429, or an HTTP 200 "Checking your browser…" page.
-The probe reports such answers as `🛡️ challenged`; when every probe is challenged the run ends as
-**Unobserved** (`healthy=unknown`): the job ends green with a warning annotation and an
+The probe reports such answers as `🛡️ challenged`; when no probe failed and at least one was
+challenged, the run ends as **Unobserved** (`healthy=unknown`): the job ends green with a warning annotation and an
 explanation in its summary, no incident is opened, updated or closed, and the badge turns red only
 on a confirmed failure. Open
 the app in a browser to see its real state, and decide in Railway's service settings whether
@@ -117,7 +117,7 @@ automated monitors should be allowed through.
    (`restartPolicyType: ON_FAILURE` in `railway.json`), so a persistent incident usually means
    configuration or the database.
 3. If the database is the problem, open the Postgres service in Railway and check its status.
-4. Nothing to do on GitHub: the issue closes itself on the next green run.
+4. Nothing to do on GitHub: the issue closes itself on the next healthy run.
 
 The **SRE patrol** shift (every 6 hours) reads these results: when the cause is in the
 repository (the workflow, a URL, `start.sh`, `Dockerfile`) it opens a fix PR; when it is the

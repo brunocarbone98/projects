@@ -14,3 +14,7 @@ node_modules/
 .claude/settings.local.json
 **/.claude/settings.local.json
 CLAUDE.local.md
+
+# DramaFetch run from the repository root: TikTok session cookies and downloads
+*cookies*.txt
+/downloads/

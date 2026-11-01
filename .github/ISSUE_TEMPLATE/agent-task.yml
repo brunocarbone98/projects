@@ -15,6 +15,7 @@ body:
       options:
         - FullStackHub
         - SecureGate
+        - DramaFetch
         - PersonalWebsite
         - repo
     validations:
@@ -28,7 +29,7 @@ body:
         @claude <what to do and why>.
 
         Scope: <files or folders to touch; what must not change>.
-        Verify with: <the project's own checks — FullStackHub: `pnpm lint && pnpm format:check && pnpm typecheck && pnpm test`; services: `pytest`; SecureGate: `./mvnw -q verify` with a local stack up>.
+        Verify with: <the project's own checks — FullStackHub: `pnpm lint && pnpm format:check && pnpm typecheck && pnpm test`; services: `pytest`; SecureGate: `./mvnw -q verify` with a local stack up; DramaFetch: not verified by the on-call agent — CI's `dramafetch` job checks the pull request>.
         Deliver: <a comment with the answer, or commits on a `claude/…` branch plus the link to open the pull request, its body following `.github/pull_request_template.md`>.
     validations:
       required: true
