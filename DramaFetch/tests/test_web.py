@@ -1117,8 +1117,11 @@ def test_a_series_complete_on_disk_costs_no_request_the_second_time(harness: Har
     assert again["state"] == "done" and again["series_name"] == SERIES_NAME
     assert again["total"] == 4 and again["files"] == 4
     assert again["report"]["skipped_complete"] is True
+    # episode 5 is locked: the manifest recorded it skipped-locked, and the line says so (no row)
+    assert again["report"]["locked"] == 1 and again["report"]["locked_numbers"] == [5]
     assert again["report"]["line"] == (
-        "complete, nothing to do: 4 episodes already on disk (checked just now)"
+        "complete, nothing to do: 4 episodes already on disk, 1 locked (5) (checked just now) — "
+        "unlocked more in the TikTok app since? --recheck looks again"
     )
     assert [row["status"] for row in again["results"]] == ["skipped-exists"] * 4
     assert all(
