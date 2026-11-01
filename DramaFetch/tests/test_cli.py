@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
+import re
 import socket
 import sys
 import time
@@ -13,9 +15,11 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from mutagen import version_string as mutagen_version
 
 from dramafetch import __version__, cli, engine
-from dramafetch.catalog import catalog_warnings
+from dramafetch.catalog import catalog_warnings, parse_item_list_payload
+from dramafetch.cooldown import active_cooldown, clear_cooldown, record_block
 from dramafetch.downloader import locked_result
 from dramafetch.errors import (
     ChallengeError,
@@ -24,9 +28,11 @@ from dramafetch.errors import (
     RateLimitedError,
 )
 from dramafetch.manifest import MANIFEST_FILENAME
+from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode, Series
 
 SERIES_ID = "7699393770256782354"
+TINY_MP4 = (Path(__file__).parent / "fixtures" / "tiny.mp4").read_bytes()  # a real 3 s MP4
 NAME = "The Billionaire's Secret Heiress"
 SERIES_URL = f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1"
 VIDEO_URL = "https://www.tiktok.com/@ana/video/7699400000000000001"
@@ -102,9 +108,9 @@ class FakeDownloader:
         status = self.outcomes.get(episode.number, DownloadStatus.DONE)
         if status is DownloadStatus.DONE:
             options.out_dir.mkdir(parents=True, exist_ok=True)
-            path = options.out_dir / f"E{episode.number:02d} - fake.mp4"
+            path = options.out_dir / f"fake - Episode {episode.number:02d}.mp4"
             path.write_bytes(b"v")
-            return DownloadResult(episode, status, path, "saved")
+            return DownloadResult(episode, status, path, f"saved {path.name} + cover embedded")
         return DownloadResult(episode, status, message=f"{status.value} from fake")
 
 
@@ -118,15 +124,24 @@ def fake_downloader(monkeypatch):
 
 @pytest.fixture
 def no_sleep(monkeypatch):
-    """Makes the CLI's engine.download_series call use an instant sleep (the pauses are still
-    computed and announced through on_pause, so their printing can be tested)."""
-    real = engine.download_series
+    """Makes the CLI's engine.run_batch (the rest between series) and engine.download_series (the
+    pauses inside a series) use an instant sleep; the pauses are still computed and announced
+    through on_pause, so their printing can be tested. Returns the list of seconds "slept"."""
+    slept: list[float] = []
+    real_batch = engine.run_batch
+    real_download = engine.download_series
 
-    def instant(*args, **kwargs):
-        kwargs.setdefault("sleep", lambda seconds: None)
-        return real(*args, **kwargs)
+    def instant_batch(*args, **kwargs):
+        kwargs.setdefault("sleep", slept.append)
+        return real_batch(*args, **kwargs)
 
-    monkeypatch.setattr(engine, "download_series", instant)
+    def instant_download(*args, **kwargs):
+        kwargs.setdefault("sleep", slept.append)
+        return real_download(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "run_batch", instant_batch)
+    monkeypatch.setattr(engine, "download_series", instant_download)
+    return slept
 
 
 class FakeBrowserDownloader:
@@ -144,7 +159,7 @@ class FakeBrowserDownloader:
         if episode.locked and not options.include_locked:
             return locked_result(episode)
         options.out_dir.mkdir(parents=True, exist_ok=True)
-        path = options.out_dir / f"E{episode.number:02d} - browser.mp4"
+        path = options.out_dir / f"browser - Episode {episode.number:02d}.mp4"
         path.write_bytes(b"v")
         return DownloadResult(episode, DownloadStatus.DONE, path, "saved 0.1 MiB")
 
@@ -260,9 +275,13 @@ def test_parser_download_flags():
             "2",
             "--engine",
             "browser",
+            "--quality",
+            "best",
+            "--no-verify",
         ]
     )
     assert args.episodes == "1-5,8"
+    assert args.quality == "best" and args.no_verify is True
     assert args.out == "/tmp/x"
     assert (args.delay_min, args.delay_max) == (1.0, 2.0)
     assert args.include_locked and args.overwrite and args.dry_run and args.no_impersonate
@@ -283,6 +302,8 @@ def test_parser_download_flags():
     assert (defaults.rest_every, defaults.rest_min, defaults.rest_max) == (10, 60.0, 120.0)
     assert defaults.max_consecutive_failures == DownloadOptions.max_consecutive_failures == 3
     assert defaults.engine == DownloadOptions.engine == "yt-dlp"
+    assert defaults.quality == DownloadOptions.quality == "compatible"
+    assert defaults.no_verify is False and DownloadOptions.verify is True
     for flag in (
         "--pace",
         "--rest-every",
@@ -293,6 +314,10 @@ def test_parser_download_flags():
         assert flag in _subcommand_help("download") and flag in _subcommand_help("serve")
         assert flag not in _subcommand_help("video")  # one file: nothing to pace
     assert "--engine {yt-dlp,browser}" in _subcommand_help("video")
+    for command in ("download", "video", "serve"):
+        assert "--quality {compatible,best}" in _subcommand_help(command)
+        assert "--no-verify" in _subcommand_help(command)
+    assert "--quality" not in _subcommand_help("info")
 
 
 def _subcommand_help(command: str) -> str:
@@ -301,6 +326,45 @@ def _subcommand_help(command: str) -> str:
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
     return subparsers.choices[command].format_help()
+
+
+def test_parser_name_format_and_thumbnail_mode():
+    """`--name-format FORMAT` and `--thumbnail {embed,both,file,none}` exist on download, video and
+    serve; the format defaults to DEFAULT_NAME_FORMAT for a series and to "{title}" (the item id)
+    for video, the thumbnail mode to `embed` (the cover goes into the MP4)."""
+    parser = cli.build_parser()
+    for argv in (["download", SERIES_URL], ["video", VIDEO_URL], ["serve"]):
+        args = parser.parse_args(argv)
+        assert args.name_format is None and args.thumbnail == "embed"
+        for mode in ("embed", "both", "file", "none"):
+            assert parser.parse_args([*argv, "--thumbnail", mode]).thumbnail == mode
+        args = parser.parse_args([*argv, "--name-format", "{series} - {n}", "--thumbnail", "none"])
+        assert args.name_format == "{series} - {n}" and args.thumbnail == "none"
+        assert cli.name_format_for(args) == "{series} - {n}"
+        with pytest.raises(SystemExit):
+            parser.parse_args([*argv, "--thumbnail", "nope"])
+    assert cli.name_format_for(parser.parse_args(["download", SERIES_URL])) == (
+        cli.DEFAULT_NAME_FORMAT
+    )
+    assert cli.name_format_for(parser.parse_args(["serve"])) == "{series} - Episode {number}"
+    assert cli.name_format_for(parser.parse_args(["video", VIDEO_URL])) == "{title}"
+    assert cli.VIDEO_NAME_FORMAT == "{title}"
+    for command in ("download", "video", "serve"):
+        help_text = _subcommand_help(command)
+        assert "--name-format FORMAT" in help_text
+        assert "{series} {number} {n} {title} {id}" in help_text
+        assert "{series} - Episode {number}" in help_text  # the default is spelled out
+        assert "--thumbnail {embed,both,file,none}" in help_text
+        # the help names what each mode does (argparse wraps lines: compare without the wrapping)
+        unwrapped = " ".join(help_text.split())
+        assert "embed (default) writes it into the MP4 as its cover art" in unwrapped
+        assert "both also keeps it next to the video as <name>.jpeg|jpg|png|webp" in unwrapped
+        assert "file keeps that file only" in unwrapped and "none fetches no cover" in unwrapped
+        # --thumbnail is the only flag about the cover (the build-3 on/off flag is gone)
+        assert help_text.count("thumbnail") == help_text.count("--thumbnail {embed,both,file,none}")
+    for command in ("info", "doctor"):
+        assert "--name-format" not in _subcommand_help(command)
+        assert "--thumbnail" not in _subcommand_help(command)
 
 
 def test_parser_video_doctor_serve():
@@ -373,6 +437,19 @@ def test_version_help_and_no_command(capsys):
         # the browser engine never reads --cookies-from-browser (a yt-dlp option): say so
         ["download", SERIES_URL, "--engine", "browser", "--cookies-from-browser", "chrome"],
         ["serve", "--engine", "browser", "--cookies-from-browser", "firefox"],
+        # the name format is checked up front too: unknown placeholder, padding spelled by hand,
+        # an unmatched brace, nothing that tells episodes apart
+        ["download", SERIES_URL, "--name-format", "{nope}"],
+        ["download", SERIES_URL, "--name-format", "{series} - Episode {number:02d}"],
+        ["download", SERIES_URL, "--name-format", "{series} - Episode {number"],
+        ["download", SERIES_URL, "--name-format", "{series}"],
+        ["download", SERIES_URL, "--name-format", ""],
+        ["video", VIDEO_URL, "--name-format", "{episode}"],
+        ["serve", "--name-format", "{{n}}"],
+        # the thumbnail mode is a closed choice
+        ["download", SERIES_URL, "--thumbnail", "nope"],
+        ["video", VIDEO_URL, "--thumbnail", "sidecar"],
+        ["serve", "--thumbnail", "yes"],
     ],
 )
 def test_usage_errors_exit_2_before_any_network(argv, capsys, fake_discovery, fake_downloader):
@@ -397,6 +474,20 @@ def test_usage_error_messages_say_what_to_do(capsys):
     assert "0 disables" in capsys.readouterr().err
     assert cli.main(["download", SERIES_URL, "--rest-min", "90", "--rest-max", "60"]) == 2
     assert "--rest-max must be >= --rest-min" in capsys.readouterr().err
+    assert cli.main(["download", SERIES_URL, "--name-format", "{series} - {nope}"]) == 2
+    err = capsys.readouterr().err
+    assert "--name-format: unknown placeholder {nope} in name format '{series} - {nope}'" in err
+    assert "use {series}, {number}, {n}, {title}, {id}" in err
+    assert cli.main(["download", SERIES_URL, "--name-format", "{series}"]) == 2
+    err = capsys.readouterr().err
+    assert "does not tell episodes apart" in err and "{number}, {n}, {title} or {id}" in err
+    assert cli.main(["download", SERIES_URL, "--thumbnail", "nope"]) == 2
+    err = capsys.readouterr().err
+    assert "--thumbnail: invalid choice: 'nope'" in err
+    # argparse quotes the choices on some Python releases and not on others (3.12.15 prints
+    # "choose from embed, both, file, none"), so look for every mode, not the punctuation.
+    listed = err.split("choose from", 1)[1]
+    assert all(mode in listed for mode in ("embed", "both", "file", "none"))
 
 
 def test_parse_extractor_args():
@@ -525,6 +616,20 @@ def test_discovery_errors_map_to_exit_codes(fake_discovery, capsys, error, code,
     assert hint in err
 
 
+def test_the_captcha_help_defers_the_headful_rerun_to_after_the_cooldown(fake_discovery, capsys):
+    """A captcha starts the 30-minute cooldown (engine.resolve records it), so the help must not
+    send the user straight back to TikTok: it names the cooldown, and the rerun it recommends —
+    `--headful` — is refused with exit 5 and no discovery call until the cooldown has ended."""
+    fake_discovery.error = ChallengeError("Verify to continue")
+    assert cli.main(["info", SERIES_URL]) == 4
+    err = capsys.readouterr().err
+    assert "30-minute cooldown" in err and "--headful" in err
+    assert active_cooldown() is not None
+    assert cli.main(["info", SERIES_URL, "--headful"]) == 5
+    assert "error: TikTok refused a request at " in capsys.readouterr().err
+    assert len(fake_discovery.calls) == 1  # the rerun made no request
+
+
 def _cjk_series():
     episode = Episode(
         number=1,
@@ -580,9 +685,11 @@ def test_doctor_uses_ascii_marks_on_a_non_utf8_stdout(monkeypatch):
     read_stdout = _cp1252_stdout(monkeypatch)
     assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
     lines = read_stdout().strip().splitlines()
-    assert len(lines) == 8
+    assert len(lines) == 10
     assert all(line.split(" ", 1)[0] in {"OK", "X", "-"} for line in lines)
-    assert lines[7].startswith("- pace: 4")
+    assert lines[7].startswith("OK mutagen: ")
+    assert lines[8] == "- cooldown: none"
+    assert lines[9].startswith("- pace: 4")
 
 
 def test_control_characters_from_tiktok_text_are_not_printed(capsys, tmp_path):
@@ -632,20 +739,30 @@ def test_download_end_to_end(fake_discovery, fake_downloader, tmp_path, capsys):
     lines = out.splitlines()
     assert lines[0] == f"{NAME} [{SERIES_ID}]: 4 episode(s) -> {tmp_path / f'{NAME} [{SERIES_ID}]'}"
     assert lines[1].startswith("E01  done")
-    assert lines[1].endswith("E01 - fake.mp4")
+    # a done line: the path, then the cover outcome from the message
+    assert lines[1].endswith(
+        f"{tmp_path / f'{NAME} [{SERIES_ID}]' / 'fake - Episode 01.mp4'} + cover embedded"
+    )
     assert lines[4].startswith("E05  skipped-locked")
     assert "looks locked: isFree=false; isLocked=True" in lines[4]
-    assert lines[-1] == "Summary: 3 done, 1 skipped-locked"
+    assert lines[-2] == "Summary: 3 done, 1 skipped-locked"
+    # then the report line: what is complete and what is not (episode 4 is a gap in the list)
+    assert lines[-1] == "incomplete: 3 of 5 — 1 locked (5); episode 4 missing from TikTok's list"
     target = tmp_path / f"{NAME} [{SERIES_ID}]"
     assert sorted(p.name for p in target.iterdir()) == [
-        "E01 - fake.mp4",
-        "E02 - fake.mp4",
-        "E03 - fake.mp4",
         MANIFEST_FILENAME,
+        "fake - Episode 01.mp4",
+        "fake - Episode 02.mp4",
+        "fake - Episode 03.mp4",
     ]
     (downloader,) = fake_downloader.instances
     assert [episode.number for episode, _ in downloader.calls] == [1, 2, 3, 5]
     assert all(options.out_dir == target for _, options in downloader.calls)
+    # the naming defaults: "{series} - Episode {number}" with the series name, covers on
+    _, first_options = downloader.calls[0]
+    assert first_options.name_format == "{series} - Episode {number}"
+    assert first_options.series_name == NAME
+    assert first_options.thumbnail == "embed" and first_options.thumbnails is True
     # a second run resumes: everything is skipped through the manifest, no downloader calls
     code = cli.main(["download", SERIES_URL, "--out", str(tmp_path)])
     assert code == 0
@@ -755,6 +872,10 @@ def test_download_dry_run_and_flags_reach_the_downloader(
             "0.5",
             "--delay-max",
             "0.5",
+            "--name-format",
+            "{series} - E{number} - {title}",
+            "--thumbnail",
+            "none",
         ]
     )
     assert code == 0
@@ -764,6 +885,8 @@ def test_download_dry_run_and_flags_reach_the_downloader(
     (downloader,) = fake_downloader.instances
     _, options = downloader.calls[0]
     assert options.dry_run and options.include_locked and options.overwrite
+    assert options.name_format == "{series} - E{number} - {title}"
+    assert options.thumbnail == "none" and options.thumbnails is False
     assert options.impersonate is False
     assert options.cookies_file == Path("c.txt")
     assert options.cookies_from_browser == "firefox"
@@ -848,10 +971,14 @@ def test_download_prints_the_stop_reason_once_on_stderr(
     captured = capsys.readouterr()
     stop_line = "  … stopped: episode 1 failed-blocked: failed-blocked from fake"
     assert captured.err.splitlines().count(stop_line) == 1
-    assert captured.out.count("stopped: episode 1 failed-blocked") == 2  # episodes 2 and 3
+    rows = [line for line in captured.out.splitlines() if line.startswith("E0")]
+    assert sum("stopped: episode 1 failed-blocked" in row for row in rows) == 2  # episodes 2, 3
+    assert captured.out.splitlines()[-1].endswith("; stopped: episode 1 failed-blocked")
     assert "Summary: 1 skipped-locked, 3 failed-blocked" in captured.out
     (downloader,) = fake_downloader.instances
     assert [episode.number for episode, _ in downloader.calls] == [1]  # nothing after the stop
+    assert active_cooldown().source == "yt-dlp"  # the refusal started the global cooldown
+    clear_cooldown()  # a failure streak is no refusal: the next run must not be turned away
 
     fake_downloader.outcomes = {1: DownloadStatus.FAILED, 2: DownloadStatus.FAILED_UNAVAILABLE}
     code = cli.main(
@@ -864,6 +991,7 @@ def test_download_prints_the_stop_reason_once_on_stderr(
     assert "stop after 2 failures / 403 / 429" in captured.err
     assert "E03  failed                 stopped: 2 consecutive failures" in captured.out
     assert "Summary: 1 skipped-locked, 1 failed-unavailable, 2 failed" in captured.out
+    assert active_cooldown() is None  # three plain failures are not TikTok refusing
 
 
 def test_download_engine_browser_gets_the_browser_flags_and_is_closed(
@@ -912,9 +1040,9 @@ def test_download_engine_browser_gets_the_browser_flags_and_is_closed(
     out = capsys.readouterr().out
     assert "Summary: 3 done, 1 skipped-locked" in out
     assert sorted(p.name for p in (tmp_path / f"{NAME} [{SERIES_ID}]").glob("*.mp4")) == [
-        "E01 - browser.mp4",
-        "E02 - browser.mp4",
-        "E03 - browser.mp4",
+        "browser - Episode 01.mp4",
+        "browser - Episode 02.mp4",
+        "browser - Episode 03.mp4",
     ]
 
 
@@ -983,6 +1111,403 @@ def test_download_pacing_flags_reach_the_options(fake_discovery, fake_downloader
 # --------------------------------------------------------------------------- video
 
 
+# --------------------------------------------------------------------------- several series
+
+SERIES_2 = "7699393770256782399"
+NAME_2 = "Second Chance Bride"
+SERIES_2_URL = f"https://www.tiktok.com/shortdrama/episode/{SERIES_2}/1"
+
+
+def make_second_series():
+    episodes = [
+        Episode(
+            number=n,
+            item_id=f"76994100000000000{n:02d}",
+            title=f"{NAME_2} | Episode {n}",
+            series_id=SERIES_2,
+            series_name=NAME_2,
+            author="drama_us",
+            duration_s=60 + n,
+        )
+        for n in (1, 2, 3)
+    ]
+    return Series(series_id=SERIES_2, name=NAME_2, episodes=episodes, total_hint=3)
+
+
+class BatchDiscovery:
+    """Answers per series id (a deep copy each time); every call is one resolve."""
+
+    def __init__(self, *series):
+        self.series = {item.series_id: item for item in series}
+        self.errors = {}
+        self.calls = []
+
+    def discover(self, ref, options):
+        self.calls.append(ref.series_id)
+        if ref.series_id in self.errors:
+            raise self.errors[ref.series_id]
+        return copy.deepcopy(self.series[ref.series_id])
+
+
+@pytest.fixture
+def batch_discovery(monkeypatch):
+    """Two series: make_series() (4 listed, a gap at 4, 5 locked) and the complete second one."""
+    discovery = BatchDiscovery(make_series(), make_second_series())
+    module = types.ModuleType("dramafetch.discovery")
+    module.choose_discovery = lambda options: discovery
+    monkeypatch.setitem(sys.modules, "dramafetch.discovery", module)
+    return discovery
+
+
+def test_parser_download_takes_several_series_a_file_and_recheck():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        ["download", SERIES_URL, SERIES_2_URL, "--from-file", "series.txt", "--recheck"]
+    )
+    assert args.urls == [SERIES_URL, SERIES_2_URL]
+    assert args.from_file == Path("series.txt") and args.recheck is True
+    defaults = parser.parse_args(["download", SERIES_URL])
+    assert defaults.urls == [SERIES_URL] and defaults.from_file is None
+    assert defaults.recheck is False and DownloadOptions.recheck is False
+    assert parser.parse_args(["download", "--from-file", "s.txt"]).urls == []  # a file alone
+    serve = parser.parse_args(["serve", "--recheck"])
+    assert serve.recheck is True and cli._download_options(serve).recheck is True
+    help_text = " ".join(_subcommand_help("download").split())
+    assert "--from-file FILE" in help_text and "--recheck" in help_text
+    assert "anything after ' #' are ignored" in help_text
+    assert "complete less than 24 h ago" in help_text
+    assert "--recheck" in _subcommand_help("serve")
+    for command in ("info", "video", "doctor"):
+        assert "--recheck" not in _subcommand_help(command)
+    assert "--from-file" not in _subcommand_help("serve")
+
+
+def test_download_reads_series_from_a_file_after_the_command_line(
+    batch_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    listing = tmp_path / "series.txt"
+    listing.write_text(
+        "﻿# my series (a byte-order mark is fine)\n"
+        "\n"
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_2}/3#comments  # the second one\n"
+        "   # an indented comment\n"
+        f"{SERIES_ID}\r\n",  # the first series again (CRLF line ends are fine too)
+        encoding="utf-8",
+    )
+    argv = ["download", SERIES_URL, "--from-file", str(listing), "--out", str(tmp_path / "o")]
+    assert cli.main(argv) == 0
+    assert batch_discovery.calls == [SERIES_ID, SERIES_2]  # command line first, once each
+    captured = capsys.readouterr()
+    assert f"note: duplicate: {SERIES_ID} given more than once; it is downloaded once" in (
+        captured.err
+    )
+    assert f"[2/2] {NAME_2} [{SERIES_2}]: 3 episode(s) -> " in captured.out
+
+
+@pytest.mark.parametrize(
+    ("lines", "where", "problem"),
+    [
+        (["# ok", SERIES_ID, "", "hello there"], 4, "Not a TikTok short-drama or video URL"),
+        ([SERIES_ID, f"{VIDEO_URL}  # oops"], 2, f"'{VIDEO_URL}' is a single video, not a series"),
+        (["https://vm.tiktok.com/ZMabc/"], 1, "Short links"),
+        # the id in full-width digits (an IME): not an id TikTok can have, so no request either
+        (
+            [SERIES_2, "".join(chr(0xFF10 + int(digit)) for digit in SERIES_ID)],
+            2,
+            "Not a TikTok short-drama or video URL",
+        ),
+    ],
+)
+def test_a_bad_line_is_a_usage_error_naming_it_before_any_request(
+    batch_discovery, fake_downloader, no_sleep, tmp_path, capsys, lines, where, problem
+):
+    listing = tmp_path / "series.txt"
+    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert cli.main(["download", "--from-file", str(listing), "--out", str(tmp_path)]) == 2
+    assert f"error: {listing}:{where}: {problem}" in capsys.readouterr().err
+    assert batch_discovery.calls == [] and fake_downloader.instances == []
+    assert no_sleep == []  # not even a pause
+
+
+@pytest.mark.parametrize(
+    ("argv", "problem"),
+    [
+        (["download", SERIES_URL, "nonsense"], "argument 2: Not a TikTok short-drama or video URL"),
+        (["download", SERIES_URL, VIDEO_URL], f"argument 2: '{VIDEO_URL}' is a single video"),
+        (["download", VIDEO_URL], f"'{VIDEO_URL}' is a single video, not a series"),
+        (["download"], "no series given: pass one or more series URLs (or ids), or --from-file"),
+        (
+            ["download", SERIES_URL, SERIES_2_URL, "--episodes", "1-2"],
+            "--episodes selects episodes of one series, and 2 series were given",
+        ),
+        (["download", "--from-file", "/nonexistent/series.txt"], "No such file or directory"),
+    ],
+)
+def test_several_series_usage_errors_exit_2_before_any_request(
+    batch_discovery, fake_downloader, capsys, argv, problem
+):
+    assert cli.main(argv) == 2
+    assert problem in capsys.readouterr().err
+    assert batch_discovery.calls == [] and fake_downloader.instances == []
+
+
+def test_an_unreadable_or_empty_series_file_is_a_usage_error(batch_discovery, tmp_path, capsys):
+    binary = tmp_path / "series.bin"
+    binary.write_bytes(b"\xff\xfe\x00\x01")
+    assert cli.main(["download", "--from-file", str(binary)]) == 2
+    assert f"--from-file {binary}: not UTF-8 text (byte 0)" in capsys.readouterr().err
+    comments = tmp_path / "comments.txt"
+    comments.write_text("# nothing here\n\n   \n", encoding="utf-8")
+    assert cli.main(["download", "--from-file", str(comments)]) == 2
+    assert "no series given" in capsys.readouterr().err
+    assert batch_discovery.calls == []
+
+
+def test_the_same_series_twice_with_episodes_is_one_series(
+    batch_discovery, fake_downloader, tmp_path, capsys
+):
+    argv = ["download", SERIES_URL, SERIES_ID, "--episodes", "1", "--out", str(tmp_path)]
+    assert cli.main(argv) == 0
+    assert batch_discovery.calls == [SERIES_ID]
+    out = capsys.readouterr().out
+    assert out.startswith(f"{NAME} [{SERIES_ID}]: 1 episode(s) -> ")  # one series: no [1/1]
+
+
+def _batch_rows(out):
+    """The rows of the batch table: everything after its header line, split on 2+ spaces."""
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.lstrip().startswith("series  "))
+    return [re.split(r"\s{2,}", line.strip()) for line in lines[start + 1 :]]
+
+
+def test_download_runs_several_series_one_after_the_other(
+    batch_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    out_dir = tmp_path / "out"
+    argv = [
+        "download",
+        SERIES_URL,
+        SERIES_2_URL,
+        "--out",
+        str(out_dir),
+        "--delay-min",
+        "0",
+        "--delay-max",
+        "0",
+        "--rest-min",
+        "95",
+        "--rest-max",
+        "95",
+    ]
+    assert cli.main(argv) == 0
+    assert batch_discovery.calls == [SERIES_ID, SERIES_2]
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    first_dir, second_dir = out_dir / f"{NAME} [{SERIES_ID}]", out_dir / f"{NAME_2} [{SERIES_2}]"
+    assert lines[0] == f"[1/2] {NAME} [{SERIES_ID}]: 4 episode(s) -> {first_dir}"
+    assert [line[:16] for line in lines[1:5]] == [
+        "E01  done       ",
+        "E02  done       ",
+        "E03  done       ",
+        "E05  skipped-loc",
+    ]
+    assert lines[5] == "incomplete: 3 of 5 — 1 locked (5); episode 4 missing from TikTok's list"
+    assert lines[6] == f"[2/2] {NAME_2} [{SERIES_2}]: 3 episode(s) -> {second_dir}"
+    assert lines[7].startswith("E01  done") and str(second_dir) in lines[7]
+    assert lines[10] == "complete: 3 of 3 (3 downloaded)"
+    assert "Summary:" not in captured.out  # several series: the table instead
+    assert lines[11:13] == ["", "Batch: 2 series — 1 incomplete, 1 complete"]
+    assert _batch_rows(captured.out) == [
+        [f"{NAME} [{SERIES_ID}]", "incomplete", "4", "3", "0", "1", "0"],
+        [f"{NAME_2} [{SERIES_2}]", "complete", "3", "3", "0", "0", "0"],
+    ]
+    err = captured.err.splitlines()
+    assert err.count("  … resting 95 s before the next series") == 1
+    assert (
+        "  pace: 0 s between episodes, 95 s rest every 10; stop after 3 failures / 403 / 429; "
+        "95 s rest between series, a 15–30 min break every 100 episodes"  # noqa: RUF001
+    ) in err
+    assert err.count("warning: [1/2] episode 4 missing (gap)") == 1
+    assert no_sleep == [95.0]  # the rest between the two series, nothing else
+    assert sorted(p.name for p in second_dir.iterdir()) == [
+        MANIFEST_FILENAME,
+        "fake - Episode 01.mp4",
+        "fake - Episode 02.mp4",
+        "fake - Episode 03.mp4",
+    ]
+
+    # the same batch again: the complete series costs no request, the other is resolved again
+    assert cli.main(argv) == 0
+    assert batch_discovery.calls == [SERIES_ID, SERIES_2, SERIES_ID]
+    captured = capsys.readouterr()
+    assert f"[2/2] {NAME_2} [{SERIES_2}]: 3 episode(s) -> {second_dir}" in captured.out
+    assert "complete, nothing to do: 3 episodes already on disk (checked just now)" in captured.out
+    assert [row[1] for row in _batch_rows(captured.out)] == ["incomplete", "skipped (complete)"]
+    assert _batch_rows(captured.out)[1] == [
+        f"{NAME_2} [{SERIES_2}]",
+        "skipped (complete)",
+        "-",
+        "0",
+        "3",
+        "0",
+        "0",
+    ]
+    assert "resting" not in captured.err  # no rest before a series that makes no request
+    assert len(fake_downloader.instances[-1].calls) == 1  # series 1's locked episode only
+
+    # --recheck resolves it anyway: every episode skipped as already downloaded, a rest before it
+    assert cli.main([*argv, "--recheck"]) == 0
+    assert batch_discovery.calls[-2:] == [SERIES_ID, SERIES_2]
+    captured = capsys.readouterr()
+    assert "complete: 3 of 3 (3 already on disk)" in captured.out
+    assert captured.err.count("  … resting 95 s before the next series") == 1
+
+
+def test_a_stop_in_the_first_series_ends_the_batch_without_a_request(
+    batch_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    fake_downloader.outcomes = {2: DownloadStatus.FAILED_RATE_LIMITED}
+    assert cli.main(["download", SERIES_URL, SERIES_2, "--out", str(tmp_path)]) == 5
+    assert batch_discovery.calls == [SERIES_ID]  # nothing at all for the second series
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert (
+        f"[2/2] {SERIES_2}: not started: batch stopped in {NAME} (episode 2 failed-rate-limited)"
+    ) in lines
+    assert [row[1] for row in _batch_rows(captured.out)] == ["incomplete", "not started"]
+    assert _batch_rows(captured.out)[1][0] == f"[{SERIES_2}]"
+    assert "resting" not in captured.err and "before the next series" not in captured.err
+    assert active_cooldown() is not None  # the 429 started the cooldown
+    # ... so the next run is refused before anything, however many series it names
+    assert cli.main(["download", SERIES_URL, SERIES_2, "--out", str(tmp_path)]) == 5
+    assert batch_discovery.calls == [SERIES_ID]
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "hint"),
+    [
+        (LoginRequiredError("TikTok redirected to /login"), 3, "--cookies"),
+        (ChallengeError("Verify to continue"), 4, "--headful"),
+        (DiscoveryError("no episode list within 45 s"), 4, None),
+    ],
+)
+def test_a_failed_resolve_in_a_batch_stops_it(
+    batch_discovery, fake_downloader, no_sleep, tmp_path, capsys, error, code, hint
+):
+    batch_discovery.errors = {SERIES_ID: error}
+    assert cli.main(["download", SERIES_URL, SERIES_2, "--out", str(tmp_path)]) == code
+    assert batch_discovery.calls == [SERIES_ID]
+    captured = capsys.readouterr()
+    assert f"error: [1/2] {error}" in captured.err
+    if hint is not None:
+        assert hint in captured.err
+    assert [row[1] for row in _batch_rows(captured.out)] == [f"failed: {error}", "not started"]
+
+
+def test_nothing_listed_in_one_series_does_not_stop_the_batch(
+    batch_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    batch_discovery.series[SERIES_ID] = Series(series_id=SERIES_ID, name=NAME, episodes=[])
+    assert cli.main(["download", SERIES_URL, SERIES_2, "--out", str(tmp_path)]) == 4
+    assert batch_discovery.calls == [SERIES_ID, SERIES_2]
+    captured = capsys.readouterr()
+    assert f"[1/2] no episodes listed for series {SERIES_ID}; try `info --dump-raw DIR`" in (
+        captured.err
+    )
+    assert [row[1] for row in _batch_rows(captured.out)] == [
+        "failed: no episodes listed",
+        "complete",
+    ]
+
+
+def test_the_pauses_of_a_batch_are_announced(capsys):
+    printer = cli._RunPrinter(engine.PacingState(run_attempts=100))
+    printer.pause("long-rest", 1320.0)
+    printer.pause("series-rest", 95.0)
+    printer.pause("rest", 60.0)
+    printer.pause("pace", 7.0)
+    assert capsys.readouterr().err.splitlines() == [
+        "  … long break 22 min after 100 episodes",
+        "  … resting 95 s before the next series",
+        "  … resting 60 s after 0 downloads",
+        "  … pausing 7 s",
+    ]
+    assert cli.describe_batch_pacing(DownloadOptions()) == (
+        "60–120 s rest between series, a 15–30 min break every 100 episodes"  # noqa: RUF001
+    )
+
+
+def test_info_shows_what_is_on_disk_without_writing_anything(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    out = str(tmp_path)
+    argv = ["download", SERIES_URL, "--out", out, "--episodes", "1-2", "--delay-min", "0"]
+    assert cli.main([*argv, "--delay-max", "0"]) == 0
+    capsys.readouterr()
+    series_folder = tmp_path / f"{NAME} [{SERIES_ID}]"
+    manifest_before = (series_folder / MANIFEST_FILENAME).read_bytes()
+    assert cli.main(["info", SERIES_URL, "--out", out]) == 0
+    rows = {
+        line.split()[0]: line
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()[:1].isdigit()
+    }
+    assert "  ✓     " in rows["1"] and "  ✓     " in rows["2"]
+    assert "✓" not in rows["3"] and "✓" not in rows["5"]
+    assert cli.main(["info", SERIES_URL, "--json", "--out", out]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [episode["on_disk"] for episode in data["episodes"]] == [True, True, False, False]
+    assert data["on_disk_count"] == 2
+    (series_folder / "fake - Episode 02.mp4").unlink()  # gone from disk: not counted
+    assert cli.main(["info", SERIES_URL, "--json", "--out", out]) == 0
+    assert json.loads(capsys.readouterr().out)["on_disk_count"] == 1
+    assert (series_folder / MANIFEST_FILENAME).read_bytes() == manifest_before  # read-only
+    assert cli.main(["info", SERIES_URL, "--json", "--out", str(tmp_path / "none")]) == 0
+    assert json.loads(capsys.readouterr().out)["on_disk_count"] == 0
+    assert not (tmp_path / "none").exists()
+
+
+def test_info_disk_column_reads_the_folder_the_download_would_use(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    """A renamed series is downloaded into `<new name> [<id>]`: the episodes in its old folder
+    get no ✓ — a download would fetch them again — and the JSON names the new folder."""
+    out = str(tmp_path)
+    argv = ["download", SERIES_URL, "--out", out, "--delay-min", "0", "--delay-max", "0"]
+    assert cli.main(argv) == 0
+    capsys.readouterr()
+    fake_discovery.series = make_series()
+    fake_discovery.series.name = "The Heiress, renamed"
+    assert cli.main(["info", SERIES_URL, "--json", "--out", out]) == 0
+    data = json.loads(capsys.readouterr().out)
+    renamed = tmp_path / f"The Heiress, renamed [{SERIES_ID}]"
+    assert data["output_dir"] == str(renamed)
+    assert data["on_disk_count"] == 0
+    assert not any(episode["on_disk"] for episode in data["episodes"])
+    assert cli.main(["info", SERIES_URL, "--out", out]) == 0
+    assert "✓" not in capsys.readouterr().out
+    assert not renamed.exists()  # info writes nothing
+
+
+def test_a_malformed_cookies_file_stops_a_batch_before_any_request(
+    batch_discovery, fake_downloader, no_sleep, tmp_path, capsys
+):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(".tiktok.com\tTRUE\t/\n", encoding="utf-8")  # 3 fields, no value
+    argv = ["download", SERIES_URL, SERIES_2_URL, "--cookies", str(cookies)]
+    assert cli.main([*argv, "--out", str(tmp_path / "out")]) == 2
+    captured = capsys.readouterr()
+    assert batch_discovery.calls == [] and fake_downloader.instances == []  # not even a list
+    assert no_sleep == []  # and no rest between series: none of them contacted TikTok
+    assert (
+        "error: [1/2] cookies file cookies.txt has malformed lines (line 1: 3 fields (expected "
+        "7)); yt-dlp would print them, cookie values included: fix or re-export the file"
+    ) in captured.err
+    assert (
+        f"[2/2] {SERIES_2}: not started: batch stopped in {SERIES_ID} (malformed cookies file)"
+    ) in captured.out
+
+
 def test_video_downloads_directly_into_out_dir(fake_downloader, tmp_path, capsys):
     assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path / "vids")]) == 0
     (downloader,) = fake_downloader.instances
@@ -993,9 +1518,52 @@ def test_video_downloads_directly_into_out_dir(fake_downloader, tmp_path, capsys
     assert episode.author == "ana"
     assert episode.page_url == VIDEO_URL
     assert options.out_dir == tmp_path / "vids"
-    assert (tmp_path / "vids" / "E00 - fake.mp4").exists()
+    assert options.name_format == "{title}"  # one file, named after its item id: <id>.mp4
+    assert options.thumbnail == "embed"  # the cover goes into the MP4 here too
+    assert (tmp_path / "vids" / "fake - Episode 00.mp4").exists()
     out = capsys.readouterr().out
     assert out.startswith("E00  done")
+
+
+def test_video_names_its_file_after_the_item_id_unless_told_otherwise(tmp_path):
+    """Through the real yt-dlp downloader with a fake YoutubeDL: `{title}` is the item id, so the
+    default is `<id>.mp4`; `--name-format` and `--thumbnail` apply to `video` too."""
+    from dramafetch import downloader as downloader_module
+
+    written = []
+
+    class FakeYdl:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def download(self, urls):
+            target = Path(self.params["outtmpl"] % {"ext": "mp4"})
+            target.write_bytes(TINY_MP4)  # a real MP4: the verification runs on it
+            written.append((target, self.params))
+            return 0
+
+    real_factory = downloader_module.YtDlpDownloader.__init__
+
+    def init_with_fake(self, ydl_factory=None):
+        real_factory(self, ydl_factory=FakeYdl)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(downloader_module.YtDlpDownloader, "__init__", init_with_fake)
+        assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 0
+        argv = ["video", VIDEO_URL, "--out", str(tmp_path), "--thumbnail", "none"]
+        assert cli.main([*argv, "--name-format", "{id} - by {series}"]) == 0
+    assert [target.name for target, _ in written] == [
+        "7699400000000000001.mp4",
+        "7699400000000000001 - by video.mp4",  # no series: {series} is the word "video"
+    ]
+    assert written[0][1]["writethumbnail"] is True
+    assert "writethumbnail" not in written[1][1]
 
 
 def test_video_failure_exit_code_and_series_url_rejection(fake_downloader, tmp_path, capsys):
@@ -1029,7 +1597,7 @@ def test_video_builds_the_downloader_through_the_engine_and_closes_it(monkeypatc
 def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     assert cli.main(["doctor"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 8
+    assert len(lines) == 10
     assert all(line[0] in "✓✗–" for line in lines)  # noqa: RUF001
     names = [line.split(" ", 1)[1].split(":")[0] for line in lines]
     assert names == [
@@ -1040,10 +1608,16 @@ def test_doctor_runs_without_a_browser_and_exits_0(capsys):
         "browser",
         "ffmpeg",
         "cookies",
+        "mutagen",
+        "cooldown",
         "pace",
     ]
+    # whether covers can be embedded into the MP4 (mutagen is a runtime dependency)
+    assert lines[7] == f"✓ mutagen: {mutagen_version} (covers are embedded into the MP4)"
+    # whether TikTok may be contacted at all (no refusal in the last 30 minutes)
+    assert lines[8] == "– cooldown: none"  # noqa: RUF001
     # the pacing defaults, in one line, so a user knows what to expect before the first run
-    assert lines[7] == (
+    assert lines[9] == (
         "– pace: 4–9 s between episodes, 60–120 s rest every 10; "  # noqa: RUF001
         "stop after 3 failures / 403 / 429"
     )
@@ -1058,8 +1632,171 @@ def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     else:
         assert "Playwright Chromium at" in browser
     assert lines[6].startswith("– cookies: no --cookies given")  # noqa: RUF001
-    # the web UI's /api/doctor keeps the seven checks only (see test_web)
+    # the web UI's /api/doctor keeps the seven environment checks only (see test_web)
     assert [check["name"] for check in cli.doctor_as_dicts(browser_channel="chrome")] == names[:7]
+
+
+def test_doctor_without_mutagen_says_covers_stay_files(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "mutagen", None)  # `import mutagen` now fails
+    assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 10
+    assert lines[7] == (
+        "✗ mutagen: not importable — covers are saved as files only (pip install mutagen)"
+    )
+
+
+def test_doctor_shows_an_active_cooldown(capsys):
+    record_block("blocked (HTTP 403): TikTok refused the request", "yt-dlp")
+    assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0  # doctor itself never refuses
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 10
+    assert re.fullmatch(
+        r"✗ cooldown: until \d\d:\d\d \((29|30) min left\): blocked \(HTTP 403\): TikTok refused "
+        r"the request",
+        lines[8],
+    ), lines[8]
+    assert cli.doctor_as_dicts(browser_channel="chrome")[-1]["name"] == "cookies"  # web: 7 only
+
+
+# --------------------------------------------------------------------------- the cooldown
+
+
+def test_commands_refuse_to_contact_tiktok_under_a_cooldown(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    """After a refusal, info/download/video exit 5 with the cooldown message and make no request
+    at all — a dry run of `download` resolves the list, so it is refused too; `video --dry-run`
+    needs no network and is not. An expired cooldown refuses nothing."""
+    record_block("HTTP 429 from the video server", "browser")
+    out = str(tmp_path)
+    for argv in (
+        ["info", SERIES_URL, "--out", out],
+        ["info", SERIES_URL, "--json", "--out", out],
+        ["download", SERIES_URL, "--out", out],
+        ["download", SERIES_URL, "--out", out, "--dry-run"],
+        # several series: refused once, up front, before the first list
+        ["download", SERIES_URL, "7699393770256782399", "--out", out],
+        ["video", VIDEO_URL, "--out", out],
+    ):
+        assert cli.main(argv) == 5, argv
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.startswith("error: TikTok refused a request at ")
+        assert "(HTTP 429 from the video server); DramaFetch waits until " in captured.err
+        assert f"delete {tmp_path / 'cooldown.json'} to lift it, at your own risk" in captured.err
+    assert fake_discovery.calls == []  # the list was never asked for
+    assert fake_downloader.instances == []  # no downloader was even built
+    assert not any(tmp_path.iterdir()) or [p.name for p in tmp_path.iterdir()] == ["cooldown.json"]
+    # a dry run of `video` needs no network: not refused
+    assert cli.main(["video", VIDEO_URL, "--out", out, "--dry-run"]) == 0
+    assert "E00  dry-run" in capsys.readouterr().out
+    # deleting the file (what the message says) lifts it; so does its expiry
+    clear_cooldown()
+    assert cli.main(["info", SERIES_URL, "--out", out]) == 0
+    assert len(fake_discovery.calls) == 1
+    record_block("old", "web", now=time.time() - 3600)  # expired half an hour ago
+    assert cli.main(["info", SERIES_URL, "--out", out]) == 0
+    assert len(fake_discovery.calls) == 2
+
+
+def test_video_records_the_cooldown_on_a_refusal(fake_downloader, tmp_path, capsys):
+    fake_downloader.outcomes = {0: DownloadStatus.FAILED_RATE_LIMITED}
+    assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 5
+    assert "E00  failed-rate-limited" in capsys.readouterr().out
+    recorded = active_cooldown()
+    assert recorded is not None and recorded.source == "yt-dlp"
+    assert recorded.reason == "failed-rate-limited from fake"
+    assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 5  # now refused up front
+    assert "error: TikTok refused a request at" in capsys.readouterr().err
+    assert len(fake_downloader.instances) == 1
+
+
+# --------------------------------------------------------------------------- quality & verify
+
+
+def test_quality_and_no_verify_flags_reach_the_options(fake_discovery, fake_downloader, tmp_path):
+    argv = ["--out", str(tmp_path), "--dry-run"]
+    assert cli.main(["download", SERIES_URL, *argv]) == 0
+    assert cli.main(["video", VIDEO_URL, *argv]) == 0
+    assert cli.main(["download", SERIES_URL, *argv, "--quality", "best", "--no-verify"]) == 0
+    assert cli.main(["video", VIDEO_URL, *argv, "--quality", "best", "--no-verify"]) == 0
+    defaults_series, defaults_video, best_series, best_video = fake_downloader.instances
+    for run in (defaults_series, defaults_video):
+        _, options = run.calls[0]
+        assert options.quality == "compatible" and options.verify is True
+    for run in (best_series, best_video):
+        _, options = run.calls[0]
+        assert options.quality == "best" and options.verify is False
+
+
+def test_quality_must_be_compatible_or_best(capsys, fake_discovery, fake_downloader):
+    assert cli.main(["download", SERIES_URL, "--quality", "ultra"]) == 2
+    assert "--quality: invalid choice: 'ultra'" in capsys.readouterr().err
+    assert fake_discovery.calls == [] and fake_downloader.instances == []
+
+
+def test_info_shows_the_quality_column_and_json_carries_the_hint(fake_discovery, tmp_path, capsys):
+    fake_discovery.series.episodes[0].quality_hint = "720p h264"
+    fake_discovery.series.episodes[1].quality_hint = "1080p bytevc1"
+    assert cli.main(["info", SERIES_ID, "--out", str(tmp_path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    header = next(line for line in lines if line.lstrip().startswith("#"))
+    assert header.split() == ["#", "item", "id", "duration", "quality", "disk", "title", "status"]
+    row1 = next(line for line in lines if line.lstrip().startswith("1 "))
+    assert "  1:31  720p h264      " in row1  # 91 s, then the rendition the default takes
+    row3 = next(line for line in lines if line.lstrip().startswith("3 "))
+    assert "  1:33  -              " in row3  # no rendition listed
+    assert cli.main(["info", SERIES_ID, "--json", "--out", str(tmp_path)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [e["quality_hint"] for e in data["episodes"]] == [
+        "720p h264",
+        "1080p bytevc1",
+        None,
+        None,
+    ]
+
+
+def test_print_result_shows_the_path_then_the_cover_note_for_done_rows(capsys):
+    episode = _episode(1)
+    path = Path("/tmp/x/Heiress - Episode 01.mp4")
+    for message, note in (
+        (f"saved {path.name} + cover embedded", " + cover embedded"),
+        (f"saved {path.name} (0.1 MiB) + cover embedded + file", " + cover embedded + file"),
+        (f"saved {path.name} + cover file", " + cover file"),
+        (f"saved {path.name}; cover: not available", "; cover: not available"),
+        (
+            f"saved {path.name} (0.1 MiB); cover: HTTP 429 from p16.tiktokcdn.com",
+            "; cover: HTTP 429 from p16.tiktokcdn.com",
+        ),
+        (f"saved {path.name} (0.1 MiB)", ""),
+    ):
+        cli._print_result(DownloadResult(episode, DownloadStatus.DONE, path, message))
+        assert capsys.readouterr().out == f"E01  done                   {path}{note}\n", message
+    # a failure has no path: its message, as before; a skip shows its path, nothing appended
+    cli._print_result(
+        DownloadResult(episode, DownloadStatus.FAILED, None, f"{INCOMPLETE_PREFIX}no audio track")
+    )
+    assert (
+        capsys.readouterr().out
+        == f"E01  failed                 {INCOMPLETE_PREFIX}no audio track\n"
+    )
+    cli._print_result(
+        DownloadResult(episode, DownloadStatus.SKIPPED_EXISTS, path, f"already exists: {path.name}")
+    )
+    assert capsys.readouterr().out == f"E01  skipped-exists         {path}\n"
+
+
+@pytest.mark.parametrize("mode", ["embed", "both", "file", "none"])
+def test_the_thumbnail_mode_reaches_download_and_video(
+    fake_downloader, fake_discovery, tmp_path, mode
+):
+    argv = ["--out", str(tmp_path), "--thumbnail", mode]
+    assert cli.main(["download", SERIES_URL, "--delay-min", "0", "--delay-max", "0", *argv]) == 0
+    assert cli.main(["video", VIDEO_URL, *argv]) == 0
+    series_run, video_run = fake_downloader.instances
+    assert {options.thumbnail for _, options in series_run.calls} == {mode}
+    assert video_run.calls[0][1].thumbnail == mode
 
 
 def test_describe_pacing():
@@ -1195,18 +1932,27 @@ class _StubServer:
         self.closed = True
 
 
-def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
+def _stub_run_server(monkeypatch):
+    """Replace `run_server` with a stub that records its kwargs and binds nothing; the CLI's lazy
+    `from dramafetch.web.server import run_server` picks it up. Clears DRAMAFETCH_TOKEN as well, so
+    the tests see the loopback default whatever the developer's shell exports."""
+    from dramafetch.web import server as web_server
+
     calls = []
     servers = []
-    module = types.ModuleType("dramafetch.web.server")
 
     def run_server(**kwargs):
         calls.append(kwargs)
         servers.append(_StubServer(kwargs["host"], kwargs["port"]))
         return servers[-1]
 
-    module.run_server = run_server
-    monkeypatch.setitem(sys.modules, "dramafetch.web.server", module)
+    monkeypatch.setattr(web_server, "run_server", run_server)
+    monkeypatch.delenv("DRAMAFETCH_TOKEN", raising=False)
+    return calls, servers
+
+
+def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
+    calls, servers = _stub_run_server(monkeypatch)
     code = cli.main(
         [
             "serve",
@@ -1237,6 +1983,9 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
             "browser",
             "--browser-channel",
             "msedge",
+            "--thumbnail",
+            "both",
+            "--recheck",
         ]
     )
     assert code == 0
@@ -1245,6 +1994,7 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert kwargs["port"] == 9000
     assert kwargs["out_dir"] == tmp_path
     assert kwargs["serve_forever"] is False  # the CLI serves itself, after announcing the bind
+    assert kwargs["token"] is None  # the loopback default needs no token
     assert kwargs["discovery_options"].cookies_file == Path("c.txt")
     assert kwargs["discovery_options"].strategy == "browser"
     download_options = kwargs["download_options"]
@@ -1259,13 +2009,95 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert download_options.max_consecutive_failures == 2
     assert download_options.engine == "browser"
     assert download_options.browser_channel == "msedge"
+    # the cover mode too: the web UI's jobs embed, keep or skip covers exactly like `download`
+    assert download_options.thumbnail == "both"
+    assert download_options.embed_cover and download_options.keep_cover_file
+    # build 6: batch jobs resolve a series their manifest calls complete only with --recheck
+    assert download_options.recheck is True
+    assert cli.build_parser().parse_args(["serve"]).recheck is False
     assert servers[0].served and servers[0].closed
     err = capsys.readouterr().err
     assert "http://127.0.0.1:9000/" in err
+    assert "token: none (loopback only)" in err
     assert "warning" not in err  # the private default needs no warning
+
+
+def test_serve_off_loopback_without_a_token_is_a_usage_error(monkeypatch, capsys):
+    calls, _ = _stub_run_server(monkeypatch)
+    for host in ("0.0.0.0", "::", "[::]", "192.168.1.20", "example.lan"):
+        assert cli.main(["serve", "--host", host]) == 2
+        err = capsys.readouterr().err
+        assert f"--host {host} needs --token (or DRAMAFETCH_TOKEN)" in err
+        assert "without it the UI would be open to everyone on the network" in err
+    assert calls == []  # refused before run_server, so before any bind
+    for host in ("127.0.0.1", "localhost", "[::1]", "127.0.0.2"):  # loopback needs none
+        assert cli.main(["serve", "--host", host]) == 0
+        assert "token: none (loopback only)" in capsys.readouterr().err
+    assert [call["token"] for call in calls] == [None] * 4
+
+
+def test_serve_token_flag_and_environment(monkeypatch, capsys):
+    calls, _ = _stub_run_server(monkeypatch)
+    assert cli.main(["serve", "--host", "0.0.0.0", "--token", "flag-token-123"]) == 0
+    assert calls[-1]["host"] == "0.0.0.0" and calls[-1]["token"] == "flag-token-123"
+    err = capsys.readouterr().err
+    assert "token: set" in err and "warning" not in err
+    assert "flag-token-123" not in err  # the value is never printed
+    monkeypatch.setenv("DRAMAFETCH_TOKEN", "env-token-4567")
     assert cli.main(["serve", "--host", "0.0.0.0"]) == 0
-    assert calls[1]["host"] == "0.0.0.0"
-    assert "warning: --host 0.0.0.0 exposes the UI" in capsys.readouterr().err
+    assert calls[-1]["token"] == "env-token-4567"
+    err = capsys.readouterr().err
+    assert "token: set" in err and "env-token-4567" not in err
+    assert cli.main(["serve", "--host", "0.0.0.0", "--token", "flag-token-123"]) == 0
+    assert calls[-1]["token"] == "flag-token-123"  # the flag wins over the variable
+    capsys.readouterr()
+    assert cli.main(["serve"]) == 0  # a token on loopback: honoured, the page is protected
+    assert calls[-1]["token"] == "env-token-4567"
+    assert "token: set" in capsys.readouterr().err
+    monkeypatch.setenv("DRAMAFETCH_TOKEN", "")  # an empty variable counts as unset
+    assert cli.main(["serve"]) == 0
+    assert calls[-1]["token"] is None
+    assert cli.main(["serve", "--host", "0.0.0.0"]) == 2
+
+
+def test_serve_refuses_an_unusable_token(monkeypatch, capsys):
+    calls, _ = _stub_run_server(monkeypatch)
+    assert cli.main(["serve", "--token", "tiny1"]) == 2
+    err = capsys.readouterr().err
+    assert "--token (or DRAMAFETCH_TOKEN): the token must be at least 8 characters" in err
+    assert "tiny1" not in err
+    assert cli.main(["serve", "--token", "has a space in it"]) == 2
+    assert "visible ASCII" in capsys.readouterr().err
+    assert cli.main(["serve", "--token", ""]) == 2
+    capsys.readouterr()
+    monkeypatch.setenv("DRAMAFETCH_TOKEN", "tiny1")
+    assert cli.main(["serve", "--host", "0.0.0.0"]) == 2
+    err = capsys.readouterr().err
+    assert "DRAMAFETCH_TOKEN" in err and "tiny1" not in err
+    assert calls == []
+
+
+def test_serve_starts_during_a_cooldown_and_leaves_the_answer_to_the_web(monkeypatch, capsys):
+    """`serve` itself contacts nobody: a cooldown recorded earlier must not stop it from binding
+    (the web answers 429 of kind `cooldown` per request; `info`/`download`/`video` exit 5)."""
+    from dramafetch.cooldown import record_block  # the autouse fixture points its file at tmp_path
+
+    calls, servers = _stub_run_server(monkeypatch)
+    record_block("blocked (HTTP 403): TikTok refused the request", "yt-dlp")
+    assert cli.main(["serve"]) == 0
+    assert len(calls) == 1 and servers[0].served and servers[0].closed
+    err = capsys.readouterr().err
+    assert "DramaFetch web UI on http://127.0.0.1:8765/" in err
+    assert "error:" not in err
+
+
+def test_serve_help_mentions_the_token():
+    help_text = _subcommand_help("serve")
+    assert "--token TOKEN" in help_text and "DRAMAFETCH_TOKEN" in help_text
+    assert "needs --token" in help_text  # the --host help says when it is required
+    parser = cli.build_parser()
+    assert parser.parse_args(["serve"]).token is None
+    assert parser.parse_args(["serve", "--token", "abcdefgh"]).token == "abcdefgh"
 
 
 def test_serve_reports_a_busy_port_instead_of_a_traceback(tmp_path, capsys):
@@ -1313,3 +2145,91 @@ def test_serve_accepts_a_bracketed_ipv6_host(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(web_server.DramaFetchServer, "serve_forever", interrupted)
     assert cli.main(["serve", "--host", "[::1]", "--port", "0", "--out", str(tmp_path)]) == 0
     assert "DramaFetch web UI on http://[::1]:" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- build 7: access
+
+PAID_SERIES_ID = "7699393770256782388"
+PAID_NAME = "Paid Love Story"
+PAID_URL = f"https://www.tiktok.com/shortdrama/episode/{PAID_SERIES_ID}/1"
+
+
+def make_paid_series(logged_in=True):
+    """The fake TikTok's third series as the catalog reads its unit fixtures."""
+    name = "logged_in" if logged_in else "logged_out"
+    fixture = Path(__file__).parent / "fixtures" / f"item_list_series3_{name}.json"
+    episodes = parse_item_list_payload(
+        json.loads(fixture.read_text("utf-8")), PAID_SERIES_ID
+    ).episodes
+    series = Series(series_id=PAID_SERIES_ID, name=PAID_NAME, episodes=episodes, total_hint=4)
+    series.warnings = catalog_warnings(episodes, 4)
+    return series
+
+
+def test_access_status_is_free_unlocked_or_locked_with_its_hints():
+    assert cli.access_status(_episode(1)) == "free"
+    bought = Episode(1, "1", "t", "s", lock_hints=("isFree=false",), access="unlocked", paid=True)
+    assert cli.access_status(bought) == "unlocked (paid)"
+    assert cli.access_status(_episode(5, ("isFree=false", "isLocked=True"))) == (
+        "locked: isFree=false; isLocked=True"
+    )
+
+
+def test_info_names_the_paid_episodes_your_account_unlocked(fake_discovery, tmp_path, capsys):
+    fake_discovery.series = make_paid_series()
+    assert cli.main(["info", PAID_URL, "--out", str(tmp_path)]) == 0
+    rows = {
+        int(line.split()[0]): line
+        for line in capsys.readouterr().out.splitlines()
+        if line[:4].strip().isdigit()
+    }
+    assert rows[1].endswith("  free") and rows[2].endswith("  free")
+    assert rows[3].endswith("  unlocked (paid)")
+    assert rows[4].endswith(
+        "  locked: isLocked=True; isFree=false; unlockPrice=30; no play address"
+    )
+
+
+def test_info_json_carries_access_paid_and_drm(fake_discovery, tmp_path, capsys):
+    fake_discovery.series = make_paid_series(logged_in=False)
+    assert cli.main(["info", PAID_SERIES_ID, "--json", "--out", str(tmp_path)]) == 0
+    episodes = json.loads(capsys.readouterr().out)["episodes"]
+    assert [episode["access"] for episode in episodes] == ["free", "free", "locked", "locked"]
+    assert [episode["paid"] for episode in episodes] == [False, False, True, True]
+    assert [episode["drm"] for episode in episodes] == [False] * 4
+    assert [episode["locked"] for episode in episodes] == [False, False, True, True]  # kept
+
+
+def test_download_reports_the_unlocked_episodes_and_the_complete_skip_points_at_recheck(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    fake_discovery.series = make_paid_series()
+    flags = ["--out", str(tmp_path), "--delay-min", "0", "--delay-max", "0"]
+    assert cli.main(["download", PAID_URL, *flags]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[3].startswith("E03  done") and lines[4].startswith("E04  skipped-locked")
+    assert lines[-2] == "Summary: 3 done, 1 skipped-locked"
+    assert lines[-1] == (
+        "complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked (3), 1 locked (4)"
+    )
+    (downloader,) = fake_downloader.instances
+    assert [episode.access for episode, _ in downloader.calls] == [
+        "free",
+        "free",
+        "unlocked",
+        "locked",
+    ]
+    # run again the same day: no request at all, and the line says what is still locked
+    assert cli.main(["download", PAID_URL, *flags]) == 0
+    assert len(fake_discovery.calls) == 1
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "complete, nothing to do: 3 episodes already on disk, 1 locked (4) (checked just now) — "
+        "unlocked more in the TikTok app since? --recheck looks again"
+    )
+
+
+def test_the_include_locked_help_says_tiktok_decides(capsys):
+    assert cli.main(["download", "--help"]) == 0  # main returns argparse's exit code
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--include-locked" in help_text
+    assert "TikTok decides; nothing is unlocked" in help_text

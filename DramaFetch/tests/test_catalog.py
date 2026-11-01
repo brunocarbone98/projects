@@ -3,24 +3,47 @@
 from __future__ import annotations
 
 import copy
+import json
+import random
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
 
 from dramafetch.catalog import (
+    NO_PLAY_ADDRESS,
     PagePayload,
+    Rendition,
+    access_of,
     catalog_warnings,
+    choose_rendition,
+    codec_name,
+    cover_url_of,
     episode_from_item,
     find_item_lists,
+    is_drm_key,
+    key_words,
     lock_hints,
     merge_episodes,
+    ordered_renditions,
     parse_detail_payload,
     parse_item_list_payload,
     play_url_candidates,
+    renditions,
     url_expiry,
 )
-from dramafetch.models import Episode
+from dramafetch.models import (
+    ACCESS_MODES,
+    DRM_MARK,
+    DRM_MESSAGE,
+    QUALITY_MODES,
+    Episode,
+)
 
 SERIES_ID = "7699393770256782354"
 OTHER_SERIES_ID = "7600000000000000000"
 NAME = "The Billionaire's Secret Heiress"
+COVER_CDN = "https://p16-sign-sg.tiktokcdn.com/"
 
 
 def _episode(number, item_id=None, hints=(), title="t"):
@@ -80,6 +103,13 @@ def test_page1_parses_three_episodes_and_skips_the_trailer(item_list_pages):
     assert not first.locked
     assert first.raw is item_list_pages[0]["itemList"][0]
     assert first.page_url == "https://www.tiktok.com/@muffindrama_us/video/7699400000000000001"
+    # the cover: originCover (the full frame) wins over cover (the cropped poster)
+    assert first.cover_url == first.raw["video"]["originCover"]
+    assert first.cover_url is not None
+    assert first.cover_url.startswith(COVER_CDN) and "~tplv-tiktokx-origin.jpeg" in first.cover_url
+    second = page.episodes[1]  # episode 2 carries no originCover: the cropped cover is next
+    assert second.cover_url == second.raw["video"]["cover"]
+    assert second.cover_url is not None and "cropcenter:300:400" in second.cover_url
 
 
 def test_page2_nested_list_drops_the_other_series(item_list_pages):
@@ -108,6 +138,11 @@ def test_merging_the_fixture_pages_gives_episodes_1_to_5(item_list_pages):
     assert "unlockPrice=30" in locked.lock_hints
     assert "no play address" in locked.lock_hints
     assert catalog_warnings(merged, 5) == ["1 episode looks locked"]
+    # every episode, the locked one included, has a cover on TikTok's image CDN, and the cover
+    # fields never read as lock hints
+    assert all(e.cover_url is not None and e.cover_url.startswith(COVER_CDN) for e in merged)
+    assert len({e.cover_url for e in merged}) == 5
+    assert not any("cover" in hint.lower() for e in merged for hint in e.lock_hints)
 
 
 # --------------------------------------------------------------------------- merge
@@ -163,8 +198,11 @@ def test_lock_hints_free_playable_and_edge_cases():
     assert lock_hints({"video": {"playAddr": "", "bitrateInfo": [{"PlayAddr": {}}]}}) == ()
     # no video object at all
     assert lock_hints({"id": "1"}) == ("no play address",)
-    # string flags
-    strings = {"video": {"playAddr": "u"}, "dramaInfo": {"isPaid": "true", "isFree": "false"}}
+    # string flags (a sold item with a real play URL: no "no play address" hint)
+    strings = {
+        "video": {"playAddr": "https://v/x"},
+        "dramaInfo": {"isPaid": "true", "isFree": "false"},
+    }
     assert lock_hints(strings) == ("isPaid=true", "isFree=false")
     # containers are scanned, never reported as values; None is ignored
     nested = {"video": {"playAddr": "u"}, "dramaInfo": {"lockInfo": {"status": 1}, "vip": None}}
@@ -173,7 +211,7 @@ def test_lock_hints_free_playable_and_edge_cases():
     deep_video = {"video": {"playAddr": "u", "bitrateInfo": [{"PlayAddr": {"isLocked": True}}]}}
     assert lock_hints(deep_video) == ()
     # long values are truncated
-    long_value = {"video": {"playAddr": "u"}, "dramaInfo": {"unlockToken": "a" * 100}}
+    long_value = {"video": {"playAddr": "https://v/x"}, "dramaInfo": {"unlockToken": "a" * 100}}
     (hint,) = lock_hints(long_value)
     assert hint.startswith("unlockToken=aaaa")
     assert len(hint) < 60
@@ -272,8 +310,66 @@ def test_episode_title_fallbacks_and_missing_optionals():
     assert episode.series_name is None
     assert episode.author is None
     assert episode.duration_s is None
+    assert episode.cover_url is None
     assert episode.page_url == "https://www.tiktok.com/@_/video/1"
     assert episode.lock_hints == ("no play address",)
+
+
+# --------------------------------------------------------------------------- cover_url_of
+
+
+def test_cover_url_precedence_origin_then_cover_then_dynamic():
+    item = _base_item()
+    item["video"].update(
+        {
+            "dynamicCover": "https://p16-sign-sg.tiktokcdn.com/obj/d~tplv-tiktokx-origin.image?x=1",
+            "cover": "https://p16-sign-sg.tiktokcdn.com/c~tplv-tiktokx-cropcenter:300:400.jpeg?x=1",
+            "originCover": "https://p16-sign-sg.tiktokcdn.com/o~tplv-tiktokx-origin.jpeg?x=1",
+        }
+    )
+    assert cover_url_of(item) == item["video"]["originCover"]
+    del item["video"]["originCover"]
+    assert cover_url_of(item) == item["video"]["cover"]
+    del item["video"]["cover"]
+    assert cover_url_of(item) == item["video"]["dynamicCover"]
+    del item["video"]["dynamicCover"]
+    assert cover_url_of(item) is None
+    episode = episode_from_item(_base_item(), SERIES_ID)
+    assert episode is not None and episode.cover_url is None
+
+
+def test_cover_url_accepts_lists_url_list_dicts_and_the_item_struct_wrapper():
+    as_dict = _base_item()
+    as_dict["video"]["originCover"] = {"UrlList": ["https://p16/a.jpeg", "https://p16/b.jpeg"]}
+    assert cover_url_of(as_dict) == "https://p16/a.jpeg"
+    as_list = _base_item()
+    as_list["video"]["cover"] = ["", "https://p16/c.jpeg"]
+    assert cover_url_of(as_list) == "https://p16/c.jpeg"
+    snake = _base_item()
+    snake["video"]["cover"] = {"url_list": [" https://p16/d.jpeg "]}
+    assert cover_url_of(snake) == "https://p16/d.jpeg"
+    wrapped = {"itemStruct": {**_base_item()}}
+    wrapped["itemStruct"]["video"]["cover"] = "https://p16/e.jpeg"
+    assert cover_url_of(wrapped) == "https://p16/e.jpeg"
+    episode = episode_from_item(wrapped, SERIES_ID)
+    assert episode is not None and episode.cover_url == "https://p16/e.jpeg"
+    # an empty or junk originCover does not hide a usable cover
+    skipped = _base_item()
+    skipped["video"].update({"originCover": "", "cover": "https://p16/f.jpeg"})
+    assert cover_url_of(skipped) == "https://p16/f.jpeg"
+    junk = _base_item()
+    junk["video"].update({"originCover": {"UrlList": [1, None]}, "cover": ["ftp://x", "nope"]})
+    assert cover_url_of(junk) is None
+
+
+def test_cover_url_never_raises_on_junk():
+    for junk in (None, "x", 1, [], {}, {"video": None}, {"video": "s"}, {"video": {}}):
+        assert cover_url_of(junk) is None
+    assert cover_url_of({"video": {"cover": 7, "originCover": None, "dynamicCover": {}}}) is None
+    deep = "https://p16/deep.jpeg"
+    for _ in range(10):
+        deep = [deep]
+    assert cover_url_of({"video": {"cover": deep}}) is None  # depth-limited like play URLs
 
 
 # --------------------------------------------------------------------------- parse payload
@@ -372,8 +468,13 @@ def _entry(codec, bitrate, *urls):
 
 def test_play_url_candidates_on_the_fixtures(item_list_pages):
     page1 = item_list_pages[0]["itemList"]
-    # episode 1 lists the same URL under bitrateInfo and playAddr: one candidate
-    assert play_url_candidates(page1[0]) == [f"{CDN}/abc/?a=1988&expire=1761200000"]
+    # episode 1 lists its 720p H.264 URL under bitrateInfo and playAddr (one candidate) and a
+    # higher-bitrate 1080p bytevc1 rendition: compatible takes the H.264 first, best the bytevc1
+    h264 = f"{CDN}/abc/?a=1988&expire=1761200000"
+    bytevc1 = f"{CDN}/abc-1080/?a=1988&expire=1761200000"
+    assert play_url_candidates(page1[0]) == [h264, bytevc1]
+    assert play_url_candidates(page1[0], "compatible") == [h264, bytevc1]
+    assert play_url_candidates(page1[0], "best") == [bytevc1, h264]
     assert play_url_candidates(page1[1]) == [f"{CDN}/def/"]
     assert play_url_candidates(page1[2]) == []  # the trailer has an empty playAddr
     locked = item_list_pages[1]["data"]["itemList"][2]
@@ -408,6 +509,117 @@ def test_play_url_candidates_order_h264_by_bitrate_then_other_codecs_then_play_a
     assert play_url_candidates({"video": {"playAddr": " https://c/w "}}) == ["https://c/w"]
     wrapped = {"itemStruct": {"video": {"playAddr": "https://c/w", "bitrateInfo": []}}}
     assert play_url_candidates(wrapped) == ["https://c/w"]
+
+
+def test_best_quality_orders_every_rendition_by_bitrate_across_codecs():
+    item = {
+        "video": {
+            "playAddr": {"UrlList": ["https://c/play", "https://c/h264-hi"]},
+            "bitrateInfo": [
+                _entry("h265", 2_000_000, "https://c/h265-hi"),
+                _entry("h264", 500_000, "https://c/h264-lo", "https://c/h264-lo-b"),
+                _entry("bytevc1", 3_000_000, "https://c/bytevc1"),
+                _entry("AVC1", 1_000_000, "https://c/h264-hi"),
+                _entry("H.264", "1500000", "https://c/h264-str"),
+                _entry("h264", 1_000_000, "https://c/h264-hi"),
+            ],
+        }
+    }
+    assert play_url_candidates(item, "best") == [
+        "https://c/bytevc1",
+        "https://c/h265-hi",
+        "https://c/h264-str",
+        "https://c/h264-hi",
+        "https://c/h264-lo",
+        "https://c/h264-lo-b",
+        "https://c/play",
+    ]
+    assert [r.label for r in ordered_renditions(item, "best")] == [
+        "?p bytevc1",
+        "?p h265",
+        "?p h264",
+        "?p h264",
+        "?p h264",
+        "?p h264",
+    ]
+    assert choose_rendition(item, "best").codec == "bytevc1"
+    assert choose_rendition(item).url_list == ["https://c/h264-str"]  # compatible: top H.264
+    with pytest.raises(
+        ValueError, match="unknown quality 'ultra': expected one of compatible, best"
+    ):
+        play_url_candidates(item, "ultra")
+    assert QUALITY_MODES == ("compatible", "best")
+
+
+def test_renditions_labels_codecs_and_the_quality_hint(item_list_pages):
+    page1 = item_list_pages[0]["itemList"]
+    found = renditions(page1[0])
+    assert found == [
+        Rendition([f"{CDN}/abc/?a=1988&expire=1761200000"], "h264", 1_138_000, 720, "720p h264"),
+        Rendition(
+            [f"{CDN}/abc-1080/?a=1988&expire=1761200000"],
+            "bytevc1",
+            1_652_000,
+            1080,
+            "1080p bytevc1",
+        ),
+    ]
+    assert found[0].h264 and not found[1].h264
+    assert choose_rendition(page1[0]) == found[0]
+    assert choose_rendition(page1[0], "best") == found[1]
+    assert episode_from_item(page1[0], SERIES_ID).quality_hint == "720p h264"
+    # a bare playAddr is not a rendition: no hint, nothing chosen, the URL still a candidate
+    assert renditions(page1[1]) == [] and choose_rendition(page1[1]) is None
+    assert episode_from_item(page1[1], SERIES_ID).quality_hint is None
+    # compatible falls back to the best of the other codecs when no H.264 is listed
+    only_h265 = {"video": {"bitrateInfo": [_entry("h265", 900_000, "https://c/h265")]}}
+    assert choose_rendition(only_h265).label == "?p h265"
+    # the height: GearName first, then video.ratio, else "?p"
+    gear = {
+        "Bitrate": 1,
+        "CodecType": "h264",
+        "GearName": "adapt_lower_1080_1",
+        "PlayAddr": "https://c/a",
+    }
+    by_ratio = {"Bitrate": 1, "CodecType": "h265", "PlayAddr": "https://c/b"}
+    assert [
+        r.label for r in renditions({"video": {"ratio": "720p", "bitrateInfo": [gear, by_ratio]}})
+    ] == [
+        "1080p h264",
+        "720p h265",
+    ]
+    assert (
+        renditions({"video": {"ratio": "default", "bitrateInfo": [by_ratio]}})[0].label == "?p h265"
+    )
+    assert renditions({"video": {"ratio": 720, "bitrateInfo": [by_ratio]}})[0].height_hint is None
+    assert renditions({"video": {"bitrateInfo": [{**gear, "GearName": "lowest_540_0"}]}})[
+        0
+    ].label == ("540p h264")
+    # codec names
+    for raw, expected in (
+        ("h264", "h264"),
+        ("H.264", "h264"),
+        ("avc1", "h264"),
+        ("h265", "h265"),
+        ("H.265", "h265"),
+        ("hevc", "h265"),
+        ("hvc1", "h265"),
+        ("bytevc1", "bytevc1"),
+        ("ByteVC1", "bytevc1"),
+        ("bytevc2", "bytevc2"),
+        ("VP9", "vp9"),
+        ("", "unknown"),
+        (None, "unknown"),
+        (3, "unknown"),
+    ):
+        assert codec_name(raw) == expected, raw
+    # junk never raises and yields nothing
+    for junk in (None, "x", 1, [], {}, {"video": None}, {"video": {"bitrateInfo": "no"}}):
+        assert renditions(junk) == [] and choose_rendition(junk) is None
+    messy = {
+        "video": {"bitrateInfo": [1, {"PlayAddr": 5}, {"Bitrate": True, "PlayAddr": "https://c/q"}]}
+    }
+    assert renditions(messy) == [Rendition(["https://c/q"], "unknown", 0, None, "?p unknown")]
 
 
 def test_play_url_candidates_never_raises_on_junk():
@@ -459,3 +671,658 @@ def test_url_expiry():
     assert url_expiry("http://[::1/?expire=1") is None  # not even a URL
     assert url_expiry("https://v/x/?expire=" + "9" * 5000) is None  # too long for int()
     assert url_expiry(None) is None
+
+
+# --------------------------------------------------------------------------- build 7: access
+
+PAID_SERIES_ID = "7699393770256782388"
+FIXTURES = Path(__file__).parent / "fixtures"
+#: A play address in THIS session's payload (what TikTok's own web player would play).
+PLAYABLE = {"playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/x/?a=1988&expire=1"}
+
+
+def _paid_page(name):
+    text = (FIXTURES / f"item_list_series3_{name}.json").read_text(encoding="utf-8")
+    return parse_item_list_payload(json.loads(text), PAID_SERIES_ID).episodes
+
+
+def _item(drama=None, video=PLAYABLE, **top):
+    item = {"id": "1", **top}
+    if video is not None:
+        item["video"] = dict(video)
+    if drama is not None:
+        item["dramaInfo"] = {"DramaVideoData": {"EpisodeNumber": 1, **drama}}
+    return item
+
+
+def test_the_episode_access_model_and_its_constants():
+    assert ACCESS_MODES == ("free", "unlocked", "locked")
+    assert DRM_MARK == "protected by DRM"
+    assert DRM_MESSAGE == "protected by DRM (encrypted tracks): DramaFetch does not decrypt it"
+    assert DRM_MESSAGE.startswith(DRM_MARK)
+    plain = Episode(1, "1", "t", "s")
+    assert (plain.access, plain.paid, plain.drm, plain.locked) == ("free", False, False, False)
+    # back-compat: an Episode built with lock_hints only (every test before build 7) is locked
+    assert Episode(1, "1", "t", "s", lock_hints=("isFree=false",)).access == "locked"
+    assert Episode(1, "1", "t", "s", drm=True).locked
+    bought = Episode(1, "1", "t", "s", lock_hints=("isFree=false",), access="unlocked", paid=True)
+    assert not bought.locked and bought.paid
+    with pytest.raises(ValueError, match="free, unlocked, locked"):
+        Episode(1, "1", "t", "s", access="paid")
+    with pytest.raises(ValueError, match="never decrypts"):
+        Episode(1, "1", "t", "s", drm=True, access="unlocked")
+
+
+def test_a_derived_access_follows_later_assignments_an_explicit_one_does_not():
+    episode = Episode(1, "1", "t", "s")
+    episode.lock_hints = ("isLocked=True",)  # how the build-6 tests made an episode locked
+    assert episode.locked
+    episode.lock_hints = ()
+    assert episode.access == "free"
+    copied = replace(episode, title="copy")  # a dataclasses.replace copy follows as well
+    copied.lock_hints = ("x",)
+    assert copied.locked and not episode.locked
+    copied.drm = True
+    assert copied.access == "locked"
+    bought = Episode(1, "1", "t", "s", lock_hints=("isFree=false",), access="unlocked", paid=True)
+    bought.lock_hints = ("isFree=false", "unlockPrice=30")
+    assert bought.access == "unlocked"  # what catalog decided stays
+    bought.lock_hints = ()
+    assert bought.access == "unlocked"
+
+
+def test_the_third_series_with_the_session_of_the_account_that_bought_episode_3():
+    episodes = _paid_page("logged_in")
+    assert [e.number for e in episodes] == [1, 2, 3, 4]
+    assert [e.access for e in episodes] == ["free", "free", "unlocked", "locked"]
+    assert [e.paid for e in episodes] == [False, False, True, True]
+    assert not any(e.drm for e in episodes)
+    assert [e.locked for e in episodes] == [False, False, False, True]
+    assert episodes[2].lock_hints == ("isFree=false", "unlockPrice=30", "isUnlocked=True")
+    # episode 4 also says isLocked at the top level of the item: scanned first, then dramaInfo
+    assert episodes[3].lock_hints == (
+        "isLocked=True",
+        "isFree=false",
+        "unlockPrice=30",
+        NO_PLAY_ADDRESS,
+    )
+    assert play_url_candidates(episodes[2].raw) and not play_url_candidates(episodes[3].raw)
+    assert episodes[2].quality_hint == "720p h264"
+    assert catalog_warnings(episodes, 4) == ["1 episode looks locked"]
+
+
+def test_the_third_series_without_the_session_locks_the_paid_episode():
+    episodes = _paid_page("logged_out")
+    assert [e.access for e in episodes] == ["free", "free", "locked", "locked"]
+    assert [e.paid for e in episodes] == [False, False, True, True]
+    assert episodes[2].lock_hints == (
+        "isFree=false",
+        "unlockPrice=30",
+        "isLocked=True",
+        NO_PLAY_ADDRESS,
+    )
+    assert not play_url_candidates(episodes[2].raw)
+    assert catalog_warnings(episodes, 4) == ["2 episodes look locked"]
+
+
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        # 6. nothing says it is sold: free
+        (_item({"isFree": True}), ("free", False, False)),
+        (_item({"isFree": True, "unlockPrice": 0, "coinCount": 0}), ("free", False, False)),
+        # 4. no play address in this session's payload: locked, free-looking or not
+        (
+            _item({"isFree": True}, video={"playAddr": "", "bitrateInfo": []}),
+            ("locked", False, False),
+        ),
+        (_item({"isFree": True}, video=None), ("locked", False, False)),
+        # 5. sold, and TikTok gave this session a play address: unlocked
+        (_item({"isFree": False, "unlockPrice": 30}), ("unlocked", True, False)),
+        (_item({"isPaid": True}), ("unlocked", True, False)),
+        (_item({"isVip": "true"}), ("unlocked", True, False)),
+        (_item({"cost": 5}), ("unlocked", True, False)),
+        (_item({"chargeType": "coins"}), ("unlocked", True, False)),
+        (_item({"unlockType": 1}), ("unlocked", True, False)),  # the old heuristic's leftover
+        (_item({"cost": -1}), ("free", False, False)),  # not a price
+        # ... and without a play address: locked, whatever its price says
+        (_item({"isFree": False, "unlockPrice": 30}, video={}), ("locked", True, False)),
+        # 3. a viewer lock wins over a play address (a preview or trial clip is not the episode)
+        (_item({"isLocked": True}), ("locked", False, False)),
+        (_item({"is_locked": 1, "isFree": False}), ("locked", True, False)),
+        (_item({"needPay": 1}), ("locked", False, False)),
+        (_item({"need_unlock": "yes"}), ("locked", False, False)),
+        (_item({"isPreview": True}), ("locked", False, False)),
+        (_item({"trialClip": True}), ("locked", False, False)),
+        (_item({"paywall": "on"}), ("locked", False, False)),
+        (_item({"lockStatus": 1}), ("locked", False, False)),
+        (_item({"payStatus": "need_pay"}), ("locked", False, False)),
+        (_item({"unlockStatus": "UNPAID"}), ("locked", False, False)),
+        (_item({"purchaseStatus": "unpurchased"}), ("locked", False, False)),
+        (_item({"lockStatus": 0, "isLocked": False}), ("free", False, False)),
+        # 2. an entitlement wins over a lock and over a missing play address
+        (
+            _item({"isFree": False, "unlockPrice": 30, "isUnlocked": True}),
+            ("unlocked", True, False),
+        ),
+        (_item({"isLocked": True, "isUnlocked": True}), ("unlocked", True, False)),
+        (_item({"hasPaid": True}, video={}), ("unlocked", True, False)),
+        (_item({"paidByUser": 1}), ("unlocked", True, False)),
+        (_item({"is_purchased": "true"}), ("unlocked", True, False)),
+        (_item({"hasAccess": True}), ("unlocked", True, False)),
+        (_item({"entitled": True}), ("unlocked", True, False)),
+        (_item({"unlockStatus": "unlocked"}, video={}), ("unlocked", True, False)),
+        (_item({"payStatus": "Paid"}), ("unlocked", True, False)),
+        (_item({"hasPaid": False}), ("free", False, False)),  # not an entitlement, not a price
+        (_item({"isUnlocked": False}), ("free", False, False)),  # nothing says it is sold
+        # 5. ... but on a sold episode an entitlement flag that says no is the paywall's flag
+        (_item({"isUnlocked": False, "isFree": False}), ("locked", True, False)),
+        (_item({"hasPaid": 0, "unlockPrice": 30}), ("locked", True, False)),
+        (_item({"is_purchased": "false", "coinCount": 5}), ("locked", True, False)),
+        (_item({"isUnlocked": True, "hasPaid": False, "isFree": False}), ("unlocked", True, False)),
+        # 1. DRM wins over everything, entitlement included: locked, never decrypted
+        (_item({"isUnlocked": True, "drmType": "widevine"}), ("locked", True, True)),
+        (_item(None, video={**PLAYABLE, "isEncrypted": True}), ("locked", False, True)),
+        (_item({"encryption": 1}), ("locked", False, True)),
+        (_item({"drm": 0, "drmType": "none"}), ("free", False, False)),  # falsy: no clue
+        # the top level of the item counts too, wrapped in itemStruct or not (the outer key wins)
+        (_item(None, isLocked=True), ("locked", False, False)),
+        (_item(None, video={}, isUnlocked=True), ("unlocked", True, False)),
+        (
+            {"itemStruct": {"id": "1", "video": PLAYABLE, "isLocked": True}},
+            ("locked", False, False),
+        ),
+        (
+            {"isLocked": False, "itemStruct": {"id": "1", "video": PLAYABLE, "isLocked": True}},
+            ("free", False, False),
+        ),
+        # video is scanned at its top level only: its renditions' fields are not clues
+        (_item(None, video={**PLAYABLE, "isPreview": 1}), ("locked", False, False)),
+        (
+            _item(None, video={"bitrateInfo": [{"PlayAddr": {"isLocked": True}}]}),
+            ("free", False, False),
+        ),
+    ],
+)
+def test_access_of_follows_the_clue_table_and_the_decision_order(item, expected):
+    access, paid, drm, hints = access_of(item)
+    assert (access, paid, drm) == expected
+    assert hints == lock_hints(item)
+    if not _has_play(item):
+        assert hints[-1] == NO_PLAY_ADDRESS
+
+
+def _has_play(item):
+    video = item.get("video", item.get("itemStruct", {}).get("video"))
+    return isinstance(video, dict) and (
+        bool(video.get("playAddr")) or bool(video.get("bitrateInfo"))
+    )
+
+
+#: Play addresses that hold no URL at all — renditions without one, a placeholder string — and
+#: what a FREE-looking item with that address is: free as in build 6 when the address has the
+#: payload's shape (renditions, a playAddr string), locked when it has none.
+URL_LESS_VIDEOS = [
+    pytest.param(
+        {
+            "playAddr": "",
+            "bitrateInfo": [
+                {"Bitrate": 0, "CodecType": "h264", "GearName": "normal_720_0", "PlayAddr": {}}
+            ],
+        },
+        "free",
+        id="rendition-without-UrlList",
+    ),
+    pytest.param(
+        {"playAddr": "", "bitrateInfo": [{"Bitrate": 1088000, "PlayAddr": {"UrlList": []}}]},
+        "free",
+        id="empty-UrlList",
+    ),
+    pytest.param({"playAddr": "", "bitrateInfo": [{}]}, "free", id="empty-rendition"),
+    pytest.param({"bitrateInfo": [{"PlayAddr": None}]}, "free", id="PlayAddr-null"),
+    pytest.param({"playAddr": "null", "bitrateInfo": []}, "free", id="playAddr-null-string"),
+    pytest.param({"playAddr": "about:blank"}, "free", id="playAddr-not-http"),
+    pytest.param({"playAddr": {"UrlList": ["/relative/path"]}}, "locked", id="playAddr-relative"),
+]
+
+
+@pytest.mark.parametrize(("video", "free_access"), URL_LESS_VIDEOS)
+def test_a_sold_episode_needs_a_real_play_url_to_count_as_unlocked(tmp_path, video, free_access):
+    """Rule 5 is about the URL TikTok gave THIS session for a sold episode: a play address that
+    holds none — renditions without a URL, a placeholder string — is no address, so the episode
+    is locked with the `no play address` hint and never handed to yt-dlp unless
+    `--include-locked`. An entitlement flag still wins, and a free-looking item keeps its
+    build-6 meaning (the yt-dlp engine never needed the payload's URLs for it)."""
+    from dramafetch.downloader import YtDlpDownloader
+    from dramafetch.engine import download_series
+    from dramafetch.models import DownloadOptions, DownloadStatus, Series
+
+    sold = _item({"isFree": False, "unlockPrice": 30}, video=video)
+    access, paid, drm, hints = access_of(sold)
+    assert (access, paid, drm) == ("locked", True, False)
+    assert hints[-1] == NO_PLAY_ADDRESS and hints.count(NO_PLAY_ADDRESS) == 1
+    assert hints[:2] == ("isFree=false", "unlockPrice=30")
+    assert play_url_candidates(sold) == [] and lock_hints(sold) == hints
+    assert access_of(_item({"isFree": False, "isUnlocked": True}, video=video))[0] == "unlocked"
+    assert access_of(_item({"isFree": True}, video=video))[0] == free_access
+
+    item = {**sold, "id": "7699400000000000203"}
+    item["dramaInfo"]["DramaVideoData"]["EpisodeNumber"] = 3
+    episode = episode_from_item(item, PAID_SERIES_ID)
+    assert episode is not None and episode.locked
+    asked = []
+
+    def ydl_factory(params):
+        asked.append(params)
+        raise AssertionError("a locked episode is never handed to yt-dlp")
+
+    series = Series(series_id=PAID_SERIES_ID, name="Paid Love Story", episodes=[episode])
+    (result,) = download_series(
+        series,
+        [episode],
+        DownloadOptions(out_dir=tmp_path),
+        downloader=YtDlpDownloader(ydl_factory),
+        sleep=lambda seconds: pytest.fail("a skip never pauses"),
+    )
+    assert result.status is DownloadStatus.SKIPPED_LOCKED and asked == []
+    assert result.message == f"looks locked: isFree=false; unlockPrice=30; {NO_PLAY_ADDRESS}"
+
+
+@pytest.mark.parametrize("value", [0, 1, 2, -1, 1.0, True, False])
+def test_an_ambiguous_status_number_is_a_hint_and_never_decides(value):
+    for key in ("unlockStatus", "pay_status", "purchaseStatus"):
+        access, paid, drm, hints = access_of(_item({key: value}))
+        assert (access, paid, drm) == ("free", False, False)
+        assert hints == (f"{key}={value}",)
+        # with a price it is the price that decides, without a play address the address does
+        assert access_of(_item({key: value, "isFree": False}))[0] == "unlocked"
+        assert access_of(_item({key: value}, video={}))[0] == "locked"
+
+
+def test_hints_name_every_clue_in_payload_order_and_drm_ones_too():
+    item = _item({"isFree": False, "unlockPrice": 30, "isUnlocked": True, "drmType": "fairplay"})
+    assert access_of(item) == (
+        "locked",
+        True,
+        True,
+        ("isFree=false", "unlockPrice=30", "isUnlocked=True", "drmType=fairplay"),
+    )
+    status = _item({"unlockStatus": " unlocked "})
+    assert access_of(status)[3] == ("unlockStatus=unlocked",)
+    # an oversized number is still a hint (Python refuses to print an int of 5000 digits)
+    huge = _item({"unlockPrice": 10**5000})
+    assert access_of(huge)[:3] == ("unlocked", True, False)
+    assert access_of(huge)[3] == ("unlockPrice=…",)
+
+
+# --------------------------------------------------------------------------- build 7b: DRM keys
+# A DRM clue locks the episode whatever else the payload says, and it only saves a download that
+# would be refused anyway (media.drm_problem is the real guard): so a key must NAME DRM in whole
+# words. Builds 1-6 never looked at these keys; a substring match would lock every episode of a
+# real payload that carries an HDR flag, a "DRM-free" flag or an encrypted user id.
+
+#: The spec's "must be DRM" list: each locks the episode as DRM, wherever access_of scans it.
+DRM_KEYS = [
+    ("isDrm", True),
+    ("drm", 1),
+    ("drmType", "widevine"),
+    ("DRMType", "fairplay"),
+    ("is_encrypted", True),
+    ("encrypted", True),
+    ("videoEncrypted", 1),
+    ("encryption", "cenc"),
+    ("encryptType", 2),
+]
+#: What TikTok's encrypted user ids (`secUid`) look like.
+ENCRYPTED_UID = "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM"
+#: The spec's "must NOT be DRM" list: HDR flags, negations and identifiers — no clue of any class.
+NOT_DRM_KEYS = [
+    ("hdrMode", 1),
+    ("HDRType", 1),
+    ("isHdr", True),
+    ("isDrmFree", True),
+    ("drm_free", 1),
+    ("nonEncrypted", True),
+    ("no_drm", 1),
+    ("notEncrypted", True),
+    ("encryptedUid", ENCRYPTED_UID),
+    ("encrypted_id", "x"),
+    ("unencrypted", True),
+    # their camelCase spellings too: an acronym's plural is one word, `un` a negation
+    ("encryptedIDs", "x"),
+    ("encryptedUIDs", f"{ENCRYPTED_UID},{ENCRYPTED_UID}"),
+    ("encryptedUserIDs", "x"),
+    ("unEncrypted", True),
+    ("isUnEncrypted", True),
+    ("un_encrypted", True),
+]
+
+
+def _everywhere(key, value):
+    """The item with `key: value` in each place access_of scans: `dramaInfo` (nested), `video`'s
+    top level, the item's own top level, an `itemStruct` wrapper's top level."""
+    return [
+        _item({key: value}),
+        _item(None, video={**PLAYABLE, key: value}),
+        _item(None, **{key: value}),
+        {"itemStruct": {"id": "1", "video": dict(PLAYABLE), key: value}},
+    ]
+
+
+@pytest.mark.parametrize(("key", "value"), DRM_KEYS)
+def test_a_key_that_names_drm_in_whole_words_locks_the_episode_as_drm(key, value):
+    assert is_drm_key(key)
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("locked", False, True, (f"{key}={value}",)), item
+    episode = episode_from_item(_item({key: value}), "s")
+    assert episode is not None and episode.drm and episode.locked
+    assert episode.lock_hints == (f"{key}={value}",)
+    # DRM still wins over an entitlement: DramaFetch never decrypts
+    assert access_of(_item({"isUnlocked": True, key: value}))[:3] == ("locked", True, True)
+
+
+@pytest.mark.parametrize(("key", "value"), NOT_DRM_KEYS)
+def test_hdr_flags_negations_and_identifiers_are_not_drm_nor_any_clue(key, value):
+    assert not is_drm_key(key)
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("free", False, False, ()), item
+    # they hide nothing either: a real DRM flag next to one still locks
+    assert access_of(_item({key: value, "isDrm": True}))[:3] == ("locked", False, True)
+    # and on a sold episode TikTok gave this session a play URL for, rule 5 decides as before
+    assert access_of(_item({key: value, "isFree": False, "unlockPrice": 30}))[:3] == (
+        "unlocked",
+        True,
+        False,
+    )
+
+
+@pytest.mark.parametrize(("key", "value"), [("isDrm", False), ("drmType", "none"), ("drmType", 0)])
+def test_a_falsy_drm_value_is_never_a_clue(key, value):
+    assert is_drm_key(key)
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("free", False, False, ())
+
+
+@pytest.mark.parametrize(
+    ("key", "words"),
+    [
+        ("DRMType", ("drm", "type")),  # an acronym run before a capitalised word
+        ("HDRBit", ("hdr", "bit")),
+        ("isDrmFree", ("is", "drm", "free")),  # camelCase
+        ("VideoEncrypted", ("video", "encrypted")),  # PascalCase
+        ("drm_free", ("drm", "free")),  # snake_case
+        ("no-drm", ("no", "drm")),  # kebab-case
+        ("drm2Type", ("drm", "2", "type")),  # digits
+        ("HDR10Plus", ("hdr", "10", "plus")),
+        ("isDRM", ("is", "drm")),
+        ("DRM", ("drm",)),
+        ("unencrypted", ("unencrypted",)),
+        ("encryptedIDs", ("encrypted", "ids")),  # an acronym's plural stays one word
+        ("encryptedUIDs", ("encrypted", "uids")),
+        ("encryptedUserIDs", ("encrypted", "user", "ids")),
+        ("IDsList", ("ids", "list")),
+        ("unEncrypted", ("un", "encrypted")),
+        ("IsDrmFree", ("is", "drm", "free")),  # a capital and an `s` before a capital: a word
+        ("", ()),
+        ("__", ()),
+        ("ü", ()),
+    ],
+)
+def test_key_words_split_camel_pascal_acronyms_snake_kebab_and_digits(key, words):
+    assert key_words(key) == words
+
+
+def test_a_real_payload_with_hdr_flags_and_encrypted_ids_keeps_its_accesses():
+    """The paid fixture with an HDR flag, a "DRM-free" flag and TikTok's encrypted user ids added
+    to every item — in `video`, in `dramaInfo` and in a block nested in it: before build 7b every
+    episode of such a payload was locked as DRM; now nothing changes."""
+    text = (FIXTURES / "item_list_series3_logged_in.json").read_text(encoding="utf-8")
+    payload = json.loads(text)
+    expected = [(e.access, e.paid, e.drm, e.lock_hints) for e in _paid_page("logged_in")]
+    for item in payload["itemList"]:
+        item["video"].update({"hdrMode": 1, "HDRType": 1, "isDrmFree": True})
+        item["dramaInfo"]["encryptedUid"] = ENCRYPTED_UID
+        item["dramaInfo"]["authorInfo"] = {"encrypted_id": "x", "no_drm": 1, "nonEncrypted": True}
+    episodes = parse_item_list_payload(payload, PAID_SERIES_ID).episodes
+    assert [(e.access, e.paid, e.drm, e.lock_hints) for e in episodes] == expected
+    assert [e.access for e in episodes] == ["free", "free", "unlocked", "locked"]
+    assert not any(e.drm for e in episodes)
+
+
+@pytest.mark.parametrize(("key", "value"), [("blockStatus", 1), ("isBlocked", True)])
+def test_block_is_not_lock(key, value):
+    """`lock_?status` and the old heuristic's leftovers do not match `block…` keys: no clue at
+    all — where `lockStatus: 1` and `isLocked: true` lock the episode."""
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("free", False, False, ())
+    for variant in (key.upper(), key[0].upper() + key[1:], f"un{key}"):
+        assert access_of(_item({variant: value})) == ("free", False, False, ()), variant
+    unblocked = key.replace("block", "lock").replace("Block", "Lock")
+    assert access_of(_item({unblocked: value}))[0] == "locked"
+
+
+UNLOCKED = ("unlocked", True, False)
+LOCKED = ("locked", False, False)
+FREE = ("free", False, False)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        # a `lock_?status` key whose word before `Lock` merely ends in b: a lock, as before 7b
+        ("subLockStatus", 1, LOCKED),
+        ("subLockStatus", "locked", LOCKED),
+        ("webLockStatus", True, LOCKED),
+        ("clubLockStatus", "1", LOCKED),
+        ("dubLockStatus", 1, LOCKED),
+        ("WEBLockStatus", 1, LOCKED),  # an acronym run that ends in B
+        ("blockLockStatus", 1, LOCKED),  # a lock word next to a block word
+        # the old heuristic's leftovers: a pricing clue, as before 7b
+        ("isSubLocked", True, UNLOCKED),
+        ("subLock", 1, UNLOCKED),
+        ("webLock", 1, UNLOCKED),
+        ("DBLock", 1, UNLOCKED),
+        ("isBlockLocked", True, UNLOCKED),
+    ],
+)
+def test_a_word_that_ends_in_b_before_lock_is_not_block(key, value, expected):
+    """Only a word that CONTAINS `block` is no lock word (`test_block_is_not_lock`): `subLock…`,
+    `webLock…` and `DBLock` are two words, the second a lock — such an episode is never
+    attempted on a lock flag's account, nor a sold one without a play URL."""
+    access, paid, drm, hints = access_of(_item({key: value}))
+    assert (access, paid, drm) == expected
+    assert hints == (f"{key}={value}",)
+    if expected == UNLOCKED:  # sold, and no real play URL: locked, as for any sold episode
+        assert access_of(_item({key: value}, video={"playAddr": "null"})) == (
+            "locked",
+            True,
+            False,
+            (f"{key}={value}", NO_PLAY_ADDRESS),
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected", "hint"),
+    [
+        # a STRING value is read like an (unlock|pay|purchase)_?status one: ENTITLED ...
+        *[(text, UNLOCKED, text) for text in ("unlocked", "paid", "purchased", "bought")],
+        ("entitled", UNLOCKED, "entitled"),
+        (" Unlocked ", UNLOCKED, "Unlocked"),
+        # ... VIEWER-LOCK ...
+        *[(text, LOCKED, text) for text in ("locked", "lock", "need_pay", "needpay", "unpaid")],
+        ("unpurchased", LOCKED, "unpurchased"),
+        ("NEED_PAY", LOCKED, "NEED_PAY"),
+        # ... and any other non-falsy string is AMBIGUOUS: a hint that never decides
+        ("pending", FREE, "pending"),
+        ("on", FREE, "on"),
+        # a bool or a number stays a lock when truthy (unchanged) ...
+        (True, LOCKED, "True"),
+        (1, LOCKED, "1"),
+        (2, LOCKED, "2"),
+        # ... and so does a string that spells one, the way `_truthy` reads "0" and "false"
+        ("1", LOCKED, "1"),
+        ("2", LOCKED, "2"),
+        (" 1 ", LOCKED, "1"),
+        ("-1", LOCKED, "-1"),
+        ("1.5", LOCKED, "1.5"),
+        ("true", LOCKED, "true"),
+        ("TRUE", LOCKED, "TRUE"),
+        ("yes", LOCKED, "yes"),
+        # falsy: no clue at all
+        (False, FREE, None),
+        (0, FREE, None),
+        ("0", FREE, None),
+        ("false", FREE, None),
+        ("no", FREE, None),
+        ("none", FREE, None),
+        ("", FREE, None),
+    ],
+)
+def test_a_lock_status_string_reads_like_a_status(value, expected, hint):
+    for key in ("lockStatus", "lock_status", "LockStatus", "episodeLockStatus"):
+        access, paid, drm, hints = access_of(_item({key: value}))
+        assert (access, paid, drm) == expected, key
+        assert hints == ((f"{key}={hint}",) if hint is not None else ()), key
+
+
+def test_lock_status_unlocked_with_a_play_address_is_unlocked_and_an_unknown_one_never_decides():
+    assert access_of(_item({"lockStatus": "unlocked"})) == (
+        "unlocked",
+        True,
+        False,
+        ("lockStatus=unlocked",),
+    )
+    # an entitlement needs no play address; without one the episode is still the account's
+    assert access_of(_item({"lockStatus": "unlocked"}, video={}))[0] == "unlocked"
+    # an unknown string decides nothing: the price, then the play address, do
+    assert access_of(_item({"lockStatus": "pending", "isFree": False}))[:3] == (
+        "unlocked",
+        True,
+        False,
+    )
+    assert access_of(_item({"lockStatus": "pending"}, video={}))[0] == "locked"
+    assert access_of(_item({"lockStatus": "pending", "isLocked": True}))[0] == "locked"
+    # a lock spelled as a string still locks a sold episode TikTok gave this session a URL for
+    assert access_of(_item({"isFree": False, "unlockPrice": 30, "lockStatus": "1"})) == (
+        "locked",
+        True,
+        False,
+        ("isFree=false", "unlockPrice=30", "lockStatus=1"),
+    )
+
+
+#: Keys the fuzz test draws from: every clue class, the containers access_of walks, and noise.
+_FUZZ_KEYS = (
+    "isLocked",
+    "isUnlocked",
+    "is_locked",
+    "locked",
+    "hasPaid",
+    "paidByUser",
+    "isFree",
+    "free",
+    "unlockPrice",
+    "price",
+    "coin",
+    "cost",
+    "charge",
+    "vip",
+    "isPaid",
+    "needPay",
+    "preview",
+    "trial",
+    "paywall",
+    "lockStatus",
+    "unlockStatus",
+    "payStatus",
+    "purchaseStatus",
+    "drm",
+    "isEncrypted",
+    "DRMType",
+    "isDrmFree",
+    "encryptedUid",
+    "hdrMode",
+    "blockStatus",
+    "lock_status",
+    "unlockType",
+    "dramaInfo",
+    "video",
+    "itemStruct",
+    "playAddr",
+    "bitrateInfo",
+    "DramaVideoData",
+    "EpisodeNumber",
+    "id",
+    "",
+    "  ",
+    "ü",
+    "😀",
+    "None",
+    "0",
+)
+_FUZZ_SCALARS = (
+    None,
+    True,
+    False,
+    0,
+    1,
+    -1,
+    2**63,
+    10**5000,
+    0.0,
+    -0.0,
+    1.5,
+    float("nan"),
+    float("inf"),
+    "",
+    " ",
+    "0",
+    "false",
+    "true",
+    "none",
+    "null",
+    "unlocked",
+    "locked",
+    "need_pay",
+    "x" * 500,
+    "\u202e",
+    "https://v16-webapp-prime.tiktok.com/v/?expire=1",
+    "²",  # a digit to str.isdigit(), not to int()
+    "7" * 5000,  # more digits than int() converts
+)
+
+
+def _junk(rng, depth=0):
+    roll = rng.random()
+    if depth > 6 or roll < 0.45:
+        return rng.choice(_FUZZ_SCALARS)
+    if roll < 0.75:
+        return {rng.choice(_FUZZ_KEYS): _junk(rng, depth + 1) for _ in range(rng.randint(0, 6))}
+    return [_junk(rng, depth + 1) for _ in range(rng.randint(0, 4))]
+
+
+def test_access_of_never_raises_and_is_deterministic_on_junk():
+    rng = random.Random(7)
+    seen = set()
+    for _ in range(3000):
+        item = _junk(rng)
+        if not isinstance(item, dict):
+            item = {"dramaInfo": item, "video": _junk(rng), rng.choice(_FUZZ_KEYS): _junk(rng)}
+        access, paid, drm, hints = access_of(item)
+        seen.add(access)
+        assert access in ACCESS_MODES
+        assert isinstance(paid, bool) and isinstance(drm, bool)
+        assert not drm or access == "locked"
+        assert isinstance(hints, tuple) and all(isinstance(hint, str) for hint in hints)
+        assert len(set(hints)) == len(hints)
+        assert access_of(copy.deepcopy(item)) == (access, paid, drm, hints)
+        assert lock_hints(item) == hints
+        episode = episode_from_item(item, "s")  # builds an Episode: its checks never trip
+        assert episode is None or (episode.access, episode.paid, episode.drm) == (access, paid, drm)
+    assert seen == set(ACCESS_MODES)
+    for junk in (None, [], "x", 5, 1.5, ["isLocked", True]):
+        assert access_of(junk) == ("locked", False, False, (NO_PLAY_ADDRESS,))
+    deep: dict = {"isUnlocked": True}
+    for _ in range(50):
+        deep = {"inner": deep}  # deeper than MAX_DEPTH: cut, never a RecursionError
+    assert access_of(_item(deep))[0] == "free"

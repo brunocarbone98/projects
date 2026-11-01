@@ -13,9 +13,13 @@
         "id": "7699400000000000001",
         "duration": 92,
         "ratio": "720p",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oEIAfBQAEDmgCDeAIQBfikIt7jEzSBhjqhAAu1~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc1&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oEIAfBQAEDmgCDeAIQBfikIt7jEzSBhjqhAAu1~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=def1&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "dynamicCover": "https://p16-sign-sg.tiktokcdn.com/obj/tos-alisg-p-0037/oYBgEQQCAfBAiDIemfAIAjEtkIhjAu7zqBS1h~tplv-tiktokx-origin.image?dr=14577&x-expires=1800000000&x-signature=ghi1&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
         "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000",
         "bitrateInfo": [
-          { "Bitrate": 1138000, "QualityType": 2, "GearName": "normal_720_0", "CodecType": "h264", "PlayAddr": { "DataSize": "13087000", "Width": 720, "Height": 1280, "UrlList": ["https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000"] } }
+          { "Bitrate": 1138000, "QualityType": 2, "GearName": "normal_720_0", "CodecType": "h264", "PlayAddr": { "DataSize": "13087000", "Width": 720, "Height": 1280, "UrlList": ["https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000"] } },
+          { "Bitrate": 1652000, "QualityType": 1, "GearName": "adapt_lower_1080_1", "CodecType": "bytevc1", "PlayAddr": { "DataSize": "18998000", "Width": 1080, "Height": 1920, "UrlList": ["https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc-1080/?a=1988&expire=1761200000"] } }
         ]
       },
       "dramaInfo": {
@@ -30,7 +34,7 @@
       "desc": "The Billionaire's Secret Heiress | Episode 2",
       "createTime": 1761116408,
       "author": { "id": "6900000000000000001", "uniqueId": "muffindrama_us", "nickname": "Muffin Drama" },
-      "video": { "id": "7699400000000000002", "duration": 88, "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/def/", "bitrateInfo": [] },
+      "video": { "id": "7699400000000000002", "duration": 88, "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oQBfIAEjkAeDQAgIBhAiu7EzImStBhCqfAD2~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc2&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "dynamicCover": "https://p16-sign-sg.tiktokcdn.com/obj/tos-alisg-p-0037/oEAIQfgBzAhI7jBEDmtkeICSiqAfAuhAQBE2~tplv-tiktokx-origin.image?dr=14577&x-expires=1800000000&x-signature=ghi2&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/def/", "bitrateInfo": [] },
       "dramaInfo": {
         "dramaID": "7699393770256782354",
         "dramaName": "The Billionaire's Secret Heiress",
@@ -41,14 +45,14 @@
       "id": "7699400000000000099",
       "desc": "Trailer without an episode number",
       "author": { "uniqueId": "muffindrama_us" },
-      "video": { "duration": 30, "playAddr": "" },
+      "video": { "duration": 30, "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oIAEhBfzAQCjgD7AiuBtfEIkASeqIAmhBQE99~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc99&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "playAddr": "" },
       "dramaInfo": { "dramaID": "7699393770256782354", "dramaName": "The Billionaire's Secret Heiress" }
     },
     {
       "id": "7699400000000000003",
       "desc": "The Billionaire's Secret Heiress | Episode 3",
       "author": { "uniqueId": "muffindrama_us" },
-      "video": { "duration": 95, "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/ghi/", "bitrateInfo": [] },
+      "video": { "duration": 95, "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oAfBEQAhzIgEkICi7AjBuDmeAIhtSfBQqAE3~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=def3&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oAfBEQAhzIgEkICi7AjBuDmeAIhtSfBQqAE3~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc3&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/ghi/", "bitrateInfo": [] },
       "dramaInfo": {
         "dramaID": "7699393770256782354",
         "dramaName": "The Billionaire's Secret Heiress",

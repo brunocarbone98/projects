@@ -9,7 +9,7 @@ A production full-stack platform, the black-box QA suite that tests it, a TikTok
 [![Live app](https://img.shields.io/badge/live-shipping--hub.up.railway.app-22d3ee?logo=railway&logoColor=white)](https://shipping-hub.up.railway.app/)
 [![Autonomous maintenance · 24/7](https://img.shields.io/badge/autonomous%20maintenance-24%2F7-a78bfa)](./OPERATIONS.md)
 
-**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents both. **DramaFetch** is a Python CLI and local web UI that downloads the TikTok short-drama episodes your own account can already watch, a whole series at a time, for personal offline viewing — it never unlocks paid episodes. All four are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges.
+**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents both. **DramaFetch** is a Python CLI and local web UI that downloads the TikTok short-drama episodes your own account can already watch — whole series, several in one run — for personal offline viewing: paid episodes your account has unlocked download like free ones, and it never unlocks, buys or decrypts anything. All four are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges.
 
 ## What's inside
 
@@ -17,7 +17,7 @@ A production full-stack platform, the black-box QA suite that tests it, a TikTok
 | --- | --- | --- | --- |
 | [`FullStackHub/`](./FullStackHub) — **Shipping Hub** | International parcel shipping & tracking platform: public SSR tracking, quotes, customer/staff dashboards, a wallet backed by a double-entry ledger | Next.js 16 · Express 5 + Prisma · PostgreSQL · FastAPI ×2 · Zod contracts · pnpm 10 + Turborepo | [Live app](https://shipping-hub.up.railway.app/) · [README](./FullStackHub/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
 | [`SecureGate/`](./SecureGate) — **QA & security suite** | Black-box tests for Shipping Hub: 28 Karate API scenarios (+1 opt-in `@ratelimit` check), 6 Serenity/Screenplay UI scenarios, a Postman/Newman collection, a token-gated SonarQube gate | Java 21 · Maven · Karate · Serenity BDD + Screenplay · Selenium · Cucumber · Newman | [README](./SecureGate/README.md) · [![SecureGate CI](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml) |
-| [`DramaFetch/`](./DramaFetch) — **TikTok short-drama downloader** | Downloads the episodes of a TikTok short drama that your own account can already watch, a whole series at a time, for personal offline viewing: CLI + local web UI, resumable manifest, locked episodes listed and skipped — never unlocked | Python 3.11 · yt-dlp · Playwright · stdlib web UI | [README](./DramaFetch/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
+| [`DramaFetch/`](./DramaFetch) — **TikTok short-drama downloader** | Downloads the episodes of a TikTok short drama that your own account can already watch — whole series, in batches — for personal offline viewing: CLI + local web UI with a save-all ZIP, resumable manifest, covers embedded, paced against TikTok's anti-bot limits; paid episodes your account unlocked included, the rest listed and skipped — never unlocked, DRM never decrypted | Python 3.11 · yt-dlp · Playwright · mutagen · stdlib web UI | [README](./DramaFetch/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
 | [`PersonalWebsite/`](./PersonalWebsite) | Static two-page portfolio served by GitHub Pages | Vanilla HTML/CSS/JS, no dependencies | [`MainPage.html`](./PersonalWebsite/MainPage.html) · [`Portfolio.html`](./PersonalWebsite/Portfolio.html) |
 
 ## Architecture
@@ -105,8 +105,9 @@ DramaFetch — Python 3.11+; episode discovery needs Playwright's Chromium (`pla
 
 ```bash
 cd DramaFetch && python -m venv .venv && . .venv/bin/activate && pip install -e ".[impersonate,dev]"
-dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, Playwright, browser, cookies (names only, never values)
+dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg, cookies (names only, never values), mutagen, cooldown
 dramafetch download "https://www.tiktok.com/shortdrama/episode/<series id>/1" --cookies cookies.txt
+dramafetch download --from-file series.txt --cookies cookies.txt   # several series, one after the other, paced
 ```
 
 Website — no build step, no dependencies:

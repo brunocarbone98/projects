@@ -8,6 +8,41 @@ from pathlib import Path
 from typing import Any, Protocol
 
 TIKTOK_BASE_URL = "https://www.tiktok.com"
+#: Default file name of an episode (without extension); see ``manifest.episode_stem`` for the
+#: placeholders: {series} {number} {n} {title} {id}.
+DEFAULT_NAME_FORMAT = "{series} - Episode {number}"
+#: ``DownloadOptions.thumbnail`` values — where an episode's cover goes: into the MP4 as its cover
+#: art (``embed``, the default), into the MP4 and a file next to it (``both``), a file next to the
+#: video only (``file``), nowhere (``none``: no cover request at all).
+THUMBNAIL_MODES = ("embed", "both", "file", "none")
+#: ``DownloadOptions.quality`` values — which rendition of an episode is taken: ``compatible``
+#: (the default) the highest-bitrate H.264, which plays everywhere; ``best`` the highest bitrate
+#: whatever the codec (TikTok's ``bytevc1``/H.265 renditions need a capable player). Nothing is
+#: re-encoded; the source's top rendition is the ceiling.
+QUALITY_MODES = ("compatible", "best")
+#: A series whose manifest says it was complete less than this long ago is skipped without a
+#: single request (``engine.run_series``); ``--recheck`` resolves it anyway.
+RECHECK_AFTER_S = 24 * 3600
+#: ``Episode.access`` values — what THIS session may do with an episode, decided by
+#: ``catalog.access_of`` from the payload TikTok served to the user's own account: ``free`` (nothing
+#: says it is sold), ``unlocked`` (a paid episode this account may play: an entitlement flag, or a
+#: play address TikTok gave this session for a sold episode) and ``locked`` (a lock, preview or DRM
+#: flag, or no play address at all: listed and skipped, never unlocked).
+ACCESS_MODES = ("free", "unlocked", "locked")
+#: Every DRM message starts with this: DramaFetch never decrypts and never keeps encrypted media.
+DRM_MARK = "protected by DRM"
+#: Why an encrypted download is deleted (``media.drm_problem``) or an episode is refused: the
+#: verdict of a downloaded file (both engines) and of yt-dlp's own "DRM protected"
+#: (``downloader.describe_failure`` puts it first).
+DRM_MESSAGE = f"{DRM_MARK} (encrypted tracks): DramaFetch does not decrypt it"
+#: The message of an episode skipped because an earlier run's DOWNLOAD found it protected by DRM
+#: (``Manifest.drm_protected``): no request — retrying cannot change that verdict — unless
+#: ``--include-locked``. A row with it keeps the memory; a payload's DRM flag is never remembered
+#: (the payload is read again whenever the series is listed).
+DRM_REMEMBERED_MESSAGE = (
+    f"{DRM_MARK} (found by an earlier run): DramaFetch does not decrypt it; "
+    "--include-locked tries again"
+)
 
 
 @dataclass(frozen=True)
@@ -49,19 +84,69 @@ class Episode:
     series_name: str | None = None
     author: str | None = None
     duration_s: int | None = None
-    # Human-readable reasons to believe the episode is locked/paid/unplayable, e.g. "isFree=false".
-    # Empty means "nothing in the payload says it is locked" — not a guarantee it will download.
+    # Every pricing / lock / entitlement / DRM clue the payload carries, human-readable, e.g.
+    # "isFree=false" or "isUnlocked=true". Informational: ``access`` decides. Empty means "nothing
+    # in the payload says anything about a price or a lock" — not a guarantee it will download.
     lock_hints: tuple[str, ...] = ()
+    # The episode cover (thumbnail): video.originCover, else video.cover, else video.dynamicCover.
+    cover_url: str | None = None
+    # What the default quality mode would download, e.g. "720p h264": the label of the rendition
+    # ``catalog.choose_rendition(item, "compatible")`` picks; None when the item lists none.
+    quality_hint: str | None = None
+    # One of ACCESS_MODES: "free", "unlocked" (paid, and playable with THIS session: the user's own
+    # account bought it or subscribes) or "locked" (skipped unless --include-locked). ``""`` derives
+    # it in ``__post_init__`` — "locked" when ``lock_hints`` (or ``drm``) is set, else "free" — so a
+    # caller that sets only ``lock_hints`` keeps the old meaning, also when it assigns them later
+    # (``__setattr__``); ``catalog.episode_from_item`` always passes an explicit value. Any value
+    # outside ACCESS_MODES: ValueError.
+    access: str = ""
+    # A pricing or entitlement clue is present (the episode is sold, whether or not this account
+    # has unlocked it). Set by catalog.
+    paid: bool = False
+    # The payload itself says the episode is DRM-protected / encrypted (set by catalog). Such an
+    # episode is always "locked" (ValueError otherwise): DramaFetch never decrypts anything.
+    drm: bool = False
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.access:
+            self.access = _derived_access(self.lock_hints, self.drm)
+        if self.access not in ACCESS_MODES:
+            raise ValueError(
+                f"Episode.access must be one of {', '.join(ACCESS_MODES)}, not {self.access!r}"
+            )
+        if self.drm and self.access != "locked":
+            raise ValueError("a DRM-protected episode is always locked: DramaFetch never decrypts")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # An access that is what its lock_hints / drm derive (see __post_init__) follows them when
+        # either is assigned later, as ``locked`` followed ``lock_hints`` before the access model —
+        # also on a ``dataclasses.replace`` copy. An access catalog decided otherwise ("unlocked",
+        # or "free" despite a hint) stays. Nothing happens while __init__ is still assigning.
+        follows = (
+            name in ("lock_hints", "drm")
+            and name in self.__dict__
+            and "access" in self.__dict__
+            and self.access == _derived_access(self.lock_hints, self.drm)
+        )
+        object.__setattr__(self, name, value)
+        if follows:
+            object.__setattr__(self, "access", _derived_access(self.lock_hints, self.drm))
 
     @property
     def locked(self) -> bool:
-        return bool(self.lock_hints)
+        return self.access == "locked"
 
     @property
     def page_url(self) -> str:
         """The ordinary video page yt-dlp understands. TikTok ignores the username segment."""
         return f"{TIKTOK_BASE_URL}/@{self.author or '_'}/video/{self.item_id}"
+
+
+def _derived_access(lock_hints: tuple[str, ...], drm: bool) -> str:
+    """The access of an Episode built without one: any hint (or DRM) meant "locked" before the
+    access model, so it still does; nothing at all means "free"."""
+    return "locked" if lock_hints or drm else "free"
 
 
 @dataclass
@@ -119,6 +204,13 @@ class DownloadOptions:
     rest_min_s: float = 60.0
     rest_max_s: float = 120.0
     max_consecutive_failures: int = 3  # stop the run after N failures in a row (0 disables)
+    # A long break every ``long_rest_every`` network attempts of a RUN — a batch of series, or the
+    # web job manager's lifetime — because nobody watches 100 episodes without one. No CLI flag
+    # lowers these (tests set them directly); an idle gap of ``long_rest_min_s`` or more counts as
+    # the break (``engine.PacingState``).
+    long_rest_every: int = 100
+    long_rest_min_s: float = 900.0
+    long_rest_max_s: float = 1800.0
     # Engine: "yt-dlp" (default; downloads each episode's page) or "browser" (fetches the play
     # URLs the episode list already carries, inside one browser session of its own — fewer
     # requests).
@@ -127,13 +219,49 @@ class DownloadOptions:
     browser_executable: Path | None = None  # browser engine: explicit Chromium binary
     browser_headful: bool = False
     base_url: str = TIKTOK_BASE_URL  # browser engine refreshes expired play URLs from here (tests)
+    # File names: placeholders {series} {number} (zero-padded) {n} {title} {id}; see
+    # ``manifest.episode_stem``. Validated by ``engine.validate_naming`` before anything is written.
+    name_format: str = DEFAULT_NAME_FORMAT
+    # The episode cover: "embed" (default) writes it into the MP4 as its cover art (the `covr`
+    # atom) and leaves no other file; "both" embeds it and keeps <stem>.<jpeg|jpg|png|webp> next to
+    # the video; "file" keeps that file only; "none" requests no cover at all. One of
+    # THUMBNAIL_MODES, checked by ``engine.validate_thumbnail`` before anything is written.
+    thumbnail: str = "embed"
+    series_name: str | None = None  # filled by engine.download_series; expands {series}
     impersonate: bool = True  # yt-dlp + curl_cffi browser impersonation when installed
-    prefer_h264: bool = True
+    # Which rendition: "compatible" (default) is the highest-bitrate H.264 — it plays everywhere;
+    # "best" the highest bitrate whatever the codec. One of QUALITY_MODES, checked by
+    # ``engine.validate_quality``; ``catalog.play_url_candidates`` and yt-dlp's format selector
+    # follow it. Nothing is re-encoded.
+    quality: str = "compatible"
+    # Verify every saved video (``media.verify_video``: an MP4 that parses, is not cut short, has
+    # an audio track and lasts about ``Episode.duration_s``); a file that fails is renamed
+    # "<name> (incomplete).<ext>" and the episode is FAILED. ``--no-verify`` turns it off — a
+    # debugging aid only.
+    verify: bool = True
     retries: int = 3
     overwrite: bool = False
     include_locked: bool = False  # try episodes that look locked (they usually have no formats)
     dry_run: bool = False
+    # Resolve a series even when its manifest says it was complete less than RECHECK_AFTER_S ago
+    # (``--recheck``); without it such a series costs no request (``engine.run_series``).
+    recheck: bool = False
     extractor_args: dict[str, dict[str, list[str]]] | None = None  # passthrough to yt-dlp
+
+    @property
+    def thumbnails(self) -> bool:
+        """Whether a cover is requested at all: every mode but ``"none"``."""
+        return self.thumbnail != "none"
+
+    @property
+    def embed_cover(self) -> bool:
+        """Whether the cover goes into the video file (modes ``embed`` and ``both``)."""
+        return self.thumbnail in ("embed", "both")
+
+    @property
+    def keep_cover_file(self) -> bool:
+        """Whether a cover file stays next to the video (modes ``both`` and ``file``)."""
+        return self.thumbnail in ("both", "file")
 
 
 class DownloadStatus(StrEnum):

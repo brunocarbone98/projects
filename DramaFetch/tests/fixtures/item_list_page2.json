@@ -8,28 +8,28 @@
         "id": "7699400000000000002",
         "desc": "The Billionaire's Secret Heiress | Episode 2 (duplicate from page 1)",
         "author": { "uniqueId": "muffindrama_us" },
-        "video": { "duration": 88, "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/def/", "bitrateInfo": [] },
+        "video": { "duration": 88, "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oQBfIAEjkAeDQAgIBhAiu7EzImStBhCqfAD2~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc2&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/def/", "bitrateInfo": [] },
         "dramaInfo": { "dramaID": "7699393770256782354", "dramaName": "The Billionaire's Secret Heiress", "DramaVideoData": { "EpisodeNumber": 2, "isFree": true } }
       },
       {
         "id": "7699400000000000004",
         "desc": "The Billionaire's Secret Heiress | Episode 4",
         "author": { "uniqueId": "muffindrama_us" },
-        "video": { "duration": 90, "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/jkl/", "bitrateInfo": [] },
+        "video": { "duration": 90, "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oEBAIQhfzgAkDCiI7BjAuAmeEIBtSfhQqAE4~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=def4&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oEBAIQhfzgAkDCiI7BjAuAmeEIBtSfhQqAE4~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc4&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "dynamicCover": "https://p16-sign-sg.tiktokcdn.com/obj/tos-alisg-p-0037/oIEAQfgBzAhI7jBEDmtkeICSiqAfAuhAQBE4~tplv-tiktokx-origin.image?dr=14577&x-expires=1800000000&x-signature=ghi4&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/jkl/", "bitrateInfo": [] },
         "dramaInfo": { "dramaID": "7699393770256782354", "dramaName": "The Billionaire's Secret Heiress", "DramaVideoData": { "EpisodeNumber": 4, "isFree": true } }
       },
       {
         "id": "7699400000000000005",
         "desc": "The Billionaire's Secret Heiress | Episode 5",
         "author": { "uniqueId": "muffindrama_us" },
-        "video": { "duration": 91, "playAddr": "", "bitrateInfo": [] },
+        "video": { "duration": 91, "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oAEIBQfhzgAkDCiI7BjAuAmeEIBtSfhQqAE5~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=def5&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oAEIBQfhzgAkDCiI7BjAuAmeEIBtSfhQqAE5~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc5&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "playAddr": "", "bitrateInfo": [] },
         "dramaInfo": { "dramaID": "7699393770256782354", "dramaName": "The Billionaire's Secret Heiress", "DramaVideoData": { "EpisodeNumber": 5, "isFree": false, "isLocked": true, "unlockPrice": 30 } }
       },
       {
         "id": "7699400000000000777",
         "desc": "Another Drama | Episode 1 (belongs to a different series)",
         "author": { "uniqueId": "otherdrama" },
-        "video": { "duration": 60, "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/zzz/", "bitrateInfo": [] },
+        "video": { "duration": 60, "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oBEAIQhfzgAkDCiI7BjAuAmeEIBtSfhQqA777~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=abc777&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5", "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/zzz/", "bitrateInfo": [] },
         "dramaInfo": { "dramaID": "7600000000000000000", "dramaName": "Another Drama", "DramaVideoData": { "EpisodeNumber": 1, "isFree": true } }
       }
     ]

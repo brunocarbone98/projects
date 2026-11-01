@@ -11,16 +11,32 @@ TikTok facts this module encodes (verified October 2026):
   and the only reliable order: series are published in batches, so ``createTime`` is a shuffle.
   Items without a number (trailers) are skipped; items whose ``dramaInfo.dramaID`` names another
   series are dropped.
-- TikTok sells later episodes for coins. The field that marks a locked episode is undocumented, so
-  :func:`lock_hints` applies key-name heuristics (``isLocked``, ``unlockPrice``, ``isFree=false``)
-  and treats an item without any play address as locked too. Locked episodes are listed and
-  skipped; nothing here unlocks, buys or bypasses anything.
+- TikTok sells later episodes (coins, a purchase, a subscription). The fields that say whether
+  THIS session may play one are undocumented, so :func:`access_of` applies key-name heuristics to
+  the payload TikTok served to the user's own session and sorts each episode into ``free``,
+  ``unlocked`` (sold, and this account may play it: an entitlement flag such as ``isUnlocked``,
+  or a play URL TikTok gave this session for a sold episode) or ``locked`` (a lock, preview,
+  trial, paywall or DRM flag, on a sold episode an entitlement flag that says no, or no play
+  address at all); :func:`lock_hints` lists every clue it found. Locked episodes are listed and
+  skipped. Nothing here unlocks, buys, fakes entitlement or bypasses anything: the decision only
+  reads what TikTok already sent to that session. The field names were inferred without access to
+  TikTok; ``--dump-raw`` from a real run confirms them.
 - ``GET /api/drama/detail/`` carries the series name and announced total; its exact shape is
   unknown, so :func:`parse_detail_payload` is best-effort.
 - Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
   codec and bitrate, plus ``video.playAddr``), valid until their ``expire`` query parameter.
-  :func:`play_url_candidates` orders them and :func:`url_expiry` reads the expiry; the browser
-  download engine fetches them directly instead of loading each episode's page.
+  Each ``bitrateInfo`` entry is one rendition — ``CodecType`` (``h264``, ``h265`` or ``bytevc1``,
+  TikTok's name for its H.265 streams), ``Bitrate`` in bit/s, ``GearName`` such as
+  ``normal_720_0`` or ``adapt_lower_1080_1`` (the height is in the name; ``video.ratio`` like
+  ``720p`` describes the main one) and the URLs. :func:`renditions` reads them,
+  :func:`choose_rendition` picks one per quality mode, :func:`play_url_candidates` orders the
+  URLs and :func:`url_expiry` reads the expiry; the browser download engine fetches them directly
+  instead of loading each episode's page.
+- Every item also carries the episode cover (thumbnail) as signed image URLs on
+  ``p16-sign-*.tiktokcdn.com``: ``video.originCover`` (the full frame), ``video.cover`` (a
+  cropped poster) and ``video.dynamicCover`` (an animated preview), each a string in the web
+  payload (a ``UrlList`` dict or a list elsewhere). :func:`episode_from_item` keeps the first of
+  them as ``Episode.cover_url``, in that order.
 """
 
 from __future__ import annotations
@@ -32,19 +48,81 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from dramafetch.models import Episode
+from dramafetch.models import QUALITY_MODES, Episode
 
 #: How deep the recursive searches descend into a payload before giving up.
 MAX_DEPTH = 12
+#: The hint of an item THIS session's payload gives no play address for.
+NO_PLAY_ADDRESS = "no play address"
 
 _ITEM_LIST_KEYS = ("itemList", "item_list")
+#: The key-name heuristic of the builds before the access model; it still catches the leftovers
+#: (``unlockType: 1``) as pricing clues, see :func:`access_of`. Matched against the key without
+#: its ``block`` words (:func:`_without_block_words`): "block" is not "lock".
 _LOCK_KEY_RE = re.compile(r"lock|paid|needpay|unlock|price|coin|vip|preview", re.IGNORECASE)
 _FREE_KEY_RE = re.compile(r"free", re.IGNORECASE)
+# The clue classes of :func:`access_of` and the key patterns behind them (case-insensitive).
+_DRM = "drm"
+_ENTITLED = "entitled"
+#: An ENTITLED full key with a falsy value (``isUnlocked: false``): on a sold episode, the payload
+#: saying the account has NOT unlocked it — the flag a client shows its paywall from.
+_NOT_ENTITLED = "not-entitled"
+_VIEWER_LOCK = "viewer-lock"
+_AMBIGUOUS = "ambiguous"
+_PRICING = "pricing"
+#: One word of a key (:func:`key_words`): an acronym run with its plural ``s`` (``IDs`` of
+#: ``encryptedIDs``), the acronym run before a capitalised word (``DRM`` of ``DRMType``), a
+#: capitalised or lower-case word, an acronym, a run of digits. Anything else — ``_``, ``-``,
+#: spaces, other characters — only separates words.
+_KEY_WORD_RE = re.compile(r"[A-Z]+s(?![a-z])|[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+#: Words that turn a DRM key into its opposite (``isDrmFree``, ``no_drm``, ``nonEncrypted``,
+#: ``notEncrypted``, ``unEncrypted``) ...
+_DRM_NEGATION_WORDS = frozenset({"free", "no", "non", "not", "un", "without"})
+#: ... or into an identifier, which says nothing about the media (``encryptedUid``,
+#: ``encrypted_id``: TikTok's encrypted user ids).
+_DRM_ID_WORDS = frozenset({"id", "ids", "uid", "uids"})
+#: Matched against the FULL key: ``isUnlocked``, ``is_purchased``, ``hasPaid``, ``paidByUser``, …
+_ENTITLED_KEY_RE = re.compile(
+    r"(?:is_?)?(?:unlocked|purchased|bought|entitled)"
+    r"|has_?(?:paid|purchased|unlocked|bought|access)"
+    r"|paid_?by_?(?:user|viewer|me)",
+    re.IGNORECASE,
+)
+#: Matched against the FULL key: ``isLocked``, ``is_locked``, ``locked``.
+_LOCKED_KEY_RE = re.compile(r"(?:is_?)?locked", re.IGNORECASE)
+#: Anywhere in the key: a payment still needed, a preview or trial clip (not the episode), a
+#: paywall.
+_VIEWER_LOCK_KEY_RE = re.compile(
+    r"need_?(?:pay|unlock|buy|purchase)|preview|trial|paywall", re.IGNORECASE
+)
+#: ``lockStatus`` / ``lock_status`` — not ``unlockStatus``, which is a :data:`_STATUS_KEY_RE`,
+#: and not ``blockStatus`` (matched against the key without its ``block`` words, see
+#: :func:`_without_block_words`). A bool or a number — or a string that spells one, see
+#: :data:`_NUMBER_OR_BOOL_TEXT_RE` — locks when truthy; any other STRING value is read like a
+#: status (the two sets below), and one that neither set knows is a hint only.
+_LOCK_STATUS_KEY_RE = re.compile(r"(?<!un)lock_?status", re.IGNORECASE)
+#: A string that spells a number or a bool (``"1"``, ``" 2 "``, ``"-1"``, ``"1.5"``, ``"true"``,
+#: ``"yes"``): a ``lock_?status`` key reads it as that number or bool, the way :func:`_truthy`
+#: reads ``"0"`` and ``"false"`` — so ``lockStatus: "1"`` locks like ``lockStatus: 1``.
+_NUMBER_OR_BOOL_TEXT_RE = re.compile(r"[+-]?[0-9]+(?:\.[0-9]+)?|true|yes", re.IGNORECASE)
+#: ``unlockStatus`` / ``payStatus`` / ``purchaseStatus``: only a STRING value decides (one of the
+#: two sets below); a bool or a number is a hint only (1 can mean either).
+_STATUS_KEY_RE = re.compile(r"(?:unlock|pay|purchase)_?status", re.IGNORECASE)
+_ENTITLED_STATUS_VALUES = frozenset({"unlocked", "paid", "purchased", "bought", "entitled"})
+_LOCKED_STATUS_VALUES = frozenset(
+    {"locked", "lock", "need_pay", "needpay", "unpaid", "unpurchased"}
+)
+_KNOWN_STATUS_VALUES = _ENTITLED_STATUS_VALUES | _LOCKED_STATUS_VALUES
+_PRICE_KEY_RE = re.compile(r"price|coin|cost|charge", re.IGNORECASE)
+_SOLD_KEY_RE = re.compile(r"vip|paid", re.IGNORECASE)
 _SERIES_ID_KEYS = ("dramaID", "dramaId", "DramaID", "albumId")
 _EPISODE_NUMBER_KEYS = ("EpisodeNumber", "episodeNumber", "episode_number")
 _NAME_KEYS = ("dramaName", "title", "name")
 _TOTAL_KEYS = ("totalEpisode", "totalEpisodes", "episodeCount", "total", "episodeTotal")
 _DETAIL_CONTAINER_KEYS = ("dramaInfo", "drama", "detail")
+#: Where an item's cover image lives, best first: the full frame, the cropped poster, the animated
+#: preview.
+_COVER_KEYS = ("originCover", "cover", "dynamicCover")
 _FALSY_STRINGS = frozenset({"", "0", "false", "no", "none", "null"})
 _MAX_HINT_VALUE_LEN = 40
 
@@ -87,51 +165,235 @@ def _walk_item_lists(
             _walk_item_lists(value, depth + 1, max_depth, found)
 
 
-def lock_hints(item: dict[str, Any]) -> tuple[str, ...]:
-    """Heuristic reasons to believe an item is locked, paid or unplayable (deterministic order).
+def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
+    """``(access, paid, drm, hints)`` of an item: what THIS session may do with the episode.
 
-    ``item["dramaInfo"]`` is scanned recursively and ``item["video"]`` at its top level: a key
-    matching ``lock|paid|needpay|unlock|price|coin|vip|preview`` with a truthy scalar value gives
-    ``"key=value"``; a key matching ``free`` with a falsy scalar value gives ``"isFree=false"``; a
-    missing or empty ``video.playAddr`` together with an empty ``video.bitrateInfo`` gives
-    ``"no play address"``. An empty tuple means nothing in the payload says "locked".
+    Pure and deterministic; never raises on junk. ``access`` is one of ``models.ACCESS_MODES``,
+    decided from the payload TikTok served to the user's own session — nothing here unlocks,
+    buys, fakes or sends anything. Scanned: the item's top-level scalar keys (those of an
+    ``itemStruct`` wrapper too), ``dramaInfo`` recursively (``MAX_DEPTH``) and ``video``'s
+    top-level scalar keys; values are bools, numbers and strings only (``_truthy`` as ever: ``0``,
+    ``""``, ``"false"``, ``"no"``, ``"none"``, ``"null"`` are falsy). Keys match
+    case-insensitively; every clue gives the hint ``<key>=<value>`` (a falsy ``free`` key gives
+    ``isFree=false``). The clue classes:
+
+    - DRM: a key that names DRM in whole words (:func:`is_drm_key`: one of its
+      :func:`key_words` is ``drm`` or starts with ``encrypt``, none is a negation — ``free``,
+      ``no``, ``non``, ``not``, ``un``, ``without`` — or an identifier — ``id``, ``ids``,
+      ``uid``, ``uids``), truthy: ``isDrm``, ``drmType: "widevine"``, ``DRMType``,
+      ``is_encrypted``, ``encryption: "cenc"``; never ``hdrMode``, ``isDrmFree``, ``no_drm``,
+      ``nonEncrypted``, ``unencrypted``, ``unEncrypted``, ``encryptedUid`` or ``encryptedUIDs``.
+    - ENTITLED (the account may play it): a FULL key ``(is_?)?(unlocked|purchased|bought|
+      entitled)``, ``has_?(paid|purchased|unlocked|bought|access)`` or
+      ``paid_?by_?(user|viewer|me)``, truthy; or an ``(unlock|pay|purchase)_?status`` or
+      ``lock_?status`` key whose string value is ``unlocked``, ``paid``, ``purchased``,
+      ``bought`` or ``entitled``.
+    - NOT-ENTITLED: one of those full keys with a falsy value (``isUnlocked: false``,
+      ``hasPaid: 0``): the payload says the account has not unlocked it. It decides only for a
+      sold episode (rule 5) and is not counted in ``paid``.
+    - VIEWER-LOCK (this session cannot play it): a FULL key ``(is_?)?locked``; a key containing
+      ``need_?(pay|unlock|buy|purchase)``, ``preview``, ``trial`` or ``paywall`` (a preview or
+      trial clip is not the episode); a ``lock_?status`` key (not ``unlock…``, not ``block…``)
+      with a bool or a number, or a string that spells one (``"1"``, ``"true"``) — all truthy;
+      or an ``(unlock|pay|purchase)_?status`` or ``lock_?status`` key whose string value is
+      ``locked``, ``lock``, ``need_pay``, ``needpay``, ``unpaid`` or ``unpurchased``.
+    - AMBIGUOUS: an ``(unlock|pay|purchase)_?status`` key with a bool or numeric value (1 can mean
+      either), or a ``lock_?status`` key with any other non-falsy string: a hint, it NEVER
+      decides.
+    - PRICING (the episode is sold): a key containing ``free`` with a falsy value; a key containing
+      ``price``, ``coin``, ``cost`` or ``charge`` with a number above 0 (or a truthy string); a key
+      containing ``vip`` or ``paid`` that is not an ENTITLED full key, truthy; and any other truthy
+      key the old ``lock|paid|needpay|unlock|price|coin|vip|preview`` heuristic matched and no
+      class above turned into a clue (``unlockType: 1``) — "block" is not "lock": a word that
+      contains ``block`` is no lock word (``blockStatus``, ``isBlocked``: no clue at all), while
+      ``subLockStatus`` or ``webLock`` still is one.
+    - PLAY: no ``video.playAddr`` and an empty ``video.bitrateInfo`` (or no ``video`` at all) in
+      this session's payload: the hint :data:`NO_PLAY_ADDRESS`.
+
+    Decision, first match wins: a DRM clue -> ``locked`` with ``drm`` (DramaFetch never decrypts);
+    an ENTITLED clue -> ``unlocked`` (even without a play address: the account is entitled, and
+    the downloader finds out what TikTok serves); a VIEWER-LOCK clue -> ``locked``; no play address
+    -> ``locked`` (free-looking items included); a PRICING clue -> ``unlocked`` when this session's
+    payload holds a real play URL for it (:func:`play_url_candidates`: an http(s) URL — a
+    ``bitrateInfo`` entry without one, or a ``playAddr`` such as ``"null"``, is no address) and no
+    NOT-ENTITLED clue, else ``locked`` (without a URL with the hint :data:`NO_PLAY_ADDRESS`); else
+    ``free``. ``paid`` is any PRICING or ENTITLED clue. Why a sold episode WITH a play URL counts as
+    unlocked: a client that is to show a paywall or a preview needs a flag for it — a lock, preview
+    or paywall flag, or an entitlement flag that says no — and with none the URL is what TikTok's
+    own web player plays for this session. Should it ever turn out to be a preview after all, the
+    integrity check of every download (``media.verify_video``: the duration) quarantines it.
     """
-    hints: list[str] = []
+    if not isinstance(item, dict):
+        item = {}
+    clues: list[tuple[str, str]] = []
+    for key, value in _top_level_scalars(item):
+        clues.extend(_clues(key, value))
     drama_info = _field(item, "dramaInfo")
     if isinstance(drama_info, dict):
-        _collect_lock_hints(drama_info, 0, hints)
+        _collect_clues(drama_info, 0, clues)
     video = _field(item, "video")
     if isinstance(video, dict):
         for key, value in video.items():
-            _hint_for(str(key), value, hints)
-        if not _has_play_address(video):
-            hints.append("no play address")
+            clues.extend(_clues(str(key), value))
+    playable = isinstance(video, dict) and _has_play_address(video)
+    classes = {kind for kind, _ in clues}
+    hints = [hint for _, hint in clues]
+    if not playable:
+        hints.append(NO_PLAY_ADDRESS)
+    drm = _DRM in classes
+    if drm:
+        access = "locked"
+    elif _ENTITLED in classes:
+        access = "unlocked"
+    elif _VIEWER_LOCK in classes or not playable:
+        access = "locked"
+    elif _PRICING in classes:
+        # Sold: unlocked only for a real play URL this session got (a rendition without any URL
+        # is no address) and no entitlement flag saying no.
+        if not play_url_candidates(item):
+            access = "locked"
+            hints.append(NO_PLAY_ADDRESS)
+        else:
+            access = "locked" if _NOT_ENTITLED in classes else "unlocked"
     else:
-        hints.append("no play address")
-    return tuple(dict.fromkeys(hints))
+        access = "free"
+    paid = _PRICING in classes or _ENTITLED in classes
+    return access, paid, drm, tuple(dict.fromkeys(hints))
 
 
-def _collect_lock_hints(node: Any, depth: int, hints: list[str]) -> None:
+def lock_hints(item: dict[str, Any]) -> tuple[str, ...]:
+    """Every pricing, lock, entitlement and DRM clue of an item, deterministic order (the fourth
+    element of :func:`access_of`): ``"key=value"``, ``"isFree=false"``, ``"no play address"``.
+    Informational — ``Episode.access`` decides; an empty tuple means the payload says nothing
+    about a price or a lock."""
+    return access_of(item)[3]
+
+
+def _top_level_scalars(item: dict[str, Any]) -> list[tuple[str, Any]]:
+    """The item's own scalar ``(key, value)`` pairs, then those of an ``itemStruct`` wrapper whose
+    key the item itself lacks (the outer key wins, as in :func:`_field`)."""
+    pairs = [(key, value) for key, value in item.items() if not isinstance(value, dict | list)]
+    inner = item.get("itemStruct")
+    if isinstance(inner, dict):
+        pairs.extend(
+            (key, value)
+            for key, value in inner.items()
+            if key not in item and not isinstance(value, dict | list)
+        )
+    return [(str(key), value) for key, value in pairs]
+
+
+def _collect_clues(node: Any, depth: int, clues: list[tuple[str, str]]) -> None:
     if depth > MAX_DEPTH:
         return
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(value, dict | list):
-                _collect_lock_hints(value, depth + 1, hints)
+                _collect_clues(value, depth + 1, clues)
             else:
-                _hint_for(str(key), value, hints)
+                clues.extend(_clues(str(key), value))
     elif isinstance(node, list):
         for value in node:
-            _collect_lock_hints(value, depth + 1, hints)
+            _collect_clues(value, depth + 1, clues)
 
 
-def _hint_for(key: str, value: Any, hints: list[str]) -> None:
-    if value is None or not isinstance(value, bool | int | float | str):
-        return
-    if _LOCK_KEY_RE.search(key) and _truthy(value):
-        hints.append(f"{key}={_format_hint_value(value)}")
-    elif _FREE_KEY_RE.search(key) and not _truthy(value):
-        hints.append("isFree=false")
+def key_words(key: str) -> tuple[str, ...]:
+    """The lower-case words of a payload key, in order: camelCase and PascalCase split at every
+    capital, an acronym run kept whole (``DRMType`` -> ``drm``, ``type``; ``HDRBit`` -> ``hdr``,
+    ``bit``), its plural too (``encryptedIDs`` -> ``encrypted``, ``ids``), ``snake_case`` and
+    ``kebab-case`` at their separators, digits on their own (``drm2`` -> ``drm``, ``2``). Pure;
+    anything that is not an ASCII letter or digit separates."""
+    return tuple(word.lower() for word in _KEY_WORD_RE.findall(key))
+
+
+def is_drm_key(key: str) -> bool:
+    """Whether a payload key names DRM (the DRM class of :func:`access_of`, whose value must also
+    be truthy): one of its :func:`key_words` is ``drm`` or starts with ``encrypt``, and none is a
+    negation (``free``, ``no``, ``non``, ``not``, ``un``, ``without``) or an identifier (``id``,
+    ``ids``, ``uid``, ``uids``). So ``isDrm``, ``drmType``, ``DRMType``, ``is_encrypted``,
+    ``videoEncrypted``, ``encryption`` and ``encryptType`` are DRM keys; ``hdrMode``,
+    ``HDRType``, ``isDrmFree``, ``drm_free``, ``no_drm``, ``nonEncrypted``, ``notEncrypted``,
+    ``unencrypted``, ``unEncrypted``, ``encryptedUid``, ``encryptedUIDs`` and ``encrypted_id``
+    are not. Whole words, not letters: a DRM clue locks the episode whatever else the payload
+    says, and it only saves a download that would be refused anyway (the media check,
+    ``media.drm_problem``, is the real guard), so precision beats recall."""
+    words = key_words(key)
+    if not any(word == "drm" or word.startswith("encrypt") for word in words):
+        return False
+    return not any(word in _DRM_NEGATION_WORDS or word in _DRM_ID_WORDS for word in words)
+
+
+def _without_block_words(key: str) -> str:
+    """``key`` with each of its :func:`key_words` that contains ``block`` turned into ``_``: what
+    :data:`_LOCK_STATUS_KEY_RE` and the old heuristic's leftovers (:data:`_LOCK_KEY_RE`) are
+    matched against, because "block" is not "lock" — ``blockStatus``, ``isBlocked``,
+    ``BLOCK_STATUS`` and ``unblockStatus`` give no clue at all — while a word that merely ends in
+    ``b`` (``subLockStatus``, ``webLock``, ``DBLock``) and a lock word next to a block word
+    (``blockLockStatus``) still count, as they did before."""
+    return _KEY_WORD_RE.sub(
+        lambda word: "_" if "block" in word.group().lower() else word.group(), key
+    )
+
+
+def _clues(key: str, value: Any) -> list[tuple[str, str]]:
+    """The ``(class, hint)`` clues one scalar ``key: value`` gives (the table of
+    :func:`access_of`); empty for a value that is not a bool, a number or a string."""
+    if not isinstance(value, bool | int | float | str):
+        return []
+    hint = f"{key}={_format_hint_value(value)}"
+    truthy = _truthy(value)
+    entitled_key = _ENTITLED_KEY_RE.fullmatch(key) is not None
+    status_key = _STATUS_KEY_RE.search(key) is not None
+    lock_key = _without_block_words(key)  # "block" is not "lock"
+    lock_status_key = _LOCK_STATUS_KEY_RE.search(lock_key) is not None
+    # a lockStatus string that spells a number or a bool ("1", "true") is that number or bool
+    is_text = isinstance(value, str) and not (
+        lock_status_key and _NUMBER_OR_BOOL_TEXT_RE.fullmatch(value.strip()) is not None
+    )
+    # a status STRING decides through the two value sets, for lockStatus as for unlockStatus
+    status = (
+        value.strip().lower()
+        if (status_key or lock_status_key) and isinstance(value, str)
+        else None
+    )
+    found: list[tuple[str, str]] = []
+    if truthy and is_drm_key(key):
+        found.append((_DRM, hint))
+    if (truthy and entitled_key) or status in _ENTITLED_STATUS_VALUES:
+        found.append((_ENTITLED, hint))
+    elif entitled_key:  # falsy: the payload says the account has NOT unlocked it
+        found.append((_NOT_ENTITLED, hint))
+    viewer_lock_key = (
+        _LOCKED_KEY_RE.fullmatch(key) is not None
+        or _VIEWER_LOCK_KEY_RE.search(key) is not None
+        or (lock_status_key and not is_text)  # a bool or a number (or one spelled): truthy locks
+    )
+    if (truthy and viewer_lock_key) or status in _LOCKED_STATUS_VALUES:
+        found.append((_VIEWER_LOCK, hint))
+    if status_key and not is_text:
+        found.append((_AMBIGUOUS, hint))
+    elif lock_status_key and is_text and truthy and status not in _KNOWN_STATUS_VALUES:
+        found.append((_AMBIGUOUS, hint))  # a lockStatus string neither set knows: a hint only
+    sold = (
+        (_PRICE_KEY_RE.search(key) is not None and _positive(value))
+        or (truthy and not entitled_key and _SOLD_KEY_RE.search(key) is not None)
+        # the old heuristic's leftovers, for a key no class above turned into a clue
+        or (truthy and not found and _LOCK_KEY_RE.search(lock_key) is not None)
+    )
+    if _FREE_KEY_RE.search(key) and not truthy:
+        found.append((_PRICING, "isFree=false"))
+    elif sold:
+        found.append((_PRICING, hint))
+    return found
+
+
+def _positive(value: Any) -> bool:
+    """A price that means "sold": a number above 0, ``true``, or a truthy string."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value > 0
+    return _truthy(value)
 
 
 def _truthy(value: Any) -> bool:
@@ -145,7 +407,10 @@ def _truthy(value: Any) -> bool:
 
 
 def _format_hint_value(value: Any) -> str:
-    text = str(value).strip() if isinstance(value, str) else str(value)
+    try:
+        text = value.strip() if isinstance(value, str) else str(value)
+    except ValueError:  # an int with more digits than str() converts (Python's safety limit)
+        text = "…"
     if len(text) > _MAX_HINT_VALUE_LEN:
         return text[: _MAX_HINT_VALUE_LEN - 1] + "…"
     return text
@@ -165,6 +430,12 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     Skipped: no item id; no (or invalid) ``dramaInfo.DramaVideoData.EpisodeNumber`` — trailers and
     teasers; a ``dramaInfo`` series id (``dramaID``/``dramaId``/``DramaID``/``albumId``) that
     differs from ``series_id``. The item may be wrapped in ``{"itemStruct": {...}}``.
+    ``cover_url`` is the first http(s) URL among ``video.originCover``, ``video.cover`` and
+    ``video.dynamicCover`` (see :func:`cover_url_of`), None when the item has none.
+    ``quality_hint`` is the label of the rendition the default quality mode takes
+    (:func:`choose_rendition` with ``"compatible"``, e.g. ``"720p h264"``), None without one.
+    ``access`` / ``paid`` / ``drm`` / ``lock_hints`` come from :func:`access_of`, always passed
+    explicitly (``Episode`` derives ``access`` from ``lock_hints`` only for other callers).
     """
     item_id = _as_id(_field(item, "id"))
     if item_id is None:
@@ -193,6 +464,7 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     duration = _as_int(video.get("duration")) if isinstance(video, dict) else None
     if duration is not None and duration < 0:
         duration = None
+    access, paid, drm, hints = access_of(item)
 
     return Episode(
         number=number,
@@ -202,9 +474,29 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
         series_name=series_name,
         author=author,
         duration_s=duration,
-        lock_hints=lock_hints(item),
+        lock_hints=hints,
+        cover_url=cover_url_of(item),
+        quality_hint=chosen.label if (chosen := choose_rendition(item)) is not None else None,
+        access=access,
+        paid=paid,
+        drm=drm,
         raw=item,
     )
+
+
+def cover_url_of(item: dict[str, Any]) -> str | None:
+    """The episode cover of an item: the first http(s) URL found under ``video.originCover``,
+    ``video.cover`` or ``video.dynamicCover``, in that order (each a string, a list of strings or
+    a dict with a ``UrlList``, like a play address); None when there is none. Never raises on
+    junk. The item may be wrapped in ``{"itemStruct": {...}}``."""
+    video = _field(item, "video") if isinstance(item, dict) else None
+    if not isinstance(video, dict):
+        return None
+    for key in _COVER_KEYS:
+        urls = _play_urls(video.get(key), 0)
+        if urls:
+            return urls[0]
+    return None
 
 
 def _field(item: dict[str, Any], key: str) -> Any:
@@ -221,7 +513,10 @@ def _as_id(value: Any) -> str | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return str(value)
+        try:
+            return str(value)
+        except ValueError:  # more digits than str() converts: no id of TikTok's
+            return None
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -235,7 +530,10 @@ def _as_int(value: Any) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip())
+        try:
+            return int(value.strip())
+        except ValueError:  # "²" is a digit to isdigit(), not to int(); or too many digits
+            return None
     return None
 
 
@@ -443,44 +741,143 @@ def _first_positive_int(container: dict[str, Any], keys: tuple[str, ...]) -> int
     return None
 
 
-# --------------------------------------------------------------------------------- play URLs
+# ---------------------------------------------------------------------- renditions & play URLs
 
 _H264_CODEC_RE = re.compile(r"h\.?264|avc", re.IGNORECASE)
+_H265_CODEC_RE = re.compile(r"h\.?265|hevc|hvc1|hev1", re.IGNORECASE)
 _URL_LIST_KEYS = ("UrlList", "urlList", "url_list")
 _MAX_URL_LIST_DEPTH = 3
+#: The height inside a ``GearName`` such as ``normal_720_0`` or ``adapt_lower_1080_1``: the only
+#: run of three or four digits (the trailing ``_0``/``_1`` is one digit).
+_GEAR_HEIGHT_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")
+#: ``video.ratio`` such as ``720p`` (or a bare ``720``).
+_RATIO_RE = re.compile(r"^\s*(\d{3,4})p?\s*$", re.IGNORECASE)
+#: Codec of a rendition whose ``CodecType`` is missing.
+UNKNOWN_CODEC = "unknown"
+#: Height part of a label when neither the ``GearName`` nor ``video.ratio`` tells it.
+UNKNOWN_HEIGHT = "?p"
 
 
-def play_url_candidates(item: dict[str, Any]) -> list[str]:
+@dataclass(frozen=True)
+class Rendition:
+    """One ``video.bitrateInfo`` entry: the play URLs of one encoding of the episode.
+
+    ``codec`` is normalised to ``h264``, ``h265`` or ``bytevc1`` (TikTok's own name for its H.265
+    streams), else the lower-cased raw ``CodecType`` (``unknown`` when absent); ``bitrate`` is
+    bit/s (0 when absent); ``height_hint`` comes from the ``GearName``, else ``video.ratio``;
+    ``label`` is what ``info`` shows — ``720p h264``, ``?p h264`` without a height.
+    """
+
+    url_list: list[str]
+    codec: str
+    bitrate: int
+    height_hint: int | None
+    label: str
+
+    @property
+    def h264(self) -> bool:
+        return self.codec == "h264"
+
+
+def codec_name(raw: Any) -> str:
+    """``h264`` for H.264/AVC spellings, ``h265`` for H.265/HEVC ones, ``bytevc1`` for TikTok's,
+    else the lower-cased raw string; :data:`UNKNOWN_CODEC` for anything that is not a string."""
+    if not isinstance(raw, str) or not raw.strip():
+        return UNKNOWN_CODEC
+    text = raw.strip()
+    if _H264_CODEC_RE.search(text):
+        return "h264"
+    if _H265_CODEC_RE.search(text):
+        return "h265"
+    if text.lower().startswith("bytevc1"):
+        return "bytevc1"
+    return text.lower()
+
+
+def renditions(item: dict[str, Any]) -> list[Rendition]:
+    """Every ``video.bitrateInfo`` entry with at least one http(s) play URL, in payload order;
+    never raises on junk. A bare ``video.playAddr`` is not a rendition: its codec and bitrate are
+    unknown (:func:`play_url_candidates` still appends it last). The item may be wrapped in
+    ``{"itemStruct": {...}}``."""
+    video = _field(item, "video") if isinstance(item, dict) else None
+    if not isinstance(video, dict):
+        return []
+    bitrate_info = video.get("bitrateInfo")
+    if not isinstance(bitrate_info, list):
+        return []
+    ratio_height = _ratio_height(video.get("ratio"))
+    found: list[Rendition] = []
+    for entry in bitrate_info:
+        if not isinstance(entry, dict):
+            continue
+        urls = _play_urls(entry.get("PlayAddr"), 0)
+        if not urls:
+            continue
+        codec = codec_name(entry.get("CodecType"))
+        height = _gear_height(entry.get("GearName"))
+        if height is None:
+            height = ratio_height
+        label = f"{height}p {codec}" if height is not None else f"{UNKNOWN_HEIGHT} {codec}"
+        found.append(Rendition(urls, codec, _as_int(entry.get("Bitrate")) or 0, height, label))
+    return found
+
+
+def ordered_renditions(item: dict[str, Any], quality: str = "compatible") -> list[Rendition]:
+    """The renditions of an item in the order ``quality`` would try them: ``compatible`` the
+    H.264 ones by bitrate descending, then the other codecs the same way; ``best`` all of them by
+    bitrate descending whatever the codec. Ties keep payload order. ValueError for a quality that
+    is not one of ``models.QUALITY_MODES``."""
+    if quality not in QUALITY_MODES:
+        raise ValueError(f"unknown quality {quality!r}: expected one of {', '.join(QUALITY_MODES)}")
+    by_bitrate = sorted(renditions(item), key=lambda rendition: -rendition.bitrate)
+    if quality == "best":
+        return by_bitrate
+    h264 = [rendition for rendition in by_bitrate if rendition.h264]
+    others = [rendition for rendition in by_bitrate if not rendition.h264]
+    return h264 + others
+
+
+def choose_rendition(item: dict[str, Any], quality: str = "compatible") -> Rendition | None:
+    """The rendition ``quality`` downloads: ``compatible`` the highest-bitrate H.264 — it plays
+    everywhere — falling back to the highest bitrate of any codec when the item lists no H.264;
+    ``best`` the highest bitrate whatever the codec. None when the item lists no renditions."""
+    ordered = ordered_renditions(item, quality)
+    return ordered[0] if ordered else None
+
+
+def play_url_candidates(item: dict[str, Any], quality: str = "compatible") -> list[str]:
     """Direct play URLs of an item, best first and de-duplicated; never raises on junk.
 
-    Order: the ``video.bitrateInfo`` entries whose ``CodecType`` is H.264/AVC (case-insensitive) by
-    ``Bitrate`` descending, every URL of their ``PlayAddr.UrlList``; then the other codecs the same
-    way; then ``video.playAddr`` (a string, or a dict with a ``UrlList``). Only ``http(s)`` strings
-    are kept, and a URL listed twice appears once, at its first position. The item may be wrapped
-    in ``{"itemStruct": {...}}``. This is what the browser download engine fetches.
+    Order: the renditions as :func:`ordered_renditions` puts them for ``quality`` — ``compatible``
+    (the default): the H.264/AVC entries by ``Bitrate`` descending, then the other codecs the same
+    way; ``best``: every entry by bitrate descending across codecs — every URL of their
+    ``PlayAddr.UrlList``; then ``video.playAddr`` (a string, or a dict with a ``UrlList``) in both
+    modes. Only ``http(s)`` strings are kept, and a URL listed twice appears once, at its first
+    position. The item may be wrapped in ``{"itemStruct": {...}}``. This is what the browser
+    download engine fetches.
     """
     video = _field(item, "video") if isinstance(item, dict) else None
     if not isinstance(video, dict):
         return []
-    h264: list[tuple[int, int, list[str]]] = []
-    others: list[tuple[int, int, list[str]]] = []
-    bitrate_info = video.get("bitrateInfo")
-    if isinstance(bitrate_info, list):
-        for index, entry in enumerate(bitrate_info):
-            if not isinstance(entry, dict):
-                continue
-            urls = _play_urls(entry.get("PlayAddr"), 0)
-            if not urls:
-                continue
-            codec = entry.get("CodecType")
-            bucket = h264 if isinstance(codec, str) and _H264_CODEC_RE.search(codec) else others
-            bucket.append((-(_as_int(entry.get("Bitrate")) or 0), index, urls))
     ordered: list[str] = []
-    for bucket in (h264, others):
-        for _, _, urls in sorted(bucket, key=lambda entry: entry[:2]):
-            ordered.extend(urls)
+    for rendition in ordered_renditions(item, quality):
+        ordered.extend(rendition.url_list)
     ordered.extend(_play_urls(video.get("playAddr"), 0))
     return list(dict.fromkeys(ordered))
+
+
+def _gear_height(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = _GEAR_HEIGHT_RE.search(value)
+    return int(match.group(1)) if match else None
+
+
+def _ratio_height(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = _RATIO_RE.match(value)
+    return int(match.group(1)) if match else None
 
 
 def _play_urls(value: Any, depth: int) -> list[str]:

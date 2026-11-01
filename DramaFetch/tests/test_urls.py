@@ -84,6 +84,36 @@ def test_rejections(text):
         parse_input(text)
 
 
+def _digits(text: str, zero: int) -> str:
+    """``text`` with every ASCII digit replaced by the digit of another script whose zero is the
+    code point ``zero``."""
+    return "".join(chr(zero + int(char)) if char.isdigit() else char for char in text)
+
+
+#: The series id in full-width digits (what an IME types: U+FF10…) and Arabic-Indic (U+0660…).
+FULL_WIDTH_ID = _digits(SERIES_ID, 0xFF10)
+ARABIC_INDIC_ID = _digits(SERIES_ID, 0x0660)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        FULL_WIDTH_ID,
+        ARABIC_INDIC_ID,
+        f"https://www.tiktok.com/shortdrama/episode/{FULL_WIDTH_ID}/1",
+        f"https://www.tiktok.com/shortdrama/episode/{ARABIC_INDIC_ID}/1",
+        f"https://www.tiktok.com/shortdrama/{FULL_WIDTH_ID}",
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/{_digits('1', 0xFF10)}",
+        f"https://www.tiktok.com/@user/video/{FULL_WIDTH_ID}",
+    ],
+)
+def test_only_ascii_digits_make_an_id(text):
+    """Python's \\d takes any Unicode digit: such text would pass for an id TikTok cannot have,
+    escape the de-duplication and cost a request that stops a batch. Ids are [0-9] only."""
+    with pytest.raises(UnsupportedUrlError):
+        parse_input(text)
+
+
 def test_short_link_message_tells_the_user_what_to_paste():
     with pytest.raises(UnsupportedUrlError, match="Short links"):
         parse_input("https://vm.tiktok.com/ZMabc123/")
