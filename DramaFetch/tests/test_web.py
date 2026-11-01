@@ -507,6 +507,56 @@ def test_security_headers(harness: Harness) -> None:
     assert "Python" not in headers.get("Server", "")
 
 
+@pytest.mark.parametrize("token", [None, TOKEN], ids=["no-token", "token"])
+def test_the_favicon_is_an_empty_204_before_the_token_check(
+    make_harness: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch, token: str | None
+) -> None:
+    """Build 7b: the browser asks for /favicon.ico on every page load. The page has no icon, and
+    with a token that automatic request used to cost a 401 — a console error per page load. Now
+    `GET` / `HEAD` of exactly that path is a bare 204 with the usual security headers, before
+    the token check and without reading any file; every other path keeps its rules."""
+    harness = make_harness(token=token)
+
+    def no_page() -> str:
+        raise AssertionError("the favicon answer reads no file")
+
+    monkeypatch.setattr(web_server, "index_html", no_page)
+    for method in ("GET", "HEAD"):
+        status, headers, body = harness.raw(method, "/favicon.ico")
+        assert (status, body) == (204, b""), method
+        assert "Content-Type" not in headers and "Content-Length" not in headers
+        assert "WWW-Authenticate" not in headers and "Set-Cookie" not in headers
+        assert headers["Cache-Control"] == "no-store"
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert headers["Referrer-Policy"] == "no-referrer"
+        assert headers["Content-Security-Policy"].startswith("default-src 'none'")
+    assert harness.raw("GET", "/favicon.ico?v=2")[0] == 204  # the path, not the query string
+    # the exact path, GET or HEAD only: everything else keeps its answer — the token's 401 with a
+    # token, the usual 404 without
+    elsewhere = 401 if token else 404
+    for method, path in (
+        ("GET", "/favicon.ico/"),
+        ("GET", "/favicon.icon"),
+        ("GET", "/favicon.ico.png"),
+        ("GET", "/static/favicon.ico"),
+        ("GET", "/api/favicon.ico"),
+        ("GET", "/FAVICON.ICO"),
+        ("POST", "/favicon.ico"),
+    ):
+        status, data = harness.request(method, path, {} if method == "POST" else None)
+        assert status == elsewhere, (method, path)
+        assert data["kind"] == ("auth" if token else "HttpError")
+    for path in ("/", "/api/jobs", "/api/files/nope/1"):  # HEAD stays unimplemented elsewhere
+        assert harness.raw("HEAD", path)[0] == 501, path
+    # the Host guard still comes first (a DNS-rebinding page gets nothing, not even a 204)
+    assert harness.raw("GET", "/favicon.ico", headers={"Host": "evil.example"})[0] == 403
+    status, _, body = harness.raw("HEAD", "/favicon.ico", headers={"Host": "evil.example"})
+    assert (status, body) == (403, b"")  # an answer to HEAD carries no body
+    monkeypatch.undo()
+    assert harness.request("GET", "/")[0] == 200  # the page itself: unchanged
+    assert harness.discovery.refs == []
+
+
 # ---------------------------------------------------------------------------- resolve
 
 

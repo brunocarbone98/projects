@@ -662,7 +662,8 @@ def test_a_fresh_entry_that_reads_as_locked_is_never_adopted(playwright, tmp_pat
     first listed as unlocked whose URL was denied, and which the fresh list now calls locked, a
     preview or DRM (a lapsed subscription, an expired session), is not this session's to play —
     none of the fresh item's URLs is requested, `episode.raw` stays the first list's, and the
-    episode is FAILED_UNAVAILABLE saying why (a DRM flag in the words the manifest remembers)."""
+    episode is FAILED_UNAVAILABLE saying why (a DRM flag in a payload flag's words, which the
+    manifest does not remember: see the next test)."""
     episode = _unlocked_first(_url("old"))
     first = episode.raw
     playwright.request.answer(_url("old"), FakeAPIResponse(403))
@@ -678,6 +679,53 @@ def test_a_fresh_entry_that_reads_as_locked_is_never_adopted(playwright, tmp_pat
     assert playwright.request.urls == [_url("old")]  # never the fresh item's URL
     assert downloader.refreshes == 1 and episode.raw is first
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_fresh_lists_drm_flag_is_not_remembered_the_next_run_reads_the_list_again(
+    playwright, tmp_path
+):
+    """Build 7b: the refusal of a DRM-flagged fresh entry is the PAYLOAD's flag, not the verdict
+    of a download, so the manifest does not remember it (`Manifest.drm_protected`): the next run
+    goes by the list it gets then — here TikTok serves the episode again, and it downloads."""
+    out = tmp_path / "out"
+    episode = _unlocked_first(_url("old"))
+    playwright.request.answer(_url("old"), FakeAPIResponse(403))
+    fresh = _item(3, UNLOCKED_ID, _url("drm"), free=False)
+    fresh["dramaInfo"]["drmType"] = "widevine"
+    playwright.browser.refresh_events = [_refresh_events(fresh)]
+    series = Series(SERIES_ID, "Heiress", [episode])
+    options = _options(out, thumbnail="none")
+
+    (first,) = engine.download_series(
+        series, [episode], options, downloader=_downloader(playwright), sleep=lambda seconds: None
+    )
+
+    assert first.status is DownloadStatus.FAILED_UNAVAILABLE
+    assert first.message == (
+        "protected by DRM (in a fresh episode list: isFree=false; drmType=widevine): "
+        "DramaFetch does not decrypt it"
+    )
+    assert playwright.request.urls == [_url("old")]  # never the fresh item's URL
+    target = out / f"Heiress [{SERIES_ID}]"
+    manifest = Manifest.load(target / "dramafetch.json", SERIES_ID, "Heiress")
+    assert manifest.entries[3].message == first.message
+    assert not manifest.drm_protected(3)  # a payload flag: read again next time, not remembered
+
+    # the next run (a new list, whose URL TikTok now serves): the episode is asked for, and saved
+    again = FakePlaywright()
+    (second,) = engine.download_series(
+        series,
+        [_unlocked_first(_url("new"))],
+        options,
+        downloader=_downloader(again),
+        sleep=lambda seconds: None,
+    )
+    assert again.request.urls == [_url("new")]
+    assert second.status is DownloadStatus.DONE
+    assert sorted(path.name for path in target.iterdir()) == [
+        "Heiress - Episode 03.mp4",
+        "dramafetch.json",
+    ]
 
 
 def test_a_locked_fresh_entry_found_before_any_request_costs_no_request(playwright, tmp_path):
