@@ -21,6 +21,8 @@ from dramafetch.manifest import (
 )
 from dramafetch.models import (
     DEFAULT_NAME_FORMAT,
+    DRM_MARK,
+    DRM_MESSAGE,
     DownloadOptions,
     DownloadResult,
     DownloadStatus,
@@ -589,3 +591,51 @@ def test_an_odd_complete_mark_is_forgotten_not_a_corrupt_manifest(
     assert manifest.complete_at is None and manifest.complete_episodes is None
     assert not (tmp_path / (MANIFEST_FILENAME + ".bak")).exists()
     assert read_manifest(tmp_path, "1").complete_since() is None
+
+
+# --------------------------------------------------------------------------- build 7: DRM memory
+
+
+def test_drm_protected_needs_a_drm_verdict_in_a_failed_unavailable_or_skipped_locked_entry(
+    tmp_path,
+):
+    """A DRM verdict does not change by retrying: the manifest remembers it in the message, and
+    ``drm_protected`` reads it back — only from the two statuses a DRM outcome is recorded with."""
+    manifest = Manifest(tmp_path / MANIFEST_FILENAME, "123", "Show")
+    cases = {
+        1: (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE, True),  # the download was encrypted
+        2: (DownloadStatus.SKIPPED_LOCKED, f"{DRM_MARK} (isDrm=True): …", True),  # payload DRM
+        3: (DownloadStatus.FAILED_UNAVAILABLE, "no video formats found", False),
+        4: (DownloadStatus.SKIPPED_LOCKED, "looks locked: isLocked=True", False),
+        5: (DownloadStatus.FAILED, DRM_MESSAGE, False),  # not a status a DRM verdict uses
+        6: (DownloadStatus.DONE, DRM_MESSAGE, False),
+    }
+    for number, (status, message, _) in cases.items():
+        path = None
+        if status is DownloadStatus.DONE:
+            path = tmp_path / f"E{number}.mp4"
+            path.write_bytes(b"video")
+        manifest.record(DownloadResult(_episode(number), status, path, message))
+    assert DRM_MESSAGE.startswith(DRM_MARK)
+    for number, (_, _, expected) in cases.items():
+        assert manifest.drm_protected(number) is expected, number
+    assert manifest.drm_protected(99) is False  # no entry at all
+    # the verdict survives a save and a side-effect-free read
+    again = read_manifest(tmp_path, "123")
+    assert again is not None
+    assert [n for n in cases if again.drm_protected(n)] == [1, 2]
+
+
+def test_locked_numbers_are_the_skipped_locked_entries_read_only(tmp_path):
+    manifest = Manifest(tmp_path / MANIFEST_FILENAME, "123", "Show")
+    video = tmp_path / "E1.mp4"
+    video.write_bytes(b"video")
+    manifest.record(DownloadResult(_episode(1), DownloadStatus.DONE, video, "saved"))
+    manifest.record(DownloadResult(_episode(5), DownloadStatus.SKIPPED_LOCKED, None, "locked"))
+    manifest.record(DownloadResult(_episode(3), DownloadStatus.SKIPPED_LOCKED, None, DRM_MESSAGE))
+    manifest.record(DownloadResult(_episode(4), DownloadStatus.FAILED, None, "boom"))
+    before = (tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8")
+    assert manifest.locked_numbers() == [3, 5]
+    assert manifest.done_entries() == [(1, video)]
+    assert (tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8") == before  # nothing written
+    assert Manifest(tmp_path / "empty.json", "123", None).locked_numbers() == []

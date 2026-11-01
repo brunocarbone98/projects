@@ -16,6 +16,7 @@ from typing import ClassVar
 import pytest
 
 from dramafetch import engine
+from dramafetch.catalog import parse_item_list_payload
 from dramafetch.cooldown import (
     active_cooldown,
     clear_cooldown,
@@ -28,6 +29,8 @@ from dramafetch.downloader import locked_result
 from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError
 from dramafetch.manifest import MANIFEST_FILENAME, Manifest, read_manifest, series_dir
 from dramafetch.models import (
+    DRM_MARK,
+    DRM_MESSAGE,
     THUMBNAIL_MODES,
     DiscoveryOptions,
     DownloadOptions,
@@ -2283,3 +2286,313 @@ def test_dump_raw_gives_each_series_of_a_batch_its_own_folder(tmp_path):
     discovery.events.clear()
     engine.run_batch(refs[:1], DiscoveryOptions(dump_dir=raw), _quiet(tmp_path / "b"), **common)
     assert [event[1] for event in discovery.events if event[0] == "dump"] == [raw]  # one: DIR
+
+
+# --------------------------------------------------------------------------- build 7
+# Paid episodes the user's own account unlocked are downloaded like free ones and named in the
+# report; a series skipped as complete still says what is locked (and that --recheck looks
+# again); a DRM verdict is remembered, so the next run skips that episode without a request.
+
+PAID_SERIES = "7699393770256782388"
+PAID_NAME = "Paid Love Story"
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _paid_series(logged_in=True):
+    """The fake TikTok's third series as the catalog reads its unit fixtures: episodes 1-2 free,
+    3 paid (unlocked with the session of the account that bought it, locked without), 4 locked
+    for everyone; TikTok announces 4."""
+    name = "logged_in" if logged_in else "logged_out"
+    payload = json.loads((FIXTURES / f"item_list_series3_{name}.json").read_text(encoding="utf-8"))
+    episodes = parse_item_list_payload(payload, PAID_SERIES).episodes
+    return Series(series_id=PAID_SERIES, name=PAID_NAME, episodes=episodes, total_hint=4)
+
+
+def _paid_episode(number, access="unlocked"):
+    return replace(_episode(number, ("isFree=false",)), access=access, paid=True)
+
+
+class DrmDownloader(FakeDownloader):
+    """FakeDownloader whose `drm` episodes come back the way both engines report an encrypted
+    download: FAILED_UNAVAILABLE with models.DRM_MESSAGE (the file already deleted)."""
+
+    def __init__(self, drm=(), outcomes=None):
+        super().__init__(outcomes)
+        self.drm = set(drm)
+
+    def download(self, episode, options):
+        if episode.number in self.drm and not (episode.locked and not options.include_locked):
+            self.calls.append((episode.number, options.out_dir))
+            return DownloadResult(episode, DownloadStatus.FAILED_UNAVAILABLE, message=DRM_MESSAGE)
+        return super().download(episode, options)
+
+
+def _seed_manifest(out_dir, series, *results):
+    """The series' manifest with `results` recorded, as an earlier run would have left it."""
+    directory = series_dir(out_dir, series)
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = Manifest.load(directory / MANIFEST_FILENAME, series.series_id, series.name)
+    for result in results:
+        manifest.record(result)
+    return manifest
+
+
+def _drm_failure(episode):
+    return DownloadResult(episode, DownloadStatus.FAILED_UNAVAILABLE, message=DRM_MESSAGE)
+
+
+def test_unlocked_paid_episodes_download_like_free_ones_and_the_report_names_them(tmp_path):
+    series = _paid_series(logged_in=True)
+    assert [episode.access for episode in series.episodes] == ["free", "free", "unlocked", "locked"]
+    events = []
+    downloader = RecordingDownloader(events)
+    run = _run_series(series, _quiet(tmp_path), BatchDiscovery(series), downloader=downloader)
+    assert events == [("attempt", PAID_SERIES, number) for number in (1, 2, 3)]  # 4: no request
+    assert [result.status for result in run.results] == [DownloadStatus.DONE] * 3 + [
+        DownloadStatus.SKIPPED_LOCKED
+    ]
+    report = run.report
+    assert report.complete and (report.unlocked, report.unlocked_numbers) == (1, (3,))
+    assert report.locked_numbers == (4,)
+    assert engine.report_line(report) == (
+        "complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked (3), 1 locked (4)"
+    )
+    data = engine.report_to_dict(report)
+    assert data["unlocked"] == 1 and data["unlocked_numbers"] == [3]
+    assert json.loads(json.dumps(data)) == data
+    view = engine.episode_to_dict(series.episodes[2])
+    assert (view["access"], view["paid"], view["drm"], view["locked"]) == (
+        "unlocked",
+        True,
+        False,
+        False,
+    )
+    assert engine.episode_to_dict(series.episodes[3])["access"] == "locked"
+    assert engine.episode_to_dict(series.episodes[0])["paid"] is False
+
+
+def test_without_the_session_a_paid_episode_is_locked_and_never_requested(tmp_path):
+    series = _paid_series(logged_in=False)
+    assert [episode.access for episode in series.episodes] == ["free", "free", "locked", "locked"]
+    events = []
+    run = _run_series(
+        series, _quiet(tmp_path), BatchDiscovery(series), downloader=RecordingDownloader(events)
+    )
+    assert events == [("attempt", PAID_SERIES, 1), ("attempt", PAID_SERIES, 2)]
+    assert [result.status for result in run.results[2:]] == [DownloadStatus.SKIPPED_LOCKED] * 2
+    assert run.report.unlocked == 0 and run.report.complete
+    assert engine.report_line(run.report) == "complete: 2 of 4 (2 downloaded) — 2 locked (3, 4)"
+    # --include-locked asks TikTok anyway, with the same session: TikTok decides, nothing more
+    events.clear()
+    _run_series(
+        series,
+        _quiet(tmp_path / "again", include_locked=True),
+        BatchDiscovery(series),
+        downloader=RecordingDownloader(events),
+    )
+    assert [event[2] for event in events] == [1, 2, 3, 4]
+
+
+def test_report_lines_name_the_unlocked_episodes_before_the_locked_ones():
+    series = Series(
+        SERIES_ID,
+        NAME,
+        [_episode(1), _episode(2), _paid_episode(3), _paid_episode(4)],
+        total_hint=4,
+    )
+    report = engine.series_report(series, _rows(series, {}))
+    assert (report.unlocked, report.unlocked_numbers) == (2, (3, 4))
+    assert engine.report_line(report) == (
+        "complete: 4 of 4 (4 downloaded) — 2 paid episodes your account unlocked (3, 4)"
+    )
+    # one found already on disk counts as well: an unlocked episode the run did not need again
+    rows = _rows(series, {4: DownloadStatus.SKIPPED_EXISTS})
+    assert engine.report_line(engine.series_report(series, rows)) == (
+        "complete: 4 of 4 (3 downloaded, 1 already on disk) — 2 paid episodes your account "
+        "unlocked (3, 4)"
+    )
+    # an incomplete series lists them among its details, before the locked ones; an unlocked
+    # episode that failed was not obtained and is a failure, not an unlocked one
+    mixed = Series(
+        SERIES_ID,
+        NAME,
+        [_episode(1), _episode(2), _paid_episode(3), _paid_episode(4, "locked"), _paid_episode(5)],
+    )
+    rows = _rows(mixed, {4: DownloadStatus.SKIPPED_LOCKED, 5: DownloadStatus.FAILED})
+    report = engine.series_report(mixed, rows)
+    assert report.unlocked_numbers == (3,) and not report.complete
+    assert engine.report_line(report) == (
+        "incomplete: 3 of 5 — 1 paid episode your account unlocked (3), 1 locked (4), 1 failed (5)"
+    )
+    assert engine.report_to_dict(report)["unlocked_numbers"] == [3]
+
+
+def test_the_skipped_complete_line_names_the_locked_episodes_and_points_at_recheck():
+    report = engine.SeriesReport(
+        series_id=SERIES_ID,
+        name=NAME,
+        listed=0,
+        done=0,
+        on_disk=4,
+        locked=1,
+        failed=0,
+        gaps=(),
+        complete=True,
+        skipped_complete=True,
+        stopped=None,
+        total=4,
+        locked_numbers=(4,),
+        checked_ago_s=7200,
+    )
+    assert engine.report_line(report) == (
+        "complete, nothing to do: 4 episodes already on disk, 1 locked (4) (checked 2 h ago) — "
+        "unlocked more in the TikTok app since? --recheck looks again"
+    )
+    assert engine.RECHECK_HINT == "unlocked more in the TikTok app since? --recheck looks again"
+    # without locked episodes the line is the build-6 one
+    assert engine.report_line(replace(report, locked=0, locked_numbers=())) == (
+        "complete, nothing to do: 4 episodes already on disk (checked 2 h ago)"
+    )
+
+
+def test_a_series_skipped_as_complete_says_what_is_locked_and_recheck_gets_the_unlocked_one(
+    tmp_path,
+):
+    before = _paid_series(logged_in=False)  # cookies of an account that has not bought 3 yet
+    discovery = BatchDiscovery(before)
+    first = _run_series(before, _quiet(tmp_path), discovery)
+    assert first.report.complete and first.report.locked_numbers == (3, 4)
+    downloader = FakeDownloader()
+    again = _run_series(
+        before, _quiet(tmp_path), discovery, wall=WALL + 2 * 3600, downloader=downloader
+    )
+    assert discovery.calls == [PAID_SERIES] and downloader.calls == []  # not one request
+    assert again.report.skipped_complete and again.contacted is False
+    assert [result.episode.number for result in again.results] == [1, 2]  # no rows for 3, 4
+    assert (again.report.locked, again.report.locked_numbers) == (2, (3, 4))
+    assert engine.report_line(again.report) == (
+        "complete, nothing to do: 2 episodes already on disk, 2 locked (3, 4) (checked 2 h ago) "
+        "— unlocked more in the TikTok app since? --recheck looks again"
+    )
+    manifest = read_manifest(series_dir(tmp_path, before), PAID_SERIES)
+    assert manifest.locked_numbers() == [3, 4] and manifest.complete_episodes == 2  # read-only
+    # the user bought episode 3 in the TikTok app and exported fresh cookies: --recheck
+    after = _paid_series(logged_in=True)
+    discovery.series[PAID_SERIES] = after
+    events = []
+    rechecked = _run_series(
+        after,
+        _quiet(tmp_path, recheck=True),
+        discovery,
+        wall=WALL + 3 * 3600,
+        downloader=RecordingDownloader(events),
+    )
+    assert discovery.calls == [PAID_SERIES, PAID_SERIES]
+    assert events == [("attempt", PAID_SERIES, 3)]  # 1-2 on disk, 4 still locked
+    assert engine.report_line(rechecked.report) == (
+        "complete: 3 of 4 (1 downloaded, 2 already on disk) — 1 paid episode your account "
+        "unlocked (3), 1 locked (4)"
+    )
+
+
+def test_a_remembered_drm_verdict_costs_no_request_no_pause_and_no_count(tmp_path):
+    series = make_series(numbers=(1, 2, 3, 4))
+    _seed_manifest(tmp_path, series, _drm_failure(series.episodes[1]))
+    options = DownloadOptions(out_dir=tmp_path)  # the default pacing: 4-9 s between attempts
+    downloader = FakeDownloader()
+    pacing = engine.PacingState()
+    results, sleeps, pauses = _run(series, options, downloader, pacing=pacing)
+    assert [number for number, _ in downloader.calls] == [1, 3, 4]
+    skipped = results[1]
+    assert skipped.status is DownloadStatus.SKIPPED_LOCKED and skipped.path is None
+    assert (
+        skipped.message
+        == engine.DRM_REMEMBERED_MESSAGE
+        == (
+            "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; "
+            "--include-locked tries again"
+        )
+    )
+    assert skipped.message.startswith(DRM_MARK)
+    # one pause before attempts 2 and 3 of the run (episodes 3 and 4), none for the skip
+    assert pauses == [("pace", 6.5), ("pace", 6.5)] and sleeps == [6.5, 6.5]
+    assert pacing.run_attempts == 3
+    # the skip keeps the memory: its message starts with the DRM mark too
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert manifest.entries[2].status == "skipped-locked" and manifest.drm_protected(2)
+    # --include-locked asks TikTok again, with the same session (here it serves the episode)
+    downloader = FakeDownloader()
+    _run(series, replace(options, include_locked=True), downloader)
+    assert [number for number, _ in downloader.calls] == [2]
+    assert not read_manifest(series_dir(tmp_path, series), SERIES_ID).drm_protected(2)
+
+
+def test_three_drm_failures_in_a_row_stop_the_run_and_the_next_run_skips_them(tmp_path):
+    series = make_series(numbers=(1, 2, 3, 4, 5))
+    options = _quiet(tmp_path)
+    first, _, _ = _run(series, options, DrmDownloader(drm=(1, 2, 3)))
+    assert [result.status for result in first] == [DownloadStatus.FAILED_UNAVAILABLE] * 3 + [
+        DownloadStatus.FAILED
+    ] * 2
+    assert {result.message for result in first[:3]} == {DRM_MESSAGE}
+    assert first[3].message.startswith("stopped: 3 consecutive failures (last: protected by DRM")
+    # the next run: 1-3 skipped without a request, and the skips neither count nor reset
+    pacing = engine.PacingState(consecutive_failures=1)
+    downloader = FakeDownloader()
+    skips = engine.download_series(
+        series,
+        series.episodes[:3],
+        options,
+        downloader=downloader,
+        sleep=lambda seconds: pytest.fail("a skip never pauses"),
+        rng=FixedRandom(),
+        pacing=pacing,
+    )
+    assert [result.status for result in skips] == [DownloadStatus.SKIPPED_LOCKED] * 3
+    assert {result.message for result in skips} == {engine.DRM_REMEMBERED_MESSAGE}
+    assert downloader.calls == [] and pacing.run_attempts == 0
+    assert pacing.consecutive_failures == 1
+    results, _, _ = _run(series, options, downloader)
+    assert [number for number, _ in downloader.calls] == [4, 5]
+    assert [result.status for result in results[3:]] == [DownloadStatus.DONE] * 2
+
+
+def test_a_stop_keeps_the_drm_memory_of_the_episodes_it_did_not_reach(tmp_path):
+    series = make_series(numbers=(1, 2, 3))
+    _seed_manifest(tmp_path, series, _drm_failure(series.episodes[2]))
+    results, _, _ = _run(series, _quiet(tmp_path), FakeDownloader({1: DownloadStatus.FAILED_LOGIN}))
+    assert [result.status for result in results] == [
+        DownloadStatus.FAILED_LOGIN,
+        DownloadStatus.FAILED_LOGIN,
+        DownloadStatus.SKIPPED_LOCKED,
+    ]
+    assert results[1].message.startswith("stopped: episode 1 failed-login-required")
+    assert results[2].message == engine.DRM_REMEMBERED_MESSAGE  # not "stopped: …"
+    assert read_manifest(series_dir(tmp_path, series), SERIES_ID).drm_protected(3)
+
+
+def test_a_failure_without_the_drm_mark_is_tried_again(tmp_path):
+    series = make_series(numbers=(1, 2))
+    unavailable = DownloadResult(
+        series.episodes[0], DownloadStatus.FAILED_UNAVAILABLE, message="no video formats found"
+    )
+    payload_drm = DownloadResult(
+        series.episodes[1], DownloadStatus.DONE, path=None, message=f"{DRM_MARK} but done"
+    )
+    _seed_manifest(tmp_path, series, unavailable, payload_drm)
+    downloader = FakeDownloader()
+    _run(series, _quiet(tmp_path), downloader)
+    assert [number for number, _ in downloader.calls] == [1, 2]  # neither entry is a DRM verdict
+
+
+def test_the_report_of_a_selection_counts_a_remembered_drm_episode_as_locked(tmp_path):
+    series = make_series(numbers=(1, 2, 3), total=3)
+    _seed_manifest(tmp_path, series, _drm_failure(series.episodes[2]))
+    run = _run_series(series, _quiet(tmp_path), BatchDiscovery(series), episodes_spec="1-2")
+    assert run.report.locked_numbers == (3,)
+    rows = engine.report_rows(
+        series, run.results, read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    )
+    assert rows[-1].message == engine.DRM_REMEMBERED_MESSAGE
+    # TikTok lists it as free, so the series is not complete without it — as a whole run says
+    assert engine.report_line(run.report) == "incomplete: 2 of 3 — 1 locked (3)"

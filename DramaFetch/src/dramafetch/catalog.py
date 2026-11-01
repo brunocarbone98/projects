@@ -414,7 +414,10 @@ def _as_id(value: Any) -> str | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return str(value)
+        try:
+            return str(value)
+        except ValueError:  # more digits than str() converts: no id of TikTok's
+            return None
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -428,7 +431,10 @@ def _as_int(value: Any) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip())
+        try:
+            return int(value.strip())
+        except ValueError:  # "²" is a digit to isdigit(), not to int(); or too many digits
+            return None
     return None
 
 

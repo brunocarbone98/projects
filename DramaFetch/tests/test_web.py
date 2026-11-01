@@ -86,6 +86,11 @@ COVER_HOST = "https://p16-sign-sg.tiktokcdn.com"
 SECOND_SERIES_ID = "7699393770256782399"
 SECOND_SERIES_NAME = "Second Chance Bride"
 SECOND_SERIES_URL = f"https://www.tiktok.com/shortdrama/episode/{SECOND_SERIES_ID}/1"
+# The fake TikTok's third series: episodes 1-2 free, 3 paid and unlocked by the account whose
+# cookies the server uses (the unit fixture with the session), 4 locked for everyone.
+PAID_SERIES_ID = "7699393770256782388"
+PAID_SERIES_NAME = "Paid Love Story"
+PAID_SERIES_URL = f"https://www.tiktok.com/shortdrama/episode/{PAID_SERIES_ID}/1"
 TOKEN = "correct-horse-battery-staple"
 NOT_FOUND = (404, {"error": "no such file", "kind": "HttpError"})
 STILL_RUNNING = (409, {"error": "the job is still running", "kind": "HttpError"})
@@ -161,12 +166,21 @@ def make_second_series() -> Series:
     )
 
 
+def make_paid_series() -> Series:
+    """The third series as the real catalog reads its unit fixture (with the session)."""
+    fixture = Path(__file__).parent / "fixtures" / "item_list_series3_logged_in.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    episodes = parse_item_list_payload(payload, PAID_SERIES_ID).episodes
+    return Series(series_id=PAID_SERIES_ID, name=PAID_SERIES_NAME, episodes=episodes, total_hint=4)
+
+
 class FakeDiscovery:
     """Implements the Discovery protocol: records the refs it gets (one per discovery, so the
     resolve cache is measured by their count) and answers instantly — or, with ``block`` set,
-    once that event is set; ``entered`` is set when a discovery is in progress. The second series
-    has its own list; any other id gets the first series' list. ``errors`` fails one series id;
-    ``events`` (shared with the downloader) logs ``("discover", series_id)``."""
+    once that event is set; ``entered`` is set when a discovery is in progress. The second and
+    third series have their own lists; any other id gets the first series' list. ``errors``
+    fails one series id; ``events`` (shared with the downloader) logs ``("discover",
+    series_id)``."""
 
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
@@ -186,6 +200,8 @@ class FakeDiscovery:
             raise self.error
         if ref.series_id in self.errors:
             raise self.errors[ref.series_id]
+        if ref.series_id == PAID_SERIES_ID:
+            return make_paid_series()
         return make_second_series() if ref.series_id == SECOND_SERIES_ID else make_series()
 
 
@@ -512,6 +528,46 @@ def test_resolve_ok(harness: Harness) -> None:
     assert data["series_dir"].startswith(str(harness.out_dir))
     assert SERIES_ID in data["series_dir"]
     assert harness.discovery.refs[0] == SeriesRef(SERIES_ID, episode_hint=3, source_url=SERIES_URL)
+
+
+def test_resolve_carries_the_access_of_every_episode(harness: Harness) -> None:
+    """The badges: ``access`` (free / unlocked / locked), ``paid`` and ``drm`` per episode, next
+    to the ``locked`` and ``lock_hints`` the page has always used."""
+    status, data = harness.request("POST", "/api/resolve", {"url": PAID_SERIES_URL})
+    assert status == 200, data
+    episodes = data["episodes"]
+    assert [episode["access"] for episode in episodes] == ["free", "free", "unlocked", "locked"]
+    assert [episode["paid"] for episode in episodes] == [False, False, True, True]
+    assert [episode["drm"] for episode in episodes] == [False] * 4
+    assert [episode["locked"] for episode in episodes] == [False, False, False, True]
+    assert episodes[2]["lock_hints"] == ["isFree=false", "unlockPrice=30", "isUnlocked=True"]
+    status, first = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert [episode["access"] for episode in first["episodes"]] == ["free"] * 4 + ["locked"]
+
+
+def test_download_all_available_takes_the_unlocked_episode_and_reports_it(harness: Harness) -> None:
+    """**Download all available** sends the free and the unlocked episodes (1-3 here): the paid
+    episode the account unlocked is downloaded like a free one, the locked one is never asked
+    for, and the report names both."""
+    status, job = harness.request(
+        "POST", "/api/download", {"url": PAID_SERIES_URL, "episodes": "1-3"}
+    )
+    assert status == 202, job
+    snapshot = harness.wait_for_job(job["job_id"])
+    assert snapshot["state"] == "done"
+    assert harness.downloader.series_calls == [(PAID_SERIES_ID, n) for n in (1, 2, 3)]
+    assert [(row["number"], row["status"]) for row in snapshot["results"]] == [
+        (1, "done"),
+        (2, "done"),
+        (3, "done"),
+    ]
+    report = snapshot["report"]
+    assert report["complete"] is True
+    assert (report["unlocked"], report["unlocked_numbers"]) == (1, [3])
+    assert report["locked_numbers"] == [4]
+    assert report["line"] == (
+        "complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked (3), 1 locked (4)"
+    )
 
 
 def test_resolve_accepts_a_bare_series_id(harness: Harness) -> None:
@@ -2798,7 +2854,8 @@ def test_on_disk_badges_read_the_folder_a_download_would_use(
 
 
 def test_the_report_of_a_selection_says_how_complete_the_series_is(harness: Harness) -> None:
-    """**Download selected** (and **Download all free**, which selects the free episodes): the
+    """**Download selected** (and **Download all available**, which selects the free and
+    unlocked episodes): the
     job's rows are its selection, its report the series' — the locked episode is named, what an
     earlier job saved is on disk, nothing else counts as "not downloaded"."""
     first_id, _ = harness.finished_rows(episodes="1,3-4")

@@ -1,7 +1,9 @@
 """The browser download engine end to end: a real headless Chromium fetches episodes from the fake
 TikTok's CDN inside one browser session (`pytest -m integration`; skipped without a browser) — and
 the integrity checks against it: a transfer cut short, a video far shorter than announced, the
-quality modes, the cooldown a rate limit starts and the CLI's refusal under it."""
+quality modes, the cooldown a rate limit starts and the CLI's refusal under it; the paid third
+series with and without the session cookie (what THIS account unlocked downloads, what it did not
+is never requested), an encrypted episode refused and remembered, and a batch of all three."""
 
 from __future__ import annotations
 
@@ -27,8 +29,9 @@ from dramafetch.catalog import (
 from dramafetch.cooldown import active_cooldown, clear_cooldown
 from dramafetch.downloader import existing_episode_file
 from dramafetch.downloader_browser import BrowserDownloader
-from dramafetch.media import INCOMPLETE_PREFIX
-from dramafetch.models import DownloadOptions, DownloadStatus, Series
+from dramafetch.manifest import read_manifest
+from dramafetch.media import INCOMPLETE_PREFIX, drm_problem_in
+from dramafetch.models import DRM_MARK, DRM_MESSAGE, DownloadOptions, DownloadStatus, Series
 from dramafetch.thumbnails import EMBED_SUFFIX, cover_sidecar, extract_cover
 
 from .fake_tiktok import (
@@ -41,9 +44,13 @@ from .fake_tiktok import (
     SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
+    THIRD_ITEMS,
+    THIRD_SERIES_ID,
+    THIRD_SERIES_NAME,
     TOTAL_EPISODES,
     FakeTikTok,
     cover_bytes,
+    drm_media_bytes,
     media_bytes,
 )
 
@@ -551,10 +558,19 @@ def batch_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 def _batch_argv(server: FakeTikTok, out: Path) -> list[str]:
     """Both series (a URL and a bare id), the browser engine, no pacing but a 1 s series rest."""
-    return [
+    return _download_argv(
+        server, out, f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1", SECOND_SERIES_ID
+    )
+
+
+def _download_argv(
+    server: FakeTikTok, out: Path, *refs: str, cookies: Path | None = None
+) -> list[str]:
+    """`download` of `refs` with the browser engine against the fake, no pacing but a 1 s series
+    rest; with `cookies`, in the session of the account they belong to."""
+    argv = [
         "download",
-        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1",
-        SECOND_SERIES_ID,
+        *refs,
         "--engine",
         "browser",
         "--strategy",
@@ -580,6 +596,9 @@ def _batch_argv(server: FakeTikTok, out: Path) -> list[str]:
         "--out",
         str(out),
     ]
+    if cookies is not None:
+        argv += ["--cookies", str(cookies)]
+    return argv
 
 
 def _table_statuses(out: str) -> list[str]:
@@ -639,7 +658,12 @@ def test_a_cli_batch_downloads_both_series_one_after_the_other_and_then_costs_no
 
     again = second_run.out.splitlines()
     assert f"[1/2] {FIRST_FOLDER}: 4 episode(s) -> {out / FIRST_FOLDER}" in again
-    assert "complete, nothing to do: 4 episodes already on disk (checked just now)" in again
+    # the skip says that episode 5 was locked when the series was found complete, and how to
+    # look again after unlocking it in the TikTok app; a series without locked ones says nothing
+    assert (
+        "complete, nothing to do: 4 episodes already on disk, 1 locked (5) (checked just now) — "
+        "unlocked more in the TikTok app since? --recheck looks again"
+    ) in again
     assert "complete, nothing to do: 3 episodes already on disk (checked just now)" in again
     assert _table_statuses(second_run.out) == ["skipped (complete)", "skipped (complete)"]
     assert "resting" not in second_run.err
@@ -669,3 +693,259 @@ def test_a_rate_limit_in_the_first_series_stops_the_cli_batch_before_the_second(
     assert _table_statuses(captured.out) == ["incomplete", "not started"]
     assert any(line.endswith("; stopped: episode 1 failed-rate-limited") for line in lines)
     assert batch_sleeps == [] and "resting" not in captured.err  # no rest: the batch ended
+
+
+# ------------------------------------------------------- paid episodes, the session, and DRM
+
+THIRD_FOLDER = f"{THIRD_SERIES_NAME} [{THIRD_SERIES_ID}]"
+#: What an episode an earlier run found encrypted gets instead of a request.
+REMEMBERED_DRM = (
+    "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; "
+    "--include-locked tries again"
+)
+RECHECK = "unlocked more in the TikTok app since? --recheck looks again"
+
+
+def _row(number: int, status: str, detail: str) -> str:
+    """One episode line of the CLI: `E03  done                   <path> + cover embedded`."""
+    return f"E{number:02d}  {status:<22} {detail}"
+
+
+def _third_name(number: int) -> str:
+    return f"{THIRD_SERIES_NAME} - Episode {number:02d}.mp4"
+
+
+def _media_paths(records: list[Any]) -> list[str]:
+    return [r.path for r in records if r.path.startswith(("/cdn/", "/cover/"))]
+
+
+def test_with_the_session_the_paid_episode_the_account_unlocked_downloads_like_a_free_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The paid third series with the cookies file. The list TikTok serves THIS session says
+    episode 3 is sold (`isFree: false`, `unlockPrice: 30`) but unlocked by the account
+    (`isUnlocked: true`) and carries its play URLs, so it downloads like episodes 1-2 — in the
+    session, one media and one cover request each — and the report names it as a paid episode
+    the account unlocked; episode 4, locked for everyone, is never requested. The session cookie
+    arrived with every request; its value is nowhere in the output."""
+    out = tmp_path / "out"
+    with FakeTikTok() as server:
+        code = cli.main(
+            _download_argv(server, out, THIRD_SERIES_ID, cookies=_cookies_txt(tmp_path))
+        )
+        captured = capsys.readouterr()
+        requests = server.series_requests(THIRD_SERIES_ID)
+        media = _media_paths(server.requests)
+
+    assert code == 0
+    folder = out / THIRD_FOLDER
+    lines = captured.out.splitlines()
+    for number, item in enumerate(THIRD_ITEMS[:3], start=1):
+        name = _third_name(number)
+        _assert_video_file(folder / name, name, item, embedded=True)
+        assert _row(number, "done", f"{folder / name} + cover embedded") in lines
+    fourth = next(line for line in lines if line.startswith("E04  "))
+    assert fourth.startswith(_row(4, "skipped-locked", "looks locked: "))
+    assert "isLocked=True" in fourth
+    assert (
+        "complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked (3), 1 locked (4)"
+    ) in lines
+    assert media == [
+        path for item in THIRD_ITEMS[:3] for path in (f"/cdn/{item}/0.mp4", f"/cover/{item}.jpg")
+    ]
+    assert requests and all(r.logged_in for r in requests)  # the cookie arrived, every time
+    assert not [r.path for r in requests if THIRD_ITEMS[3] in r.path]  # episode 4: never asked
+    assert sorted(p.name for p in folder.iterdir()) == [
+        *(_third_name(n) for n in (1, 2, 3)),
+        "dramafetch.json",
+    ]
+    assert SESSION_VALUE not in captured.out + captured.err
+
+
+def test_without_the_session_the_paid_episodes_are_locked_and_never_requested(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same series without a cookies file: the list TikTok serves an anonymous session marks
+    episode 3 `isLocked: true` and carries no play URL for it — nor for 4 — so both are listed as
+    locked and skipped without a single request (not their media, not their covers); episodes 1-2
+    download. Every episode this session may play is on disk: the series is complete, and the
+    report names the two locked ones."""
+    out = tmp_path / "out"
+    with FakeTikTok() as server:
+        code = cli.main(_download_argv(server, out, THIRD_SERIES_ID))
+        captured = capsys.readouterr()
+        requests = server.series_requests(THIRD_SERIES_ID)
+
+    assert code == 0
+    folder = out / THIRD_FOLDER
+    lines = captured.out.splitlines()
+    for number, item in enumerate(THIRD_ITEMS[:2], start=1):
+        name = _third_name(number)
+        _assert_video_file(folder / name, name, item, embedded=True)
+        assert _row(number, "done", f"{folder / name} + cover embedded") in lines
+    for number in (3, 4):
+        row = next(line for line in lines if line.startswith(f"E{number:02d}  "))
+        assert row.startswith(_row(number, "skipped-locked", "looks locked: "))
+        assert "isLocked=True" in row
+    assert "complete: 2 of 4 (2 downloaded) — 2 locked (3, 4)" in lines
+    assert _media_paths(requests) == [
+        path for item in THIRD_ITEMS[:2] for path in (f"/cdn/{item}/0.mp4", f"/cover/{item}.jpg")
+    ]
+    assert not [r.path for r in requests if THIRD_ITEMS[2] in r.path or THIRD_ITEMS[3] in r.path]
+    assert requests and not any(r.logged_in for r in requests)
+    assert sorted(p.name for p in folder.iterdir()) == [
+        _third_name(1),
+        _third_name(2),
+        "dramafetch.json",
+    ]
+
+
+def test_the_browser_engine_refuses_encrypted_media_even_without_verification(
+    tmp_path: Path,
+) -> None:
+    """`drm_media` on episode 1 of the main series, with `verify=False` (`--no-verify`): the DRM
+    check is no part of the verification, it always runs. One request — the H.264 rendition; the
+    bytevc1 mirror is not tried (it would serve the same encrypted file), no list is refreshed,
+    no cover is requested — and nothing is written."""
+    with FakeTikTok(drm_media=frozenset({(SERIES_ID, 1)})) as server:
+        series = _series_from_server(server)
+        assert len(play_url_candidates(series.episode(1).raw)) == 2
+        before = len(server.requests)
+        with BrowserDownloader() as downloader:
+            result = downloader.download(
+                series.episode(1), _options(server, tmp_path, verify=False)
+            )
+            refreshes = downloader.refreshes
+        after = server.requests[before:]
+
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
+    assert result.message == DRM_MESSAGE and result.message.startswith(DRM_MARK)
+    assert [r.path for r in after] == [MEDIA_1]
+    assert refreshes == 0
+    series_dir = tmp_path / "series"
+    assert not series_dir.exists() or list(series_dir.iterdir()) == []
+    assert drm_problem_in(drm_media_bytes(ITEM_1, "0")) == DRM_MESSAGE  # what the CDN sent
+
+
+def test_an_encrypted_episode_is_refused_kept_nowhere_and_skipped_next_time_without_a_request(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`drm_media`: the CDN serves episode 3 — the one the account bought — encrypted (`encv` /
+    `enca` sample entries, a `pssh` box). The browser engine checks the body in memory before
+    writing anything: failed-unavailable with the DRM message, nothing of it on disk (no video, no
+    `.part`, no cover), neither its second rendition nor its cover requested; the run goes on (one
+    failure is no streak). The manifest remembers the verdict, so the next run — which lists the
+    series again, as it is not complete — skips episode 3 as locked without one media request."""
+    out = tmp_path / "out"
+    folder = out / THIRD_FOLDER
+    third = THIRD_ITEMS[2]
+    with FakeTikTok(drm_media=frozenset({(THIRD_SERIES_ID, 3)})) as server:
+        argv = _download_argv(server, out, THIRD_SERIES_ID, cookies=_cookies_txt(tmp_path))
+        assert cli.main(argv) == 2  # a failed episode
+        first = capsys.readouterr()
+        first_media = _media_paths(server.requests)
+        before = len(server.requests)
+        assert cli.main(argv) == 0
+        second = capsys.readouterr()
+        rerun = server.requests[before:]
+
+    lines = first.out.splitlines()
+    assert _row(3, "failed-unavailable", DRM_MESSAGE) in lines
+    assert "incomplete: 2 of 4 — 1 locked (4), 1 failed (3)" in lines
+    assert [path for path in first_media if third in path] == [f"/cdn/{third}/0.mp4"]
+    assert sorted(p.name for p in folder.iterdir()) == [
+        _third_name(1),
+        _third_name(2),
+        "dramafetch.json",
+    ]
+    manifest = read_manifest(folder, THIRD_SERIES_ID)
+    assert manifest is not None and manifest.drm_protected(3)
+
+    again = second.out.splitlines()
+    assert _row(3, "skipped-locked", REMEMBERED_DRM) in again
+    assert any(r.path == "/api/drama/episode/item_list/" for r in rerun)  # listed again
+    assert _media_paths(rerun) == []  # and not one media or cover request
+    assert sorted(p.name for p in folder.iterdir()) == [
+        _third_name(1),
+        _third_name(2),
+        "dramafetch.json",
+    ]
+
+
+def test_a_cli_batch_of_all_three_series_with_the_session_then_costs_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], batch_sleeps: list[float]
+) -> None:
+    """The three series in one `download` with the cookies file: each resolved right before its
+    own downloads (all requests of one series before any of the next), a 1 s rest between two
+    series, every free episode and the one the account unlocked on disk, every series complete;
+    the same batch again is skipped as complete with ZERO requests, and the two series with
+    locked episodes say how to look again."""
+    out = tmp_path / "out"
+    refs = (
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1",
+        SECOND_SERIES_ID,
+        f"https://www.tiktok.com/shortdrama/episode/{THIRD_SERIES_ID}/3",
+    )
+    with FakeTikTok() as server:
+        argv = _download_argv(server, out, *refs, cookies=_cookies_txt(tmp_path))
+        assert cli.main(argv) == 0
+        first_run = capsys.readouterr()
+        groups = [
+            {id(record) for record in server.series_requests(series_id)}
+            for series_id in (SERIES_ID, SECOND_SERIES_ID, THIRD_SERIES_ID)
+        ]
+        owners = "".join(
+            str(index + 1)
+            for record in server.requests
+            for index, group in enumerate(groups)
+            if id(record) in group
+        )
+        assert all(groups)
+        assert owners == "".join(str(i + 1) * len(group) for i, group in enumerate(groups))
+        locked_items = ("7699400000000000005", THIRD_ITEMS[3])
+        assert not [r.path for r in server.requests if any(i in r.path for i in locked_items)]
+        requests_after_first_run = len(server.requests)
+
+        started = time.monotonic()
+        assert cli.main(argv) == 0
+        second_run = capsys.readouterr()
+        assert len(server.requests) == requests_after_first_run  # ZERO requests the second time
+        assert time.monotonic() - started < 5  # no browser was even started
+
+    lines = first_run.out.splitlines()
+    assert lines[0] == f"[1/3] {FIRST_FOLDER}: 5 episode(s) -> {out / FIRST_FOLDER}"
+    assert f"[2/3] {SECOND_FOLDER}: 3 episode(s) -> {out / SECOND_FOLDER}" in lines
+    assert f"[3/3] {THIRD_FOLDER}: 4 episode(s) -> {out / THIRD_FOLDER}" in lines
+    assert "complete: 4 of 5 (4 downloaded) — 1 locked (5)" in lines
+    assert "complete: 3 of 3 (3 downloaded)" in lines
+    assert (
+        "complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked (3), 1 locked (4)"
+    ) in lines
+    assert _table_statuses(first_run.out) == ["complete", "complete", "complete"]
+    assert first_run.err.splitlines().count("  … resting 1 s before the next series") == 2
+    assert batch_sleeps == [1.0, 1.0]  # one rest between two series, recorded, never slept
+    main_items = (ITEM_1, ITEM_2, "7699400000000000003", "7699400000000000004")
+    for folder, series_name, items in (
+        (FIRST_FOLDER, SERIES_NAME, main_items),
+        (SECOND_FOLDER, SECOND_SERIES_NAME, SECOND_ITEMS),
+        (THIRD_FOLDER, THIRD_SERIES_NAME, THIRD_ITEMS[:3]),
+    ):
+        for number, item in enumerate(items, start=1):
+            name = f"{series_name} - Episode {number:02d}.mp4"
+            _assert_video_file(out / folder / name, name, item, embedded=True)
+    assert SESSION_VALUE not in first_run.out + first_run.err
+
+    again = second_run.out.splitlines()
+    assert f"[3/3] {THIRD_FOLDER}: 3 episode(s) -> {out / THIRD_FOLDER}" in again
+    assert (
+        "complete, nothing to do: 4 episodes already on disk, 1 locked (5) (checked just now) — "
+        f"{RECHECK}"
+    ) in again
+    assert "complete, nothing to do: 3 episodes already on disk (checked just now)" in again
+    assert (
+        "complete, nothing to do: 3 episodes already on disk, 1 locked (4) (checked just now) — "
+        f"{RECHECK}"
+    ) in again
+    assert _table_statuses(second_run.out) == ["skipped (complete)"] * 3
+    assert "resting" not in second_run.err
+    assert batch_sleeps == [1.0, 1.0]  # nothing more
