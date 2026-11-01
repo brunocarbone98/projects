@@ -922,6 +922,29 @@ def test_failure_stop_skips_an_episode_whose_file_is_already_on_disk(tmp_path):
     assert results[4].message.startswith("stopped: ")
 
 
+def test_a_stop_never_adopts_an_encrypted_file_as_the_episode(tmp_path):
+    """The stop gives a remaining episode the result its downloader would have given
+    (`downloader.existing_file_result`): a file under its name with encrypted tracks is deleted and
+    FAILED_UNAVAILABLE with the DRM message — never `skipped-exists`, which the manifest would
+    count as on disk, the web serve and a later run skip — and the manifest remembers it."""
+    from encrypted_mp4 import encrypted_mp4
+
+    series = make_series(numbers=(1, 2, 3, 4, 5))
+    target = series_dir(tmp_path, series)
+    target.mkdir(parents=True)
+    encrypted = target / f"{NAME} - Episode 05.mp4"
+    encrypted.write_bytes(encrypted_mp4())
+    downloader = FakeDownloader(dict.fromkeys((1, 2, 3), DownloadStatus.FAILED))
+
+    results, _, _ = _run(series, DownloadOptions(out_dir=tmp_path), downloader)
+
+    assert [r.status.value for r in results] == ["failed"] * 4 + ["failed-unavailable"]
+    assert (results[4].message, results[4].path) == (DRM_MESSAGE, None)
+    assert not encrypted.exists() and [call[0] for call in downloader.calls] == [1, 2, 3]
+    manifest = read_manifest(target, SERIES_ID)
+    assert manifest.drm_protected(5) and manifest.done_entries() == []
+
+
 def test_cookie_problem_failures_are_not_a_failure_streak(tmp_path):
     """The up-front cookies-file refusal fails every network episode without a request; it must
     not read as "3 consecutive failures" (the messages name the real cause)."""

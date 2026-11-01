@@ -1060,6 +1060,110 @@ def test_an_encrypted_file_the_os_will_not_delete_is_reported_with_what_to_do(
     assert _names(tmp_path) == [f"{STEM}.mp4"]  # the cover went; the video is left to the user
 
 
+def test_an_encrypted_file_already_under_the_episodes_name_is_deleted_never_adopted(
+    tmp_path, monkeypatch
+):
+    """A file found under the episode's name is checked for encrypted tracks before it is taken
+    for the episode (one a failed run or a refused deletion left there): deleted with its cover
+    and FAILED_UNAVAILABLE with the DRM message — no request, never `skipped-exists`, so it is
+    never counted as on disk, served or zipped. A dry run changes nothing; a plain file is
+    skipped as ever; a file the OS will not delete is reported again with what to do."""
+    video = tmp_path / f"{STEM}.mp4"
+    video.write_bytes(ENCRYPTED)
+    (tmp_path / f"{STEM}.jpeg").write_bytes(JPEG)
+    factory, log = make_factory()
+    downloader = YtDlpDownloader(factory)
+
+    dry = downloader.download(EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True))
+    assert dry.status is DownloadStatus.SKIPPED_EXISTS and video.exists()
+
+    result = downloader.download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert (result.status, result.message) == (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE)
+    assert result.path is None and log == [] and _names(tmp_path) == []
+
+    video.write_bytes(TINY_MP4)  # an ordinary file under that name: skipped as ever
+    plain = downloader.download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert (plain.status, plain.path) == (DownloadStatus.SKIPPED_EXISTS, video)
+
+    def refuse(path, **_):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    video.write_bytes(ENCRYPTED)
+    monkeypatch.setattr(media_module, "discard", refuse)
+    again = downloader.download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert again.status is DownloadStatus.FAILED_UNAVAILABLE
+    assert again.message.startswith(f"{DRM_MESSAGE} (could not delete {STEM}.mp4: ")
+    assert log == []
+
+
+class _WritesThenFails(FakeYdl):
+    """yt-dlp writing the video under the episode's name and only then raising (or exiting
+    non-zero): a postprocessor, a rename, an error after the transfer."""
+
+    def download(self, urls):
+        error, self.error = self.error, None
+        retcode = super().download(urls)
+        if error is not None:
+            raise error
+        return retcode
+
+
+@pytest.mark.parametrize(
+    ("error", "retcode", "status"),
+    [
+        pytest.param(
+            RuntimeError("ERROR: Postprocessing: Conversion failed!"),
+            0,
+            DownloadStatus.FAILED_UNAVAILABLE,
+            id="raises",
+        ),
+        pytest.param(None, 1, DownloadStatus.FAILED_UNAVAILABLE, id="exit-code"),
+        pytest.param(
+            RuntimeError("ERROR: [TikTok] x: No video formats found!"),
+            0,
+            DownloadStatus.FAILED_UNAVAILABLE,
+            id="unavailable",
+        ),
+        # a status that stops the run is kept (the stop and the cooldown matter more)
+        pytest.param(
+            RuntimeError("ERROR: HTTP Error 403: Forbidden"),
+            0,
+            DownloadStatus.FAILED_BLOCKED,
+            id="403",
+        ),
+    ],
+)
+def test_a_failed_run_never_leaves_an_encrypted_file_under_the_episodes_name(
+    tmp_path, error, retcode, status
+):
+    log = []
+
+    def factory(params):
+        return _WritesThenFails(
+            params,
+            log,
+            error=error,
+            retcode=retcode,
+            video_bytes=ENCRYPTED,
+            sidecar=(".jpeg", JPEG),
+        )
+
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is status and result.path is None
+    if status is DownloadStatus.FAILED_UNAVAILABLE:
+        assert result.message == DRM_MESSAGE  # the verdict the manifest remembers
+    else:
+        assert result.message.startswith(BLOCKED_MESSAGE)
+    assert _names(tmp_path) == [] and len(log) == 1
+    # a plain file left by a failed run stays (a rerun skips it, as before): no false verdict
+    plain_log = []
+    plain = YtDlpDownloader(
+        lambda params: _WritesThenFails(params, plain_log, error=error, retcode=retcode)
+    ).download(EPISODE, DownloadOptions(out_dir=tmp_path / "plain"))
+    assert plain.status is not DownloadStatus.DONE and not plain.message.startswith(DRM_MARK)
+    assert _names(tmp_path / "plain") == [f"{STEM}.mp4"]
+
+
 def test_a_payload_flagged_drm_episode_is_skipped_with_the_drm_wording(tmp_path):
     drm = Episode(
         number=6,

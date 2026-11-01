@@ -622,6 +622,89 @@ def test_the_fresh_list_is_final_for_episodes_it_carries_without_a_play_url(play
     assert downloader.refreshes == 1  # not in the fresh list: another page load would not list it
 
 
+UNLOCKED_ID = "7699400000000000003"
+
+
+def _unlocked_first(*urls: str) -> Episode:
+    """Episode 3 as the first list gave it: sold, and this account's entitlement flag says yes."""
+    first = _item(3, UNLOCKED_ID, *urls, free=False)
+    first["dramaInfo"]["isUnlocked"] = True
+    return _episode(
+        3, first, access="unlocked", paid=True, lock_hints=("isFree=false", "isUnlocked=True")
+    )
+
+
+@pytest.mark.parametrize(
+    ("flags", "reason"),
+    [
+        pytest.param(
+            {"isUnlocked": False, "isPreview": True},
+            "no playable stream: locked, region-restricted or not logged in (locked in a fresh "
+            "episode list: isFree=false; isUnlocked=False; isPreview=True)",
+            id="lapsed-preview",
+        ),
+        pytest.param(
+            {"isLocked": True, "needPay": True},
+            "no playable stream: locked, region-restricted or not logged in (locked in a fresh "
+            "episode list: isFree=false; isLocked=True; needPay=True)",
+            id="lapsed-locked",
+        ),
+        pytest.param(
+            {"drmType": "widevine"},
+            "protected by DRM (in a fresh episode list: isFree=false; drmType=widevine): "
+            "DramaFetch does not decrypt it",
+            id="drm-flag",
+        ),
+    ],
+)
+def test_a_fresh_entry_that_reads_as_locked_is_never_adopted(playwright, tmp_path, flags, reason):
+    """The fresh item is access-checked like the first list's (`catalog.access_of`): an episode
+    first listed as unlocked whose URL was denied, and which the fresh list now calls locked, a
+    preview or DRM (a lapsed subscription, an expired session), is not this session's to play —
+    none of the fresh item's URLs is requested, `episode.raw` stays the first list's, and the
+    episode is FAILED_UNAVAILABLE saying why (a DRM flag in the words the manifest remembers)."""
+    episode = _unlocked_first(_url("old"))
+    first = episode.raw
+    playwright.request.answer(_url("old"), FakeAPIResponse(403))
+    fresh = _item(3, UNLOCKED_ID, _url("preview"), free=False)
+    fresh["dramaInfo"].update(flags)
+    playwright.browser.refresh_events = [_refresh_events(fresh)]
+    downloader = _downloader(playwright)
+
+    result = downloader.download(episode, _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
+    assert result.message == reason
+    assert playwright.request.urls == [_url("old")]  # never the fresh item's URL
+    assert downloader.refreshes == 1 and episode.raw is first
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_locked_fresh_entry_found_before_any_request_costs_no_request(playwright, tmp_path):
+    """The same check when the first list's URL had expired (the refresh comes first): no request
+    at all. With `--include-locked` the fresh entry is asked for like any locked episode — with
+    the same session; TikTok decides."""
+    episode = _unlocked_first(_url("old", int(NOW) - 5))
+    fresh = _item(3, UNLOCKED_ID, _url("fresh"), free=False)
+    fresh["dramaInfo"]["isLocked"] = True
+    playwright.browser.refresh_events = [_refresh_events(fresh)]
+    downloader = _downloader(playwright)
+
+    result = downloader.download(episode, _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE
+    assert result.message.endswith("(locked in a fresh episode list: isFree=false; isLocked=True)")
+    assert playwright.request.calls == [] and downloader.refreshes == 1
+
+    asked = FakePlaywright()
+    asked.browser.refresh_events = [_refresh_events(fresh)]
+    again = _unlocked_first(_url("old", int(NOW) - 5))
+    result = _downloader(asked).download(again, _options(tmp_path, include_locked=True))
+    assert result.status is DownloadStatus.DONE
+    assert asked.request.urls == [_url("fresh")]
+    assert again.raw is not None and again.raw["video"]["playAddr"] == _url("fresh")
+
+
 def test_at_most_four_requests_per_episode_over_both_lists(playwright, tmp_path):
     """Twelve mirrors all answering 403 are not twelve requests: the budget stops the episode
     after MAX_GETS_PER_EPISODE, and a fresh list is only fetched while there is budget left to
@@ -1823,6 +1906,40 @@ def test_a_payload_flagged_drm_episode_is_skipped_without_a_browser(playwright, 
     result = _downloader(playwright).download(drm, _options(tmp_path))
     assert result.status is DownloadStatus.SKIPPED_LOCKED
     assert result.message == "protected by DRM (isDrm=1): DramaFetch does not decrypt it"
+    assert playwright.launches == 0 and playwright.request.calls == []
+
+
+def test_an_encrypted_file_already_under_the_episodes_name_is_deleted_without_a_browser(
+    playwright, tmp_path
+):
+    """The skip rule shared with yt-dlp (`downloader.existing_file_result`): a file found under
+    the episode's name is checked for encrypted tracks before it is taken for the episode — one
+    the yt-dlp engine could not delete, say. Deleted, FAILED_UNAVAILABLE with the DRM message, no
+    browser, no request; the manifest then remembers the verdict."""
+    video = tmp_path / f"{STEM}.mp4"
+    video.write_bytes(ENCRYPTED_VIDEO)
+    episode = _episode(1, _item(1, ITEM_1, _url("ep1")))
+
+    result = _downloader(playwright).download(episode, _options(tmp_path))
+
+    assert (result.status, result.message) == (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE)
+    assert not video.exists() and playwright.launches == 0 and playwright.request.calls == []
+
+    # through the engine: the manifest remembers it, and nothing encrypted stays
+    out = tmp_path / "out"
+    target = out / f"Heiress [{SERIES_ID}]"
+    target.mkdir(parents=True)
+    (target / f"{STEM}.mp4").write_bytes(ENCRYPTED_VIDEO)
+    (first,) = engine.download_series(
+        Series(SERIES_ID, "Heiress", [episode]),
+        [episode],
+        _options(out),
+        downloader=_downloader(playwright),
+        sleep=lambda seconds: pytest.fail("no request, no pause"),
+    )
+    assert (first.status, first.message) == (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE)
+    assert Manifest.load(target / "dramafetch.json", SERIES_ID, "Heiress").drm_protected(1)
+    assert sorted(p.name for p in target.iterdir()) == ["dramafetch.json"]
     assert playwright.launches == 0 and playwright.request.calls == []
 
 
