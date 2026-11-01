@@ -683,7 +683,7 @@ def test_resolve_is_cached_for_fifteen_minutes(harness: Harness) -> None:
 
 
 def test_download_reuses_the_resolved_list(harness: Harness) -> None:
-    """Resolve, then Download all free: one discovery, not two — the point of the cache; a
+    """Resolve, then Download all available: one discovery, not two — the point of the cache; a
     download without a resolve first fills the cache for the next call."""
     assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[0] == 200
     job = harness.start_download(episodes="1-2")
@@ -699,6 +699,52 @@ def test_download_reuses_the_resolved_list(harness: Harness) -> None:
     status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
     assert status == 200 and data["from_cache"] is True
     assert len(harness.discovery.refs) == 2
+
+
+def test_a_cached_list_belongs_to_the_session_that_resolved_it(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The cache is per session: a list says what TikTok served the session that resolved it
+    (which paid episodes it unlocked, and their signed play URLs), so a cookies file exported
+    again — another account, or this one after unlocking an episode — makes the next resolve,
+    download or batch job resolve anew instead of handing it the old session's list. The key is
+    the file's path, inode, size and modification time (`web_server.session_key`), never its
+    content; an unchanged file still costs one discovery for Resolve + Download."""
+    import os
+
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    harness.server.discovery_options = replace(
+        harness.server.discovery_options, cookies_file=cookies
+    )
+    key = web_server.session_key(harness.server.discovery_options)
+    assert key.startswith(str(cookies.resolve())) and "Netscape" not in key
+    assert web_server.session_key(DiscoveryOptions()) == ""
+    assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[1]["from_cache"] is False
+    job = harness.start_download(episodes="1")
+    assert harness.wait_for_job(job["job_id"])["state"] == "done"
+    assert len(harness.discovery.refs) == 1  # same session: the cached list
+
+    # the cookies of another session exported to the same file
+    cookies.write_text("# Netscape HTTP Cookie File\n# another session\n", encoding="utf-8")
+    os.utime(cookies, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    job = harness.start_download(episodes="2")
+    assert harness.wait_for_job(job["job_id"])["state"] == "done"
+    assert len(harness.discovery.refs) == 2  # not the old session's list
+    status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200 and data["from_cache"] is True  # the list of the current session
+    assert len(harness.discovery.refs) == 2
+
+    # the same size, only a new modification time: still another export
+    os.utime(cookies, ns=(1_700_000_000_000_000_001, 1_700_000_000_000_000_001))
+    snapshots = harness.batch_snapshots(harness.start_batch([SERIES_URL]))
+    assert [snapshot["state"] for snapshot in snapshots] == ["done"]
+    assert len(harness.discovery.refs) == 3  # a batch job's lazy resolve follows the rule too
+
+    # the file gone is another session as well (the discovery then runs without it)
+    cookies.unlink()
+    assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[1]["from_cache"] is False
+    assert len(harness.discovery.refs) == 4
 
 
 def test_refresh_bypasses_the_cache(harness: Harness) -> None:

@@ -47,12 +47,16 @@ status; cookie and token values never appear in responses or logs (the log says 
 ``token: none``). Resolving a series runs synchronously inside the request: the discovery opens
 TikTok in a browser and usually takes 10-40 s, so the page shows a waiting note.
 
-Fewer requests to TikTok: a resolved episode list is kept in memory for ``SERIES_CACHE_TTL_S``
-(15 minutes; the ``SERIES_CACHE_SIZE`` most recently resolved series) and reused by both
+Fewer requests to TikTok: a resolved episode list is kept in memory for ``SERIES_CACHE_TTL_S`` (15
+minutes; the ``SERIES_CACHE_SIZE`` most recently resolved series) and reused by both
 ``POST /api/resolve`` and ``POST /api/download``, so "Resolve" followed by "Download all available"
-costs one discovery, not two; ``{"url": ..., "refresh": true}`` on ``/api/resolve`` fetches the
-list again, and a failed resolve is never cached. Discoveries run one at a time. And after TikTok
-refused a request (HTTP 403, HTTP 429, a captcha — recorded by the engines and the CLI in the
+costs one discovery, not two; ``{"url": ..., "refresh": true}`` on ``/api/resolve`` fetches the list
+again, and a failed resolve is never cached. A list is reused only for the session that resolved it
+(:func:`session_key`: the cookies file's path, inode, size and modification time, never its
+content): a ``cookies.txt`` exported again — another account, or this one after unlocking an episode
+— makes the next resolve, download or batch job fetch the list anew, so no download ever gets
+another session's access decisions or signed play URLs. Discoveries run one at a time. And after
+TikTok refused a request (HTTP 403, HTTP 429, a captcha — recorded by the engines and the CLI in the
 cooldown file, see ``dramafetch.cooldown``) both routes refuse to contact TikTok until the cooldown
 ends: ``429 {"error": <the cooldown message>, "kind": "cooldown", "hint": ...}`` with a
 ``Retry-After`` header in seconds. ``/api/resolve`` still serves a cached list then (no request
@@ -282,13 +286,35 @@ class ResolvedSeries:
     from_cache: bool
 
 
+def session_key(options: DiscoveryOptions) -> str:
+    """Which TikTok session a list is resolved with, as far as the server can tell without reading
+    it: the cookies file's resolved path, inode, size and modification time — never its content
+    (``""`` without a cookies file, a fixed text for one that cannot be read). A list belongs to
+    the session that resolved it: its access decisions (``free`` / ``unlocked`` / ``locked``) and
+    its signed play URLs are what TikTok served THAT session, so a ``cookies.txt`` exported again —
+    another account, or this one after unlocking an episode in the TikTok app — must not inherit
+    the old one's list (:class:`SeriesCache` treats another key as a miss)."""
+    cookies = options.cookies_file
+    if cookies is None:
+        return ""
+    try:
+        path = cookies.expanduser().resolve()
+        info = path.stat()
+    except (OSError, RuntimeError):  # missing, unreadable, a symlink loop
+        return f"{cookies}: not readable"
+    return f"{path}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+
+
 class SeriesCache:
     """The resolved episode lists by series id, each kept for ``ttl_s`` seconds after its discovery.
 
     In memory, per process, bounded to the ``size`` most recently resolved series (the oldest
     entry makes room), thread-safe (requests are handled in threads). Only successful resolves are
     stored — a failure never is — and an entry older than ``ttl_s`` is dropped when it is asked
-    for. ``clock`` is ``time.time`` unless a test injects one.
+    for. Each entry remembers the session it was resolved with (``session``, see
+    :func:`session_key`): asked for with another one, it is a miss and is dropped — a list is
+    never handed to a session it was not resolved for. ``clock`` is ``time.time`` unless a test
+    injects one.
     """
 
     def __init__(
@@ -300,27 +326,29 @@ class SeriesCache:
         self.ttl_s = ttl_s
         self.size = size
         self.clock = clock
-        self._entries: OrderedDict[str, tuple[float, Series]] = OrderedDict()
+        self._entries: OrderedDict[str, tuple[float, Series, str]] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, series_id: str) -> tuple[float, Series] | None:
-        """``(resolved_at, series)`` when the series was resolved less than ``ttl_s`` ago."""
+    def get(self, series_id: str, session: str = "") -> tuple[float, Series] | None:
+        """``(resolved_at, series)`` when the series was resolved less than ``ttl_s`` ago with
+        this ``session``."""
         with self._lock:
             entry = self._entries.get(series_id)
             if entry is None:
                 return None
-            if self.clock() - entry[0] >= self.ttl_s:
+            resolved_at, series, resolved_with = entry
+            if resolved_with != session or self.clock() - resolved_at >= self.ttl_s:
                 del self._entries[series_id]
                 return None
-            return entry
+            return resolved_at, series
 
-    def put(self, series_id: str, series: Series) -> float:
-        """Store a series resolved just now (replacing an older entry) and return its
-        ``resolved_at``; beyond ``size`` entries the least recently resolved one is dropped."""
+    def put(self, series_id: str, series: Series, session: str = "") -> float:
+        """Store a series resolved just now with ``session`` (replacing an older entry) and return
+        its ``resolved_at``; beyond ``size`` entries the least recently resolved one is dropped."""
         resolved_at = self.clock()
         with self._lock:
             self._entries.pop(series_id, None)
-            self._entries[series_id] = (resolved_at, series)
+            self._entries[series_id] = (resolved_at, series, session)
             while len(self._entries) > self.size:
                 self._entries.popitem(last=False)
         return resolved_at
@@ -356,11 +384,12 @@ class _CachedDiscovery:
 
     def discover(self, ref: SeriesRef, options: DiscoveryOptions) -> Series:
         app = self._app
-        cached = app.series_cache.get(ref.series_id)
+        cached = app.series_cache.get(ref.series_id, session_key(options))
         if cached is not None:
             return cached[1]
         with app.resolve_lock:
-            cached = app.series_cache.get(ref.series_id)
+            session = session_key(options)  # again: the file may have changed while we waited
+            cached = app.series_cache.get(ref.series_id, session)
             if cached is not None:  # the request that held the lock resolved this very series
                 return cached[1]
             cooldown = current_cooldown()
@@ -372,7 +401,7 @@ class _CachedDiscovery:
 
                 discovery = choose_discovery(options)
             series = discovery.discover(ref, options)
-            app.series_cache.put(ref.series_id, series)
+            app.series_cache.put(ref.series_id, series, session)
         return series
 
 
@@ -865,10 +894,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _resolve(self, body: dict[str, Any], *, allow_refresh: bool) -> ResolvedSeries:
         """The series the body's ``url`` names: the cached list when it was resolved less than
-        ``SERIES_CACHE_TTL_S`` ago (``from_cache``), else one discovery — refused with the
-        cooldown's 429 while TikTok is not to be contacted. ``"refresh": true`` (honoured on
-        ``/api/resolve`` only) skips the cache. Discoveries run one at a time: a request for a
-        series another request is resolving waits and then takes the fresh entry."""
+        ``SERIES_CACHE_TTL_S`` ago with the current session (``from_cache``; see
+        :func:`session_key`), else one discovery — refused with the cooldown's 429 while TikTok is
+        not to be contacted. ``"refresh": true`` (honoured on ``/api/resolve`` only) skips the
+        cache. Discoveries run one at a time: a request for a series another request is resolving
+        waits and then takes the fresh entry."""
         from dramafetch.urls import parse_input
 
         url = body.get("url")
@@ -884,18 +914,20 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(refresh, bool):
             raise HttpError(HTTPStatus.BAD_REQUEST, '"refresh" must be true or false')
         app = self.app
-        cached = None if refresh else app.series_cache.get(ref.series_id)
+        session = session_key(app.discovery_options)
+        cached = None if refresh else app.series_cache.get(ref.series_id, session)
         if cached is not None:  # served without any request, cooldown or not
             return ResolvedSeries(cached[1], cached[0], from_cache=True)
         with app.resolve_lock:
-            cached = None if refresh else app.series_cache.get(ref.series_id)
+            session = session_key(app.discovery_options)  # the file may have changed meanwhile
+            cached = None if refresh else app.series_cache.get(ref.series_id, session)
             if cached is not None:  # the request that held the lock resolved this very series
                 return ResolvedSeries(cached[1], cached[0], from_cache=True)
             cooldown = current_cooldown()
             if cooldown is not None:
                 raise cooldown_error(cooldown)
             series = self._discover(ref)
-            resolved_at = app.series_cache.put(ref.series_id, series)
+            resolved_at = app.series_cache.put(ref.series_id, series, session)
         return ResolvedSeries(series, resolved_at, from_cache=False)
 
     def _discover(self, ref: SeriesRef) -> Series:
