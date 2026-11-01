@@ -112,7 +112,7 @@ def image_problem(data: bytes, content_type: str = "") -> str:
 
 
 def format_size(size: int) -> str:
-    """``20531`` -> ``"20.1 KiB"``; MiB from one mebibyte up, plain bytes under one kibibyte."""
+    """``1536`` -> ``"1.5 KiB"``; MiB from one mebibyte up, plain bytes under one kibibyte."""
     if size >= _MIB:
         return f"{size / _MIB:.1f} MiB"
     if size >= 1024:
@@ -152,7 +152,7 @@ def embed_cover(video: Path, image: bytes) -> None:
         raise ThumbnailError("not a JPEG or PNG image")
     if len(image) > MAX_COVER_BYTES:
         raise ThumbnailError(
-            f"{format_size(len(image))} exceeds the {MAX_COVER_BYTES // _MIB} MiB cover limit"
+            f"{len(image):,} bytes is above the {MAX_COVER_BYTES // _MIB} MiB cover limit"
         )
     try:
         from mutagen.mp4 import MP4, MP4Cover  # lazy: see the module docstring

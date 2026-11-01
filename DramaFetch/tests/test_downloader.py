@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from mutagen.mp4 import MP4
 
 from dramafetch.downloader import (
     BLOCKED_MESSAGE,
@@ -25,6 +26,7 @@ from dramafetch.downloader import (
 )
 from dramafetch.manifest import episode_stem
 from dramafetch.models import DownloadOptions, DownloadStatus, Episode
+from dramafetch.thumbnails import MAX_COVER_BYTES, extract_cover
 
 SERIES_ID = "7699393770256782354"
 EPISODE = Episode(
@@ -48,14 +50,28 @@ OPTIONS = DownloadOptions()
 
 
 class FakeYdl:
-    """Stands in for yt_dlp.YoutubeDL: records params and URLs, creates a file or raises."""
+    """Stands in for yt_dlp.YoutubeDL: records params and URLs, creates a file or raises. With
+    `sidecar=(".jpeg", bytes)` it also writes the cover `writethumbnail` would have written next to
+    the video (named after the cover URL's extension, as yt-dlp does)."""
 
-    def __init__(self, params, log, *, produce=".mp4", error=None, retcode=0):
+    def __init__(
+        self,
+        params,
+        log,
+        *,
+        produce=".mp4",
+        error=None,
+        retcode=0,
+        video_bytes=b"video",
+        sidecar=None,
+    ):
         self.params = params
         self.log = log
         self.produce = produce
         self.error = error
         self.retcode = retcode
+        self.video_bytes = video_bytes
+        self.sidecar = sidecar
 
     def __enter__(self):
         return self
@@ -70,7 +86,10 @@ class FakeYdl:
         if self.produce:
             # yt-dlp templates are %-format strings: `%(ext)s` expands, `%%` is a literal `%`.
             target = Path(self.params["outtmpl"] % {"ext": self.produce.lstrip(".")})
-            target.write_bytes(b"video")
+            if self.sidecar is not None:  # yt-dlp fetches and writes the cover before the video
+                suffix, data = self.sidecar
+                target.with_suffix(suffix).write_bytes(data)
+            target.write_bytes(self.video_bytes)
         return self.retcode
 
 
@@ -140,7 +159,7 @@ def test_retries_stay_modest_whatever_the_options_say():
 
 
 def test_build_options_minimal_without_cookies_and_h264():
-    options = DownloadOptions(prefer_h264=False, impersonate=False, thumbnails=False)
+    options = DownloadOptions(prefer_h264=False, impersonate=False, thumbnail="none")
     params = YtDlpDownloader(lambda p: None).build_options(EPISODE, options, "o.%(ext)s")
     assert params["format"] == "best"
     assert "cookiefile" not in params
@@ -151,16 +170,19 @@ def test_build_options_minimal_without_cookies_and_h264():
     assert params["overwrites"] is False
 
 
-def test_writethumbnail_follows_the_thumbnails_option():
-    """`--no-thumbnails` leaves the key out entirely (yt-dlp's default is off); on, it is the plain
-    `writethumbnail` with no postprocessor, so no ffmpeg is needed and no conversion happens."""
+def test_writethumbnail_follows_the_thumbnail_mode():
+    """`--thumbnail none` leaves the key out entirely (yt-dlp's default is off); every other mode
+    asks for the plain `writethumbnail` with no postprocessor — no ffmpeg, no conversion, no
+    yt-dlp embedding: what happens to the file afterwards is DramaFetch's own `_finish_cover`."""
     downloader = YtDlpDownloader(lambda p: None)
-    on = downloader.build_options(EPISODE, DownloadOptions(thumbnails=True), "o.%(ext)s")
-    assert on["writethumbnail"] is True
-    assert "postprocessors" not in on and "convertthumbnails" not in on
-    off = downloader.build_options(EPISODE, DownloadOptions(thumbnails=False), "o.%(ext)s")
+    for mode in ("embed", "both", "file"):
+        on = downloader.build_options(EPISODE, DownloadOptions(thumbnail=mode), "o.%(ext)s")
+        assert on["writethumbnail"] is True
+        assert "postprocessors" not in on and "convertthumbnails" not in on
+        assert "embedthumbnail" not in on
+    off = downloader.build_options(EPISODE, DownloadOptions(thumbnail="none"), "o.%(ext)s")
     assert "writethumbnail" not in off
-    assert DownloadOptions().thumbnails is True
+    assert DownloadOptions().thumbnail == "embed" and DownloadOptions().thumbnails is True
 
 
 def test_build_options_omits_impersonation_when_curl_cffi_is_missing(monkeypatch):
@@ -211,7 +233,7 @@ def test_existing_file_is_skipped_and_partials_do_not_count(tmp_path):
     assert log[1]["params"]["overwrites"] is True
 
 
-def test_dry_run_reports_the_page_url_and_the_thumbnail(tmp_path):
+def test_dry_run_reports_the_page_url_and_the_cover(tmp_path):
     factory, log = make_factory()
     result = YtDlpDownloader(factory).download(
         EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True)
@@ -219,12 +241,16 @@ def test_dry_run_reports_the_page_url_and_the_thumbnail(tmp_path):
     assert result.status is DownloadStatus.DRY_RUN
     assert EPISODE.page_url in result.message
     assert result.message == (
-        "would download https://www.tiktok.com/@muffindrama_us/video/7699400000000000003"
-        " + thumbnail"
+        "would download https://www.tiktok.com/@muffindrama_us/video/7699400000000000003 + cover"
     )
     assert log == []
+    for mode in ("both", "file"):
+        with_cover = YtDlpDownloader(factory).download(
+            EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True, thumbnail=mode)
+        )
+        assert with_cover.message == f"would download {EPISODE.page_url} + cover"
     plain = YtDlpDownloader(factory).download(
-        EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True, thumbnails=False)
+        EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True, thumbnail="none")
     )
     assert plain.message == f"would download {EPISODE.page_url}"
     assert log == []
@@ -240,7 +266,8 @@ def test_success_creates_the_file_in_out_dir(tmp_path):
     assert result.status is DownloadStatus.DONE
     assert result.path == out_dir / f"{STEM}.mp4"
     assert result.path.read_bytes() == b"video"
-    assert result.message == f"saved {STEM}.mp4"
+    # yt-dlp wrote no cover next to the video (it says nothing when it cannot get one): told
+    assert result.message == f"saved {STEM}.mp4; cover: not available"
     assert log[0]["urls"] == [EPISODE.page_url]
     assert log[0]["params"]["outtmpl"] == str(out_dir / f"{STEM}.%(ext)s")
 
@@ -594,3 +621,157 @@ def test_existing_episode_file_matches_the_whole_stem_not_a_prefix(tmp_path):
     assert existing_episode_file(tmp_path, EPISODE, dotted_options) == dotted
     (tmp_path / f"{STEM}.f123.mp4").write_bytes(b"video")
     assert existing_episode_file(tmp_path, EPISODE, OPTIONS) is None
+
+
+# --------------------------------------------------------------------------- the cover
+
+FIXTURE = Path(__file__).parent / "fixtures" / "tiny.mp4"
+TINY_MP4 = FIXTURE.read_bytes()  # 3 s, 160x120 H.264 + silent AAC: what mutagen can tag
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"j" * 600 + b"\xff\xd9"
+PNG = b"\x89PNG\r\n\x1a\n" + b"p" * 600
+WEBP = b"RIFF\x00\x10\x00\x00WEBPVP8 " + b"w" * 600
+
+
+def _download(tmp_path, mode="embed", *, video_bytes=TINY_MP4, sidecar=(".jpeg", JPEG)):
+    """One DONE download through the fake ydl, which writes the video and — unless `sidecar` is
+    None — the `<stem>.<ext>` cover yt-dlp's `writethumbnail` would have written next to it."""
+    factory, log = make_factory(video_bytes=video_bytes, sidecar=sidecar)
+    result = YtDlpDownloader(factory).download(
+        EPISODE, DownloadOptions(out_dir=tmp_path, thumbnail=mode)
+    )
+    assert result.status is DownloadStatus.DONE
+    assert result.path == tmp_path / f"{STEM}.mp4"
+    return result, log
+
+
+def _names(directory):
+    return sorted(p.name for p in directory.iterdir())
+
+
+def test_embed_is_the_default_the_cover_goes_into_the_mp4_and_the_sidecar_goes(tmp_path):
+    result, log = _download(tmp_path)
+    assert log[0]["params"]["writethumbnail"] is True
+    assert result.message == f"saved {STEM}.mp4 + cover embedded"
+    assert _names(tmp_path) == [f"{STEM}.mp4"]  # no .jpeg left, no .embed.part
+    assert extract_cover(result.path) == (JPEG, "image/jpeg")
+    assert abs(MP4(result.path).info.length - 3.0) < 0.2  # still the 3-second video
+
+
+def test_both_embeds_the_cover_and_keeps_the_file(tmp_path):
+    result, _ = _download(tmp_path, "both")
+    assert result.message == f"saved {STEM}.mp4 + cover embedded + file"
+    assert _names(tmp_path) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
+    assert (tmp_path / f"{STEM}.jpeg").read_bytes() == JPEG
+    assert extract_cover(result.path) == (JPEG, "image/jpeg")
+
+
+def test_file_keeps_the_sidecar_and_leaves_the_video_as_yt_dlp_wrote_it(tmp_path):
+    result, _ = _download(tmp_path, "file")
+    assert result.message == f"saved {STEM}.mp4 + cover file"
+    assert _names(tmp_path) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
+    assert result.path.read_bytes() == TINY_MP4
+    assert extract_cover(result.path) is None
+
+
+def test_none_asks_yt_dlp_for_no_cover_and_leaves_a_stale_sidecar_alone(tmp_path):
+    (tmp_path / f"{STEM}.jpeg").write_bytes(JPEG)  # from an earlier run
+    result, log = _download(tmp_path, "none", sidecar=None)
+    assert "writethumbnail" not in log[0]["params"]
+    assert result.message == f"saved {STEM}.mp4"
+    assert _names(tmp_path) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
+    assert result.path.read_bytes() == TINY_MP4
+
+
+def test_a_png_cover_is_embedded_as_png(tmp_path):
+    result, _ = _download(tmp_path, sidecar=(".png", PNG))
+    assert result.message == f"saved {STEM}.mp4 + cover embedded"
+    assert extract_cover(result.path) == (PNG, "image/png")
+    assert _names(tmp_path) == [f"{STEM}.mp4"]
+
+
+@pytest.mark.parametrize("mode", ["embed", "both"])
+def test_a_webp_cover_cannot_be_embedded_and_is_kept_as_a_file(tmp_path, mode):
+    result, _ = _download(tmp_path, mode, sidecar=(".webp", WEBP))
+    assert result.message == f"saved {STEM}.mp4; cover: webp cannot be embedded; file kept"
+    assert _names(tmp_path) == [f"{STEM}.mp4", f"{STEM}.webp"]
+    assert result.path.read_bytes() == TINY_MP4
+
+
+def test_yt_dlps_image_extension_is_renamed_after_the_bytes(tmp_path):
+    """A `dynamicCover` URL without an extension lands as `<stem>.image`; the bytes say what it is,
+    so it is renamed first — and then embedded, kept or both like any other cover."""
+    both, _ = _download(tmp_path, "both", sidecar=(".image", JPEG))
+    assert both.message == f"saved {STEM}.mp4 + cover embedded + file"
+    assert _names(tmp_path) == [f"{STEM}.jpg", f"{STEM}.mp4"]
+    embed_only, _ = _download(tmp_path / "e", "embed", sidecar=(".image", PNG))
+    assert embed_only.message == f"saved {STEM}.mp4 + cover embedded"
+    assert _names(tmp_path / "e") == [f"{STEM}.mp4"]
+    assert extract_cover(embed_only.path) == (PNG, "image/png")
+    kept, _ = _download(tmp_path / "f", "file", sidecar=(".image", WEBP))
+    assert kept.message == f"saved {STEM}.mp4 + cover file"
+    assert _names(tmp_path / "f") == [f"{STEM}.mp4", f"{STEM}.webp"]
+
+
+def test_a_failed_embed_keeps_the_file_and_the_video_byte_for_byte(tmp_path):
+    """yt-dlp produced something mutagen cannot tag: the cover stays a file, whatever the mode,
+    and nothing is half done — no `.embed.part`, the video exactly as yt-dlp wrote it."""
+    junk = b"\x00\x00\x00\x18ftypmp42" + b"v" * 4000
+    for mode in ("embed", "both"):
+        directory = tmp_path / mode
+        result, _ = _download(directory, mode, video_bytes=junk)
+        assert result.message.startswith(
+            f"saved {STEM}.mp4; cover: could not embed (could not write the cover into "
+            f"{STEM}.mp4 (MP4StreamInfoError: "
+        )
+        assert result.message.endswith(")); file kept")
+        assert _names(directory) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
+        assert result.path.read_bytes() == junk
+
+
+def test_without_mutagen_the_cover_stays_a_file_and_the_message_says_how_to_install_it(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setitem(sys.modules, "mutagen.mp4", None)
+    result, _ = _download(tmp_path)
+    assert result.message == (
+        f"saved {STEM}.mp4; cover: could not embed (mutagen is not installed: pip install "
+        "mutagen); file kept"
+    )
+    assert _names(tmp_path) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
+    assert result.path.read_bytes() == TINY_MP4
+
+
+def test_an_oversize_sidecar_is_deleted_not_kept(tmp_path):
+    huge = b"\xff\xd8\xff" + b"\0" * MAX_COVER_BYTES  # three bytes over the limit
+    result, _ = _download(tmp_path, sidecar=(".jpeg", huge))
+    assert result.message == f"saved {STEM}.mp4; cover: too large, not kept"
+    assert _names(tmp_path) == [f"{STEM}.mp4"]
+    assert result.path.read_bytes() == TINY_MP4
+
+
+def test_a_sidecar_that_is_not_an_image_is_kept_but_never_embedded(tmp_path):
+    result, _ = _download(tmp_path, sidecar=(".jpeg", b"<html>access denied</html>" * 20))
+    assert result.message == f"saved {STEM}.mp4; cover: not a JPEG, PNG or WEBP image; file kept"
+    assert _names(tmp_path) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
+    assert result.path.read_bytes() == TINY_MP4
+
+
+@pytest.mark.parametrize("mode", ["embed", "both", "file"])
+def test_no_sidecar_means_the_cover_was_not_available(tmp_path, mode):
+    result, log = _download(tmp_path, mode, sidecar=None)
+    assert log[0]["params"]["writethumbnail"] is True
+    assert result.message == f"saved {STEM}.mp4; cover: not available"
+    assert _names(tmp_path) == [f"{STEM}.mp4"]
+
+
+def test_the_embed_goes_through_a_copy_that_replaces_the_video(tmp_path, monkeypatch):
+    replaced = []
+    original = Path.replace
+
+    def recording(self, target):
+        replaced.append((Path(self).name, Path(target).name))
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", recording)
+    _download(tmp_path)
+    assert replaced == [(f"{STEM}.mp4.embed.part", f"{STEM}.mp4")]

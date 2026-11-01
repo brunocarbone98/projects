@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from mutagen import version_string as mutagen_version
 
 from dramafetch import __version__, cli, engine
 from dramafetch.catalog import catalog_warnings
@@ -303,16 +304,21 @@ def _subcommand_help(command: str) -> str:
     return subparsers.choices[command].format_help()
 
 
-def test_parser_name_format_and_no_thumbnails():
-    """`--name-format FORMAT` and `--no-thumbnails` exist on download, video and serve; the format
-    defaults to DEFAULT_NAME_FORMAT for a series and to "{title}" (the item id) for video."""
+def test_parser_name_format_and_thumbnail_mode():
+    """`--name-format FORMAT` and `--thumbnail {embed,both,file,none}` exist on download, video and
+    serve; the format defaults to DEFAULT_NAME_FORMAT for a series and to "{title}" (the item id)
+    for video, the thumbnail mode to `embed` (the cover goes into the MP4)."""
     parser = cli.build_parser()
     for argv in (["download", SERIES_URL], ["video", VIDEO_URL], ["serve"]):
         args = parser.parse_args(argv)
-        assert args.name_format is None and args.no_thumbnails is False
-        args = parser.parse_args([*argv, "--name-format", "{series} - {n}", "--no-thumbnails"])
-        assert args.name_format == "{series} - {n}" and args.no_thumbnails is True
+        assert args.name_format is None and args.thumbnail == "embed"
+        for mode in ("embed", "both", "file", "none"):
+            assert parser.parse_args([*argv, "--thumbnail", mode]).thumbnail == mode
+        args = parser.parse_args([*argv, "--name-format", "{series} - {n}", "--thumbnail", "none"])
+        assert args.name_format == "{series} - {n}" and args.thumbnail == "none"
         assert cli.name_format_for(args) == "{series} - {n}"
+        with pytest.raises(SystemExit):
+            parser.parse_args([*argv, "--thumbnail", "nope"])
     assert cli.name_format_for(parser.parse_args(["download", SERIES_URL])) == (
         cli.DEFAULT_NAME_FORMAT
     )
@@ -324,9 +330,17 @@ def test_parser_name_format_and_no_thumbnails():
         assert "--name-format FORMAT" in help_text
         assert "{series} {number} {n} {title} {id}" in help_text
         assert "{series} - Episode {number}" in help_text  # the default is spelled out
-        assert "--no-thumbnails" in help_text
+        assert "--thumbnail {embed,both,file,none}" in help_text
+        # the help names what each mode does (argparse wraps lines: compare without the wrapping)
+        unwrapped = " ".join(help_text.split())
+        assert "embed (default) writes it into the MP4 as its cover art" in unwrapped
+        assert "both also keeps it next to the video as <name>.jpeg|jpg|png|webp" in unwrapped
+        assert "file keeps that file only" in unwrapped and "none fetches no cover" in unwrapped
+        # --thumbnail is the only flag about the cover (the build-3 on/off flag is gone)
+        assert help_text.count("thumbnail") == help_text.count("--thumbnail {embed,both,file,none}")
     for command in ("info", "doctor"):
         assert "--name-format" not in _subcommand_help(command)
+        assert "--thumbnail" not in _subcommand_help(command)
 
 
 def test_parser_video_doctor_serve():
@@ -408,6 +422,10 @@ def test_version_help_and_no_command(capsys):
         ["download", SERIES_URL, "--name-format", ""],
         ["video", VIDEO_URL, "--name-format", "{episode}"],
         ["serve", "--name-format", "{{n}}"],
+        # the thumbnail mode is a closed choice
+        ["download", SERIES_URL, "--thumbnail", "nope"],
+        ["video", VIDEO_URL, "--thumbnail", "sidecar"],
+        ["serve", "--thumbnail", "yes"],
     ],
 )
 def test_usage_errors_exit_2_before_any_network(argv, capsys, fake_discovery, fake_downloader):
@@ -439,6 +457,10 @@ def test_usage_error_messages_say_what_to_do(capsys):
     assert cli.main(["download", SERIES_URL, "--name-format", "{series}"]) == 2
     err = capsys.readouterr().err
     assert "does not tell episodes apart" in err and "{number}, {n}, {title} or {id}" in err
+    assert cli.main(["download", SERIES_URL, "--thumbnail", "nope"]) == 2
+    err = capsys.readouterr().err
+    assert "--thumbnail: invalid choice: 'nope'" in err
+    assert "'embed', 'both', 'file', 'none'" in err
 
 
 def test_parse_extractor_args():
@@ -622,9 +644,10 @@ def test_doctor_uses_ascii_marks_on_a_non_utf8_stdout(monkeypatch):
     read_stdout = _cp1252_stdout(monkeypatch)
     assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
     lines = read_stdout().strip().splitlines()
-    assert len(lines) == 8
+    assert len(lines) == 9
     assert all(line.split(" ", 1)[0] in {"OK", "X", "-"} for line in lines)
-    assert lines[7].startswith("- pace: 4")
+    assert lines[7].startswith("OK mutagen: ")
+    assert lines[8].startswith("- pace: 4")
 
 
 def test_control_characters_from_tiktok_text_are_not_printed(capsys, tmp_path):
@@ -692,7 +715,7 @@ def test_download_end_to_end(fake_discovery, fake_downloader, tmp_path, capsys):
     _, first_options = downloader.calls[0]
     assert first_options.name_format == "{series} - Episode {number}"
     assert first_options.series_name == NAME
-    assert first_options.thumbnails is True
+    assert first_options.thumbnail == "embed" and first_options.thumbnails is True
     # a second run resumes: everything is skipped through the manifest, no downloader calls
     code = cli.main(["download", SERIES_URL, "--out", str(tmp_path)])
     assert code == 0
@@ -804,7 +827,8 @@ def test_download_dry_run_and_flags_reach_the_downloader(
             "0.5",
             "--name-format",
             "{series} - E{number} - {title}",
-            "--no-thumbnails",
+            "--thumbnail",
+            "none",
         ]
     )
     assert code == 0
@@ -815,7 +839,7 @@ def test_download_dry_run_and_flags_reach_the_downloader(
     _, options = downloader.calls[0]
     assert options.dry_run and options.include_locked and options.overwrite
     assert options.name_format == "{series} - E{number} - {title}"
-    assert options.thumbnails is False
+    assert options.thumbnail == "none" and options.thumbnails is False
     assert options.impersonate is False
     assert options.cookies_file == Path("c.txt")
     assert options.cookies_from_browser == "firefox"
@@ -1046,7 +1070,7 @@ def test_video_downloads_directly_into_out_dir(fake_downloader, tmp_path, capsys
     assert episode.page_url == VIDEO_URL
     assert options.out_dir == tmp_path / "vids"
     assert options.name_format == "{title}"  # one file, named after its item id: <id>.mp4
-    assert options.thumbnails is True
+    assert options.thumbnail == "embed"  # the cover goes into the MP4 here too
     assert (tmp_path / "vids" / "fake - Episode 00.mp4").exists()
     out = capsys.readouterr().out
     assert out.startswith("E00  done")
@@ -1054,7 +1078,7 @@ def test_video_downloads_directly_into_out_dir(fake_downloader, tmp_path, capsys
 
 def test_video_names_its_file_after_the_item_id_unless_told_otherwise(tmp_path):
     """Through the real yt-dlp downloader with a fake YoutubeDL: `{title}` is the item id, so the
-    default is `<id>.mp4`; `--name-format` and `--no-thumbnails` apply to `video` too."""
+    default is `<id>.mp4`; `--name-format` and `--thumbnail` apply to `video` too."""
     from dramafetch import downloader as downloader_module
 
     written = []
@@ -1083,7 +1107,7 @@ def test_video_names_its_file_after_the_item_id_unless_told_otherwise(tmp_path):
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(downloader_module.YtDlpDownloader, "__init__", init_with_fake)
         assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 0
-        argv = ["video", VIDEO_URL, "--out", str(tmp_path), "--no-thumbnails"]
+        argv = ["video", VIDEO_URL, "--out", str(tmp_path), "--thumbnail", "none"]
         assert cli.main([*argv, "--name-format", "{id} - by {series}"]) == 0
     assert [target.name for target, _ in written] == [
         "7699400000000000001.mp4",
@@ -1124,7 +1148,7 @@ def test_video_builds_the_downloader_through_the_engine_and_closes_it(monkeypatc
 def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     assert cli.main(["doctor"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 8
+    assert len(lines) == 9
     assert all(line[0] in "✓✗–" for line in lines)  # noqa: RUF001
     names = [line.split(" ", 1)[1].split(":")[0] for line in lines]
     assert names == [
@@ -1135,10 +1159,13 @@ def test_doctor_runs_without_a_browser_and_exits_0(capsys):
         "browser",
         "ffmpeg",
         "cookies",
+        "mutagen",
         "pace",
     ]
+    # whether covers can be embedded into the MP4 (mutagen is a runtime dependency)
+    assert lines[7] == f"✓ mutagen: {mutagen_version} (covers are embedded into the MP4)"
     # the pacing defaults, in one line, so a user knows what to expect before the first run
-    assert lines[7] == (
+    assert lines[8] == (
         "– pace: 4–9 s between episodes, 60–120 s rest every 10; "  # noqa: RUF001
         "stop after 3 failures / 403 / 429"
     )
@@ -1153,8 +1180,30 @@ def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     else:
         assert "Playwright Chromium at" in browser
     assert lines[6].startswith("– cookies: no --cookies given")  # noqa: RUF001
-    # the web UI's /api/doctor keeps the seven checks only (see test_web)
+    # the web UI's /api/doctor keeps the seven environment checks only (see test_web)
     assert [check["name"] for check in cli.doctor_as_dicts(browser_channel="chrome")] == names[:7]
+
+
+def test_doctor_without_mutagen_says_covers_stay_files(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "mutagen", None)  # `import mutagen` now fails
+    assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 9
+    assert lines[7] == (
+        "✗ mutagen: not importable — covers are saved as files only (pip install mutagen)"
+    )
+
+
+@pytest.mark.parametrize("mode", ["embed", "both", "file", "none"])
+def test_the_thumbnail_mode_reaches_download_and_video(
+    fake_downloader, fake_discovery, tmp_path, mode
+):
+    argv = ["--out", str(tmp_path), "--thumbnail", mode]
+    assert cli.main(["download", SERIES_URL, "--delay-min", "0", "--delay-max", "0", *argv]) == 0
+    assert cli.main(["video", VIDEO_URL, *argv]) == 0
+    series_run, video_run = fake_downloader.instances
+    assert {options.thumbnail for _, options in series_run.calls} == {mode}
+    assert video_run.calls[0][1].thumbnail == mode
 
 
 def test_describe_pacing():

@@ -5,6 +5,7 @@ refresh, bad bodies, error sanitising, atomic writes and close()."""
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from dramafetch.downloader_browser import (
 )
 from dramafetch.manifest import Manifest
 from dramafetch.models import DownloadOptions, DownloadStatus, Episode, Series
+from dramafetch.thumbnails import extract_cover
 
 SERIES_ID = "7699393770256782354"
 BASE = "https://www.tiktok.com"
@@ -32,7 +34,17 @@ CDN = f"https://{CDN_HOST}/video/tos/useast2a"
 NOW = 1_800_000_000.0
 FRESH = int(NOW) + 3600
 SESSION_VALUE = "secret-session-value-that-must-never-show"
-VIDEO = b"\x00\x00\x00\x18ftypmp42" + b"v" * (2 * MIN_VIDEO_BYTES)
+TINY_MP4 = (Path(__file__).parent / "fixtures" / "tiny.mp4").read_bytes()  # 3 s, mutagen-taggable
+
+
+def _padded_mp4(size: int) -> bytes:
+    """The fixture followed by one top-level `free` box that pads it to `size` bytes — like the
+    fake CDN's episodes: a valid MP4 above MIN_VIDEO_BYTES."""
+    box = size - len(TINY_MP4)
+    return TINY_MP4 + box.to_bytes(4, "big") + b"free" + b"\0" * (box - 8)
+
+
+VIDEO = _padded_mp4(2 * MIN_VIDEO_BYTES)
 # The default name format, "{series} - Episode {number}", for episode 1 of "Heiress".
 STEM = "Heiress - Episode 01"
 SAVED = f"saved {STEM}.mp4 ({len(VIDEO) / 1048576:.1f} MiB)"
@@ -823,7 +835,7 @@ def _with_cover(number: int = 1, cover: str | None = COVER) -> Episode:
     return _episode(number, _item(number, item_id, _url(f"ep{number}")), cover_url=cover)
 
 
-def test_the_cover_is_fetched_once_after_the_video_and_saved_next_to_it(playwright, tmp_path):
+def test_the_cover_is_fetched_once_after_the_video_and_embedded_into_it(playwright, tmp_path):
     playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
     downloader = _downloader(playwright)
 
@@ -831,9 +843,9 @@ def test_the_cover_is_fetched_once_after_the_video_and_saved_next_to_it(playwrig
 
     assert result.status is DownloadStatus.DONE
     assert result.path == tmp_path / f"{STEM}.mp4"
-    assert result.message == f"{SAVED} + thumbnail"
-    assert (tmp_path / f"{STEM}.jpg").read_bytes() == JPEG
-    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.jpg", f"{STEM}.mp4"]
+    assert result.message == f"{SAVED} + cover embedded"
+    assert extract_cover(result.path) == (JPEG, "image/jpeg")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.mp4"]  # no sidecar, no .part
     assert playwright.request.urls == [_url("ep1"), COVER]  # the video first, then the cover
     _, kwargs = playwright.request.calls[1]
     assert kwargs == {
@@ -857,18 +869,20 @@ def test_the_cover_is_fetched_once_after_the_video_and_saved_next_to_it(playwrig
         (PNG, "application/octet-stream", ".png"),  # the type says nothing: the magic decides
         (WEBP, None, ".webp"),
         (JPEG, "text/plain", ".jpg"),
+        (PNG, "image/jpeg", ".png"),  # a conflict: the bytes win
         (b"i" * 600, "image/avif", ".jpg"),  # an image type without known magic: .jpg
     ],
 )
-def test_cover_extension_from_the_content_type_then_the_magic(
+def test_cover_extension_from_the_magic_then_the_content_type(
     playwright, tmp_path, body, content_type, extension
 ):
     playwright.request.answer(COVER, FakeAPIResponse(200, body, content_type))
-    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail="file"))
     assert result.status is DownloadStatus.DONE
-    assert result.message.endswith(" + thumbnail")
+    assert result.message == f"{SAVED} + cover file"
     assert (tmp_path / f"{STEM}{extension}").read_bytes() == body
     assert not list(tmp_path.glob("*.part"))
+    assert result.path.read_bytes() == VIDEO  # mode file: nothing embedded
 
 
 @pytest.mark.parametrize(
@@ -908,8 +922,9 @@ def test_a_cover_that_cannot_be_had_never_changes_the_status(
 
     assert result.status is DownloadStatus.DONE
     assert result.path == tmp_path / f"{STEM}.mp4"
-    assert result.message == f"{SAVED}; thumbnail: {reason}"
+    assert result.message == f"{SAVED}; cover: {reason}"
     assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.mp4"]  # no sidecar, no .part
+    assert result.path.read_bytes() == VIDEO  # nothing embedded either
     assert playwright.request.urls == [_url("ep1"), COVER]  # one attempt, no second try
     for secret in (SESSION_VALUE, "SIGNATURETOKEN"):
         assert secret not in result.message and secret not in caplog.text
@@ -932,16 +947,16 @@ def test_a_rate_limited_cover_is_a_warning_not_a_stop(playwright, tmp_path, capl
     second = downloader.download(_with_cover(2), options)
 
     assert first.status is DownloadStatus.DONE
-    assert first.message == f"{SAVED}; thumbnail: HTTP 429 from {COVER_HOST}"
+    assert first.message == f"{SAVED}; cover: HTTP 429 from {COVER_HOST}"
     assert f"HTTP 429 for the cover from {COVER_HOST}" in caplog.text
     assert "SIGNATURETOKEN" not in caplog.text
-    assert second.status is DownloadStatus.DONE and second.message.endswith(" + thumbnail")
+    assert second.status is DownloadStatus.DONE and second.message.endswith(" + cover embedded")
     assert playwright.request.urls == [_url("ep1"), COVER, _url("ep2"), COVER]
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         "Heiress - Episode 01.mp4",
-        "Heiress - Episode 02.jpg",
         "Heiress - Episode 02.mp4",
     ]
+    assert extract_cover(first.path) is None and extract_cover(second.path) == (JPEG, "image/jpeg")
 
 
 def test_the_cover_request_is_outside_the_media_budget(playwright, tmp_path):
@@ -961,29 +976,30 @@ def test_the_cover_request_is_outside_the_media_budget(playwright, tmp_path):
     result = downloader.download(_episode(1, item, cover_url=COVER), _options(tmp_path))
 
     assert result.status is DownloadStatus.DONE
-    assert result.message.endswith(" + thumbnail")
+    assert result.message.endswith(" + cover embedded")
     assert playwright.request.urls == [*mirrors, COVER]
     assert len(playwright.request.urls) == MAX_GETS_PER_EPISODE + MAX_COVER_GETS
-    assert (tmp_path / f"{STEM}.jpg").read_bytes() == JPEG
+    assert extract_cover(result.path) == (JPEG, "image/jpeg")
     assert downloader.refreshes == 0
 
 
-def test_no_cover_request_without_thumbnails_a_cover_url_or_a_video(playwright, tmp_path):
+def test_no_cover_request_in_mode_none_without_a_cover_url_or_without_a_video(playwright, tmp_path):
     downloader = _downloader(playwright)
 
-    off = downloader.download(_with_cover(1), _options(tmp_path, thumbnails=False))
+    off = downloader.download(_with_cover(1), _options(tmp_path, thumbnail="none"))
     assert off.status is DownloadStatus.DONE
     assert off.message == SAVED
     assert playwright.request.urls == [_url("ep1")]
+    assert off.path.read_bytes() == VIDEO
 
     none = downloader.download(_with_cover(2, cover=None), _options(tmp_path))
-    assert none.status is DownloadStatus.DONE and "thumbnail" not in none.message
+    assert none.status is DownloadStatus.DONE and "cover" not in none.message
     assert playwright.request.urls == [_url("ep1"), _url("ep2")]
 
     # a failed video never asks for its cover ...
     playwright.request.answer(_url("ep3"), FakeAPIResponse(503, b"busy", "text/plain"))
     failed = downloader.download(_with_cover(3), _options(tmp_path))
-    assert failed.status is DownloadStatus.FAILED and "thumbnail" not in failed.message
+    assert failed.status is DownloadStatus.FAILED and "cover" not in failed.message
     assert playwright.request.urls == [_url("ep1"), _url("ep2"), _url("ep3")]
 
     # ... and neither does an episode skipped for its existing video: a missing cover stays missing
@@ -996,23 +1012,26 @@ def test_no_cover_request_without_thumbnails_a_cover_url_or_a_video(playwright, 
     ]
 
 
-def test_dry_run_announces_the_thumbnail_when_a_cover_would_be_fetched(playwright, tmp_path):
+def test_dry_run_announces_the_cover_when_one_would_be_fetched(playwright, tmp_path):
     downloader = _downloader(playwright)
     dry = _options(tmp_path, dry_run=True)
     message = downloader.download(_with_cover(1), dry).message
-    assert message == f"would download from {CDN_HOST} + thumbnail"
+    assert message == f"would download from {CDN_HOST} + cover"
     assert downloader.download(_with_cover(2, cover=None), dry).message == (
         f"would download from {CDN_HOST}"
     )
-    off = _options(tmp_path, dry_run=True, thumbnails=False)
+    for mode in ("both", "file"):
+        with_cover = _options(tmp_path, dry_run=True, thumbnail=mode)
+        assert downloader.download(_with_cover(1), with_cover).message.endswith(" + cover")
+    off = _options(tmp_path, dry_run=True, thumbnail="none")
     assert downloader.download(_with_cover(1), off).message == f"would download from {CDN_HOST}"
     expired = _episode(3, _item(3, "3", _url("c", int(NOW) - 5)), cover_url=COVER)
     assert downloader.download(expired, dry).message == (
-        f"would download from {CDN_HOST} (play url expired: fresh list first) + thumbnail"
+        f"would download from {CDN_HOST} (play url expired: fresh list first) + cover"
     )
     no_url = _episode(4, None, cover_url=COVER)
     assert downloader.download(no_url, dry).message.endswith(
-        "(it would be refreshed first) + thumbnail"
+        "(it would be refreshed first) + cover"
     )
     assert playwright.launches == 0 and playwright.request.calls == []
     assert not (tmp_path / f"{STEM}.jpg").exists()
@@ -1028,13 +1047,24 @@ def test_the_cover_is_written_as_part_then_renamed(playwright, tmp_path, monkeyp
 
     monkeypatch.setattr(Path, "replace", recording_replace)
     playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    downloader = _downloader(playwright)
 
-    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
-
+    result = downloader.download(_with_cover(1), _options(tmp_path, thumbnail="file"))
     assert result.status is DownloadStatus.DONE
     assert replaced == [
         (tmp_path / f"{STEM}.mp4.part", tmp_path / f"{STEM}.mp4"),
         (tmp_path / f"{STEM}.jpg.part", tmp_path / f"{STEM}.jpg"),
+    ]
+
+    # embedding edits a copy of the video and renames it over the original: never in place
+    replaced.clear()
+    embedded = downloader.download(_with_cover(2), _options(tmp_path, thumbnail="both"))
+    assert embedded.status is DownloadStatus.DONE
+    assert replaced == [
+        (tmp_path / "Heiress - Episode 02.mp4.part", tmp_path / "Heiress - Episode 02.mp4"),
+        (tmp_path / "Heiress - Episode 02.mp4.embed.part", tmp_path / "Heiress - Episode 02.mp4"),
+        (tmp_path / "Heiress - Episode 02.jpg.part", tmp_path / "Heiress - Episode 02.jpg"),
     ]
 
 
@@ -1051,11 +1081,101 @@ def test_a_failed_cover_write_leaves_no_partial_file_and_keeps_the_video(
     monkeypatch.setattr(Path, "replace", failing_for_images)
     playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
 
-    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail="file"))
 
     assert result.status is DownloadStatus.DONE
-    assert result.message == f"{SAVED}; thumbnail: [Errno 28] No space left on device"
+    assert result.message == f"{SAVED}; cover: [Errno 28] No space left on device"
     assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.mp4"]
+
+
+# --- the cover: modes ---------------------------------------------------------------------------
+
+
+def test_both_embeds_the_cover_and_keeps_the_file(playwright, tmp_path):
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail="both"))
+    assert result.status is DownloadStatus.DONE
+    assert result.message == f"{SAVED} + cover embedded + file"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.jpg", f"{STEM}.mp4"]
+    assert (tmp_path / f"{STEM}.jpg").read_bytes() == JPEG
+    assert extract_cover(result.path) == (JPEG, "image/jpeg")
+
+
+def test_file_saves_the_sidecar_and_leaves_the_video_as_the_cdn_sent_it(playwright, tmp_path):
+    playwright.request.answer(COVER, FakeAPIResponse(200, PNG, "image/png"))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail="file"))
+    assert result.status is DownloadStatus.DONE
+    assert result.message == f"{SAVED} + cover file"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.mp4", f"{STEM}.png"]
+    assert result.path.read_bytes() == VIDEO
+    assert extract_cover(result.path) is None
+
+
+def test_a_png_cover_is_embedded_as_png(playwright, tmp_path):
+    playwright.request.answer(COVER, FakeAPIResponse(200, PNG, "image/png"))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
+    assert result.message == f"{SAVED} + cover embedded"
+    assert extract_cover(result.path) == (PNG, "image/png")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.mp4"]
+
+
+@pytest.mark.parametrize("mode", ["embed", "both"])
+def test_a_webp_cover_is_saved_as_a_file_because_it_cannot_be_embedded(playwright, tmp_path, mode):
+    playwright.request.answer(COVER, FakeAPIResponse(200, WEBP, "image/webp"))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail=mode))
+    assert result.status is DownloadStatus.DONE
+    assert result.message == f"{SAVED}; cover: webp cannot be embedded; saved as file"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.mp4", f"{STEM}.webp"]
+    assert (tmp_path / f"{STEM}.webp").read_bytes() == WEBP
+    assert result.path.read_bytes() == VIDEO
+
+
+@pytest.mark.parametrize("mode", ["embed", "both"])
+def test_a_video_mutagen_cannot_tag_keeps_the_cover_as_a_file(playwright, tmp_path, mode):
+    """The CDN body passed the video checks but is not an MP4 mutagen can write to: the cover is
+    saved next to it instead, the video stays exactly as downloaded and no `.embed.part` is left."""
+    not_an_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"v" * (2 * MIN_VIDEO_BYTES)
+    playwright.request.answer(_url("ep1"), FakeAPIResponse(200, not_an_mp4, "video/mp4"))
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail=mode))
+
+    assert result.status is DownloadStatus.DONE
+    saved = f"saved {STEM}.mp4 ({len(not_an_mp4) / 1048576:.1f} MiB)"
+    assert result.message.startswith(
+        f"{saved}; cover: could not embed (could not write the cover into {STEM}.mp4 "
+        "(MP4StreamInfoError: "
+    )
+    assert result.message.endswith(")); saved as file")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.jpg", f"{STEM}.mp4"]
+    assert (tmp_path / f"{STEM}.jpg").read_bytes() == JPEG
+    assert result.path.read_bytes() == not_an_mp4
+
+
+def test_without_mutagen_the_cover_is_saved_as_a_file_and_the_message_says_so(
+    playwright, tmp_path, monkeypatch
+):
+    monkeypatch.setitem(sys.modules, "mutagen.mp4", None)  # `import mutagen.mp4` now fails
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
+    assert result.status is DownloadStatus.DONE
+    assert result.message == (
+        f"{SAVED}; cover: could not embed (mutagen is not installed: pip install mutagen); "
+        "saved as file"
+    )
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.jpg", f"{STEM}.mp4"]
+    assert result.path.read_bytes() == VIDEO
+
+
+@pytest.mark.parametrize("mode", ["embed", "both", "file"])
+def test_an_oversize_cover_is_not_kept_in_any_mode(playwright, tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(downloader_browser, "MAX_COVER_BYTES", 1000)
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG + b"j" * 1000, "image/jpeg"))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail=mode))
+    assert result.status is DownloadStatus.DONE
+    assert result.message == f"{SAVED}; cover: too large, not kept"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.mp4"]
+    assert result.path.read_bytes() == VIDEO
 
 
 # --- errors -------------------------------------------------------------------------------------

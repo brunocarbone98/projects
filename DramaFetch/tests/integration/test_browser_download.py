@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from mutagen.mp4 import MP4
 
 from dramafetch.catalog import (
     merge_episodes,
@@ -20,29 +21,32 @@ from dramafetch.catalog import (
 )
 from dramafetch.downloader_browser import BrowserDownloader
 from dramafetch.models import DownloadOptions, DownloadStatus, Series
+from dramafetch.thumbnails import EMBED_SUFFIX, cover_sidecar, extract_cover
 
 from .fake_tiktok import (
     COVER_MIN_SIZE,
     JPEG_EOI,
     JPEG_SOI,
     MEDIA_SIZE,
-    MP4_HEADER,
     SERIES_ID,
     SERIES_NAME,
     TOTAL_EPISODES,
     FakeTikTok,
     cover_bytes,
+    media_bytes,
 )
 
 CHROMIUM = Path(os.environ.get("DRAMAFETCH_CHROMIUM") or "/opt/pw-browsers/chromium")
 SESSION_VALUE = "fake-session-value-that-must-never-leak"
-# The default name format, "{series} - Episode {number}"; the cover sits next to the video.
+# The default name format, "{series} - Episode {number}"; a sidecar cover sits next to the video.
 EPISODE_1 = f"{SERIES_NAME} - Episode 01.mp4"
 EPISODE_2 = f"{SERIES_NAME} - Episode 02.mp4"
 COVER_1 = f"{SERIES_NAME} - Episode 01.jpg"
 COVER_2 = f"{SERIES_NAME} - Episode 02.jpg"
-MEDIA_1 = "/cdn/7699400000000000001/0.mp4"
-MEDIA_2 = "/cdn/7699400000000000002/0.mp4"
+ITEM_1 = "7699400000000000001"
+ITEM_2 = "7699400000000000002"
+MEDIA_1 = f"/cdn/{ITEM_1}/0.mp4"
+MEDIA_2 = f"/cdn/{ITEM_2}/0.mp4"
 COVER_PATH_1 = "/cover/7699400000000000001.jpg"
 COVER_PATH_2 = "/cover/7699400000000000002.jpg"
 
@@ -107,10 +111,21 @@ def _cookies_txt(tmp_path: Path) -> Path:
     return path
 
 
-def _assert_video_file(path: Path | None, name: str) -> None:
+def _assert_video_file(path: Path | None, name: str, item_id: str, *, embedded: bool) -> None:
+    """A real, playable MP4 under `name` (the `ftyp` box first, the fixture's 3 seconds), with no
+    `.embed.part` left next to it. `embedded`: the fake CDN's JPEG for `item_id` sits in its `covr`
+    atom; otherwise the file is byte for byte what the CDN sent and carries no cover."""
     assert path is not None and path.name == name and path.is_file()
     data = path.read_bytes()
-    assert data.startswith(MP4_HEADER) and len(data) == MEDIA_SIZE
+    assert data[4:8] == b"ftyp"
+    assert abs(MP4(path).info.length - 3.0) < 0.2
+    assert not list(path.parent.glob(f"*{EMBED_SUFFIX}"))
+    if embedded:
+        assert extract_cover(path) == (cover_bytes(item_id), "image/jpeg")
+        assert len(data) > MEDIA_SIZE  # the atom was added, nothing else changed
+    else:
+        assert data == media_bytes(item_id, "0") and len(data) == MEDIA_SIZE
+        assert extract_cover(path) is None
 
 
 def test_downloads_episodes_1_and_2_inside_one_browser_session(tmp_path: Path) -> None:
@@ -126,19 +141,13 @@ def test_downloads_episodes_1_and_2_inside_one_browser_session(tmp_path: Path) -
 
     assert first.status is DownloadStatus.DONE
     assert second.status is DownloadStatus.DONE
-    _assert_video_file(first.path, EPISODE_1)
-    _assert_video_file(second.path, EPISODE_2)
-    assert first.message == f"saved {EPISODE_1} (0.1 MiB) + thumbnail"
-    assert second.message == f"saved {EPISODE_2} (0.1 MiB) + thumbnail"
-    # the covers (JPEG magic) sit next to the videos, under the same stem
-    _assert_cover_file(options.out_dir / COVER_1, "7699400000000000001")
-    _assert_cover_file(options.out_dir / COVER_2, "7699400000000000002")
-    assert sorted(p.name for p in options.out_dir.iterdir()) == [
-        COVER_1,
-        EPISODE_1,
-        COVER_2,
-        EPISODE_2,
-    ]
+    # the default: the cover is embedded into each MP4 as its cover art; no sidecar file
+    _assert_video_file(first.path, EPISODE_1, ITEM_1, embedded=True)
+    _assert_video_file(second.path, EPISODE_2, ITEM_2, embedded=True)
+    assert first.message == f"saved {EPISODE_1} (0.1 MiB) + cover embedded"
+    assert second.message == f"saved {EPISODE_2} (0.1 MiB) + cover embedded"
+    assert cover_sidecar(first.path) is None and cover_sidecar(second.path) is None
+    assert sorted(p.name for p in options.out_dir.iterdir()) == [EPISODE_1, EPISODE_2]
     # exactly one CDN request and one cover request per episode, the cover right after its
     # video, all with the Referer of the series site; no page load
     assert [r.path for r in after] == [MEDIA_1, COVER_PATH_1, MEDIA_2, COVER_PATH_2]
@@ -147,18 +156,71 @@ def test_downloads_episodes_1_and_2_inside_one_browser_session(tmp_path: Path) -
     assert not downloader.browser_started  # closed by the context manager
 
 
-def test_no_thumbnails_saves_the_videos_only_and_asks_for_no_cover(tmp_path: Path) -> None:
+def test_thumbnail_both_embeds_the_cover_and_keeps_the_sidecar(tmp_path: Path) -> None:
+    with FakeTikTok() as server:
+        series = _series_from_server(server)
+        before = len(server.requests)
+        options = _options(server, tmp_path, thumbnail="both")
+        with BrowserDownloader() as downloader:
+            results = [downloader.download(series.episode(n), options) for n in (1, 2)]
+        after = server.requests[before:]
+
+    assert [r.status for r in results] == [DownloadStatus.DONE, DownloadStatus.DONE]
+    assert results[0].message == f"saved {EPISODE_1} (0.1 MiB) + cover embedded + file"
+    _assert_video_file(results[0].path, EPISODE_1, ITEM_1, embedded=True)
+    _assert_video_file(results[1].path, EPISODE_2, ITEM_2, embedded=True)
+    _assert_cover_file(options.out_dir / COVER_1, ITEM_1)
+    _assert_cover_file(options.out_dir / COVER_2, ITEM_2)
+    assert cover_sidecar(results[0].path) == options.out_dir / COVER_1
+    assert sorted(p.name for p in options.out_dir.iterdir()) == [
+        COVER_1,
+        EPISODE_1,
+        COVER_2,
+        EPISODE_2,
+    ]
+    assert [r.path for r in after] == [MEDIA_1, COVER_PATH_1, MEDIA_2, COVER_PATH_2]
+
+
+def test_thumbnail_file_keeps_the_sidecar_only_and_the_video_as_the_cdn_sent_it(
+    tmp_path: Path,
+) -> None:
+    with FakeTikTok() as server:
+        series = _series_from_server(server)
+        before = len(server.requests)
+        options = _options(server, tmp_path, thumbnail="file")
+        with BrowserDownloader() as downloader:
+            results = [downloader.download(series.episode(n), options) for n in (1, 2)]
+        after = server.requests[before:]
+
+    assert [r.status for r in results] == [DownloadStatus.DONE, DownloadStatus.DONE]
+    assert results[0].message == f"saved {EPISODE_1} (0.1 MiB) + cover file"
+    _assert_video_file(results[0].path, EPISODE_1, ITEM_1, embedded=False)
+    _assert_video_file(results[1].path, EPISODE_2, ITEM_2, embedded=False)
+    _assert_cover_file(options.out_dir / COVER_1, ITEM_1)
+    _assert_cover_file(options.out_dir / COVER_2, ITEM_2)
+    assert sorted(p.name for p in options.out_dir.iterdir()) == [
+        COVER_1,
+        EPISODE_1,
+        COVER_2,
+        EPISODE_2,
+    ]
+    assert [r.path for r in after] == [MEDIA_1, COVER_PATH_1, MEDIA_2, COVER_PATH_2]
+
+
+def test_thumbnail_none_saves_the_videos_only_and_asks_for_no_cover(tmp_path: Path) -> None:
     with FakeTikTok() as server:
         series = _series_from_server(server)
         assert all(e.cover_url and e.cover_url.startswith(server.base_url) for e in series.episodes)
         before = len(server.requests)
-        options = _options(server, tmp_path, thumbnails=False)
+        options = _options(server, tmp_path, thumbnail="none")
         with BrowserDownloader() as downloader:
             results = [downloader.download(series.episode(n), options) for n in (1, 2)]
         after = server.requests[before:]
 
     assert [r.status for r in results] == [DownloadStatus.DONE, DownloadStatus.DONE]
     assert results[0].message == f"saved {EPISODE_1} (0.1 MiB)"
+    _assert_video_file(results[0].path, EPISODE_1, ITEM_1, embedded=False)
+    _assert_video_file(results[1].path, EPISODE_2, ITEM_2, embedded=False)
     assert sorted(p.name for p in options.out_dir.iterdir()) == [EPISODE_1, EPISODE_2]
     assert [r.path for r in after] == [MEDIA_1, MEDIA_2]
     assert server.cover_requests == []
@@ -194,8 +256,8 @@ def test_expired_play_urls_are_refreshed_once_in_the_session(tmp_path: Path) -> 
         after = server.requests[before:]
 
     assert [r.status for r in results] == [DownloadStatus.DONE, DownloadStatus.DONE]
-    _assert_video_file(results[0].path, EPISODE_1)
-    _assert_video_file(results[1].path, EPISODE_2)
+    _assert_video_file(results[0].path, EPISODE_1, ITEM_1, embedded=True)
+    _assert_video_file(results[1].path, EPISODE_2, ITEM_2, embedded=True)
     assert refreshes == 1  # episode 2 came from the refreshed list cached in the run
     series_pages = [r for r in after if r.path.startswith("/shortdrama/episode/")]
     assert [r.path for r in series_pages] == [f"/shortdrama/episode/{SERIES_ID}/1"]
@@ -207,7 +269,7 @@ def test_expired_play_urls_are_refreshed_once_in_the_session(tmp_path: Path) -> 
     covers = [r for r in after if r.path.startswith("/cover/")]
     assert [r.path for r in covers] == [COVER_PATH_1, COVER_PATH_2]  # one per episode, after it
     assert [r.path for r in after][-2:] == [MEDIA_2, COVER_PATH_2]  # the cover follows its video
-    _assert_cover_file(options.out_dir / COVER_1, "7699400000000000001")
+    assert sorted(p.name for p in options.out_dir.iterdir()) == [EPISODE_1, EPISODE_2]
 
 
 def test_cdn_rate_limit_is_reported_as_rate_limited(tmp_path: Path) -> None:
@@ -237,7 +299,7 @@ def test_dry_run_touches_no_network_and_starts_no_browser(tmp_path: Path) -> Non
     assert [r.status for r in results] == [DownloadStatus.DRY_RUN] * 4 + [
         DownloadStatus.SKIPPED_LOCKED
     ]
-    assert results[0].message == "would download from 127.0.0.1 + thumbnail"
+    assert results[0].message == "would download from 127.0.0.1 + cover"
     assert not downloader.browser_started
     assert not (tmp_path / "series").exists()
 
@@ -252,7 +314,8 @@ def test_cookies_log_the_session_in_at_the_cdn_and_never_leak(tmp_path: Path) ->
         after = server.requests[before:]
 
     assert result.status is DownloadStatus.DONE
-    _assert_video_file(result.path, EPISODE_1)
+    _assert_video_file(result.path, EPISODE_1, ITEM_1, embedded=True)
+    assert result.message == f"saved {EPISODE_1} (0.1 MiB) + cover embedded"
     assert [r.path for r in after] == [MEDIA_1, COVER_PATH_1]
     assert all(r.logged_in and r.with_referer for r in after)  # the cover goes with the session
     assert SESSION_VALUE not in result.message and SESSION_VALUE not in repr(result)

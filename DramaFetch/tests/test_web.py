@@ -1,9 +1,10 @@
 """Tests for the web UI: the JSON API driven through ``http.client`` against fakes, and JobManager.
 
 No network: a fake Discovery returns a five-episode series (episode 5 locked) and a fake Downloader
-writes a tiny file instantly — optionally with a cover sidecar next to it. The real
-``engine.download_series`` and manifest run underneath. Every server here binds to 127.0.0.1; the
-off-loopback rule is tested by the refusal that comes before any bind.
+writes a tiny file instantly — optionally with a cover sidecar next to it, or as a copy of the real
+``fixtures/tiny.mp4`` with a cover embedded in it (written with mutagen directly, the way the
+engines do). The real ``engine.download_series`` and manifest run underneath. Every server here
+binds to 127.0.0.1; the off-loopback rule is tested by the refusal that comes before any bind.
 """
 
 from __future__ import annotations

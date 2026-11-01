@@ -343,11 +343,11 @@ class YtDlpDownloader:
                 message=f"already exists: {existing.name}",
             )
         if options.dry_run:
-            thumbnail = " + cover" if options.thumbnails else ""
+            cover = " + cover" if options.thumbnails else ""
             return DownloadResult(
                 episode=episode,
                 status=DownloadStatus.DRY_RUN,
-                message=f"would download {episode.page_url}{thumbnail}",
+                message=f"would download {episode.page_url}{cover}",
             )
         problem = cookies_file_problem(options.cookies_file)
         if problem is not None:

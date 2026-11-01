@@ -313,15 +313,15 @@ class BrowserDownloader:
         return None, last
 
     def _dry_run_message(self, episode: Episode, options: DownloadOptions) -> str:
-        thumbnail = " + cover" if options.thumbnails and episode.cover_url else ""
+        cover = " + cover" if options.thumbnails and episode.cover_url else ""
         candidates = play_url_candidates(episode.raw) if episode.raw is not None else []
         if not candidates:
             return (
                 "would download: no play url in the episode list (it would be refreshed first)"
-                + thumbnail
+                + cover
             )
         suffix = "" if self._usable(candidates[0]) else " (play url expired: fresh list first)"
-        return f"would download from {_host(candidates[0])}{suffix}{thumbnail}"
+        return f"would download from {_host(candidates[0])}{suffix}{cover}"
 
     # -- the cover (thumbnail) -----------------------------------------------------------------
 

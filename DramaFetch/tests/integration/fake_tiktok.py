@@ -19,8 +19,11 @@ Routes (all GET):
                                  play URL inside an item_list payload is rewritten to
                                  `{base}/cdn/{item_id}/{n}.mp4?expire=<now + media_ttl_s>` (`n`:
                                  order of first appearance within the item). Answers 200
-                                 `video/mp4` with 128 KiB of deterministic bytes behind a plausible
-                                 MP4 header, 403 when `expire` is in the past (or, with
+                                 `video/mp4` with the real 3-second fixture `tiny.mp4` followed
+                                 by one top-level `free` box that names the episode and pads the
+                                 file to exactly 128 KiB — a valid MP4 (mutagen tags it, ffmpeg
+                                 decodes it, so covers can be embedded), distinct per episode —
+                                 403 when `expire` is in the past (or, with
                                  `require_login`, without the session cookie) and 429 when the
                                  server was started with `cdn_rate_limit`. `expired_media_first`
                                  makes the FIRST item_list response carry already-expired URLs and
@@ -64,8 +67,11 @@ CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
 COVER_PATH_RE = re.compile(r"^/cover/(?P<id>\d+)\.jpg$")
 MEDIA_URL_PREFIX = "https://v16-webapp-prime.tiktok.com/"
 COVER_URL_PREFIX = "https://p16-sign-sg.tiktokcdn.com/"
-MP4_HEADER = b"\x00\x00\x00\x18ftypmp42"
+#: 20 531 bytes: 3 s of 160x120 H.264 with silent AAC, `moov` before `mdat` (faststart).
+TINY_MP4 = (FIXTURES / "tiny.mp4").read_bytes()
 MEDIA_SIZE = 128 * 1024
+FREE_BOX = b"free"
+MEDIA_LABEL_PREFIX = b"dramafetch:"
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 COVER_MIN_SIZE = 600  # the COM segment pads every cover past this
@@ -359,9 +365,14 @@ def rewrite_media_urls(node: Any, base: str, expire: int) -> tuple[Any, int]:
 
 
 def media_bytes(item_id: str, index: str) -> bytes:
-    """128 KiB that start like an MP4 file (`ftypmp42`) and are the same on every call."""
-    filler = random.Random(f"{item_id}/{index}").randbytes(MEDIA_SIZE - len(MP4_HEADER))
-    return MP4_HEADER + filler
+    """The real fixture `tests/fixtures/tiny.mp4` followed by one top-level `free` box (a 4-byte
+    big-endian size, `free`, the payload) whose payload starts with `dramafetch:<item_id>:<index>`
+    and pads the file to exactly `MEDIA_SIZE`: a valid MP4 that mutagen and ffmpeg accept, at
+    least `MIN_VIDEO_BYTES` long, distinct per episode and the same on every call."""
+    label = MEDIA_LABEL_PREFIX + f"{item_id}:{index}".encode()
+    box_size = MEDIA_SIZE - len(TINY_MP4)
+    filler = random.Random(f"{item_id}/{index}").randbytes(box_size - 8 - len(label))
+    return TINY_MP4 + box_size.to_bytes(4, "big") + FREE_BOX + label + filler
 
 
 def cover_bytes(item_id: str) -> bytes:

@@ -16,6 +16,7 @@ from dramafetch import engine
 from dramafetch.downloader import locked_result
 from dramafetch.manifest import MANIFEST_FILENAME, Manifest, series_dir
 from dramafetch.models import (
+    THUMBNAIL_MODES,
     DiscoveryOptions,
     DownloadOptions,
     DownloadResult,
@@ -678,6 +679,47 @@ def test_an_unusable_name_format_is_refused_before_the_series_directory_exists(
     assert list(tmp_path.iterdir()) == []
     engine.validate_naming(DownloadOptions())  # the default is fine
     engine.validate_naming(DownloadOptions(name_format="{title}"))  # the bare-video default too
+
+
+@pytest.mark.parametrize("mode", THUMBNAIL_MODES)
+def test_thumbnail_modes_are_accepted_and_shape_the_options(mode):
+    options = DownloadOptions(thumbnail=mode)
+    engine.validate_thumbnail(options)
+    assert options.thumbnails is (mode != "none")
+    assert options.embed_cover is (mode in ("embed", "both"))
+    assert options.keep_cover_file is (mode in ("both", "file"))
+    assert THUMBNAIL_MODES == ("embed", "both", "file", "none")
+    assert DownloadOptions().thumbnail == "embed"
+
+
+@pytest.mark.parametrize("mode", ["sidecar", "EMBED", "", "yes"])
+def test_an_unknown_thumbnail_mode_is_refused_before_the_series_directory_exists(tmp_path, mode):
+    series = make_series(numbers=(1, 2))
+    options = DownloadOptions(out_dir=tmp_path, thumbnail=mode)
+    match = f"unknown thumbnail mode {mode!r}: expected one of embed, both, file, none"
+    with pytest.raises(ValueError, match=match):
+        engine.validate_thumbnail(options)
+    downloader = ClosingDownloader()
+    with pytest.raises(ValueError, match=match):
+        engine.download_series(series, series.episodes, options, downloader=downloader)
+    assert downloader.calls == [] and downloader.closed == 0
+    assert not series_dir(tmp_path, series).exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_thumbnail_mode_reaches_the_downloader_untouched(tmp_path):
+    series = make_series(numbers=(1,))
+    seen = []
+
+    class Recording(FakeDownloader):
+        def download(self, episode, options):
+            seen.append(options.thumbnail)
+            return super().download(episode, options)
+
+    for mode in THUMBNAIL_MODES:
+        options = DownloadOptions(out_dir=tmp_path / mode, thumbnail=mode)
+        _run(series, options, Recording())
+    assert seen == list(THUMBNAIL_MODES)
 
 
 def test_the_downloader_gets_the_series_name_for_the_series_placeholder(tmp_path):
