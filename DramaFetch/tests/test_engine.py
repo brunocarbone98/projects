@@ -2617,5 +2617,229 @@ def test_the_report_of_a_selection_counts_a_remembered_drm_episode_as_locked(tmp
         series, run.results, read_manifest(series_dir(tmp_path, series), SERIES_ID)
     )
     assert rows[-1].message == engine.DRM_REMEMBERED_MESSAGE
-    # TikTok lists it as free, so the series is not complete without it — as a whole run says
-    assert engine.report_line(run.report) == "incomplete: 2 of 3 — 1 locked (3)"
+    # TikTok lists it as free, but it cannot be downloaded: like a locked episode it is left out
+    # of "every downloadable episode is on disk" (build 7b) — as a whole run says
+    assert run.report.complete
+    assert engine.report_line(run.report) == "complete: 2 of 3 (2 downloaded) — 1 locked (3)"
+    # a selection never marks the series complete for the 24-hour skip, though
+    assert read_manifest(series_dir(tmp_path, series), SERIES_ID).complete_at is None
+
+
+# --------------------------------------------------------------------------- build 7b
+# The DRM memory holds only what a DOWNLOAD found (a payload flag is read again on every run);
+# what cannot be downloaded is left out of completeness, so a series whose only missing episodes
+# are DRM-protected is marked complete and skipped; and a refusal wins over DRM wording.
+
+DONE = DownloadStatus.DONE
+ON_DISK = DownloadStatus.SKIPPED_EXISTS
+SKIPPED_LOCKED = DownloadStatus.SKIPPED_LOCKED
+UNAVAILABLE = DownloadStatus.FAILED_UNAVAILABLE
+BLOCKED = DownloadStatus.FAILED_BLOCKED
+
+
+def test_models_hold_the_drm_memory_message_the_engine_writes():
+    from dramafetch import models
+
+    assert engine.DRM_REMEMBERED_MESSAGE is models.DRM_REMEMBERED_MESSAGE
+    assert models.DRM_REMEMBERED_MESSAGE == (
+        "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; "
+        "--include-locked tries again"
+    )
+
+
+def test_a_series_whose_only_missing_episode_is_remembered_drm_is_complete_and_then_skipped(
+    tmp_path,
+):
+    """A first run finds episode 3 encrypted — the verdict of a download, remembered. The next
+    whole-series run (every other episode already on disk, 3 skipped from the memory: not one
+    download request) is complete, says what is locked and marks the manifest complete; so the
+    run after it is skipped with ZERO requests — not even the list — and its line names 3 as
+    locked with the --recheck hint (R-4). Before build 7b such a series stayed incomplete forever
+    and every whole-series run listed it again, for nothing."""
+    series = make_series(numbers=(1, 2, 3, 4), total=4)
+    discovery = BatchDiscovery(series)
+    first = _run_series(series, _quiet(tmp_path), discovery, downloader=DrmDownloader(drm=(3,)))
+    assert [result.status for result in first.results] == [DONE, DONE, UNAVAILABLE, DONE]
+    assert first.results[2].message == DRM_MESSAGE
+    assert engine.report_line(first.report) == "incomplete: 3 of 4 — 1 failed (3)"
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert manifest.drm_protected(3) and manifest.complete_at is None
+
+    downloader = FakeDownloader()
+    second = _run_series(
+        series, _quiet(tmp_path), discovery, downloader=downloader, wall=WALL + 60
+    )
+    assert discovery.calls == [SERIES_ID, SERIES_ID]  # listed again: it was not complete yet
+    assert downloader.calls == []  # 1, 2, 4 on disk, 3 remembered: no download request at all
+    assert [result.status for result in second.results] == [
+        ON_DISK,
+        ON_DISK,
+        SKIPPED_LOCKED,
+        ON_DISK,
+    ]
+    assert second.results[2].message == engine.DRM_REMEMBERED_MESSAGE
+    report = second.report
+    assert report.complete and (report.locked, report.locked_numbers) == (1, (3,))
+    assert engine.report_line(report) == "complete: 3 of 4 (3 already on disk) — 1 locked (3)"
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert manifest.complete_episodes == 3 and manifest.complete_since() == WALL + 60
+    assert manifest.locked_numbers() == [3] and manifest.drm_protected(3)
+
+    third_downloader = FakeDownloader()
+    third = _run_series(
+        series,
+        _quiet(tmp_path),
+        discovery,
+        downloader=third_downloader,
+        wall=WALL + 60 + 2 * 3600,
+    )
+    assert discovery.calls == [SERIES_ID, SERIES_ID]  # zero requests: not even the list
+    assert third_downloader.calls == [] and third.contacted is False
+    assert third.report.skipped_complete and third.report.locked_numbers == (3,)
+    assert [result.episode.number for result in third.results] == [1, 2, 4]  # no row for 3
+    assert engine.report_line(third.report) == (
+        "complete, nothing to do: 3 episodes already on disk, 1 locked (3) (checked 2 h ago) "
+        "— unlocked more in the TikTok app since? --recheck looks again"
+    )
+
+
+def test_with_include_locked_a_remembered_drm_episode_is_attempted_and_a_failure_counts(tmp_path):
+    """`--include-locked` asks TikTok again for an episode the memory would skip — with the same
+    session: TikTok decides. Encrypted again, it is a failure as before (the series incomplete,
+    its complete mark forgotten); served playable, it downloads and the memory is gone."""
+    series = make_series(numbers=(1, 2, 3), total=3)
+    discovery = BatchDiscovery(series)
+    _run_series(series, _quiet(tmp_path), discovery, downloader=DrmDownloader(drm=(3,)))
+    marked = _run_series(series, _quiet(tmp_path), discovery)
+    assert marked.report.complete
+    assert read_manifest(series_dir(tmp_path, series), SERIES_ID).complete_at is not None
+
+    downloader = DrmDownloader(drm=(3,))
+    again = _run_series(
+        series, _quiet(tmp_path, include_locked=True), discovery, downloader=downloader
+    )
+    assert [number for number, _ in downloader.calls] == [3]  # only the remembered one is asked
+    assert [result.status for result in again.results] == [ON_DISK, ON_DISK, UNAVAILABLE]
+    assert not again.report.complete
+    assert engine.report_line(again.report) == "incomplete: 2 of 3 — 1 failed (3)"
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert manifest.complete_at is None and manifest.drm_protected(3)
+
+    served = FakeDownloader()
+    last = _run_series(series, _quiet(tmp_path, include_locked=True), discovery, downloader=served)
+    assert [number for number, _ in served.calls] == [3]
+    assert engine.report_line(last.report) == "complete: 3 of 3 (1 downloaded, 2 already on disk)"
+    assert not read_manifest(series_dir(tmp_path, series), SERIES_ID).drm_protected(3)
+
+
+def _payload_item(number, **drama):
+    """An item_list entry as TikTok's web app serves it (free, with a play address); `drama`
+    goes into `dramaInfo.DramaVideoData`."""
+    return {
+        "id": f"76994000000000000{number:02d}",
+        "desc": f"{NAME} | Episode {number}",
+        "author": {"uniqueId": "muffindrama_us"},
+        "video": {
+            "duration": 3,
+            "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/x/?a=1988&expire=1",
+        },
+        "dramaInfo": {
+            "dramaID": SERIES_ID,
+            "dramaName": NAME,
+            "DramaVideoData": {"EpisodeNumber": number, **drama},
+        },
+    }
+
+
+def _payload_series(*items):
+    payload = {"itemList": list(items), "hasMore": False}
+    return Series(SERIES_ID, NAME, parse_item_list_payload(payload, SERIES_ID).episodes)
+
+
+def test_a_payload_drm_flag_is_not_remembered_the_next_run_reads_the_payload_again(tmp_path):
+    """The payload is read again on every run, so its DRM flag is never remembered: a run that
+    still finds it skips the episode for the payload's reason, and once TikTok stops flagging it
+    the next run asks for it — with the same session."""
+    flagged = _payload_series(_payload_item(1), _payload_item(2, isDrm=True))
+    assert [episode.drm for episode in flagged.episodes] == [False, True]
+    events = []
+    results, _, _ = _run(flagged, _quiet(tmp_path), RecordingDownloader(events))
+    assert events == [("attempt", SERIES_ID, 1)]  # the flagged one: no request
+    flag = "protected by DRM (isDrm=True): DramaFetch does not decrypt it"
+    assert (results[1].status, results[1].message) == (SKIPPED_LOCKED, flag)
+    manifest = read_manifest(series_dir(tmp_path, flagged), SERIES_ID)
+    assert manifest.entries[2].status == "skipped-locked" and manifest.entries[2].message == flag
+    assert not manifest.drm_protected(2)
+
+    # still flagged: skipped again, for the payload's reason — not "found by an earlier run"
+    events.clear()
+    results, _, _ = _run(flagged, _quiet(tmp_path), RecordingDownloader(events))
+    assert events == [] and results[1].message == flag
+
+    # TikTok stopped flagging it: the next run asks for it
+    clear = _payload_series(_payload_item(1), _payload_item(2))
+    assert not clear.episodes[1].locked
+    results, _, _ = _run(clear, _quiet(tmp_path), RecordingDownloader(events))
+    assert events == [("attempt", SERIES_ID, 2)]  # 1 is on disk
+    assert [result.status for result in results] == [ON_DISK, DONE]
+
+
+class _FailingYdl:
+    """A yt-dlp stand-in whose every download raises the next of the shared `errors`."""
+
+    def __init__(self, errors, asked):
+        self.errors, self.asked = errors, asked
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def download(self, urls):
+        self.asked.append(urls[0])
+        raise self.errors.pop(0)
+
+
+def test_yt_dlps_drm_error_is_remembered_and_a_403_naming_drm_stops_with_the_cooldown(tmp_path):
+    """Through the real yt-dlp downloader: "This video is DRM protected" is FAILED_UNAVAILABLE
+    with DRM_MESSAGE first (describe_failure), which the manifest remembers; an HTTP 403 whose
+    message also names DRM is a refusal — FAILED_BLOCKED, the run stops there and the 30-minute
+    cooldown is recorded — and is never remembered as DRM."""
+    from yt_dlp.utils import DownloadError
+
+    from dramafetch.downloader import BLOCKED_MESSAGE, YtDlpDownloader
+
+    drm_error = "ERROR: [TikTok] 7699400000000000001: This video is DRM protected"
+    blocked_error = (
+        "ERROR: [TikTok] 7699400000000000002: HTTP Error 403: Forbidden (DRM protected?)"
+    )
+    errors = [DownloadError(drm_error), DownloadError(blocked_error)]
+    asked = []
+    downloader = YtDlpDownloader(lambda params: _FailingYdl(errors, asked))
+    series = make_series(numbers=(1, 2, 3))
+    results, _, _ = _run(series, _quiet(tmp_path), downloader)
+    assert [result.status for result in results] == [UNAVAILABLE, BLOCKED, BLOCKED]
+    assert results[0].message == f"{DRM_MESSAGE}: {drm_error}"
+    assert results[1].message == f"{BLOCKED_MESSAGE}: {blocked_error}"
+    assert results[2].message.startswith("stopped: episode 2 failed-blocked")
+    assert asked == [series.episodes[0].page_url, series.episodes[1].page_url]  # 3: no request
+    recorded = active_cooldown()
+    assert recorded is not None and recorded.source == "yt-dlp"
+    assert recorded.reason.startswith("blocked (HTTP 403): TikTok refused the request")
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert manifest.drm_protected(1)
+    assert not manifest.drm_protected(2) and not manifest.drm_protected(3)
+
+    # after the cooldown: 1 is skipped from the memory without a request, 2 and 3 are tried again
+    clear_cooldown()
+    errors[:] = [DownloadError("Video not available"), DownloadError("Video not available")]
+    asked.clear()
+    results, _, _ = _run(series, _quiet(tmp_path), downloader)
+    assert asked == [series.episodes[1].page_url, series.episodes[2].page_url]
+    assert (results[0].status, results[0].message) == (
+        SKIPPED_LOCKED,
+        engine.DRM_REMEMBERED_MESSAGE,
+    )
+    assert [result.status for result in results[1:]] == [UNAVAILABLE, UNAVAILABLE]
+    assert active_cooldown() is None

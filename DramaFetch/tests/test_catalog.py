@@ -21,6 +21,8 @@ from dramafetch.catalog import (
     cover_url_of,
     episode_from_item,
     find_item_lists,
+    is_drm_key,
+    key_words,
     lock_hints,
     merge_episodes,
     ordered_renditions,
@@ -953,6 +955,194 @@ def test_hints_name_every_clue_in_payload_order_and_drm_ones_too():
     assert access_of(huge)[3] == ("unlockPrice=…",)
 
 
+# --------------------------------------------------------------------------- build 7b: DRM keys
+# A DRM clue locks the episode whatever else the payload says, and it only saves a download that
+# would be refused anyway (media.drm_problem is the real guard): so a key must NAME DRM in whole
+# words. Builds 1-6 never looked at these keys; a substring match would lock every episode of a
+# real payload that carries an HDR flag, a "DRM-free" flag or an encrypted user id.
+
+#: The spec's "must be DRM" list: each locks the episode as DRM, wherever access_of scans it.
+DRM_KEYS = [
+    ("isDrm", True),
+    ("drm", 1),
+    ("drmType", "widevine"),
+    ("DRMType", "fairplay"),
+    ("is_encrypted", True),
+    ("encrypted", True),
+    ("videoEncrypted", 1),
+    ("encryption", "cenc"),
+    ("encryptType", 2),
+]
+#: The spec's "must NOT be DRM" list: HDR flags, negations and identifiers — no clue of any class.
+NOT_DRM_KEYS = [
+    ("hdrMode", 1),
+    ("HDRType", 1),
+    ("isHdr", True),
+    ("isDrmFree", True),
+    ("drm_free", 1),
+    ("nonEncrypted", True),
+    ("no_drm", 1),
+    ("notEncrypted", True),
+    ("encryptedUid", "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM"),
+    ("encrypted_id", "x"),
+    ("unencrypted", True),
+]
+
+
+def _everywhere(key, value):
+    """The item with `key: value` in each place access_of scans: `dramaInfo` (nested), `video`'s
+    top level, the item's own top level, an `itemStruct` wrapper's top level."""
+    return [
+        _item({key: value}),
+        _item(None, video={**PLAYABLE, key: value}),
+        _item(None, **{key: value}),
+        {"itemStruct": {"id": "1", "video": dict(PLAYABLE), key: value}},
+    ]
+
+
+@pytest.mark.parametrize(("key", "value"), DRM_KEYS)
+def test_a_key_that_names_drm_in_whole_words_locks_the_episode_as_drm(key, value):
+    assert is_drm_key(key)
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("locked", False, True, (f"{key}={value}",)), item
+    episode = episode_from_item(_item({key: value}), "s")
+    assert episode is not None and episode.drm and episode.locked
+    assert episode.lock_hints == (f"{key}={value}",)
+    # DRM still wins over an entitlement: DramaFetch never decrypts
+    assert access_of(_item({"isUnlocked": True, key: value}))[:3] == ("locked", True, True)
+
+
+@pytest.mark.parametrize(("key", "value"), NOT_DRM_KEYS)
+def test_hdr_flags_negations_and_identifiers_are_not_drm_nor_any_clue(key, value):
+    assert not is_drm_key(key)
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("free", False, False, ()), item
+    # they hide nothing either: a real DRM flag next to one still locks
+    assert access_of(_item({key: value, "isDrm": True}))[:3] == ("locked", False, True)
+    # and on a sold episode TikTok gave this session a play URL for, rule 5 decides as before
+    assert access_of(_item({key: value, "isFree": False, "unlockPrice": 30}))[:3] == (
+        "unlocked",
+        True,
+        False,
+    )
+
+
+@pytest.mark.parametrize(("key", "value"), [("isDrm", False), ("drmType", "none"), ("drmType", 0)])
+def test_a_falsy_drm_value_is_never_a_clue(key, value):
+    assert is_drm_key(key)
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("free", False, False, ())
+
+
+@pytest.mark.parametrize(
+    ("key", "words"),
+    [
+        ("DRMType", ("drm", "type")),  # an acronym run before a capitalised word
+        ("HDRBit", ("hdr", "bit")),
+        ("isDrmFree", ("is", "drm", "free")),  # camelCase
+        ("VideoEncrypted", ("video", "encrypted")),  # PascalCase
+        ("drm_free", ("drm", "free")),  # snake_case
+        ("no-drm", ("no", "drm")),  # kebab-case
+        ("drm2Type", ("drm", "2", "type")),  # digits
+        ("HDR10Plus", ("hdr", "10", "plus")),
+        ("isDRM", ("is", "drm")),
+        ("DRM", ("drm",)),
+        ("unencrypted", ("unencrypted",)),
+        ("", ()),
+        ("__", ()),
+        ("ü", ()),
+    ],
+)
+def test_key_words_split_camel_pascal_acronyms_snake_kebab_and_digits(key, words):
+    assert key_words(key) == words
+
+
+def test_a_real_payload_with_hdr_flags_and_encrypted_ids_keeps_its_accesses():
+    """The paid fixture with an HDR flag, a "DRM-free" flag and TikTok's encrypted user ids added
+    to every item — in `video`, in `dramaInfo` and in a block nested in it: before build 7b every
+    episode of such a payload was locked as DRM; now nothing changes."""
+    text = (FIXTURES / "item_list_series3_logged_in.json").read_text(encoding="utf-8")
+    payload = json.loads(text)
+    expected = [(e.access, e.paid, e.drm, e.lock_hints) for e in _paid_page("logged_in")]
+    for item in payload["itemList"]:
+        item["video"].update({"hdrMode": 1, "HDRType": 1, "isDrmFree": True})
+        item["dramaInfo"]["encryptedUid"] = "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM"
+        item["dramaInfo"]["authorInfo"] = {"encrypted_id": "x", "no_drm": 1, "nonEncrypted": True}
+    episodes = parse_item_list_payload(payload, PAID_SERIES_ID).episodes
+    assert [(e.access, e.paid, e.drm, e.lock_hints) for e in episodes] == expected
+    assert [e.access for e in episodes] == ["free", "free", "unlocked", "locked"]
+    assert not any(e.drm for e in episodes)
+
+
+@pytest.mark.parametrize(("key", "value"), [("blockStatus", 1), ("isBlocked", True)])
+def test_block_is_not_lock(key, value):
+    """`lock_?status` and the old heuristic's leftovers do not match `block…` keys: no clue at
+    all — where `lockStatus: 1` and `isLocked: true` lock the episode."""
+    for item in _everywhere(key, value):
+        assert access_of(item) == ("free", False, False, ())
+    for variant in (key.upper(), key[0].upper() + key[1:], f"un{key}"):
+        assert access_of(_item({variant: value})) == ("free", False, False, ()), variant
+    unblocked = key.replace("block", "lock").replace("Block", "Lock")
+    assert access_of(_item({unblocked: value}))[0] == "locked"
+
+
+UNLOCKED = ("unlocked", True, False)
+LOCKED = ("locked", False, False)
+FREE = ("free", False, False)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected", "hint"),
+    [
+        # a STRING value is read like an (unlock|pay|purchase)_?status one: ENTITLED ...
+        *[(text, UNLOCKED, text) for text in ("unlocked", "paid", "purchased", "bought")],
+        ("entitled", UNLOCKED, "entitled"),
+        (" Unlocked ", UNLOCKED, "Unlocked"),
+        # ... VIEWER-LOCK ...
+        *[(text, LOCKED, text) for text in ("locked", "lock", "need_pay", "needpay", "unpaid")],
+        ("unpurchased", LOCKED, "unpurchased"),
+        ("NEED_PAY", LOCKED, "NEED_PAY"),
+        # ... and any other non-falsy string is AMBIGUOUS: a hint that never decides
+        ("pending", FREE, "pending"),
+        ("2", FREE, "2"),
+        # a bool or a number stays a lock when truthy (unchanged)
+        (True, LOCKED, "True"),
+        (1, LOCKED, "1"),
+        (2, LOCKED, "2"),
+        # falsy: no clue at all
+        (False, FREE, None),
+        (0, FREE, None),
+        ("0", FREE, None),
+        ("none", FREE, None),
+        ("", FREE, None),
+    ],
+)
+def test_a_lock_status_string_reads_like_a_status(value, expected, hint):
+    for key in ("lockStatus", "lock_status", "LockStatus", "episodeLockStatus"):
+        access, paid, drm, hints = access_of(_item({key: value}))
+        assert (access, paid, drm) == expected, key
+        assert hints == ((f"{key}={hint}",) if hint is not None else ()), key
+
+
+def test_lock_status_unlocked_with_a_play_address_is_unlocked_and_an_unknown_one_never_decides():
+    assert access_of(_item({"lockStatus": "unlocked"})) == (
+        "unlocked",
+        True,
+        False,
+        ("lockStatus=unlocked",),
+    )
+    # an entitlement needs no play address; without one the episode is still the account's
+    assert access_of(_item({"lockStatus": "unlocked"}, video={}))[0] == "unlocked"
+    # an unknown string decides nothing: the price, then the play address, do
+    assert access_of(_item({"lockStatus": "pending", "isFree": False}))[:3] == (
+        "unlocked",
+        True,
+        False,
+    )
+    assert access_of(_item({"lockStatus": "pending"}, video={}))[0] == "locked"
+    assert access_of(_item({"lockStatus": "pending", "isLocked": True}))[0] == "locked"
+
+
 #: Keys the fuzz test draws from: every clue class, the containers access_of walks, and noise.
 _FUZZ_KEYS = (
     "isLocked",
@@ -980,6 +1170,12 @@ _FUZZ_KEYS = (
     "purchaseStatus",
     "drm",
     "isEncrypted",
+    "DRMType",
+    "isDrmFree",
+    "encryptedUid",
+    "hdrMode",
+    "blockStatus",
+    "lock_status",
     "unlockType",
     "dramaInfo",
     "video",

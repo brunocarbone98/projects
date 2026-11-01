@@ -19,10 +19,18 @@ from dramafetch.manifest import (
     series_dir,
     validate_name_format,
 )
+from dramafetch.downloader import (
+    BLOCKED_MESSAGE,
+    PAYLOAD_DRM_MESSAGE,
+    YtDlpDownloader,
+    describe_failure,
+    locked_result,
+)
 from dramafetch.models import (
     DEFAULT_NAME_FORMAT,
     DRM_MARK,
     DRM_MESSAGE,
+    DRM_REMEMBERED_MESSAGE,
     DownloadOptions,
     DownloadResult,
     DownloadStatus,
@@ -596,34 +604,64 @@ def test_an_odd_complete_mark_is_forgotten_not_a_corrupt_manifest(
 # --------------------------------------------------------------------------- build 7: DRM memory
 
 
-def test_drm_protected_needs_a_drm_verdict_in_a_failed_unavailable_or_skipped_locked_entry(
+#: yt-dlp's own words for DRM, and what describe_failure stores for them.
+YT_DLP_DRM = "ERROR: [TikTok] 7699400000000000007: This video is DRM protected"
+
+
+def test_drm_protected_needs_a_download_verdict_in_a_failed_unavailable_or_skipped_locked_entry(
     tmp_path,
 ):
-    """A DRM verdict does not change by retrying: the manifest remembers it in the message, and
-    ``drm_protected`` reads it back — only from the two statuses a DRM outcome is recorded with."""
+    """A DRM verdict of a DOWNLOAD does not change by retrying: the manifest remembers it in the
+    message, and ``drm_protected`` reads it back — from the two statuses a DRM outcome is recorded
+    with, and only for a message that starts with ``DRM_MESSAGE`` (an encrypted file, both
+    engines; yt-dlp's own "DRM protected") or ``DRM_REMEMBERED_MESSAGE`` (the memory's own skip).
+    A payload's DRM flag is not remembered: the payload is read again on every run."""
     manifest = Manifest(tmp_path / MANIFEST_FILENAME, "123", "Show")
+    flagged = Episode(9, "id9", "t", "123", lock_hints=("isDrm=True",), drm=True)
+    yt_dlp = describe_failure(DownloadStatus.FAILED_UNAVAILABLE, YT_DLP_DRM)
+    blocked_text = "HTTP Error 403: Forbidden (DRM protected?)"
+    blocked = YtDlpDownloader.classify_error(blocked_text)
+    fresh = (
+        f"{DRM_MARK} (in a fresh episode list: isFree=false; drmType=widevine): "
+        "DramaFetch does not decrypt it"
+    )
     cases = {
         1: (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE, True),  # the download was encrypted
-        2: (DownloadStatus.SKIPPED_LOCKED, f"{DRM_MARK} (isDrm=True): …", True),  # payload DRM
+        2: (DownloadStatus.SKIPPED_LOCKED, locked_result(flagged).message, False),  # payload DRM
         3: (DownloadStatus.FAILED_UNAVAILABLE, "no video formats found", False),
         4: (DownloadStatus.SKIPPED_LOCKED, "looks locked: isLocked=True", False),
         5: (DownloadStatus.FAILED, DRM_MESSAGE, False),  # not a status a DRM verdict uses
         6: (DownloadStatus.DONE, DRM_MESSAGE, False),
+        7: (DownloadStatus.FAILED_UNAVAILABLE, yt_dlp, True),  # yt-dlp: "DRM protected"
+        8: (DownloadStatus.SKIPPED_LOCKED, DRM_REMEMBERED_MESSAGE, True),  # the memory's skip
+        9: (DownloadStatus.FAILED_UNAVAILABLE, fresh, False),  # a fresh list's flag: the payload
+        10: (DownloadStatus.FAILED_UNAVAILABLE, f"{DRM_MESSAGE} (could not delete E.mp4)", True),
+        11: (blocked, describe_failure(blocked, blocked_text), False),  # a refusal, not DRM
+        12: (DownloadStatus.SKIPPED_LOCKED, PAYLOAD_DRM_MESSAGE, False),  # payload, no hints
+        13: (DownloadStatus.SKIPPED_LOCKED, DRM_MESSAGE, True),
     }
+    assert locked_result(flagged).message.startswith(DRM_MARK)  # DRM wording, not a verdict
+    assert yt_dlp == f"{DRM_MESSAGE}: {YT_DLP_DRM}"
+    assert blocked is DownloadStatus.FAILED_BLOCKED
+    assert cases[11][1].startswith(BLOCKED_MESSAGE)
     for number, (status, message, _) in cases.items():
         path = None
         if status is DownloadStatus.DONE:
             path = tmp_path / f"E{number}.mp4"
             path.write_bytes(b"video")
         manifest.record(DownloadResult(_episode(number), status, path, message))
-    assert DRM_MESSAGE.startswith(DRM_MARK)
+    assert DRM_MESSAGE.startswith(DRM_MARK) and DRM_REMEMBERED_MESSAGE.startswith(DRM_MARK)
     for number, (_, _, expected) in cases.items():
         assert manifest.drm_protected(number) is expected, number
     assert manifest.drm_protected(99) is False  # no entry at all
     # the verdict survives a save and a side-effect-free read
     again = read_manifest(tmp_path, "123")
     assert again is not None
-    assert [n for n in cases if again.drm_protected(n)] == [1, 2]
+    assert [n for n in cases if again.drm_protected(n)] == [1, 7, 8, 10, 13]
+    assert DRM_REMEMBERED_MESSAGE == (
+        "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; "
+        "--include-locked tries again"
+    )
 
 
 def test_locked_numbers_are_the_skipped_locked_entries_read_only(tmp_path):

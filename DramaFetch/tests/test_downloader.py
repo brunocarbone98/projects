@@ -18,6 +18,7 @@ from dramafetch.downloader import (
     COMPATIBLE_FORMAT,
     H264_FORMAT,
     MAX_RETRIES,
+    PAYLOAD_DRM_MESSAGE,
     VIDEO_SUFFIXES,
     YtDlpDownloader,
     cookies_file_problem,
@@ -931,18 +932,59 @@ def test_build_options_never_allows_unplayable_formats(tmp_path):
         "ERROR: [TikTok] 7699400000000000003: This video is DRM protected",
         "This video is DRM protected",
         "drm-protected stream",
-        # DRM wins over whatever else the message says: no login, wait or retry changes it
-        "ERROR: [TikTok] 123: This video is DRM protected; log in for more",
-        "HTTP Error 403: Forbidden (DRM)",
-        "HTTP Error 429 while fetching the DRM license",
+        # DRM comes before the "unavailable" family: the DRM message goes first either way
+        "ERROR: [TikTok] 123: This video is DRM protected and not available",
+        "No video formats found! (DRM)",
     ],
 )
-def test_drm_wordings_are_unavailable_and_checked_first(message):
+def test_drm_wordings_are_unavailable_with_the_drm_message_first(message):
     assert mentions_drm(message)
     assert YtDlpDownloader.classify_error(message) is DownloadStatus.FAILED_UNAVAILABLE
     described = describe_failure(DownloadStatus.FAILED_UNAVAILABLE, message)
     assert described == f"{DRM_MESSAGE}: {message}"
-    assert described.startswith(DRM_MARK)  # how the manifest remembers a DRM verdict
+    assert described.startswith(DRM_MESSAGE)  # how the manifest remembers a DRM verdict
+
+
+@pytest.mark.parametrize(
+    ("message", "status"),
+    [
+        # the anti-bot rules come first: a refusal that also names DRM stops the run (and a 403 /
+        # 429 starts the cooldown) instead of passing for a DRM verdict
+        ("HTTP Error 403: Forbidden (DRM protected?)", DownloadStatus.FAILED_BLOCKED),
+        ("HTTP Error 403: Forbidden (DRM)", DownloadStatus.FAILED_BLOCKED),
+        ("Access Denied: DRM license server", DownloadStatus.FAILED_BLOCKED),
+        ("HTTP Error 429: Too Many Requests (drm)", DownloadStatus.FAILED_RATE_LIMITED),
+        ("HTTP Error 429 while fetching the DRM license", DownloadStatus.FAILED_RATE_LIMITED),
+        ("rate limit exceeded on the DRM endpoint", DownloadStatus.FAILED_RATE_LIMITED),
+        (
+            "ERROR: [TikTok] 123: This video is DRM protected; log in for more",
+            DownloadStatus.FAILED_LOGIN,
+        ),
+        # the order among the refusals is unchanged: login, then 429, then 403
+        ("HTTP Error 403: Forbidden; DRM; log in to continue", DownloadStatus.FAILED_LOGIN),
+        ("HTTP Error 429 (forbidden, drm)", DownloadStatus.FAILED_RATE_LIMITED),
+    ],
+)
+def test_a_refusal_wins_over_drm_wording(message, status):
+    assert mentions_drm(message)
+    assert YtDlpDownloader.classify_error(message) is status
+    described = describe_failure(status, message)
+    assert not described.startswith(DRM_MARK)  # never stored, nor remembered, as a DRM verdict
+    if status is DownloadStatus.FAILED_BLOCKED:
+        assert described == f"{BLOCKED_MESSAGE}: {message}"
+    else:
+        assert described == message
+
+
+def test_a_403_from_yt_dlp_that_names_drm_is_blocked_with_advice(tmp_path):
+    from yt_dlp.utils import DownloadError
+
+    error = "ERROR: [TikTok] 7699400000000000003: HTTP Error 403: Forbidden (DRM protected?)"
+    factory, log = make_factory(error=DownloadError(error))
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED_BLOCKED and result.path is None
+    assert result.message == f"{BLOCKED_MESSAGE}: {error}"
+    assert len(log) == 1  # one attempt; the engine stops the run and records the cooldown
 
 
 def test_the_letters_drm_inside_a_word_or_an_id_are_not_drm():
@@ -1181,7 +1223,12 @@ def test_a_payload_flagged_drm_episode_is_skipped_with_the_drm_wording(tmp_path)
         "protected by DRM (drmProtected=true; isFree=false): DramaFetch does not decrypt it"
     )
     assert log == [] and list(tmp_path.iterdir()) == []
-    assert locked_result(replace(drm, lock_hints=())).message == DRM_MESSAGE
+    # without hints (the catalog always gives one) the wording still is a payload flag's, never
+    # DRM_MESSAGE — the verdict of a download, which the manifest remembers
+    assert locked_result(replace(drm, lock_hints=())).message == PAYLOAD_DRM_MESSAGE == (
+        "protected by DRM (flagged in the episode list): DramaFetch does not decrypt it"
+    )
+    assert not PAYLOAD_DRM_MESSAGE.startswith(DRM_MESSAGE)
     assert locked_result(LOCKED).message == (
         "looks locked: isFree=false; isLocked=True; no play address"
     )
