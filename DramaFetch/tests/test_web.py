@@ -695,8 +695,8 @@ def test_cooldown_error_carries_the_message_the_kind_and_retry_after() -> None:
 
 
 def test_current_cooldown_reads_the_engines_seam(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The web asks the engine (`engine.check_cooldown`, build 5's seam) and, until that exists,
-    the cooldown module itself; both read the cooldown file in the test's state directory."""
+    """The web asks the engine (`engine.check_cooldown`, the seam every front end uses), which
+    reads the cooldown file in the test's state directory."""
     from dramafetch import engine
 
     assert web_server.current_cooldown() is None  # no refusal recorded here

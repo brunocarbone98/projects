@@ -75,7 +75,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 from dramafetch import __version__
-from dramafetch.cooldown import Cooldown, active_cooldown, cooldown_message
+from dramafetch.cooldown import Cooldown, cooldown_message
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -205,9 +205,7 @@ def current_cooldown() -> Cooldown | None:
     raises: a missing or corrupt file counts as no cooldown (``dramafetch.cooldown``)."""
     from dramafetch import engine  # lazy: sibling module, pulls in yt-dlp
 
-    # ``engine.check_cooldown`` is build 5's seam; until it exists the cooldown module answers.
-    check: Callable[[], Cooldown | None] = getattr(engine, "check_cooldown", active_cooldown)
-    return check()
+    return engine.check_cooldown()
 
 
 def cooldown_error(cooldown: Cooldown, *, now: float | None = None) -> HttpError:
