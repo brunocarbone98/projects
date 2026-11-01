@@ -68,6 +68,10 @@ jobs:
 
   dramafetch:
     runs-on: ubuntu-latest
+    env:
+      # Every test that would skip for a tool this job installs (node, a full ffmpeg, Chromium)
+      # fails instead, naming the tool: a green run never silently left a proof out.
+      DRAMAFETCH_REQUIRE_TOOLS: "1"
     defaults:
       run:
         working-directory: DramaFetch
@@ -78,7 +82,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: DramaFetch/pyproject.toml
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Chrome extension unit tests (node --test, no npm dependencies)
@@ -95,6 +99,8 @@ jobs:
         run: ruff format --check .
       - name: Mypy (strict)
         run: mypy
+      - name: Install a full ffmpeg (the framemd5 proofs of the embedded covers)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Unit tests (fixtures + local fake TikTok server, no network)
         run: pytest
       - name: Install Chromium for the integration test
@@ -104,7 +110,7 @@ jobs:
       - name: Integration test (real Chromium against the fake TikTok server)
         run: pytest -m integration
       - name: Upload the Chrome extension (Load unpacked in chrome://extensions)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dramafetch-extension
           path: |
