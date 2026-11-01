@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dramafetch"
+version = "0.1.0"
+description = "Download the TikTok short-drama episodes you are allowed to watch, a whole series at a time, for personal offline viewing."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Bruno Carbone" }]
+dependencies = [
+  "yt-dlp>=2026.10.26",
+  "playwright>=1.50",
+]
+
+[project.optional-dependencies]
+# yt-dlp uses curl_cffi to impersonate a real browser's TLS fingerprint; TikTok is friendlier to it.
+impersonate = ["curl_cffi>=0.10"]
+dev = ["pytest>=8", "ruff>=0.9", "mypy>=1.14"]
+
+[project.scripts]
+dramafetch = "dramafetch.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dramafetch.web" = ["static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "integration: drives a real Chromium against the local fake TikTok server (needs a browser binary)",
+]
+# Unit tests by default; `pytest -m integration` runs the browser test (the later -m wins).
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "N", "SIM", "RUF", "ANN", "PTH", "RET", "C4"]
+# typing.Any is legitimate for untyped JSON payloads from TikTok; everything else is annotated.
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["dramafetch"]
+
+[[tool.mypy.overrides]]
+module = ["yt_dlp", "yt_dlp.*", "curl_cffi", "curl_cffi.*"]
+ignore_missing_imports = true

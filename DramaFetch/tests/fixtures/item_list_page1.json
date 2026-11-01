@@ -1,0 +1,59 @@
+{
+  "statusCode": 0,
+  "status_code": 0,
+  "cursor": 3,
+  "hasMore": true,
+  "itemList": [
+    {
+      "id": "7699400000000000001",
+      "desc": "The Billionaire's Secret Heiress | Episode 1",
+      "createTime": 1761116407,
+      "author": { "id": "6900000000000000001", "uniqueId": "muffindrama_us", "nickname": "Muffin Drama" },
+      "video": {
+        "id": "7699400000000000001",
+        "duration": 92,
+        "ratio": "720p",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000",
+        "bitrateInfo": [
+          { "Bitrate": 1138000, "QualityType": 2, "GearName": "normal_720_0", "CodecType": "h264", "PlayAddr": { "DataSize": "13087000", "Width": 720, "Height": 1280, "UrlList": ["https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000"] } }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782354",
+        "dramaName": "The Billionaire's Secret Heiress",
+        "DramaVideoData": { "EpisodeNumber": 1, "isFree": true }
+      },
+      "stats": { "playCount": 120000 }
+    },
+    {
+      "id": "7699400000000000002",
+      "desc": "The Billionaire's Secret Heiress | Episode 2",
+      "createTime": 1761116408,
+      "author": { "id": "6900000000000000001", "uniqueId": "muffindrama_us", "nickname": "Muffin Drama" },
+      "video": { "id": "7699400000000000002", "duration": 88, "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/def/", "bitrateInfo": [] },
+      "dramaInfo": {
+        "dramaID": "7699393770256782354",
+        "dramaName": "The Billionaire's Secret Heiress",
+        "DramaVideoData": { "EpisodeNumber": 2, "isFree": true }
+      }
+    },
+    {
+      "id": "7699400000000000099",
+      "desc": "Trailer without an episode number",
+      "author": { "uniqueId": "muffindrama_us" },
+      "video": { "duration": 30, "playAddr": "" },
+      "dramaInfo": { "dramaID": "7699393770256782354", "dramaName": "The Billionaire's Secret Heiress" }
+    },
+    {
+      "id": "7699400000000000003",
+      "desc": "The Billionaire's Secret Heiress | Episode 3",
+      "author": { "uniqueId": "muffindrama_us" },
+      "video": { "duration": 95, "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/ghi/", "bitrateInfo": [] },
+      "dramaInfo": {
+        "dramaID": "7699393770256782354",
+        "dramaName": "The Billionaire's Secret Heiress",
+        "DramaVideoData": { "EpisodeNumber": 3, "isFree": true }
+      }
+    }
+  ]
+}

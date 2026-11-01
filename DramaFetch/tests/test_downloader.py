@@ -1,0 +1,506 @@
+"""downloader: yt-dlp params, the no-network paths, success, and every error classification."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from dramafetch.downloader import (
+    BLOCKED_MESSAGE,
+    H264_FORMAT,
+    MAX_RETRIES,
+    YtDlpDownloader,
+    cookies_file_problem,
+    curl_cffi_available,
+    describe_failure,
+    existing_episode_file,
+    impersonate_target,
+    is_partial_file,
+    output_template,
+    redact_secrets,
+    sanitize_error,
+)
+from dramafetch.manifest import episode_stem
+from dramafetch.models import DownloadOptions, DownloadStatus, Episode
+
+SERIES_ID = "7699393770256782354"
+EPISODE = Episode(
+    number=3,
+    item_id="7699400000000000003",
+    title="Heiress | Episode 3",
+    series_id=SERIES_ID,
+    author="muffindrama_us",
+)
+LOCKED = Episode(
+    number=5,
+    item_id="7699400000000000005",
+    title="Ep 5",
+    series_id=SERIES_ID,
+    lock_hints=("isFree=false", "isLocked=True", "no play address"),
+)
+STEM = "E03 - Heiress Episode 3"
+
+
+class FakeYdl:
+    """Stands in for yt_dlp.YoutubeDL: records params and URLs, creates a file or raises."""
+
+    def __init__(self, params, log, *, produce=".mp4", error=None, retcode=0):
+        self.params = params
+        self.log = log
+        self.produce = produce
+        self.error = error
+        self.retcode = retcode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def download(self, urls):
+        self.log.append({"params": self.params, "urls": list(urls)})
+        if self.error is not None:
+            raise self.error
+        if self.produce:
+            # yt-dlp templates are %-format strings: `%(ext)s` expands, `%%` is a literal `%`.
+            target = Path(self.params["outtmpl"] % {"ext": self.produce.lstrip(".")})
+            target.write_bytes(b"video")
+        return self.retcode
+
+
+def make_factory(**kwargs):
+    log = []
+
+    def factory(params):
+        return FakeYdl(params, log, **kwargs)
+
+    return factory, log
+
+
+# --------------------------------------------------------------------------- build_options
+
+
+def test_build_options_full(tmp_path):
+    options = DownloadOptions(
+        out_dir=tmp_path,
+        cookies_file=tmp_path / "cookies.txt",
+        cookies_from_browser="chrome",
+        retries=2,
+        overwrite=True,
+        extractor_args={"tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}},
+    )
+    params = YtDlpDownloader(lambda p: None).build_options(EPISODE, options, "/tmp/x.%(ext)s")
+    assert params["outtmpl"] == "/tmp/x.%(ext)s"
+    assert params["noplaylist"] is True
+    assert params["retries"] == 2
+    assert params["fragment_retries"] == 2
+    assert params["quiet"] is True
+    assert params["no_warnings"] is True
+    assert params["noprogress"] is True
+    assert params["format"] == H264_FORMAT == "best[vcodec^=h264]/best[vcodec=avc1]/best"
+    assert params["cookiefile"] == str(tmp_path / "cookies.txt")
+    assert params["cookiesfrombrowser"] == ("chrome",)
+    assert params["http_headers"] == {"Referer": "https://www.tiktok.com/"}
+    assert params["restrictfilenames"] is False
+    # Only on Windows (where yt-dlp sanitizes anyway): on POSIX the flag would rewrite a legal
+    # `--out` such as `videos:tiktok` into a sibling directory DramaFetch never looks at.
+    assert params["windowsfilenames"] is (sys.platform == "win32")
+    assert params["overwrites"] is True
+    assert params["sleep_interval_requests"] == 1
+    assert params["extractor_args"] == {
+        "tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}
+    }
+    # curl_cffi is installed in the venv, so impersonation is on by default
+    assert curl_cffi_available()
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+
+    assert isinstance(params["impersonate"], ImpersonateTarget)
+    assert params["impersonate"].client == "chrome"
+
+
+def test_retries_stay_modest_whatever_the_options_say():
+    """After a refusal every retry is one more request against the same address: yt-dlp never
+    gets more than MAX_RETRIES (3), and always sleeps a second between its own requests."""
+    assert MAX_RETRIES == 3
+    downloader = YtDlpDownloader(lambda p: None)
+    params = downloader.build_options(EPISODE, DownloadOptions(retries=7), "o.%(ext)s")
+    assert params["retries"] == 3 and params["fragment_retries"] == 3
+    assert params["sleep_interval_requests"] == 1
+    params = downloader.build_options(EPISODE, DownloadOptions(), "o.%(ext)s")
+    assert params["retries"] == 3 and params["fragment_retries"] == 3
+    params = downloader.build_options(EPISODE, DownloadOptions(retries=0), "o.%(ext)s")
+    assert params["retries"] == 0 and params["fragment_retries"] == 0
+
+
+def test_build_options_minimal_without_cookies_and_h264():
+    options = DownloadOptions(prefer_h264=False, impersonate=False)
+    params = YtDlpDownloader(lambda p: None).build_options(EPISODE, options, "o.%(ext)s")
+    assert params["format"] == "best"
+    assert "cookiefile" not in params
+    assert "cookiesfrombrowser" not in params
+    assert "impersonate" not in params
+    assert "extractor_args" not in params
+    assert params["overwrites"] is False
+
+
+def test_build_options_omits_impersonation_when_curl_cffi_is_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "curl_cffi", None)  # makes `import curl_cffi` fail
+    assert not curl_cffi_available()
+    assert impersonate_target() is None
+    params = YtDlpDownloader(lambda p: None).build_options(EPISODE, DownloadOptions(), "o.%(ext)s")
+    assert "impersonate" not in params
+
+
+# --------------------------------------------------------------------------- no-network paths
+
+
+def test_locked_episode_is_skipped_without_calling_yt_dlp(tmp_path):
+    factory, log = make_factory()
+    result = YtDlpDownloader(factory).download(LOCKED, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.SKIPPED_LOCKED
+    assert result.path is None
+    assert result.message == "looks locked: isFree=false; isLocked=True; no play address"
+    assert log == []
+    assert not tmp_path.exists() or not any(tmp_path.iterdir())
+
+
+def test_include_locked_tries_the_download(tmp_path):
+    factory, log = make_factory()
+    result = YtDlpDownloader(factory).download(
+        LOCKED, DownloadOptions(out_dir=tmp_path, include_locked=True)
+    )
+    assert result.status is DownloadStatus.DONE
+    assert len(log) == 1
+
+
+def test_existing_file_is_skipped_and_partials_do_not_count(tmp_path):
+    factory, log = make_factory()
+    downloader = YtDlpDownloader(factory)
+    (tmp_path / f"{STEM}.mp4.part").write_bytes(b"partial")
+    result = downloader.download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.DONE  # the .part file was ignored
+    assert len(log) == 1
+    result = downloader.download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.SKIPPED_EXISTS
+    assert result.path == tmp_path / f"{STEM}.mp4"
+    assert result.message == f"already exists: {STEM}.mp4"
+    assert len(log) == 1  # not called again
+    result = downloader.download(EPISODE, DownloadOptions(out_dir=tmp_path, overwrite=True))
+    assert result.status is DownloadStatus.DONE
+    assert len(log) == 2
+    assert log[1]["params"]["overwrites"] is True
+
+
+def test_dry_run_reports_the_page_url(tmp_path):
+    factory, log = make_factory()
+    result = YtDlpDownloader(factory).download(
+        EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True)
+    )
+    assert result.status is DownloadStatus.DRY_RUN
+    assert EPISODE.page_url in result.message
+    assert "https://www.tiktok.com/@muffindrama_us/video/7699400000000000003" in result.message
+    assert log == []
+
+
+# --------------------------------------------------------------------------- success
+
+
+def test_success_creates_the_file_in_out_dir(tmp_path):
+    out_dir = tmp_path / "series dir"
+    factory, log = make_factory(produce=".mp4")
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=out_dir))
+    assert result.status is DownloadStatus.DONE
+    assert result.path == out_dir / f"{STEM}.mp4"
+    assert result.path.read_bytes() == b"video"
+    assert result.message == f"saved {STEM}.mp4"
+    assert log[0]["urls"] == [EPISODE.page_url]
+    assert log[0]["params"]["outtmpl"] == str(out_dir / f"{STEM}.%(ext)s")
+
+
+def test_output_template_escapes_literal_percent_signs():
+    episode = Episode(
+        number=1, item_id="1", title="Finale %(cookies)s 100%% | 50% off", series_id="s"
+    )
+    template = output_template(Path("/tmp/50% off"), episode)
+    assert template == "/tmp/50%% off/E01 - Finale %%(cookies)s 100%%%% 50%% off.%(ext)s"
+    assert template % {"ext": "mp4"} == "/tmp/50% off/E01 - Finale %(cookies)s 100%% 50% off.mp4"
+
+
+def test_percent_sequences_in_titles_stay_literal_through_the_fake_ydl(tmp_path):
+    episode = Episode(number=1, item_id="1", title="Ep %(id)s | %(cookies)s", series_id="s")
+    factory, _ = make_factory()
+    result = YtDlpDownloader(factory).download(episode, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.DONE
+    assert result.path == tmp_path / "E01 - Ep %(id)s %(cookies)s.mp4"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory names")
+@pytest.mark.parametrize(
+    ("out_dir_name", "title"),
+    [
+        ("videos:tiktok", "Episode 1"),  # a colon is legal in a Linux/macOS directory name
+        ("2026-10-31 12:00", "Episode 1"),
+        ("My Videos.", "Episode 1"),  # trailing dot
+        ("ok", "50%(off) sale | Episode 1"),  # `%(` would start a template field
+        ("ok", "100%% sure | Episode 1"),
+        ("ok", "100% sure | Episode 1"),
+        ("ok", "Finale %(cookies)s"),  # yt-dlp fills a `cookies` field per format
+        ("ok", "Ep %(id)s"),
+        ("ok", "霸道总裁的秘密 | 第1集"),
+    ],
+)
+def test_yt_dlp_writes_exactly_where_dramafetch_looks(tmp_path, out_dir_name, title):
+    """The real YoutubeDL.prepare_filename (no network) must produce the path DramaFetch expects,
+    whatever `--out` and the TikTok title contain, and never a cookie value."""
+    import yt_dlp
+
+    out_dir = tmp_path / out_dir_name / "Series [1]"
+    episode = Episode(number=1, item_id="7699400000000000001", title=title, series_id="1")
+    options = DownloadOptions(out_dir=out_dir)
+    params = YtDlpDownloader().build_options(episode, options, output_template(out_dir, episode))
+    info = {
+        "id": episode.item_id,
+        "title": "t",
+        "ext": "mp4",
+        "cookies": "sessionid=SECRET_SESSION_VALUE; Domain=.tiktok.com",
+    }
+    with yt_dlp.YoutubeDL(params) as ydl:
+        actual = ydl.prepare_filename(info)
+    assert actual == str(out_dir / (episode_stem(episode) + ".mp4"))
+    assert "SECRET_SESSION_VALUE" not in actual
+    assert episode.item_id not in actual.rsplit("/", 1)[1]  # `%(id)s` in a title is not expanded
+
+
+def test_success_without_a_file_is_a_failure(tmp_path):
+    factory, _ = make_factory(produce=None)
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED
+    assert "no file" in result.message
+
+
+def test_non_zero_return_code_is_a_failure(tmp_path):
+    factory, _ = make_factory(retcode=1)
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED
+    assert result.message == "yt-dlp exited with code 1"
+
+
+# --------------------------------------------------------------------------- errors
+
+
+@pytest.mark.parametrize(
+    ("message", "status"),
+    [
+        (
+            "ERROR: [TikTok] 123: Unable to extract video data; requiring login",
+            DownloadStatus.FAILED_LOGIN,
+        ),
+        ("Login required to view this video", DownloadStatus.FAILED_LOGIN),
+        ("Please Log in to continue", DownloadStatus.FAILED_LOGIN),
+        ("only logged-in users can view", DownloadStatus.FAILED_LOGIN),
+        ("HTTP Error 429: Too Many Requests", DownloadStatus.FAILED_RATE_LIMITED),
+        ("Unable to download webpage: HTTP Error 429", DownloadStatus.FAILED_RATE_LIMITED),
+        ("rate limit exceeded", DownloadStatus.FAILED_RATE_LIMITED),
+        # "429" inside a video id is not a status code: ~1.6 % of TikTok ids contain it
+        (
+            "ERROR: [TikTok] 7429384756102938475: Video not available",
+            DownloadStatus.FAILED_UNAVAILABLE,
+        ),
+        (
+            "ERROR: [TikTok] 7312000000000429001: Unable to extract video data",
+            DownloadStatus.FAILED,
+        ),
+        ("ERROR: [TikTok] 123: No video formats found!", DownloadStatus.FAILED_UNAVAILABLE),
+        ("This video is not available", DownloadStatus.FAILED_UNAVAILABLE),
+        ("Video is private", DownloadStatus.FAILED_UNAVAILABLE),
+        ("The video has been removed", DownloadStatus.FAILED_UNAVAILABLE),
+        ("This content is geo-restricted", DownloadStatus.FAILED_UNAVAILABLE),
+        ("not available in your country", DownloadStatus.FAILED_UNAVAILABLE),
+        # HTTP 403 is TikTok's protection saying no: its own status, and the run stops
+        ("Unable to download webpage: HTTP Error 403: Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("ERROR: [TikTok] 7699400000000000003: HTTP Error 403", DownloadStatus.FAILED_BLOCKED),
+        ("HTTP Error 403: Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("403 Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("Forbidden", DownloadStatus.FAILED_BLOCKED),
+        ("Access Denied", DownloadStatus.FAILED_BLOCKED),
+        ("<h1>access denied</h1> you don't have permission", DownloadStatus.FAILED_BLOCKED),
+        # login wording wins over a 403, and a 429 wins over "forbidden"
+        ("HTTP Error 403: Forbidden; log in to continue", DownloadStatus.FAILED_LOGIN),
+        ("HTTP Error 429: Too Many Requests (forbidden)", DownloadStatus.FAILED_RATE_LIMITED),
+        # "403" inside a video id, or without the HTTP wording, is not a block
+        (
+            "ERROR: [TikTok] 7403000000000000001: Video not available",
+            DownloadStatus.FAILED_UNAVAILABLE,
+        ),
+        ("ERROR: [TikTok] 7312000000000403001: Unable to extract", DownloadStatus.FAILED),
+        ("Permission denied: '/downloads/E03.mp4'", DownloadStatus.FAILED),
+        ("", DownloadStatus.FAILED),
+    ],
+)
+def test_classify_error(message, status):
+    assert YtDlpDownloader.classify_error(message) is status
+
+
+def test_describe_failure_prefixes_blocked_results_only():
+    assert BLOCKED_MESSAGE == (
+        "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again"
+    )
+    text = "HTTP Error 403: Forbidden"
+    assert describe_failure(DownloadStatus.FAILED_BLOCKED, text) == f"{BLOCKED_MESSAGE}: {text}"
+    assert describe_failure(DownloadStatus.FAILED_BLOCKED, "") == BLOCKED_MESSAGE
+    for status in (
+        DownloadStatus.FAILED,
+        DownloadStatus.FAILED_LOGIN,
+        DownloadStatus.FAILED_RATE_LIMITED,
+        DownloadStatus.FAILED_UNAVAILABLE,
+    ):
+        assert describe_failure(status, text) == text
+
+
+def test_a_403_from_yt_dlp_is_a_blocked_result_with_advice(tmp_path):
+    from yt_dlp.utils import DownloadError
+
+    factory, log = make_factory(
+        error=DownloadError("ERROR: Unable to download webpage: HTTP Error 403: Forbidden")
+    )
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED_BLOCKED
+    assert result.status.ok is False
+    assert result.message.startswith("blocked (HTTP 403): TikTok refused the request; wait 30-60")
+    assert result.message.endswith(": ERROR: Unable to download webpage: HTTP Error 403: Forbidden")
+    assert result.path is None
+    assert len(log) == 1  # one attempt; the engine stops the run, nothing here retries
+
+
+@pytest.mark.parametrize(
+    ("message", "status"),
+    [
+        ("ERROR: [TikTok] 7699400000000000003: requiring login", DownloadStatus.FAILED_LOGIN),
+        ("HTTP Error 429: Too Many Requests", DownloadStatus.FAILED_RATE_LIMITED),
+        ("No video formats found!; please report this issue", DownloadStatus.FAILED_UNAVAILABLE),
+        ("something odd happened", DownloadStatus.FAILED),
+    ],
+)
+def test_download_errors_are_classified_never_raised(tmp_path, message, status):
+    from yt_dlp.utils import DownloadError
+
+    factory, _ = make_factory(error=DownloadError(message))
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is status
+    assert result.message == message
+    assert result.path is None
+
+
+def test_any_exception_is_caught(tmp_path):
+    factory, _ = make_factory(error=RuntimeError("boom\nsecond line"))
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED
+    assert result.message == "boom"  # first line only
+    factory, _ = make_factory(error=ValueError())
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED
+    assert result.message == "ValueError"
+
+
+def test_error_messages_are_redacted_and_truncated(tmp_path):
+    from yt_dlp.utils import DownloadError
+
+    leak = (
+        "ERROR: request failed with Cookie: sessionid=SECRETSESSION; sid_tt=SECRETSID; "
+        "msToken=SECRETTOKEN&ttwid=SECRETTTWID " + "x" * 400
+    )
+    factory, _ = make_factory(error=DownloadError(leak))
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    for secret in ("SECRETSESSION", "SECRETSID", "SECRETTOKEN", "SECRETTTWID"):
+        assert secret not in result.message
+    assert "<redacted>" in result.message
+    assert len(result.message) <= 300
+    assert result.message.endswith("…")
+
+
+def test_malformed_cookies_file_is_refused_before_yt_dlp_runs(tmp_path):
+    """yt-dlp would skip the bad line with a WARNING quoting it whole (value included), which
+    `quiet`/`no_warnings` do not silence; DramaFetch names the line number only and never starts."""
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".tiktok.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tSECRET_SESSION_1\n"
+        ".tiktok.com\tTRUE\t/\tTRUE\t1893456000\tttwid\tSECRET_TTWID_789\textra_field\n",
+        encoding="utf-8",
+    )
+    factory, log = make_factory()
+    result = YtDlpDownloader(factory).download(
+        EPISODE, DownloadOptions(out_dir=tmp_path, cookies_file=cookies)
+    )
+    assert result.status is DownloadStatus.FAILED
+    assert "line 3: 8 fields (expected 7)" in result.message
+    assert "SECRET" not in result.message and "extra_field" not in result.message
+    assert log == []  # yt-dlp was never constructed
+    assert cookies_file_problem(cookies) == result.message
+
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.tiktok.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tSECRET_SESSION_1\n",
+        encoding="utf-8",
+    )
+    assert cookies_file_problem(cookies) is None
+    assert cookies_file_problem(None) is None
+    assert cookies_file_problem(tmp_path / "missing.txt") is None  # left to yt-dlp's own error
+    result = YtDlpDownloader(factory).download(
+        EPISODE, DownloadOptions(out_dir=tmp_path, cookies_file=cookies)
+    )
+    assert result.status is DownloadStatus.DONE
+    assert log[0]["params"]["cookiefile"] == str(cookies)
+
+
+def test_sanitize_error_keeps_harmless_mentions_of_cookies():
+    text = "No video formats found; try passing cookies with --cookies"
+    assert sanitize_error(text) == text
+    assert sanitize_error("   \n\n  ") == "unknown error"
+    assert sanitize_error("sid_tt: abc123; done") == "sid_tt=<redacted>; done"
+
+
+def test_redact_secrets_covers_every_line_and_url_query_strings():
+    """Playwright quotes the whole failed request below the first line of its message — the signed
+    URL and the cookie header — so the redaction runs over all of it, not only the kept line."""
+    text = (
+        "APIRequestContext.get: Timeout 120000ms exceeded.\n"
+        "Call log:\n"
+        "  - → GET https://v16-webapp-prime.tiktok.com/video/tos/x/?expire=1&signature=SIGTOKEN"
+        "&tk=tt_chain_token\n"
+        "    - Referer: https://www.tiktok.com/\n"
+        "    - cookie: sessionid=SECRETSESSION\n"
+    )
+    redacted = redact_secrets(text)
+    assert "SIGTOKEN" not in redacted and "SECRETSESSION" not in redacted
+    assert "GET https://v16-webapp-prime.tiktok.com/video/tos/x/\n" in redacted
+    assert "Referer: https://www.tiktok.com/\n" in redacted  # a plain URL is left alone
+    assert "cookie=<redacted>" in redacted
+    assert sanitize_error(text) == "APIRequestContext.get: Timeout 120000ms exceeded."
+    assert sanitize_error("\n   \n sid_guard: abc; sessionid=def\n") == (
+        "sid_guard=<redacted>; sessionid=<redacted>"
+    )
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def test_partial_detection_and_newest_existing_file(tmp_path):
+    assert is_partial_file("E01 - x.mp4.part")
+    assert is_partial_file("E01 - x.mp4.ytdl")
+    assert is_partial_file("E01 - x.mp4.part-Frag3")
+    assert not is_partial_file("E01 - x.mp4")
+    assert existing_episode_file(tmp_path / "missing", EPISODE) is None
+    assert existing_episode_file(tmp_path, EPISODE) is None
+    older = tmp_path / f"{STEM}.webm"
+    older.write_bytes(b"1")
+    import os
+
+    os.utime(older, (1_000_000, 1_000_000))
+    newer = tmp_path / f"{STEM}.mp4"
+    newer.write_bytes(b"2")
+    (tmp_path / f"{STEM}x.mp4").write_bytes(b"other stem")  # prefix without the dot: not ours
+    (tmp_path / f"{STEM}.mp4.part").write_bytes(b"partial")
+    assert existing_episode_file(tmp_path, EPISODE) == newer

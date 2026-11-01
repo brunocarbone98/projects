@@ -1,6 +1,6 @@
 # Bruno Carbone · projects
 
-A production full-stack platform, the black-box QA suite that tests it, and a portfolio site — maintained around the clock by Claude Code agents.
+A production full-stack platform, the black-box QA suite that tests it, a TikTok short-drama downloader for personal offline viewing, and a portfolio site — maintained around the clock by Claude Code agents.
 
 [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml)
 [![SecureGate CI](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml)
@@ -9,7 +9,7 @@ A production full-stack platform, the black-box QA suite that tests it, and a po
 [![Live app](https://img.shields.io/badge/live-shipping--hub.up.railway.app-22d3ee?logo=railway&logoColor=white)](https://shipping-hub.up.railway.app/)
 [![Autonomous maintenance · 24/7](https://img.shields.io/badge/autonomous%20maintenance-24%2F7-a78bfa)](./OPERATIONS.md)
 
-**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents both. All three are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges.
+**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents both. **DramaFetch** is a Python CLI and local web UI that downloads the TikTok short-drama episodes your own account can already watch, a whole series at a time, for personal offline viewing — it never unlocks paid episodes. All four are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges.
 
 ## What's inside
 
@@ -17,6 +17,7 @@ A production full-stack platform, the black-box QA suite that tests it, and a po
 | --- | --- | --- | --- |
 | [`FullStackHub/`](./FullStackHub) — **Shipping Hub** | International parcel shipping & tracking platform: public SSR tracking, quotes, customer/staff dashboards, a wallet backed by a double-entry ledger | Next.js 16 · Express 5 + Prisma · PostgreSQL · FastAPI ×2 · Zod contracts · pnpm 10 + Turborepo | [Live app](https://shipping-hub.up.railway.app/) · [README](./FullStackHub/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
 | [`SecureGate/`](./SecureGate) — **QA & security suite** | Black-box tests for Shipping Hub: 28 Karate API scenarios (+1 opt-in `@ratelimit` check), 6 Serenity/Screenplay UI scenarios, a Postman/Newman collection, a token-gated SonarQube gate | Java 21 · Maven · Karate · Serenity BDD + Screenplay · Selenium · Cucumber · Newman | [README](./SecureGate/README.md) · [![SecureGate CI](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml) |
+| [`DramaFetch/`](./DramaFetch) — **TikTok short-drama downloader** | Downloads the episodes of a TikTok short drama that your own account can already watch, a whole series at a time, for personal offline viewing: CLI + local web UI, resumable manifest, locked episodes listed and skipped — never unlocked | Python 3.11 · yt-dlp · Playwright · stdlib web UI | [README](./DramaFetch/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
 | [`PersonalWebsite/`](./PersonalWebsite) | Static two-page portfolio served by GitHub Pages | Vanilla HTML/CSS/JS, no dependencies | [`MainPage.html`](./PersonalWebsite/MainPage.html) · [`Portfolio.html`](./PersonalWebsite/Portfolio.html) |
 
 ## Architecture
@@ -51,7 +52,7 @@ The repository is maintained around the clock by Claude Code agents on two runti
 
 | Shift | Cadence | Runtime | What it does | Output |
 | --- | --- | --- | --- | --- |
-| CI | every push to `main`, every PR | GitHub Actions · `ci.yml` | Lint, format check, typecheck, Vitest (shared + API against PostgreSQL) | Green/red check |
+| CI | every push to `main`, every PR | GitHub Actions · `ci.yml` | Lint, format check, typecheck, Vitest (shared + API against PostgreSQL); DramaFetch `ruff`, `mypy`, `pytest` and the Chromium integration test | Green/red check |
 | SecureGate CI | PRs touching `SecureGate/` or `FullStackHub/`; nightly 06:00 UTC | GitHub Actions · `securegate-ci.yml` | Starts Postgres + API + web + Chrome; runs Karate API + Serenity UI + Newman | `securegate-reports` artifact (Serenity, Karate, surefire) |
 | Uptime patrol | every 30 min (best-effort GitHub schedule) + manual | GitHub Actions · `uptime-patrol.yml` | Probes `/en`, the demo tracking page, `/es/quote` and `/sitemap.xml` on the live app | Opens, updates and auto-closes `🚨 Production incident: Shipping Hub is unhealthy` (label `incident`) |
 | Claude on-call | on `@claude` in an issue, PR comment or review | GitHub Actions · `claude.yml` | Reads the request, works on a branch, answers in a comment | Comments; `claude/…` branches with a ready-to-open PR link |
@@ -100,6 +101,14 @@ cd SecureGate
 ./mvnw verify -Pui -Dheadless.mode=true                # + 6 Serenity/Screenplay UI scenarios
 ```
 
+DramaFetch — Python 3.11+; episode discovery needs Playwright's Chromium (`playwright install chromium`) or an installed Chrome (`--browser-channel chrome`), and a `cookies.txt` exported from your logged-in browser:
+
+```bash
+cd DramaFetch && python -m venv .venv && . .venv/bin/activate && pip install -e ".[impersonate,dev]"
+dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, Playwright, browser, cookies (names only, never values)
+dramafetch download "https://www.tiktok.com/shortdrama/episode/<series id>/1" --cookies cookies.txt
+```
+
 Website — no build step, no dependencies:
 
 ```bash
@@ -124,6 +133,7 @@ open PersonalWebsite/MainPage.html                     # xdg-open on Linux
 │   └── pull_request_template.md
 ├── FullStackHub/            Shipping Hub — apps/web · apps/api · services/pricing · services/labels · packages/shared · .claude/agents
 ├── SecureGate/              QA & security suite — src/test/resources/karate · src/test/java/com/securegate · postman · .claude/agents
+├── DramaFetch/              TikTok short-drama downloader — src/dramafetch (cli · engine · discovery · web) · tests · pyproject.toml
 ├── PersonalWebsite/         MainPage.html · Portfolio.html · favicon.svg
 ├── Dockerfile · start.sh · railway.json     one-container Railway deployment of Shipping Hub
 └── README.md · CLAUDE.md · AGENTS.md · OPERATIONS.md · DEMO.md · DEPLOY.md
@@ -131,13 +141,13 @@ open PersonalWebsite/MainPage.html                     # xdg-open on Linux
 
 ## Conventions & docs
 
-Everything is in English; conventional commits; strict TypeScript with no `any`; Markdown, JSON and YAML under `FullStackHub/` must pass Prettier (printWidth 100); `ROADMAP.md` files are frozen.
+Everything is in English; conventional commits; strict TypeScript with no `any`; Markdown, JSON and YAML under `FullStackHub/` must pass Prettier (printWidth 100); Python under `DramaFetch/` must pass `ruff` and `mypy --strict`; `ROADMAP.md` files are frozen.
 
 | Document | For |
 | --- | --- |
 | [`AGENTS.md`](./AGENTS.md) | Tool-agnostic instructions for any coding agent: map, commands, definition of done, the eight guardrails, branch/PR/issue conventions |
 | [`CLAUDE.md`](./CLAUDE.md) | Claude Code sessions at the repo root: routing, roster, shifts, notes for autonomous runs (imports `AGENTS.md`) |
-| [`FullStackHub/CLAUDE.md`](./FullStackHub/CLAUDE.md) · [`SecureGate/CLAUDE.md`](./SecureGate/CLAUDE.md) | Per-project rules, commands and subagents |
+| [`FullStackHub/CLAUDE.md`](./FullStackHub/CLAUDE.md) · [`SecureGate/CLAUDE.md`](./SecureGate/CLAUDE.md) · [`DramaFetch/CLAUDE.md`](./DramaFetch/CLAUDE.md) | Per-project rules, commands and (for the first two) subagents |
 | [`DEPLOY.md`](./DEPLOY.md) | Railway deployment, monitoring & incidents |
 | [`OPERATIONS.md`](./OPERATIONS.md) | The autonomous-maintenance operations manual |
 | [`DEMO.md`](./DEMO.md) | The live-interview runbook |
