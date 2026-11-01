@@ -18,7 +18,8 @@
         "dynamicCover": "https://p16-sign-sg.tiktokcdn.com/obj/tos-alisg-p-0037/oYBgEQQCAfBAiDIemfAIAjEtkIhjAu7zqBS1h~tplv-tiktokx-origin.image?dr=14577&x-expires=1800000000&x-signature=ghi1&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
         "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000",
         "bitrateInfo": [
-          { "Bitrate": 1138000, "QualityType": 2, "GearName": "normal_720_0", "CodecType": "h264", "PlayAddr": { "DataSize": "13087000", "Width": 720, "Height": 1280, "UrlList": ["https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000"] } }
+          { "Bitrate": 1138000, "QualityType": 2, "GearName": "normal_720_0", "CodecType": "h264", "PlayAddr": { "DataSize": "13087000", "Width": 720, "Height": 1280, "UrlList": ["https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000"] } },
+          { "Bitrate": 1652000, "QualityType": 1, "GearName": "adapt_lower_1080_1", "CodecType": "bytevc1", "PlayAddr": { "DataSize": "18998000", "Width": 1080, "Height": 1920, "UrlList": ["https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc-1080/?a=1988&expire=1761200000"] } }
         ]
       },
       "dramaInfo": {

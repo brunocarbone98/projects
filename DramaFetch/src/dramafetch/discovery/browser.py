@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
 import time
 import traceback
@@ -66,6 +67,12 @@ CHALLENGE_CHECK_INTERVAL_S = 2.0
 DETAIL_GRACE_S = 2.0
 SCROLL_ROUNDS_WITHOUT_NEWS = 4
 SCROLL_WHEEL_PX = 1500
+#: The pause before the next episode-list page (an in-page fetch or a scroll round) is
+#: ``DiscoveryOptions.page_delay_s`` times a factor drawn uniformly from this range, so paging
+#: never ticks like a metronome: with the default 0.8 s that is 0.8-1.6 s. ``page_delay_s`` (and
+#: the hidden ``--page-delay``) stays the minimum; the random source and the sleep are injectable
+#: (``PlaywrightDiscovery(rng=..., sleep=...)``), so no test waits for real.
+PAGE_DELAY_JITTER = (1.0, 2.0)
 RATE_LIMIT_MESSAGE = (
     "TikTok is rate-limiting this address (HTTP 429 on the episode list): wait 30-60 minutes "
     "before trying again"
@@ -166,8 +173,19 @@ class _Capture:
 class PlaywrightDiscovery:
     """Resolve a series by letting a real Chromium load the page and paging its episode API."""
 
-    def __init__(self, playwright_factory: Callable[[], Any] | None = None) -> None:
+    def __init__(
+        self,
+        playwright_factory: Callable[[], Any] | None = None,
+        *,
+        rng: random.Random | None = None,
+        sleep: Callable[[Page, float], None] | None = None,
+    ) -> None:
+        """``rng`` draws the jitter of the pause between episode-list pages and ``sleep(page,
+        seconds)`` waits it out (default: :func:`_pause`, Playwright's own clock); tests inject a
+        fixed ``random.Random`` and a recording fake so nothing waits for real."""
         self._factory = playwright_factory
+        self._rng = rng if rng is not None else random.Random()
+        self._sleep = sleep if sleep is not None else _pause
 
     def discover(self, ref: SeriesRef, options: DiscoveryOptions) -> Series:
         factory = self._factory if self._factory is not None else _default_factory()
@@ -321,7 +339,7 @@ class PlaywrightDiscovery:
             next_url = _with_query_params(
                 template, {"cursor": str(cursor), "count": str(options.page_count)}
             )
-            _pause(page, options.page_delay_s)
+            self._page_pause(page, options)
             payload = self._fetch_in_page(page, next_url, options.timeout_s)
             if payload is None:
                 capture.warnings.append(
@@ -376,8 +394,15 @@ class PlaywrightDiscovery:
             except Exception as exc:
                 log.debug("scrolling failed: %s", _one_line(exc))
                 return
-            _pause(page, options.page_delay_s)
+            self._page_pause(page, options)
             quiet_rounds = 0 if capture.drain() > 0 else quiet_rounds + 1
+
+    def _page_pause(self, page: Page, options: DiscoveryOptions) -> None:
+        """Wait before asking for the next episode-list page: ``page_delay_s`` times a random
+        1.0-2.0 (:func:`page_pause_s`), through the injectable sleep."""
+        seconds = page_pause_s(options.page_delay_s, self._rng)
+        log.debug("pausing %.2f s before the next episode-list page", seconds)
+        self._sleep(page, seconds)
 
     def _await_detail(self, page: Page, capture: _Capture) -> None:
         """Give the series detail response a moment to arrive if the page has not sent it yet."""
@@ -459,6 +484,14 @@ def _one_line(exc: BaseException) -> str:
 
 def _max_pages_warning(max_pages: int) -> str:
     return f"pagination stopped at max_pages ({max_pages}); the list may be incomplete"
+
+
+def page_pause_s(page_delay_s: float, rng: random.Random) -> float:
+    """The randomised pause before the next episode-list page: ``page_delay_s`` — the minimum —
+    times a factor drawn uniformly from :data:`PAGE_DELAY_JITTER` (0.8 s -> 0.8-1.6 s); a zero or
+    negative delay (tests against the fake server) stays 0."""
+    low, high = PAGE_DELAY_JITTER
+    return max(0.0, page_delay_s) * rng.uniform(low, high)
 
 
 def _pause(page: Page, seconds: float) -> None:

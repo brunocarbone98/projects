@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -15,8 +16,11 @@ import pytest
 
 from dramafetch.discovery.browser import (
     FETCH_JS,
+    PAGE_DELAY_JITTER,
+    POLL_INTERVAL_S,
     SCROLL_JS,
     PlaywrightDiscovery,
+    page_pause_s,
 )
 from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError
 from dramafetch.models import DiscoveryOptions, SeriesRef
@@ -74,8 +78,14 @@ def _assert_full_series(series: Any) -> None:
 @pytest.mark.integration
 class TestWithChromium:
     def test_resolves_every_episode_by_paging_inside_the_page(self) -> None:
+        pauses: list[float] = []
+
+        def recording_sleep(page: Any, seconds: float) -> None:
+            pauses.append(seconds)
+            page.wait_for_timeout(seconds * 1000)  # the real wait, through Playwright's clock
+
         with FakeTikTok() as server:
-            series = PlaywrightDiscovery().discover(
+            series = PlaywrightDiscovery(sleep=recording_sleep).discover(
                 SeriesRef(SERIES_ID, episode_hint=1), _options(server)
             )
 
@@ -87,6 +97,8 @@ class TestWithChromium:
         assert second["dramaID"] == SERIES_ID
         assert (second["aid"], second["app_language"], second["X-Bogus"]) == ("1988", "en", "fake")
         assert not any(r.logged_in for r in requests)
+        # One pause before our page, randomised between page_delay_s (0.3 here) and twice that.
+        assert len(pauses) == 1 and 0.3 <= pauses[0] <= 0.6, pauses
 
     def test_login_redirect_without_cookies_raises_login_required(self) -> None:
         with (
@@ -170,7 +182,8 @@ class TestWithChromium:
             )
             elapsed = time.monotonic() - started
         _assert_full_series(series)  # the page's own scroll handler is not delayed
-        assert elapsed < 12, elapsed  # 2 s abort + 4 quiet scroll rounds of 0.3 s + browser time
+        # 2 s abort + 4 quiet scroll rounds of 0.3-0.6 s (randomised) + browser time
+        assert elapsed < 12, elapsed
         assert any("scrolled the page instead" in w for w in series.warnings)
 
     def test_http_429_on_pagination_stops_discovery_as_rate_limited(self) -> None:
@@ -206,6 +219,7 @@ class _FakePage:
         self.url = "about:blank"
         self.mouse = _FakeMouse()
         self.evaluated: list[tuple[str, Any]] = []
+        self.waited: list[float] = []  # every wait_for_timeout(ms), never slept
 
     def on(self, event: str, handler: Any) -> None:
         assert event == "response"
@@ -219,7 +233,7 @@ class _FakePage:
                 handler(response)
 
     def wait_for_timeout(self, ms: float) -> None:
-        pass  # no real clock: the deadline is wall-clock time, kept short in these tests
+        self.waited.append(ms)  # no real clock: the deadline is wall-clock time, kept short here
 
     def evaluate(self, expression: str, arg: Any = None) -> Any:
         self.evaluated.append((expression, arg))
@@ -416,11 +430,66 @@ def test_captured_payload_is_paged_with_the_captured_url(item_list_pages, list_k
     assert browser.closed
 
 
+class _FixedRng(random.Random):
+    """A random source whose `uniform` always answers `value`."""
+
+    def __init__(self, value: float) -> None:
+        super().__init__(0)
+        self.value = value
+
+    def uniform(self, a: float, b: float) -> float:
+        return self.value
+
+
+def test_the_pause_between_pages_is_randomised_from_the_minimum(item_list_pages) -> None:
+    """`page_delay_s` is the minimum: the pause before the next page is it times a random 1.0-2.0
+    drawn from the injected rng and waited through the injected sleep — nothing waits for real."""
+    browser = _first_page_browser(item_list_pages)
+    browser.fetch_results = [item_list_pages[1]]
+    pauses: list[tuple[Any, float]] = []
+    discovery = PlaywrightDiscovery(
+        playwright_factory=lambda: _FakePlaywright(browser),
+        rng=random.Random(7),
+        sleep=lambda page, seconds: pauses.append((page, seconds)),
+    )
+
+    series = discovery.discover(SeriesRef(SERIES_ID), _fake_options(page_delay_s=0.8))
+
+    assert series.numbers == [1, 2, 3, 4, 5]
+    assert PAGE_DELAY_JITTER == (1.0, 2.0)
+    assert [seconds for _, seconds in pauses] == [
+        pytest.approx(0.8 * random.Random(7).uniform(1.0, 2.0))
+    ]
+    assert 0.8 <= pauses[0][1] <= 1.6
+    assert isinstance(pauses[0][0], _FakePage)  # the sleep gets the page: Playwright's clock
+    assert pauses[0][0].waited == []  # the injected sleep replaced it entirely
+    # The bounds, and the zero delay the fast tests use.
+    assert page_pause_s(0.8, _FixedRng(1.0)) == 0.8
+    assert page_pause_s(0.8, _FixedRng(2.0)) == pytest.approx(1.6)
+    assert page_pause_s(0.0, random.Random(1)) == 0.0
+    assert page_pause_s(-1.0, random.Random(1)) == 0.0
+    draws = {page_pause_s(0.8, random.Random(seed)) for seed in range(50)}
+    assert len(draws) > 40 and all(0.8 <= draw <= 1.6 for draw in draws)  # spread, in range
+
+
+def test_the_default_sleep_waits_through_the_page_clock(item_list_pages) -> None:
+    """Without an injected sleep the pause goes through `page.wait_for_timeout`, so Playwright
+    keeps dispatching responses meanwhile; `time.sleep` would stall the listener."""
+    browser = _first_page_browser(item_list_pages)
+    browser.fetch_results = [item_list_pages[1]]
+
+    series, pages = _discover_with_fake_browser(browser, page_delay_s=0.8)
+
+    assert series.numbers == [1, 2, 3, 4, 5]
+    waits = [ms for ms in pages[0].waited if ms != POLL_INTERVAL_S * 1000]  # polling ticks aside
+    assert len(waits) == 1 and 800 <= waits[0] <= 1600, waits
+
+
 def test_an_empty_in_page_page_triggers_the_scroll_fallback(item_list_pages) -> None:
     browser = _first_page_browser(item_list_pages)
     browser.fetch_results = [{"itemList": [], "hasMore": False, "cursor": 3, "statusCode": 0}]
 
-    series, pages = _discover_with_fake_browser(browser)
+    series, pages = _discover_with_fake_browser(browser, page_delay_s=0.5)
 
     assert series.numbers == [1, 2, 3]  # the fake page loads nothing more when scrolled
     assert any(
@@ -428,6 +497,9 @@ def test_an_empty_in_page_page_triggers_the_scroll_fallback(item_list_pages) -> 
     )
     assert any(expression == SCROLL_JS for expression, _ in pages[0].evaluated)
     assert "TikTok announces 5 episodes, 3 listed" in series.warnings
+    # The pause before our page and one per scroll round (4 quiet rounds), each randomised.
+    waits = [ms for ms in pages[0].waited if ms != POLL_INTERVAL_S * 1000]
+    assert len(waits) == 5 and all(500 <= ms <= 1000 for ms in waits), waits
 
 
 def test_http_429_from_the_in_page_fetch_is_rate_limited(item_list_pages) -> None:

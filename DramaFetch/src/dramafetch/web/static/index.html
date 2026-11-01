@@ -180,7 +180,7 @@
              placeholder="https://www.tiktok.com/shortdrama/episode/7675706520839033876/8">
       <button type="submit" id="resolve-btn" class="primary">Resolve</button>
     </form>
-    <p class="hint">The long number is the series id; the trailing number is only the episode you were watching. Resolving opens TikTok in a browser on this machine and usually takes 10–40 s. Then <strong>Download all free</strong> is one click, and every episode it downloads gets a <strong>Save</strong> link for this device. Covers are embedded in the video by default (<code>serve --thumbnail both</code> saves a separate image as well); the <strong>Cover</strong> link gives you the embedded one, or the file saved next to the video.</p>
+    <p class="hint">The long number is the series id; the trailing number is only the episode you were watching. Resolving opens TikTok in a browser on this machine and usually takes 10–40 s; the list is kept for 15 minutes, so downloading right after it costs no second visit (<strong>Refresh list</strong> fetches it again). Then <strong>Download all free</strong> is one click, and every episode it downloads gets a <strong>Save</strong> link for this device. Covers are embedded in the video by default (<code>serve --thumbnail both</code> saves a separate image as well); the <strong>Cover</strong> link gives you the embedded one, or the file saved next to the video.</p>
     <p id="resolve-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
@@ -258,7 +258,9 @@
   'use strict';
 
   var POLL_MS = 2000;
-  var state = { series: null, jobId: null, pollTimer: null };
+  // How often the cooldown note recounts the minutes left (no request is made for it).
+  var COOLDOWN_TICK_MS = 30000;
+  var state = { series: null, jobId: null, pollTimer: null, cooldownUntil: 0, cooldownTimer: null };
   // While the token form is shown: the promise every refused call waits on, and its resolver.
   var auth = { pending: null, settle: null };
 
@@ -303,6 +305,9 @@
           error.status = response.status;
           error.kind = data && data.kind;
           error.hint = data && data.hint;
+          // The cooldown's 429 says in seconds how long the server refuses to contact TikTok.
+          var retryAfter = parseInt(response.headers.get('Retry-After'), 10);
+          error.retryAfter = isNaN(retryAfter) ? null : retryAfter;
           throw error;
         }
         return data;
@@ -382,6 +387,42 @@
     return typeof value === 'string' && /^https?:\/\//i.test(value);
   }
 
+  function clockTime(epochSeconds) {
+    var date = new Date(epochSeconds * 1000);
+    var h = date.getHours();
+    var m = date.getMinutes();
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+
+  // ---------------------------------------------------------------- cooldown
+
+  // TikTok refused a request less than 30 minutes ago: the server answers 429 of kind "cooldown"
+  // (with a Retry-After in seconds) to anything that would contact TikTok again, and so does the
+  // page — the download buttons stay disabled until the cooldown ends and the note counts the
+  // minutes down locally; nothing polls the server or TikTok for it. A cached list still resolves.
+  function cooldownActive() { return state.cooldownUntil > Date.now(); }
+
+  function startCooldown(error) {
+    var seconds = error.retryAfter > 0 ? error.retryAfter : 30 * 60;
+    state.cooldownUntil = Date.now() + seconds * 1000;
+    state.cooldownMessage = error.message;
+    renderCooldown();
+  }
+
+  function renderCooldown() {
+    if (state.cooldownTimer) { clearTimeout(state.cooldownTimer); state.cooldownTimer = null; }
+    if (!cooldownActive()) {
+      setStatus($('download-status'), 'The cooldown is over: downloads are possible again.', 'ok');
+      updateSelectionCount();
+      return;
+    }
+    var minutes = Math.ceil((state.cooldownUntil - Date.now()) / 60000);
+    setStatus($('download-status'), state.cooldownMessage, 'error',
+      'Downloads are disabled for another ' + minutes + ' min' + (minutes === 1 ? '' : 's') + '.');
+    updateSelectionCount();
+    state.cooldownTimer = setTimeout(renderCooldown, COOLDOWN_TICK_MS);
+  }
+
   // ---------------------------------------------------------------- resolve
 
   function renderSeries(series) {
@@ -393,6 +434,11 @@
     if (series.total_hint) { count += ' (TikTok announces ' + series.total_hint + ')'; }
     meta.appendChild(document.createTextNode(' — ' + count + ' — series id '));
     meta.appendChild(el('code', { text: series.series_id }));
+    // The server keeps a resolved list for 15 minutes (Download reuses it); this fetches it again.
+    meta.appendChild(document.createTextNode(' — '));
+    var refresh = el('a', { href: '#', id: 'refresh-link', text: 'Refresh list', title: 'Resolve the series again instead of reusing the list fetched at ' + clockTime(series.resolved_at) });
+    refresh.addEventListener('click', function (event) { event.preventDefault(); resolveSeries(true); });
+    meta.appendChild(refresh);
 
     var dir = $('series-dir');
     clear(dir);
@@ -461,24 +507,32 @@
     var text = boxes.length + ' of ' + checkboxes().length + ' selected';
     if (lockedCount) { text += ' (' + lockedCount + ' locked: will be tried, usually fails)'; }
     $('selection-count').textContent = text;
-    $('download-btn').disabled = boxes.length === 0;
-    $('download-all-btn').disabled = freeNumbers().length === 0;
+    $('download-btn').disabled = boxes.length === 0 || cooldownActive();
+    $('download-all-btn').disabled = freeNumbers().length === 0 || cooldownActive();
   }
 
-  $('resolve-form').addEventListener('submit', function (event) {
-    event.preventDefault();
+  // `refresh` asks the server for a fresh list instead of the one it may have kept (15 minutes).
+  function resolveSeries(refresh) {
     var url = $('url').value.trim();
     if (!url) { return; }
     var button = $('resolve-btn');
     button.disabled = true;
     $('series-card').classList.add('hidden');
     setStatus($('resolve-status'), 'Resolving… a browser is opening TikTok; this usually takes 10–40 s.');
-    api('POST', '/api/resolve', { url: url }).then(function (series) {
-      setStatus($('resolve-status'), 'Resolved.', 'ok');
+    var body = refresh ? { url: url, refresh: true } : { url: url };
+    api('POST', '/api/resolve', body).then(function (series) {
+      var note = series.from_cache ? 'Resolved from the list fetched at ' + clockTime(series.resolved_at) + ' (kept for 15 minutes).' : 'Resolved.';
+      setStatus($('resolve-status'), note, 'ok');
       renderSeries(series);
     }).catch(function (error) {
       setStatus($('resolve-status'), error.message, 'error', error.hint);
+      if (error.kind === 'cooldown') { startCooldown(error); }
     }).then(function () { button.disabled = false; });
+  }
+
+  $('resolve-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    resolveSeries(false);
   });
 
   $('select-free').addEventListener('click', function () {
@@ -496,7 +550,7 @@
     if (!numbers.length || !state.series) { return; }
     var buttons = [$('download-btn'), $('download-all-btn')];
     buttons.forEach(function (button) { button.disabled = true; });
-    setStatus($('download-status'), 'Starting… the series is resolved again before the job is queued.');
+    setStatus($('download-status'), 'Starting… the list resolved less than 15 minutes ago is reused, so nothing is fetched again before the job is queued.');
     api('POST', '/api/download', {
       url: $('url').value.trim(),
       episodes: compressRanges(numbers),
@@ -506,6 +560,7 @@
       startPolling(job.job_id);
     }).catch(function (error) {
       setStatus($('download-status'), error.message, 'error', error.hint);
+      if (error.kind === 'cooldown') { startCooldown(error); }
     }).then(function () {
       buttons.forEach(function (button) { button.disabled = false; });
       updateSelectionCount();

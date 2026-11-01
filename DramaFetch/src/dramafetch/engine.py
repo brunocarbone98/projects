@@ -7,9 +7,11 @@ lasted — and after every ``rest_every`` network attempts (failures count, skip
 for 60-120 s. The run stops at the first sign of blocking: a login redirect, HTTP 429 (rate
 limited), HTTP 403 or a captcha wall (blocked) or ``max_consecutive_failures`` failures in a row;
 the remaining episodes are marked ``stopped: …`` without another request, because the right answer
-is to wait 30-60 minutes and resume (the manifest remembers what is done), not to retry. Skips
-never pause. The sleep function and the random source are injectable for tests. Locked episodes
-are skipped, never unlocked.
+is to wait 30-60 minutes and resume (the manifest remembers what is done), not to retry. A refusal
+(HTTP 403 / 429 from a download, HTTP 429 or a captcha while resolving the list) is also recorded
+as the global cooldown (``dramafetch.cooldown.record_block``): for 30 minutes every front end
+refuses to contact TikTok at all (:func:`check_cooldown`). Skips never pause. The sleep function
+and the random source are injectable for tests. Locked episodes are skipped, never unlocked.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from dramafetch.cooldown import Cooldown, active_cooldown, record_block
 from dramafetch.downloader import (
     YtDlpDownloader,
     cookies_file_problem,
@@ -29,8 +32,10 @@ from dramafetch.downloader import (
     locked_result,
     sanitize_error,
 )
+from dramafetch.errors import ChallengeError, RateLimitedError
 from dramafetch.manifest import Manifest, manifest_path, series_dir, validate_name_format
 from dramafetch.models import (
+    QUALITY_MODES,
     THUMBNAIL_MODES,
     Discovery,
     DiscoveryOptions,
@@ -82,6 +87,10 @@ _STOP_STATUSES = frozenset(
 )
 #: Failures counted towards ``max_consecutive_failures`` (a DONE resets the count, skips do not).
 _COUNTED_FAILURES = frozenset({DownloadStatus.FAILED, DownloadStatus.FAILED_UNAVAILABLE})
+#: The stop statuses that are TikTok refusing (HTTP 403 / a captcha, HTTP 429): besides stopping
+#: the run they start the global cooldown (:func:`record_block_if_refused`). A login redirect stops
+#: the run too but is not a refusal.
+BLOCK_STATUSES = frozenset({DownloadStatus.FAILED_RATE_LIMITED, DownloadStatus.FAILED_BLOCKED})
 
 #: Inclusive episode-number interval; ``None`` as the upper bound means "to the last episode".
 Interval = tuple[int, int | None]
@@ -94,13 +103,20 @@ def resolve(
 
     Without an explicit ``discovery`` the strategy comes from
     ``dramafetch.discovery.choose_discovery(options)`` (imported lazily: the discovery package
-    pulls in Playwright).
+    pulls in Playwright). A :class:`~dramafetch.errors.RateLimitedError` or
+    :class:`~dramafetch.errors.ChallengeError` from the discovery records the global cooldown
+    (source ``"discovery"``) and is re-raised.
     """
     if discovery is None:
         from dramafetch.discovery import choose_discovery
 
         discovery = choose_discovery(options)
-    series = discovery.discover(ref, options)
+    try:
+        series = discovery.discover(ref, options)
+    except (RateLimitedError, ChallengeError) as exc:
+        # TikTok refused the list (HTTP 429, a captcha): nothing contacts it for a while.
+        record_block(str(exc), "discovery")
+        raise
     if series.name is None:
         series.name = next((e.series_name for e in series.episodes if e.series_name), None)
     return series
@@ -257,6 +273,33 @@ def validate_thumbnail(options: DownloadOptions) -> None:
         )
 
 
+def validate_quality(options: DownloadOptions) -> None:
+    """Raise ValueError when ``options.quality`` is not one of ``models.QUALITY_MODES``
+    (``compatible``, ``best``). Checked before the series directory is created; the CLI's
+    ``--quality`` choices refuse it even earlier."""
+    if options.quality not in QUALITY_MODES:
+        raise ValueError(
+            f"unknown quality {options.quality!r}: expected one of {', '.join(QUALITY_MODES)}"
+        )
+
+
+def check_cooldown() -> Cooldown | None:
+    """The global cooldown in force, if any (``dramafetch.cooldown.active_cooldown``): every front
+    end asks before contacting TikTok and refuses while one is active — the CLI with exit 5, the
+    web with a 429. The browser engine's in-session list refresh does not ask: it runs inside a
+    download that already passed the check."""
+    return active_cooldown()
+
+
+def record_block_if_refused(result: DownloadResult, source: str) -> Cooldown | None:
+    """Start the global cooldown when ``result`` is a refusal (:data:`BLOCK_STATUSES`: HTTP 403 /
+    a captcha, HTTP 429) — ``dramafetch.cooldown.record_block(result.message or status,
+    source)`` — and return it; None for any other result. ``source`` is the engine name."""
+    if result.status not in BLOCK_STATUSES:
+        return None
+    return record_block(result.message or result.status.value, source=source)
+
+
 def make_downloader(options: DownloadOptions) -> Downloader:
     """The downloader for ``options.engine``.
 
@@ -326,9 +369,9 @@ def download_series(
 ) -> list[DownloadResult]:
     """Download the given episodes of a series, one at a time, ascending, resumably, paced.
 
-    Validates the pacing options, the name format and the thumbnail mode first (ValueError, see
-    :func:`validate_pacing`, :func:`validate_naming` and :func:`validate_thumbnail`), then
-    creates the series directory, loads
+    Validates the pacing options, the name format, the thumbnail mode and the quality mode first
+    (ValueError, see :func:`validate_pacing`, :func:`validate_naming`, :func:`validate_thumbnail`
+    and :func:`validate_quality`), then creates the series directory, loads
     its manifest (unless one is given), builds the downloader for ``options.engine`` (unless one
     is given; see :func:`make_downloader`) and, for each episode: an episode the manifest says is
     done (file still present) is skipped without network unless ``options.overwrite``; otherwise
@@ -344,10 +387,12 @@ def download_series(
 
     Early stops: a FAILED_LOGIN, FAILED_RATE_LIMITED or FAILED_BLOCKED result stops the run, and
     so do ``max_consecutive_failures`` FAILED/FAILED_UNAVAILABLE results in a row (a DONE resets
-    the count, skips neither count nor reset). The remaining episodes that would have needed the
-    network get the stopping status (FAILED for the failure streak) with the message
-    ``"stopped: <reason>"`` without contacting TikTok; done, locked and already-present ones keep
-    their skips.
+    the count, skips neither count nor reset). A FAILED_RATE_LIMITED or FAILED_BLOCKED result is
+    also recorded as the global cooldown, once per run, before the rest is marked
+    (:func:`record_block_if_refused` with ``options.engine`` as the source). The remaining
+    episodes that would have needed the network get the stopping status (FAILED for the failure
+    streak) with the message ``"stopped: <reason>"`` without contacting TikTok; done, locked and
+    already-present ones keep their skips.
     Every result is recorded in the manifest and passed to ``on_result``. A cookies file yt-dlp
     would complain about (see :func:`dramafetch.downloader.cookies_file_problem`) is checked once
     up front: every episode that would have needed the network is FAILED with that message, with
@@ -357,6 +402,7 @@ def download_series(
     validate_pacing(options)
     validate_naming(options)
     validate_thumbnail(options)
+    validate_quality(options)
     target_dir = series_dir(options.out_dir, series)
     target_dir.mkdir(parents=True, exist_ok=True)
     if manifest is None:
@@ -412,6 +458,7 @@ def download_series(
                 reason = f"episode {episode.number} {result.status.value}"
                 if result.message:
                     reason += f": {result.message}"
+                record_block_if_refused(result, options.engine)
                 stop(ordered[index + 1 :], result.status, reason)
                 break
             if result.status in _COUNTED_FAILURES:
@@ -510,6 +557,7 @@ def episode_to_dict(episode: Episode) -> dict[str, Any]:
         "lock_hints": list(episode.lock_hints),
         "page_url": episode.page_url,
         "cover_url": episode.cover_url,
+        "quality_hint": episode.quality_hint,
     }
 
 

@@ -15,6 +15,11 @@ DEFAULT_NAME_FORMAT = "{series} - Episode {number}"
 #: art (``embed``, the default), into the MP4 and a file next to it (``both``), a file next to the
 #: video only (``file``), nowhere (``none``: no cover request at all).
 THUMBNAIL_MODES = ("embed", "both", "file", "none")
+#: ``DownloadOptions.quality`` values — which rendition of an episode is taken: ``compatible``
+#: (the default) the highest-bitrate H.264, which plays everywhere; ``best`` the highest bitrate
+#: whatever the codec (TikTok's ``bytevc1``/H.265 renditions need a capable player). Nothing is
+#: re-encoded; the source's top rendition is the ceiling.
+QUALITY_MODES = ("compatible", "best")
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,9 @@ class Episode:
     lock_hints: tuple[str, ...] = ()
     # The episode cover (thumbnail): video.originCover, else video.cover, else video.dynamicCover.
     cover_url: str | None = None
+    # What the default quality mode would download, e.g. "720p h264": the label of the rendition
+    # ``catalog.choose_rendition(item, "compatible")`` picks; None when the item lists none.
+    quality_hint: str | None = None
     raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -146,7 +154,16 @@ class DownloadOptions:
     thumbnail: str = "embed"
     series_name: str | None = None  # filled by engine.download_series; expands {series}
     impersonate: bool = True  # yt-dlp + curl_cffi browser impersonation when installed
-    prefer_h264: bool = True
+    # Which rendition: "compatible" (default) is the highest-bitrate H.264 — it plays everywhere;
+    # "best" the highest bitrate whatever the codec. One of QUALITY_MODES, checked by
+    # ``engine.validate_quality``; ``catalog.play_url_candidates`` and yt-dlp's format selector
+    # follow it. Nothing is re-encoded.
+    quality: str = "compatible"
+    # Verify every saved video (``media.verify_video``: an MP4 that parses, is not cut short, has
+    # an audio track and lasts about ``Episode.duration_s``); a file that fails is renamed
+    # "<name> (incomplete).<ext>" and the episode is FAILED. ``--no-verify`` turns it off — a
+    # debugging aid only.
+    verify: bool = True
     retries: int = 3
     overwrite: bool = False
     include_locked: bool = False  # try episodes that look locked (they usually have no formats)

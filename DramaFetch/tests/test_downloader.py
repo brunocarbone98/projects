@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import errno
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from mutagen.mp4 import MP4
 
+from dramafetch import downloader as downloader_module
 from dramafetch.downloader import (
+    BEST_FORMAT,
     BLOCKED_MESSAGE,
+    COMPATIBLE_FORMAT,
     H264_FORMAT,
     MAX_RETRIES,
     VIDEO_SUFFIXES,
@@ -18,6 +23,7 @@ from dramafetch.downloader import (
     curl_cffi_available,
     describe_failure,
     existing_episode_file,
+    format_for,
     impersonate_target,
     is_partial_file,
     output_template,
@@ -25,6 +31,7 @@ from dramafetch.downloader import (
     sanitize_error,
 )
 from dramafetch.manifest import episode_stem
+from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import DownloadOptions, DownloadStatus, Episode
 from dramafetch.thumbnails import EMBED_SUFFIX, MAX_COVER_BYTES, extract_cover
 
@@ -47,12 +54,18 @@ LOCKED = Episode(
 # The default name format, "{series} - Episode {number}", for EPISODE.
 STEM = "Heiress - Episode 03"
 OPTIONS = DownloadOptions()
+FIXTURE = Path(__file__).parent / "fixtures" / "tiny.mp4"
+# 3 s of 160x120 H.264 + silent AAC: a real MP4 (mutagen tags it, the verification accepts it),
+# what the fake yt-dlp writes unless a test says otherwise. EPISODE has no duration, so only the
+# container checks apply to it.
+TINY_MP4 = FIXTURE.read_bytes()
 
 
 class FakeYdl:
-    """Stands in for yt_dlp.YoutubeDL: records params and URLs, creates a file or raises. With
-    `sidecar=(".jpeg", bytes)` it also writes the cover `writethumbnail` would have written next to
-    the video (named after the cover URL's extension, as yt-dlp does)."""
+    """Stands in for yt_dlp.YoutubeDL: records params and URLs, creates a file (the real 3-second
+    fixture by default) or raises. With `sidecar=(".jpeg", bytes)` it also writes the cover
+    `writethumbnail` would have written next to the video (named after the cover URL's extension,
+    as yt-dlp does)."""
 
     def __init__(
         self,
@@ -62,7 +75,7 @@ class FakeYdl:
         produce=".mp4",
         error=None,
         retcode=0,
-        video_bytes=b"video",
+        video_bytes=TINY_MP4,
         sidecar=None,
     ):
         self.params = params
@@ -122,7 +135,9 @@ def test_build_options_full(tmp_path):
     assert params["quiet"] is True
     assert params["no_warnings"] is True
     assert params["noprogress"] is True
-    assert params["format"] == H264_FORMAT == "best[vcodec^=h264]/best[vcodec=avc1]/best"
+    # the default quality, "compatible": the highest-bitrate H.264, then anything
+    assert params["format"] == COMPATIBLE_FORMAT == "best[vcodec^=h264]/best[vcodec=avc1]/best"
+    assert H264_FORMAT == COMPATIBLE_FORMAT  # the former name
     assert params["cookiefile"] == str(tmp_path / "cookies.txt")
     assert params["cookiesfrombrowser"] == ("chrome",)
     assert params["http_headers"] == {"Referer": "https://www.tiktok.com/"}
@@ -158,10 +173,11 @@ def test_retries_stay_modest_whatever_the_options_say():
     assert params["retries"] == 0 and params["fragment_retries"] == 0
 
 
-def test_build_options_minimal_without_cookies_and_h264():
-    options = DownloadOptions(prefer_h264=False, impersonate=False, thumbnail="none")
+def test_build_options_minimal_with_best_quality_and_without_cookies():
+    options = DownloadOptions(quality="best", impersonate=False, thumbnail="none")
     params = YtDlpDownloader(lambda p: None).build_options(EPISODE, options, "o.%(ext)s")
-    assert params["format"] == "best"
+    assert params["format"] == BEST_FORMAT == "best"  # the highest bitrate whatever the codec
+    assert format_for("compatible") == COMPATIBLE_FORMAT and format_for("best") == BEST_FORMAT
     assert "cookiefile" not in params
     assert "cookiesfrombrowser" not in params
     assert "impersonate" not in params
@@ -265,7 +281,7 @@ def test_success_creates_the_file_in_out_dir(tmp_path):
     result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=out_dir))
     assert result.status is DownloadStatus.DONE
     assert result.path == out_dir / f"{STEM}.mp4"
-    assert result.path.read_bytes() == b"video"
+    assert result.path.read_bytes() == TINY_MP4
     # yt-dlp wrote no cover next to the video (it says nothing when it cannot get one): told
     assert result.message == f"saved {STEM}.mp4; cover: not available"
     assert log[0]["urls"] == [EPISODE.page_url]
@@ -625,19 +641,21 @@ def test_existing_episode_file_matches_the_whole_stem_not_a_prefix(tmp_path):
 
 # --------------------------------------------------------------------------- the cover
 
-FIXTURE = Path(__file__).parent / "fixtures" / "tiny.mp4"
-TINY_MP4 = FIXTURE.read_bytes()  # 3 s, 160x120 H.264 + silent AAC: what mutagen can tag
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"j" * 600 + b"\xff\xd9"
 PNG = b"\x89PNG\r\n\x1a\n" + b"p" * 600
 WEBP = b"RIFF\x00\x10\x00\x00WEBPVP8 " + b"w" * 600
 
 
-def _download(tmp_path, mode="embed", *, video_bytes=TINY_MP4, sidecar=(".jpeg", JPEG)):
+def _download(
+    tmp_path, mode="embed", *, video_bytes=TINY_MP4, sidecar=(".jpeg", JPEG), verify=True
+):
     """One DONE download through the fake ydl, which writes the video and — unless `sidecar` is
-    None — the `<stem>.<ext>` cover yt-dlp's `writethumbnail` would have written next to it."""
+    None — the `<stem>.<ext>` cover yt-dlp's `writethumbnail` would have written next to it.
+    `verify=False` is `--no-verify`: the only way a file that is not an MP4 reaches the cover step
+    (with the check on it is quarantined first, see the integrity tests)."""
     factory, log = make_factory(video_bytes=video_bytes, sidecar=sidecar)
     result = YtDlpDownloader(factory).download(
-        EPISODE, DownloadOptions(out_dir=tmp_path, thumbnail=mode)
+        EPISODE, DownloadOptions(out_dir=tmp_path, thumbnail=mode, verify=verify)
     )
     assert result.status is DownloadStatus.DONE
     assert result.path == tmp_path / f"{STEM}.mp4"
@@ -714,12 +732,14 @@ def test_yt_dlps_image_extension_is_renamed_after_the_bytes(tmp_path):
 
 
 def test_a_failed_embed_keeps_the_file_and_the_video_byte_for_byte(tmp_path):
-    """yt-dlp produced something mutagen cannot tag: the cover stays a file, whatever the mode,
-    and nothing is half done — no `.embed.part`, the video exactly as yt-dlp wrote it."""
+    """yt-dlp produced something mutagen cannot tag and the verification is off (`--no-verify`;
+    with it on the file never reaches the cover step: it is quarantined, see below): the cover
+    stays a file, whatever the mode, and nothing is half done — no `.embed.part`, the video
+    exactly as yt-dlp wrote it."""
     junk = b"\x00\x00\x00\x18ftypmp42" + b"v" * 4000
     for mode in ("embed", "both"):
         directory = tmp_path / mode
-        result, _ = _download(directory, mode, video_bytes=junk)
+        result, _ = _download(directory, mode, video_bytes=junk, verify=False)
         assert result.message.startswith(
             f"saved {STEM}.mp4; cover: could not embed (could not write the cover into "
             f"{STEM}.mp4 (MP4StreamInfoError: "
@@ -727,6 +747,74 @@ def test_a_failed_embed_keeps_the_file_and_the_video_byte_for_byte(tmp_path):
         assert result.message.endswith(")); file kept")
         assert _names(directory) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
         assert result.path.read_bytes() == junk
+
+
+# --------------------------------------------------------------------------- integrity
+
+
+def test_a_file_that_fails_the_verification_is_quarantined_with_its_cover_deleted(tmp_path):
+    """The default: the produced file is verified BEFORE the cover step. One that is not an MP4 is
+    renamed `<stem> (incomplete).mp4`, the `.jpeg` yt-dlp wrote is deleted (no cover for a bad
+    download, nothing embedded), the episode is FAILED with the reason — and a rerun tries again,
+    quarantining a second bad file under the next free name."""
+    junk = b"\x00\x00\x00\x18ftypmp42" + b"v" * 4000
+    factory, log = make_factory(video_bytes=junk, sidecar=(".jpeg", JPEG))
+    options = DownloadOptions(out_dir=tmp_path)
+    result = YtDlpDownloader(factory).download(EPISODE, options)
+    assert result.status is DownloadStatus.FAILED and result.path is None
+    assert result.message.startswith(f"{INCOMPLETE_PREFIX}not a valid MP4 (")
+    assert result.message.endswith(f") (kept as {STEM} (incomplete).mp4)")
+    assert _names(tmp_path) == [f"{STEM} (incomplete).mp4"]
+    assert (tmp_path / f"{STEM} (incomplete).mp4").read_bytes() == junk
+    assert existing_episode_file(tmp_path, EPISODE, options) is None  # a rerun downloads again
+    again = YtDlpDownloader(factory).download(EPISODE, options)
+    assert again.status is DownloadStatus.FAILED and len(log) == 2
+    assert again.message.endswith(f"(kept as {STEM} (incomplete 2).mp4)")
+    assert _names(tmp_path) == [f"{STEM} (incomplete 2).mp4", f"{STEM} (incomplete).mp4"]
+
+
+def test_a_short_video_fails_the_duration_check_unless_verification_is_off(tmp_path):
+    """The list said 120 s, the file lasts 3 s: what a locked episode's preview looks like."""
+    long_episode = replace(EPISODE, duration_s=120)
+    factory, log = make_factory(sidecar=None)
+    result = YtDlpDownloader(factory).download(
+        long_episode, DownloadOptions(out_dir=tmp_path, thumbnail="none")
+    )
+    assert result.status is DownloadStatus.FAILED
+    assert result.message == (
+        f"{INCOMPLETE_PREFIX}duration 3 s, expected 120 s (kept as {STEM} (incomplete).mp4)"
+    )
+    assert _names(tmp_path) == [f"{STEM} (incomplete).mp4"]
+    # about the right length, or no length known (``dramafetch video``): fine
+    episodes = (replace(EPISODE, duration_s=3), replace(EPISODE, duration_s=5), EPISODE)
+    for index, episode in enumerate(episodes):
+        ok = YtDlpDownloader(factory).download(
+            episode, DownloadOptions(out_dir=tmp_path / str(index), thumbnail="none")
+        )
+        assert ok.status is DownloadStatus.DONE and ok.message == f"saved {STEM}.mp4"
+    # --no-verify: the same short file is accepted as it is (a debugging aid)
+    off = YtDlpDownloader(factory).download(
+        long_episode, DownloadOptions(out_dir=tmp_path / "off", thumbnail="none", verify=False)
+    )
+    assert off.status is DownloadStatus.DONE and off.message == f"saved {STEM}.mp4"
+    assert len(log) == 5
+
+
+def test_a_bad_file_that_cannot_be_renamed_is_reported_in_place(tmp_path, monkeypatch):
+    def refuse(path):
+        raise OSError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(downloader_module, "quarantine", refuse)
+    factory, _ = make_factory(sidecar=None)
+    result = YtDlpDownloader(factory).download(
+        replace(EPISODE, duration_s=120), DownloadOptions(out_dir=tmp_path, thumbnail="none")
+    )
+    assert result.status is DownloadStatus.FAILED
+    assert result.message == (
+        f"{INCOMPLETE_PREFIX}duration 3 s, expected 120 s (could not rename {STEM}.mp4: "
+        "Permission denied)"
+    )
+    assert _names(tmp_path) == [f"{STEM}.mp4"]  # left where it is, under its own name
 
 
 def test_a_directory_in_the_way_of_the_working_copy_is_reported_never_raised(tmp_path):

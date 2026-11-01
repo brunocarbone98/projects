@@ -1,5 +1,7 @@
 """The browser download engine end to end: a real headless Chromium fetches episodes from the fake
-TikTok's CDN inside one browser session (`pytest -m integration`; skipped without a browser)."""
+TikTok's CDN inside one browser session (`pytest -m integration`; skipped without a browser) — and
+the integrity checks against it: a transfer cut short, a video far shorter than announced, the
+quality modes, the cooldown a rate limit starts and the CLI's refusal under it."""
 
 from __future__ import annotations
 
@@ -13,13 +15,18 @@ from typing import Any
 import pytest
 from mutagen.mp4 import MP4
 
+from dramafetch import cli, engine
 from dramafetch.catalog import (
+    choose_rendition,
     merge_episodes,
     parse_item_list_payload,
     play_url_candidates,
     url_expiry,
 )
+from dramafetch.cooldown import active_cooldown, clear_cooldown
+from dramafetch.downloader import existing_episode_file
 from dramafetch.downloader_browser import BrowserDownloader
+from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import DownloadOptions, DownloadStatus, Series
 from dramafetch.thumbnails import EMBED_SUFFIX, cover_sidecar, extract_cover
 
@@ -74,6 +81,8 @@ def _series_from_server(server: FakeTikTok, *, session: bool = False) -> Series:
             pages.append(parse_item_list_payload(json.load(response), SERIES_ID))
     episodes = merge_episodes(page.episodes for page in pages)
     assert [e.number for e in episodes] == [1, 2, 3, 4, 5]
+    if not server.options.short_media:  # the lists say what the fake CDN's media lasts: 3 s
+        assert [e.duration_s for e in episodes] == [3, 3, 3, 3, 3]
     return Series(SERIES_ID, SERIES_NAME, episodes, total_hint=TOTAL_EPISODES)
 
 
@@ -250,8 +259,8 @@ def test_expired_play_urls_are_refreshed_once_in_the_session(tmp_path: Path) -> 
         series = _series_from_server(server)  # page 1 (episodes 1-3) carries expired URLs
         now = int(time.time())
         for number in (1, 2, 3):
-            (url,) = play_url_candidates(series.episode(number).raw)
-            assert (url_expiry(url) or 0) < now
+            urls = play_url_candidates(series.episode(number).raw)
+            assert urls and all((url_expiry(url) or 0) < now for url in urls)
         before = len(server.requests)
         options = _options(server, tmp_path)
         with BrowserDownloader() as downloader:
@@ -337,11 +346,159 @@ def test_without_a_session_the_cdn_refuses_and_the_refresh_meets_the_login_page(
 
     assert result.status is DownloadStatus.FAILED_LOGIN
     assert "login page" in result.message and "--cookies" in result.message
-    # the CDN said 403 (no session), the refresh opened the series page and was sent to /login
-    assert [r.path for r in after][:3] == [
-        "/cdn/7699400000000000001/0.mp4",
+    # the CDN said 403 (no session) for both renditions of episode 1 — the H.264 first, then the
+    # bytevc1 mirror — so the refresh opened the series page and was sent to /login
+    assert [r.path for r in after][:4] == [
+        MEDIA_1,
+        f"/cdn/{ITEM_1}/1.mp4",
         f"/shortdrama/episode/{SERIES_ID}/1",
         "/login",
     ]
-    assert not any(r.path.startswith("/cdn/") for r in after[1:])
+    assert not any(r.path.startswith("/cdn/") for r in after[2:])
     assert not (tmp_path / "series").exists() or not list((tmp_path / "series").iterdir())
+
+
+# --- integrity, quality and the cooldown --------------------------------------------------------
+
+INCOMPLETE_1 = f"{SERIES_NAME} - Episode 01 (incomplete).mp4"
+
+
+def test_quality_best_fetches_the_highest_bitrate_rendition_first(tmp_path: Path) -> None:
+    """Episode 1 lists a 720p H.264 (`/cdn/<id>/0.mp4`) and a higher-bitrate 1080p bytevc1
+    rendition (`/cdn/<id>/1.mp4`): `compatible` (the default, what `info` shows) takes the H.264,
+    `best` the bytevc1 — the codec a capable player needs."""
+    with FakeTikTok() as server:
+        series = _series_from_server(server)
+        episode = series.episode(1)
+        assert episode.quality_hint == "720p h264"
+        assert choose_rendition(episode.raw, "best").label == "1080p bytevc1"
+        before = len(server.requests)
+        options = _options(server, tmp_path, quality="best", thumbnail="none")
+        with BrowserDownloader() as downloader:
+            result = downloader.download(episode, options)
+        after = server.requests[before:]
+
+    assert result.status is DownloadStatus.DONE
+    assert [r.path for r in after] == [f"/cdn/{ITEM_1}/1.mp4"]
+    assert result.path is not None and result.path.read_bytes() == media_bytes(ITEM_1, "1")
+    assert abs(MP4(result.path).info.length - 3.0) < 0.2
+
+
+def test_a_truncated_transfer_fails_the_episode_without_a_retry_or_a_cover(
+    tmp_path: Path,
+) -> None:
+    """The CDN announces the whole file and stops at 60 %: Chromium's request API reports the
+    transfer as aborted before a single byte reaches DramaFetch, so nothing is on disk; the
+    episode is FAILED with the truncation message, the episode's second rendition is NOT tried
+    (the network failed, not the URL), no list is refreshed and no cover is requested."""
+    with FakeTikTok(truncate_media=True) as server:
+        series = _series_from_server(server)
+        assert len(play_url_candidates(series.episode(1).raw)) == 2  # a mirror it must not try
+        before = len(server.requests)
+        with BrowserDownloader() as downloader:
+            result = downloader.download(series.episode(1), _options(server, tmp_path))
+            refreshes = downloader.refreshes
+        after = server.requests[before:]
+
+    assert result.status is DownloadStatus.FAILED and result.path is None
+    assert result.message == (
+        f"{INCOMPLETE_PREFIX}truncated body (the transfer was cut short) from 127.0.0.1"
+    )
+    assert [r.path for r in after] == [MEDIA_1]  # one request: no next mirror, no cover
+    assert refreshes == 0
+    series_dir = tmp_path / "series"
+    assert not series_dir.exists() or list(series_dir.iterdir()) == []
+
+
+def test_a_video_far_shorter_than_announced_is_quarantined_and_a_rerun_tries_again(
+    tmp_path: Path,
+) -> None:
+    """`short_media`: the list says episode 1 lasts 92 s (the fixture's value) while the CDN serves
+    the 3-second file — a locked episode served as a preview looks exactly like this. The file is
+    kept as `… (incomplete).mp4` untouched (no cover embedded, none requested), the episode is
+    FAILED with the reason, and a rerun does not take the quarantined file for the episode."""
+    with FakeTikTok(short_media=True) as server:
+        series = _series_from_server(server)
+        episode = series.episode(1)
+        assert episode.duration_s == 92
+        before = len(server.requests)
+        options = _options(server, tmp_path)
+        with BrowserDownloader() as downloader:
+            first = downloader.download(episode, options)
+            second = downloader.download(episode, options)
+        after = server.requests[before:]
+
+    assert first.status is DownloadStatus.FAILED and first.path is None
+    assert first.message == (
+        f"{INCOMPLETE_PREFIX}duration 3 s, expected 92 s (kept as {INCOMPLETE_1})"
+    )
+    kept = options.out_dir / INCOMPLETE_1
+    assert kept.read_bytes() == media_bytes(ITEM_1, "0")  # as the CDN sent it: no cover in it
+    assert extract_cover(kept) is None
+    assert second.status is DownloadStatus.FAILED  # tried again, not skipped as existing
+    assert second.message.endswith(f"(kept as {SERIES_NAME} - Episode 01 (incomplete 2).mp4)")
+    assert sorted(p.name for p in options.out_dir.iterdir()) == [
+        f"{SERIES_NAME} - Episode 01 (incomplete 2).mp4",
+        INCOMPLETE_1,
+    ]
+    assert existing_episode_file(options.out_dir, episode, options) is None
+    assert [r.path for r in after] == [MEDIA_1, MEDIA_1]  # no cover request for a bad download
+
+
+def test_a_rate_limit_through_the_engine_starts_the_cooldown_and_the_cli_then_refuses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The e2e of the cooldown: a 429 from the CDN stops the run (exit 5) and writes
+    `cooldown.json` into DRAMAFETCH_STATE_DIR (tmp_path, through the conftest fixture); the CLI's
+    `download` and `info` then exit 5 with the message and make ZERO requests to the server;
+    deleting the file lets the next `info` run — with a real Chromium — go through."""
+    with FakeTikTok(cdn_rate_limit=True) as server:
+        series = _series_from_server(server)
+        options = _options(server, tmp_path, delay_min_s=0, delay_max_s=0, rest_every=0)
+        results = engine.download_series(
+            series,
+            [series.episode(1), series.episode(2)],
+            options,
+            downloader=BrowserDownloader(),
+            sleep=lambda seconds: None,
+        )
+        assert [r.status.value for r in results] == ["failed-rate-limited"] * 2
+        assert results[1].message.startswith("stopped: episode 1 failed-rate-limited")
+        assert engine.exit_code(results) == 5
+        recorded = active_cooldown()
+        assert recorded is not None and recorded.source == "browser"
+        assert recorded.reason.startswith("rate limited (HTTP 429) by the video server")
+        assert (tmp_path / "cooldown.json").is_file()
+        assert [r.path for r in server.requests[-1:]] == [MEDIA_1]  # the one refused request
+
+        argv_tail = [
+            "--strategy",
+            "browser",
+            "--base-url",
+            server.base_url,
+            "--browser-path",
+            str(CHROMIUM),
+            "--page-count",
+            "10",
+            "--page-delay",
+            "0",
+            "--out",
+            str(tmp_path / "cli"),
+        ]
+        requests_before = len(server.requests)
+        started = time.monotonic()
+        assert cli.main(["download", SERIES_ID, "--engine", "browser", *argv_tail]) == 5
+        assert cli.main(["info", SERIES_ID, *argv_tail]) == 5
+        assert time.monotonic() - started < 5  # refused up front: no browser, no request
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.count("error: TikTok refused a request at ") == 2
+        assert f"delete {tmp_path / 'cooldown.json'} to lift it" in captured.err
+        assert len(server.requests) == requests_before  # ZERO requests to TikTok under a cooldown
+
+        clear_cooldown()  # what the message tells the user to do
+        assert cli.main(["info", SERIES_ID, *argv_tail]) == 0
+        out = capsys.readouterr().out
+        assert f"Series: {SERIES_NAME} [{SERIES_ID}]" in out and "720p h264" in out
+        assert len(server.item_list_requests) > 0  # the list was fetched again
+        assert not (tmp_path / "cli").exists()  # info writes nothing

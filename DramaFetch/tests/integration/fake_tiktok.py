@@ -28,7 +28,15 @@ Routes (all GET):
                                  server was started with `cdn_rate_limit`. `expired_media_first`
                                  makes the FIRST item_list response carry already-expired URLs and
                                  the later ones fresh URLs, to exercise the download engine's
-                                 refresh.
+                                 refresh. The media lasts 3 s, so the item_list payloads served
+                                 say `video.duration = 3` (`MEDIA_DURATION_S`) for every item —
+                                 unless `short_media`, which keeps the fixtures' own durations
+                                 (92 s, 88 s, …) while the CDN still serves the 3-second file: a
+                                 valid MP4 far shorter than announced, what a locked episode's
+                                 preview looks like; the engines' verification must fail it.
+                                 `truncate_media` announces the full `Content-Length` but sends
+                                 only 60 % of the body (`TRUNCATE_RATIO`) and drops the
+                                 connection: a transfer cut short by the network.
   /cover/<item_id>.jpg           the fake image CDN. Every `https://p16-sign-sg.tiktokcdn.com/...`
                                  cover URL inside an item_list payload (`video.cover`,
                                  `originCover`, `dynamicCover`) is rewritten to
@@ -71,6 +79,11 @@ COVER_URL_PREFIX = "https://p16-sign-sg.tiktokcdn.com/"
 #: 20 531 bytes: 3 s of 160x120 H.264 with silent AAC, `moov` before `mdat` (faststart).
 TINY_MP4 = (FIXTURES / "tiny.mp4").read_bytes()
 MEDIA_SIZE = 128 * 1024
+#: What `tiny.mp4` lasts; the lists served announce it (unless `short_media`), so the engines'
+#: duration check passes for the fake CDN's episodes.
+MEDIA_DURATION_S = 3
+#: How much of the body `truncate_media` sends before dropping the connection.
+TRUNCATE_RATIO = 0.6
 FREE_BOX = b"free"
 MEDIA_LABEL_PREFIX = b"dramafetch:"
 JPEG_SOI = b"\xff\xd8"
@@ -158,6 +171,9 @@ class FakeOptions:
     media_ttl_s: int = 3600  # `expire` of the rewritten play URLs, seconds from now
     expired_media_first: bool = False  # the FIRST item_list served carries expire=now-10
     cdn_rate_limit: bool = False  # every /cdn/ request answers HTTP 429
+    # Integrity failures (both make the engines fail the episode without a retry):
+    truncate_media: bool = False  # Content-Length says all, the body stops at 60 %, then EOF
+    short_media: bool = False  # lists keep the fixtures' 92 s durations; the CDN serves 3 s
 
     @property
     def page_scrolls(self) -> bool:
@@ -275,7 +291,8 @@ class _Handler(BaseHTTPRequestHandler):
                 expire = now - EXPIRED_MEDIA_OFFSET_S
             else:
                 expire = now + options.media_ttl_s
-            rewritten, count = rewrite_media_urls(payload, server.base_url, expire)
+            duration = None if options.short_media else MEDIA_DURATION_S
+            rewritten, count = rewrite_media_urls(payload, server.base_url, expire, duration)
             if count:
                 server.media_lists_served += 1
         assert isinstance(rewritten, dict)
@@ -296,6 +313,8 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif not query.get("expire", "").isdigit() or int(query["expire"]) < int(time.time()):
             self._send(HTTPStatus.FORBIDDEN, b"url expired", "text/plain")
+        elif options.truncate_media:
+            self._send_truncated(media_bytes(item_id, index), "video/mp4")
         else:
             self._send(HTTPStatus.OK, media_bytes(item_id, index), "video/mp4")
 
@@ -331,18 +350,34 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_truncated(self, body: bytes, content_type: str) -> None:
+        """Announce the whole body, send `TRUNCATE_RATIO` of it and drop the connection: what a
+        transfer cut short by the network looks like to the client (Playwright reports it as
+        `aborted`; a client that returned the partial body would see fewer bytes than announced)."""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body[: int(len(body) * TRUNCATE_RATIO)])
+        self.wfile.flush()
+        self.close_connection = True
+
     def log_message(self, format: str, *args: Any) -> None:
         """Silence the default access log (it would echo request lines into the test output)."""
 
 
-def rewrite_media_urls(node: Any, base: str, expire: int) -> tuple[Any, int]:
+def rewrite_media_urls(
+    node: Any, base: str, expire: int, duration: int | None = None
+) -> tuple[Any, int]:
     """A copy of an item_list payload with every `https://v16-webapp-prime.tiktok.com/...` string
     replaced by `{base}/cdn/{item_id}/{index}.mp4?expire={expire}` and every
     `https://p16-sign-sg.tiktokcdn.com/...` string (the covers) by `{base}/cover/{item_id}.jpg`,
     plus the number of distinct MEDIA URLs rewritten (covers are not counted: the count tells
     whether the list carried play URLs). An item is a dict holding `video` or `dramaInfo`; `index`
     is the order of first appearance within the item, so a URL an item lists twice stays one
-    URL."""
+    URL. With `duration`, every item's `video.duration` becomes that many seconds (what the fake
+    CDN's media really lasts); None leaves the fixtures' durations alone."""
     rewritten = 0
 
     def walk(value: Any, item_id: str, indexes: dict[str, int]) -> Any:
@@ -350,7 +385,11 @@ def rewrite_media_urls(node: Any, base: str, expire: int) -> tuple[Any, int]:
         if isinstance(value, dict):
             if "video" in value or "dramaInfo" in value:
                 item_id, indexes = str(value.get("id") or item_id), {}
-            return {key: walk(inner, item_id, indexes) for key, inner in value.items()}
+            mapped = {key: walk(inner, item_id, indexes) for key, inner in value.items()}
+            video = mapped.get("video")
+            if duration is not None and isinstance(video, dict) and "duration" in video:
+                video["duration"] = duration
+            return mapped
         if isinstance(value, list):
             return [walk(inner, item_id, indexes) for inner in value]
         if isinstance(value, str) and value.startswith(MEDIA_URL_PREFIX):

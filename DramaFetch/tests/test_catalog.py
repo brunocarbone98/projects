@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import copy
 
+import pytest
+
 from dramafetch.catalog import (
     PagePayload,
+    Rendition,
     catalog_warnings,
+    choose_rendition,
+    codec_name,
     cover_url_of,
     episode_from_item,
     find_item_lists,
     lock_hints,
     merge_episodes,
+    ordered_renditions,
     parse_detail_payload,
     parse_item_list_payload,
     play_url_candidates,
+    renditions,
     url_expiry,
 )
-from dramafetch.models import Episode
+from dramafetch.models import QUALITY_MODES, Episode
 
 SERIES_ID = "7699393770256782354"
 OTHER_SERIES_ID = "7600000000000000000"
@@ -444,8 +451,13 @@ def _entry(codec, bitrate, *urls):
 
 def test_play_url_candidates_on_the_fixtures(item_list_pages):
     page1 = item_list_pages[0]["itemList"]
-    # episode 1 lists the same URL under bitrateInfo and playAddr: one candidate
-    assert play_url_candidates(page1[0]) == [f"{CDN}/abc/?a=1988&expire=1761200000"]
+    # episode 1 lists its 720p H.264 URL under bitrateInfo and playAddr (one candidate) and a
+    # higher-bitrate 1080p bytevc1 rendition: compatible takes the H.264 first, best the bytevc1
+    h264 = f"{CDN}/abc/?a=1988&expire=1761200000"
+    bytevc1 = f"{CDN}/abc-1080/?a=1988&expire=1761200000"
+    assert play_url_candidates(page1[0]) == [h264, bytevc1]
+    assert play_url_candidates(page1[0], "compatible") == [h264, bytevc1]
+    assert play_url_candidates(page1[0], "best") == [bytevc1, h264]
     assert play_url_candidates(page1[1]) == [f"{CDN}/def/"]
     assert play_url_candidates(page1[2]) == []  # the trailer has an empty playAddr
     locked = item_list_pages[1]["data"]["itemList"][2]
@@ -480,6 +492,117 @@ def test_play_url_candidates_order_h264_by_bitrate_then_other_codecs_then_play_a
     assert play_url_candidates({"video": {"playAddr": " https://c/w "}}) == ["https://c/w"]
     wrapped = {"itemStruct": {"video": {"playAddr": "https://c/w", "bitrateInfo": []}}}
     assert play_url_candidates(wrapped) == ["https://c/w"]
+
+
+def test_best_quality_orders_every_rendition_by_bitrate_across_codecs():
+    item = {
+        "video": {
+            "playAddr": {"UrlList": ["https://c/play", "https://c/h264-hi"]},
+            "bitrateInfo": [
+                _entry("h265", 2_000_000, "https://c/h265-hi"),
+                _entry("h264", 500_000, "https://c/h264-lo", "https://c/h264-lo-b"),
+                _entry("bytevc1", 3_000_000, "https://c/bytevc1"),
+                _entry("AVC1", 1_000_000, "https://c/h264-hi"),
+                _entry("H.264", "1500000", "https://c/h264-str"),
+                _entry("h264", 1_000_000, "https://c/h264-hi"),
+            ],
+        }
+    }
+    assert play_url_candidates(item, "best") == [
+        "https://c/bytevc1",
+        "https://c/h265-hi",
+        "https://c/h264-str",
+        "https://c/h264-hi",
+        "https://c/h264-lo",
+        "https://c/h264-lo-b",
+        "https://c/play",
+    ]
+    assert [r.label for r in ordered_renditions(item, "best")] == [
+        "?p bytevc1",
+        "?p h265",
+        "?p h264",
+        "?p h264",
+        "?p h264",
+        "?p h264",
+    ]
+    assert choose_rendition(item, "best").codec == "bytevc1"
+    assert choose_rendition(item).url_list == ["https://c/h264-str"]  # compatible: top H.264
+    with pytest.raises(
+        ValueError, match="unknown quality 'ultra': expected one of compatible, best"
+    ):
+        play_url_candidates(item, "ultra")
+    assert QUALITY_MODES == ("compatible", "best")
+
+
+def test_renditions_labels_codecs_and_the_quality_hint(item_list_pages):
+    page1 = item_list_pages[0]["itemList"]
+    found = renditions(page1[0])
+    assert found == [
+        Rendition([f"{CDN}/abc/?a=1988&expire=1761200000"], "h264", 1_138_000, 720, "720p h264"),
+        Rendition(
+            [f"{CDN}/abc-1080/?a=1988&expire=1761200000"],
+            "bytevc1",
+            1_652_000,
+            1080,
+            "1080p bytevc1",
+        ),
+    ]
+    assert found[0].h264 and not found[1].h264
+    assert choose_rendition(page1[0]) == found[0]
+    assert choose_rendition(page1[0], "best") == found[1]
+    assert episode_from_item(page1[0], SERIES_ID).quality_hint == "720p h264"
+    # a bare playAddr is not a rendition: no hint, nothing chosen, the URL still a candidate
+    assert renditions(page1[1]) == [] and choose_rendition(page1[1]) is None
+    assert episode_from_item(page1[1], SERIES_ID).quality_hint is None
+    # compatible falls back to the best of the other codecs when no H.264 is listed
+    only_h265 = {"video": {"bitrateInfo": [_entry("h265", 900_000, "https://c/h265")]}}
+    assert choose_rendition(only_h265).label == "?p h265"
+    # the height: GearName first, then video.ratio, else "?p"
+    gear = {
+        "Bitrate": 1,
+        "CodecType": "h264",
+        "GearName": "adapt_lower_1080_1",
+        "PlayAddr": "https://c/a",
+    }
+    by_ratio = {"Bitrate": 1, "CodecType": "h265", "PlayAddr": "https://c/b"}
+    assert [
+        r.label for r in renditions({"video": {"ratio": "720p", "bitrateInfo": [gear, by_ratio]}})
+    ] == [
+        "1080p h264",
+        "720p h265",
+    ]
+    assert (
+        renditions({"video": {"ratio": "default", "bitrateInfo": [by_ratio]}})[0].label == "?p h265"
+    )
+    assert renditions({"video": {"ratio": 720, "bitrateInfo": [by_ratio]}})[0].height_hint is None
+    assert renditions({"video": {"bitrateInfo": [{**gear, "GearName": "lowest_540_0"}]}})[
+        0
+    ].label == ("540p h264")
+    # codec names
+    for raw, expected in (
+        ("h264", "h264"),
+        ("H.264", "h264"),
+        ("avc1", "h264"),
+        ("h265", "h265"),
+        ("H.265", "h265"),
+        ("hevc", "h265"),
+        ("hvc1", "h265"),
+        ("bytevc1", "bytevc1"),
+        ("ByteVC1", "bytevc1"),
+        ("bytevc2", "bytevc2"),
+        ("VP9", "vp9"),
+        ("", "unknown"),
+        (None, "unknown"),
+        (3, "unknown"),
+    ):
+        assert codec_name(raw) == expected, raw
+    # junk never raises and yields nothing
+    for junk in (None, "x", 1, [], {}, {"video": None}, {"video": {"bitrateInfo": "no"}}):
+        assert renditions(junk) == [] and choose_rendition(junk) is None
+    messy = {
+        "video": {"bitrateInfo": [1, {"PlayAddr": 5}, {"Bitrate": True, "PlayAddr": "https://c/q"}]}
+    }
+    assert renditions(messy) == [Rendition(["https://c/q"], "unknown", 0, None, "?p unknown")]
 
 
 def test_play_url_candidates_never_raises_on_junk():

@@ -13,7 +13,10 @@ as they happen, so stdout stays a clean list of results.
 Exit codes: 0 ok · 2 usage/unsupported URL/some episode failed · 3 login required ·
 4 discovery failed (captcha: try ``--headful``; an HTTP error for the series page) · 5 blocked
 (HTTP 403, or a captcha met while ``--engine browser`` refreshed the list) or rate limited
-(HTTP 429): wait 30-60 min, then run again to resume · 130 interrupted.
+(HTTP 429): wait 30-60 min, then run again to resume — and, with the same code, a refusal of
+``info``/``download``/``video`` to contact TikTok at all while the global cooldown that such a
+block starts is in force (``dramafetch.cooldown``; no flag skips it, deleting its file does) ·
+130 interrupted.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from dramafetch import __version__, engine
+from dramafetch.cooldown import cooldown_message, cooldown_summary
 from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.downloader import MAX_RETRIES, curl_cffi_available
 from dramafetch.errors import (
@@ -46,6 +50,7 @@ from dramafetch.errors import (
 from dramafetch.manifest import NAME_PLACEHOLDERS, series_dir, validate_name_format
 from dramafetch.models import (
     DEFAULT_NAME_FORMAT,
+    QUALITY_MODES,
     THUMBNAIL_MODES,
     DiscoveryOptions,
     DownloadOptions,
@@ -270,6 +275,22 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
         "file; both also keeps it next to the video as <name>.jpeg|jpg|png|webp (for Plex, "
         "Jellyfin, Kodi and galleries, which show a frame of the video otherwise); file keeps that "
         "file only, nothing embedded; none fetches no cover at all",
+    )
+    group.add_argument(
+        "--quality",
+        choices=QUALITY_MODES,
+        default=DownloadOptions.quality,
+        help="which rendition to take: compatible (default) is the highest-bitrate H.264 and "
+        "plays everywhere; best is the highest bitrate whatever the codec — often TikTok's "
+        "bytevc1 (H.265), which needs a capable player. Nothing is re-encoded: the source's top "
+        "rendition is the ceiling",
+    )
+    group.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="skip the integrity check of every saved video (an MP4 that parses, is not cut "
+        "short, has audio and lasts about as long as the episode list says; a file that fails is "
+        "kept as '<name> (incomplete).mp4' and the episode fails) — a debugging aid only",
     )
     group.add_argument("--overwrite", action="store_true", help="re-download existing files")
     group.add_argument("--dry-run", action="store_true", help="list what would be downloaded")
@@ -545,6 +566,8 @@ def _download_options(args: argparse.Namespace) -> DownloadOptions:
         else DownloadOptions.base_url,
         name_format=name_format_for(args),
         thumbnail=getattr(args, "thumbnail", DownloadOptions.thumbnail),
+        quality=getattr(args, "quality", DownloadOptions.quality),
+        verify=not getattr(args, "no_verify", False),
         impersonate=not args.no_impersonate,
         retries=args.retries,
         overwrite=args.overwrite,
@@ -566,8 +589,23 @@ def _series_ref(text: str) -> SeriesRef:
     return ref
 
 
+def _refused_by_cooldown() -> int | None:
+    """``EXIT_RATE_LIMITED`` (5), with the cooldown message on stderr, when TikTok refused a
+    request less than ``cooldown.COOLDOWN_MINUTES`` ago (``engine.check_cooldown``); None when
+    TikTok may be contacted. Asked before any request — knocking again right after a refusal is
+    what escalates TikTok's protection — and there is no flag that skips it: deleting the file the
+    message names does."""
+    active = engine.check_cooldown()
+    if active is None:
+        return None
+    _stderr(f"error: {cooldown_message(active)}")
+    return EXIT_RATE_LIMITED
+
+
 def _cmd_info(args: argparse.Namespace) -> int:
     ref = _series_ref(args.url)
+    if (refused := _refused_by_cooldown()) is not None:
+        return refused
     series = engine.resolve(ref, _discovery_options(args))
     target_dir = series_dir(Path(args.out), series)
     if args.as_json:
@@ -583,6 +621,9 @@ def _cmd_info(args: argparse.Namespace) -> int:
 def _cmd_download(args: argparse.Namespace) -> int:
     ref = _series_ref(args.url)
     options = _download_options(args)
+    # Even --dry-run resolves the episode list, so the cooldown applies to it too.
+    if (refused := _refused_by_cooldown()) is not None:
+        return refused
     series = engine.resolve(ref, _discovery_options(args))
     for warning in series.warnings:
         _stderr(f"warning: {warning}")
@@ -624,6 +665,9 @@ def _cmd_video(args: argparse.Namespace) -> int:
             f"{args.url.strip()!r} is a series, not a single video: use `dramafetch download URL`."
         )
     options = _download_options(args)
+    # A dry run needs no network, so it is the one command the cooldown leaves alone.
+    if not options.dry_run and (refused := _refused_by_cooldown()) is not None:
+        return refused
     episode = Episode(
         number=0, item_id=ref.item_id, title=ref.item_id, series_id="", author=ref.author
     )
@@ -633,6 +677,7 @@ def _cmd_video(args: argparse.Namespace) -> int:
         result = downloader.download(episode, options)
     finally:
         engine.close_downloader(downloader)
+    engine.record_block_if_refused(result, options.engine)  # a 403/429 here starts the cooldown too
     _print_result(result)
     return engine.exit_code([result])
 
@@ -643,9 +688,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         browser_path=args.browser_path,
         cookies_file=args.cookies,
     )
-    # Whether covers can be embedded, then the pacing defaults as information (neither ok nor
-    # fail): the web UI's doctor panel keeps the seven environment facts above and omits both.
+    # Whether covers can be embedded, whether a TikTok cooldown is in force, then the pacing
+    # defaults as information (neither ok nor fail): the web UI's doctor panel keeps the seven
+    # environment facts above and omits these three.
     checks.append(_check_mutagen())
+    checks.append(_check_cooldown())
     checks.append(DoctorCheck("pace", "skip", describe_pacing()))
     # A stdout that cannot encode the check marks (a Windows pipe in cp1252) gets ASCII ones.
     lines = format_doctor(checks, ascii_marks=not _stream_is_utf8(sys.stdout))
@@ -748,6 +795,9 @@ def _truncate(text: str, width: int) -> str:
 
 
 def _print_series_table(series: Series, target_dir: Path) -> None:
+    """The ``info`` table: number, item id, duration, quality (the rendition the default
+    ``--quality compatible`` downloads, e.g. ``720p h264``; ``-`` when the list names none),
+    title and free/locked status."""
     episodes = sorted(series.episodes, key=lambda episode: episode.number)
     count = len(episodes)
     header = f"Series: {_printable(series.display_name)} [{series.series_id}] — {count} episode"
@@ -758,14 +808,20 @@ def _print_series_table(series: Series, target_dir: Path) -> None:
     print(f"Output: {_printable(str(target_dir))}")
     print()
     titles = {episode.item_id: _printable(episode.title) for episode in episodes}
+    qualities = {episode.item_id: _printable(episode.quality_hint or "-") for episode in episodes}
     id_width = max(7, max((len(episode.item_id) for episode in episodes), default=7))
+    quality_width = max(7, max((len(quality) for quality in qualities.values()), default=7))
     title_width = min(50, max(5, max((len(title) for title in titles.values()), default=5)))
-    print(f"{'#':>4}  {'item id':<{id_width}}  {'duration':>8}  {'title':<{title_width}}  status")
+    print(
+        f"{'#':>4}  {'item id':<{id_width}}  {'duration':>8}  {'quality':<{quality_width}}  "
+        f"{'title':<{title_width}}  status"
+    )
     for episode in episodes:
         status = "free" if not episode.locked else "locked: " + "; ".join(episode.lock_hints)
         print(
             f"{episode.number:>4}  {_printable(episode.item_id):<{id_width}}  "
             f"{_format_duration(episode.duration_s):>8}  "
+            f"{qualities[episode.item_id]:<{quality_width}}  "
             f"{_truncate(titles[episode.item_id], title_width):<{title_width}}  "
             f"{_printable(status)}"
         )
@@ -776,8 +832,25 @@ def _print_series_table(series: Series, target_dir: Path) -> None:
             print(f"  - {_printable(warning)}")
 
 
+#: Where a DONE message starts telling what became of the cover (``downloader._finish_cover``,
+#: ``downloader_browser._keep_cover``): `` + cover embedded``, ``; cover: not available``, …
+_COVER_MARKERS = (" + cover", "; cover:")
+
+
+def _cover_note(message: str) -> str:
+    """The cover outcome at the end of a DONE message (`` + cover embedded``, `` + cover embedded
+    + file``, `` + cover file``, ``; cover: <reason>``), empty when the message has none."""
+    positions = [position for position in map(message.find, _COVER_MARKERS) if position >= 0]
+    return message[min(positions) :] if positions else ""
+
+
 def _print_result(result: DownloadResult) -> None:
-    detail = str(result.path) if result.path is not None else result.message
+    """One line per result: ``E01  done  <path> + cover embedded`` — a result with a file shows
+    its path followed by the cover note of its message; any other result shows its message."""
+    if result.path is not None:
+        detail = str(result.path) + _cover_note(result.message)
+    else:
+        detail = result.message
     print(
         _printable(f"E{result.episode.number:02d}  {result.status.value:<22} {detail}"), flush=True
     )
@@ -985,6 +1058,16 @@ def _check_mutagen() -> DoctorCheck:
     return DoctorCheck("mutagen", "ok", f"{version_string} (covers are embedded into the MP4)")
 
 
+def _check_cooldown() -> DoctorCheck:
+    """The doctor line ``cooldown: none`` (the dash mark: information), or the cross
+    ``cooldown: until HH:MM (N min left): <reason>`` while TikTok must not be contacted
+    (``engine.check_cooldown``; ``info``/``download``/``video`` then exit 5)."""
+    active = engine.check_cooldown()
+    if active is None:
+        return DoctorCheck("cooldown", "skip", "none")
+    return DoctorCheck("cooldown", "fail", cooldown_summary(active))
+
+
 def _check_cookies(cookies_file: Path | None) -> DoctorCheck:
     if cookies_file is None:
         return DoctorCheck(
@@ -1111,7 +1194,8 @@ def doctor_as_dicts(
     cookies_file: Path | None = None,
 ) -> list[dict[str, Any]]:
     """JSON-ready doctor facts for the web UI: the seven environment checks of
-    :func:`doctor_checks` only (the ``doctor`` command adds the ``mutagen`` and ``pace`` lines)."""
+    :func:`doctor_checks` only (the ``doctor`` command adds the ``mutagen``, ``cooldown`` and
+    ``pace`` lines)."""
     checks = doctor_checks(
         browser_channel=browser_channel, browser_path=browser_path, cookies_file=cookies_file
     )

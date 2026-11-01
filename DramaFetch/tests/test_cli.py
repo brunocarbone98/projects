@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import socket
 import sys
 import time
@@ -17,6 +18,7 @@ from mutagen import version_string as mutagen_version
 
 from dramafetch import __version__, cli, engine
 from dramafetch.catalog import catalog_warnings
+from dramafetch.cooldown import active_cooldown, clear_cooldown, record_block
 from dramafetch.downloader import locked_result
 from dramafetch.errors import (
     ChallengeError,
@@ -25,9 +27,11 @@ from dramafetch.errors import (
     RateLimitedError,
 )
 from dramafetch.manifest import MANIFEST_FILENAME
+from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode, Series
 
 SERIES_ID = "7699393770256782354"
+TINY_MP4 = (Path(__file__).parent / "fixtures" / "tiny.mp4").read_bytes()  # a real 3 s MP4
 NAME = "The Billionaire's Secret Heiress"
 SERIES_URL = f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1"
 VIDEO_URL = "https://www.tiktok.com/@ana/video/7699400000000000001"
@@ -105,7 +109,7 @@ class FakeDownloader:
             options.out_dir.mkdir(parents=True, exist_ok=True)
             path = options.out_dir / f"fake - Episode {episode.number:02d}.mp4"
             path.write_bytes(b"v")
-            return DownloadResult(episode, status, path, "saved")
+            return DownloadResult(episode, status, path, f"saved {path.name} + cover embedded")
         return DownloadResult(episode, status, message=f"{status.value} from fake")
 
 
@@ -261,9 +265,13 @@ def test_parser_download_flags():
             "2",
             "--engine",
             "browser",
+            "--quality",
+            "best",
+            "--no-verify",
         ]
     )
     assert args.episodes == "1-5,8"
+    assert args.quality == "best" and args.no_verify is True
     assert args.out == "/tmp/x"
     assert (args.delay_min, args.delay_max) == (1.0, 2.0)
     assert args.include_locked and args.overwrite and args.dry_run and args.no_impersonate
@@ -284,6 +292,8 @@ def test_parser_download_flags():
     assert (defaults.rest_every, defaults.rest_min, defaults.rest_max) == (10, 60.0, 120.0)
     assert defaults.max_consecutive_failures == DownloadOptions.max_consecutive_failures == 3
     assert defaults.engine == DownloadOptions.engine == "yt-dlp"
+    assert defaults.quality == DownloadOptions.quality == "compatible"
+    assert defaults.no_verify is False and DownloadOptions.verify is True
     for flag in (
         "--pace",
         "--rest-every",
@@ -294,6 +304,10 @@ def test_parser_download_flags():
         assert flag in _subcommand_help("download") and flag in _subcommand_help("serve")
         assert flag not in _subcommand_help("video")  # one file: nothing to pace
     assert "--engine {yt-dlp,browser}" in _subcommand_help("video")
+    for command in ("download", "video", "serve"):
+        assert "--quality {compatible,best}" in _subcommand_help(command)
+        assert "--no-verify" in _subcommand_help(command)
+    assert "--quality" not in _subcommand_help("info")
 
 
 def _subcommand_help(command: str) -> str:
@@ -644,10 +658,11 @@ def test_doctor_uses_ascii_marks_on_a_non_utf8_stdout(monkeypatch):
     read_stdout = _cp1252_stdout(monkeypatch)
     assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
     lines = read_stdout().strip().splitlines()
-    assert len(lines) == 9
+    assert len(lines) == 10
     assert all(line.split(" ", 1)[0] in {"OK", "X", "-"} for line in lines)
     assert lines[7].startswith("OK mutagen: ")
-    assert lines[8].startswith("- pace: 4")
+    assert lines[8] == "- cooldown: none"
+    assert lines[9].startswith("- pace: 4")
 
 
 def test_control_characters_from_tiktok_text_are_not_printed(capsys, tmp_path):
@@ -697,7 +712,10 @@ def test_download_end_to_end(fake_discovery, fake_downloader, tmp_path, capsys):
     lines = out.splitlines()
     assert lines[0] == f"{NAME} [{SERIES_ID}]: 4 episode(s) -> {tmp_path / f'{NAME} [{SERIES_ID}]'}"
     assert lines[1].startswith("E01  done")
-    assert lines[1].endswith("fake - Episode 01.mp4")
+    # a done line: the path, then the cover outcome from the message
+    assert lines[1].endswith(
+        f"{tmp_path / f'{NAME} [{SERIES_ID}]' / 'fake - Episode 01.mp4'} + cover embedded"
+    )
     assert lines[4].startswith("E05  skipped-locked")
     assert "looks locked: isFree=false; isLocked=True" in lines[4]
     assert lines[-1] == "Summary: 3 done, 1 skipped-locked"
@@ -928,6 +946,8 @@ def test_download_prints_the_stop_reason_once_on_stderr(
     assert "Summary: 1 skipped-locked, 3 failed-blocked" in captured.out
     (downloader,) = fake_downloader.instances
     assert [episode.number for episode, _ in downloader.calls] == [1]  # nothing after the stop
+    assert active_cooldown().source == "yt-dlp"  # the refusal started the global cooldown
+    clear_cooldown()  # a failure streak is no refusal: the next run must not be turned away
 
     fake_downloader.outcomes = {1: DownloadStatus.FAILED, 2: DownloadStatus.FAILED_UNAVAILABLE}
     code = cli.main(
@@ -940,6 +960,7 @@ def test_download_prints_the_stop_reason_once_on_stderr(
     assert "stop after 2 failures / 403 / 429" in captured.err
     assert "E03  failed                 stopped: 2 consecutive failures" in captured.out
     assert "Summary: 1 skipped-locked, 1 failed-unavailable, 2 failed" in captured.out
+    assert active_cooldown() is None  # three plain failures are not TikTok refusing
 
 
 def test_download_engine_browser_gets_the_browser_flags_and_is_closed(
@@ -1095,7 +1116,7 @@ def test_video_names_its_file_after_the_item_id_unless_told_otherwise(tmp_path):
 
         def download(self, urls):
             target = Path(self.params["outtmpl"] % {"ext": "mp4"})
-            target.write_bytes(b"v")
+            target.write_bytes(TINY_MP4)  # a real MP4: the verification runs on it
             written.append((target, self.params))
             return 0
 
@@ -1148,7 +1169,7 @@ def test_video_builds_the_downloader_through_the_engine_and_closes_it(monkeypatc
 def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     assert cli.main(["doctor"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 9
+    assert len(lines) == 10
     assert all(line[0] in "✓✗–" for line in lines)  # noqa: RUF001
     names = [line.split(" ", 1)[1].split(":")[0] for line in lines]
     assert names == [
@@ -1160,12 +1181,15 @@ def test_doctor_runs_without_a_browser_and_exits_0(capsys):
         "ffmpeg",
         "cookies",
         "mutagen",
+        "cooldown",
         "pace",
     ]
     # whether covers can be embedded into the MP4 (mutagen is a runtime dependency)
     assert lines[7] == f"✓ mutagen: {mutagen_version} (covers are embedded into the MP4)"
+    # whether TikTok may be contacted at all (no refusal in the last 30 minutes)
+    assert lines[8] == "– cooldown: none"  # noqa: RUF001
     # the pacing defaults, in one line, so a user knows what to expect before the first run
-    assert lines[8] == (
+    assert lines[9] == (
         "– pace: 4–9 s between episodes, 60–120 s rest every 10; "  # noqa: RUF001
         "stop after 3 failures / 403 / 429"
     )
@@ -1188,10 +1212,149 @@ def test_doctor_without_mutagen_says_covers_stay_files(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "mutagen", None)  # `import mutagen` now fails
     assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 9
+    assert len(lines) == 10
     assert lines[7] == (
         "✗ mutagen: not importable — covers are saved as files only (pip install mutagen)"
     )
+
+
+def test_doctor_shows_an_active_cooldown(capsys):
+    record_block("blocked (HTTP 403): TikTok refused the request", "yt-dlp")
+    assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0  # doctor itself never refuses
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 10
+    assert re.fullmatch(
+        r"✗ cooldown: until \d\d:\d\d \((29|30) min left\): blocked \(HTTP 403\): TikTok refused "
+        r"the request",
+        lines[8],
+    ), lines[8]
+    assert cli.doctor_as_dicts(browser_channel="chrome")[-1]["name"] == "cookies"  # web: 7 only
+
+
+# --------------------------------------------------------------------------- the cooldown
+
+
+def test_commands_refuse_to_contact_tiktok_under_a_cooldown(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    """After a refusal, info/download/video exit 5 with the cooldown message and make no request
+    at all — a dry run of `download` resolves the list, so it is refused too; `video --dry-run`
+    needs no network and is not. An expired cooldown refuses nothing."""
+    record_block("HTTP 429 from the video server", "browser")
+    out = str(tmp_path)
+    for argv in (
+        ["info", SERIES_URL, "--out", out],
+        ["info", SERIES_URL, "--json", "--out", out],
+        ["download", SERIES_URL, "--out", out],
+        ["download", SERIES_URL, "--out", out, "--dry-run"],
+        ["video", VIDEO_URL, "--out", out],
+    ):
+        assert cli.main(argv) == 5, argv
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.startswith("error: TikTok refused a request at ")
+        assert "(HTTP 429 from the video server); DramaFetch waits until " in captured.err
+        assert f"delete {tmp_path / 'cooldown.json'} to lift it, at your own risk" in captured.err
+    assert fake_discovery.calls == []  # the list was never asked for
+    assert fake_downloader.instances == []  # no downloader was even built
+    assert not any(tmp_path.iterdir()) or [p.name for p in tmp_path.iterdir()] == ["cooldown.json"]
+    # a dry run of `video` needs no network: not refused
+    assert cli.main(["video", VIDEO_URL, "--out", out, "--dry-run"]) == 0
+    assert "E00  dry-run" in capsys.readouterr().out
+    # deleting the file (what the message says) lifts it; so does its expiry
+    clear_cooldown()
+    assert cli.main(["info", SERIES_URL, "--out", out]) == 0
+    assert len(fake_discovery.calls) == 1
+    record_block("old", "web", now=time.time() - 3600)  # expired half an hour ago
+    assert cli.main(["info", SERIES_URL, "--out", out]) == 0
+    assert len(fake_discovery.calls) == 2
+
+
+def test_video_records_the_cooldown_on_a_refusal(fake_downloader, tmp_path, capsys):
+    fake_downloader.outcomes = {0: DownloadStatus.FAILED_RATE_LIMITED}
+    assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 5
+    assert "E00  failed-rate-limited" in capsys.readouterr().out
+    recorded = active_cooldown()
+    assert recorded is not None and recorded.source == "yt-dlp"
+    assert recorded.reason == "failed-rate-limited from fake"
+    assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 5  # now refused up front
+    assert "error: TikTok refused a request at" in capsys.readouterr().err
+    assert len(fake_downloader.instances) == 1
+
+
+# --------------------------------------------------------------------------- quality & verify
+
+
+def test_quality_and_no_verify_flags_reach_the_options(fake_discovery, fake_downloader, tmp_path):
+    argv = ["--out", str(tmp_path), "--dry-run"]
+    assert cli.main(["download", SERIES_URL, *argv]) == 0
+    assert cli.main(["video", VIDEO_URL, *argv]) == 0
+    assert cli.main(["download", SERIES_URL, *argv, "--quality", "best", "--no-verify"]) == 0
+    assert cli.main(["video", VIDEO_URL, *argv, "--quality", "best", "--no-verify"]) == 0
+    defaults_series, defaults_video, best_series, best_video = fake_downloader.instances
+    for run in (defaults_series, defaults_video):
+        _, options = run.calls[0]
+        assert options.quality == "compatible" and options.verify is True
+    for run in (best_series, best_video):
+        _, options = run.calls[0]
+        assert options.quality == "best" and options.verify is False
+
+
+def test_quality_must_be_compatible_or_best(capsys, fake_discovery, fake_downloader):
+    assert cli.main(["download", SERIES_URL, "--quality", "ultra"]) == 2
+    assert "--quality: invalid choice: 'ultra'" in capsys.readouterr().err
+    assert fake_discovery.calls == [] and fake_downloader.instances == []
+
+
+def test_info_shows_the_quality_column_and_json_carries_the_hint(fake_discovery, tmp_path, capsys):
+    fake_discovery.series.episodes[0].quality_hint = "720p h264"
+    fake_discovery.series.episodes[1].quality_hint = "1080p bytevc1"
+    assert cli.main(["info", SERIES_ID, "--out", str(tmp_path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    header = next(line for line in lines if line.lstrip().startswith("#"))
+    assert header.split() == ["#", "item", "id", "duration", "quality", "title", "status"]
+    row1 = next(line for line in lines if line.lstrip().startswith("1 "))
+    assert "  1:31  720p h264      " in row1  # 91 s, then the rendition the default takes
+    row3 = next(line for line in lines if line.lstrip().startswith("3 "))
+    assert "  1:33  -              " in row3  # no rendition listed
+    assert cli.main(["info", SERIES_ID, "--json", "--out", str(tmp_path)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [e["quality_hint"] for e in data["episodes"]] == [
+        "720p h264",
+        "1080p bytevc1",
+        None,
+        None,
+    ]
+
+
+def test_print_result_shows_the_path_then_the_cover_note_for_done_rows(capsys):
+    episode = _episode(1)
+    path = Path("/tmp/x/Heiress - Episode 01.mp4")
+    for message, note in (
+        (f"saved {path.name} + cover embedded", " + cover embedded"),
+        (f"saved {path.name} (0.1 MiB) + cover embedded + file", " + cover embedded + file"),
+        (f"saved {path.name} + cover file", " + cover file"),
+        (f"saved {path.name}; cover: not available", "; cover: not available"),
+        (
+            f"saved {path.name} (0.1 MiB); cover: HTTP 429 from p16.tiktokcdn.com",
+            "; cover: HTTP 429 from p16.tiktokcdn.com",
+        ),
+        (f"saved {path.name} (0.1 MiB)", ""),
+    ):
+        cli._print_result(DownloadResult(episode, DownloadStatus.DONE, path, message))
+        assert capsys.readouterr().out == f"E01  done                   {path}{note}\n", message
+    # a failure has no path: its message, as before; a skip shows its path, nothing appended
+    cli._print_result(
+        DownloadResult(episode, DownloadStatus.FAILED, None, f"{INCOMPLETE_PREFIX}no audio track")
+    )
+    assert (
+        capsys.readouterr().out
+        == f"E01  failed                 {INCOMPLETE_PREFIX}no audio track\n"
+    )
+    cli._print_result(
+        DownloadResult(episode, DownloadStatus.SKIPPED_EXISTS, path, f"already exists: {path.name}")
+    )
+    assert capsys.readouterr().out == f"E01  skipped-exists         {path}\n"
 
 
 @pytest.mark.parametrize("mode", ["embed", "both", "file", "none"])
@@ -1478,6 +1641,20 @@ def test_serve_refuses_an_unusable_token(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "DRAMAFETCH_TOKEN" in err and "tiny1" not in err
     assert calls == []
+
+
+def test_serve_starts_during_a_cooldown_and_leaves_the_answer_to_the_web(monkeypatch, capsys):
+    """`serve` itself contacts nobody: a cooldown recorded earlier must not stop it from binding
+    (the web answers 429 of kind `cooldown` per request; `info`/`download`/`video` exit 5)."""
+    from dramafetch.cooldown import record_block  # the autouse fixture points its file at tmp_path
+
+    calls, servers = _stub_run_server(monkeypatch)
+    record_block("blocked (HTTP 403): TikTok refused the request", "yt-dlp")
+    assert cli.main(["serve"]) == 0
+    assert len(calls) == 1 and servers[0].served and servers[0].closed
+    err = capsys.readouterr().err
+    assert "DramaFetch web UI on http://127.0.0.1:8765/" in err
+    assert "error:" not in err
 
 
 def test_serve_help_mentions_the_token():

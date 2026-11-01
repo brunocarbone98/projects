@@ -9,15 +9,21 @@ Without a logged-in session TikTok returns no formats ("No video formats found")
 Locked (paid) episodes are skipped before any network access; nothing here unlocks or bypasses
 anything. Cookie values are never logged; error messages are redacted just in case.
 
-The episode cover yt-dlp saves next to the video (``writethumbnail``) is then embedded into the
-MP4 as its cover art, kept as a file, or both, as ``DownloadOptions.thumbnail`` says (see
-:func:`_finish_cover` and ``dramafetch.thumbnails``); what became of it is appended to the DONE
-message and never changes the status.
+Every file yt-dlp produces is verified before anything else happens to it
+(``dramafetch.media.verify_video``: an MP4 that parses, is not cut short, has an audio track and
+lasts about ``Episode.duration_s``) unless ``DownloadOptions.verify`` is off; a file that fails is
+renamed ``<name> (incomplete).<ext>`` (``media.quarantine``), the cover yt-dlp wrote is deleted and
+the episode is FAILED with ``"download looks incomplete or wrong: <reason> (kept as <name>)"`` —
+a rerun tries it again. Only then is the episode cover yt-dlp saved next to the video
+(``writethumbnail``) embedded into the MP4 as its cover art, kept as a file, or both, as
+``DownloadOptions.thumbnail`` says (see :func:`_finish_cover` and ``dramafetch.thumbnails``);
+what became of it is appended to the DONE message and never changes the status.
 """
 
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 import sys
 from collections.abc import Callable
@@ -28,6 +34,7 @@ from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.discovery.static import redact_tokens, safe_url
 from dramafetch.errors import ThumbnailError
 from dramafetch.manifest import episode_stem
+from dramafetch.media import INCOMPLETE_PREFIX, quarantine, verify_video
 from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode
 from dramafetch.thumbnails import (
     COVER_SUFFIXES,
@@ -37,9 +44,16 @@ from dramafetch.thumbnails import (
     image_kind,
 )
 
+log = logging.getLogger(__name__)
+
 TIKTOK_REFERER = "https://www.tiktok.com/"
-H264_FORMAT = "best[vcodec^=h264]/best[vcodec=avc1]/best"
+#: yt-dlp format selectors per ``DownloadOptions.quality`` (see :func:`format_for`): ``compatible``
+#: takes the highest-bitrate H.264 and falls back to the best of anything, ``best`` the highest
+#: bitrate whatever the codec. TikTok formats are progressive, so a selector only chooses a file;
+#: nothing is merged or re-encoded.
+COMPATIBLE_FORMAT = "best[vcodec^=h264]/best[vcodec=avc1]/best"
 BEST_FORMAT = "best"
+H264_FORMAT = COMPATIBLE_FORMAT  # the former name of COMPATIBLE_FORMAT
 MAX_MESSAGE_LEN = 300
 #: yt-dlp retries per download are capped here whatever ``DownloadOptions.retries`` says: after a
 #: refusal every retry is one more request against the same address, which is what trips TikTok's
@@ -94,6 +108,12 @@ def impersonate_target() -> Any | None:
     except Exception:
         return None
     return ImpersonateTarget("chrome")
+
+
+def format_for(quality: str) -> str:
+    """The yt-dlp format selector for a ``DownloadOptions.quality``: :data:`BEST_FORMAT` for
+    ``best``, :data:`COMPATIBLE_FORMAT` otherwise."""
+    return BEST_FORMAT if quality == "best" else COMPATIBLE_FORMAT
 
 
 def is_partial_file(name: str) -> bool:
@@ -306,7 +326,7 @@ class YtDlpDownloader:
             "noprogress": True,
             # TikTok formats are progressive; yt-dlp already ranks the watermarked download_addr
             # below play_addr* through `preference`, so a plain best[...] selector is enough.
-            "format": H264_FORMAT if options.prefer_h264 else BEST_FORMAT,
+            "format": format_for(options.quality),
             "http_headers": {"Referer": TIKTOK_REFERER},
             "restrictfilenames": False,
             # The generated parts of the path are already Windows-safe (`safe_filename`). On Windows
@@ -332,7 +352,13 @@ class YtDlpDownloader:
         return params
 
     def download(self, episode: Episode, options: DownloadOptions) -> DownloadResult:
-        """Download into ``options.out_dir`` (already the SERIES directory). Never raises."""
+        """Download into ``options.out_dir`` (already the SERIES directory). Never raises.
+
+        After yt-dlp returns, the produced file is verified (``options.verify``, see
+        :func:`~dramafetch.media.verify_video`) BEFORE the cover step: a file that fails is
+        quarantined (see :meth:`_quarantine`) and the episode is FAILED; a file that passes gets
+        its cover handled by :func:`_finish_cover`.
+        """
         out_dir = options.out_dir
         if episode.locked and not options.include_locked:
             return locked_result(episode)
@@ -378,11 +404,46 @@ class YtDlpDownloader:
                 status=DownloadStatus.FAILED,
                 message="yt-dlp finished but no file appeared in the series directory",
             )
+        if options.verify:
+            problem = verify_video(produced, episode.duration_s)
+            if problem is not None:
+                return self._quarantine(episode, produced, problem)
         return DownloadResult(
             episode=episode,
             status=DownloadStatus.DONE,
             path=produced,
             message=f"saved {produced.name}" + _finish_cover(produced, options),
+        )
+
+    @staticmethod
+    def _quarantine(episode: Episode, produced: Path, problem: str) -> DownloadResult:
+        """The FAILED result for a file that failed :func:`~dramafetch.media.verify_video`: the
+        file is renamed ``<name> (incomplete).<ext>`` (:func:`~dramafetch.media.quarantine`) so
+        that a rerun tries the episode again, the cover yt-dlp wrote next to it is deleted (no
+        cover is embedded into or kept for a bad download), and the message is
+        ``"download looks incomplete or wrong: <problem> (kept as <name>)"``. A file that cannot
+        be renamed is reported as such and left in place (logged at WARNING)."""
+        sidecar = _written_cover(produced)
+        if sidecar is not None:
+            try:
+                sidecar.unlink()
+            except OSError as exc:
+                log.debug("could not delete the cover %s: %s", sidecar.name, exc.strerror)
+        try:
+            kept = quarantine(produced)
+        except OSError as exc:
+            log.warning("could not quarantine %s: %s", produced.name, exc.strerror)
+            return DownloadResult(
+                episode=episode,
+                status=DownloadStatus.FAILED,
+                message=f"{INCOMPLETE_PREFIX}{problem} (could not rename {produced.name}: "
+                f"{exc.strerror or exc.__class__.__name__})",
+            )
+        log.debug("episode %s: %s; kept as %s", episode.number, problem, kept.name)
+        return DownloadResult(
+            episode=episode,
+            status=DownloadStatus.FAILED,
+            message=f"{INCOMPLETE_PREFIX}{problem} (kept as {kept.name})",
         )
 
     @staticmethod

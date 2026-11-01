@@ -5,6 +5,9 @@ writes a tiny file instantly — optionally with a cover sidecar next to it, or 
 ``fixtures/tiny.mp4`` with a cover embedded in it (written with mutagen directly, the way the
 engines do). The real ``engine.download_series`` and manifest run underneath. Every server here
 binds to 127.0.0.1; the off-loopback rule is tested by the refusal that comes before any bind.
+Build 5: the resolve cache is measured by how many discoveries the fake saw, and the cooldown
+answers use the real cooldown file, written into the state directory the autouse fixture in
+``conftest.py`` points at ``tmp_path`` — never ``~/.dramafetch``.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from urllib.parse import quote
 import pytest
 from mutagen.mp4 import MP4, MP4Cover
 
+from dramafetch.cooldown import Cooldown, clear_cooldown, cooldown_message, record_block
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -56,6 +60,7 @@ from dramafetch.web.server import (
 SERIES_ID = "7699393770256782354"
 SERIES_NAME = "The Billionaire's Secret Heiress"
 SERIES_URL = f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/3"
+OTHER_SERIES_URL = "https://www.tiktok.com/shortdrama/episode/7600000000000000002/1"
 VIDEO_URL = "https://www.tiktok.com/@muffindrama_us/video/7699400000000000001"
 LOCK_HINTS = ("isFree=false", "isLocked=True", "unlockPrice=30", "no play address")
 COVER_HOST = "https://p16-sign-sg.tiktokcdn.com"
@@ -114,14 +119,21 @@ def make_series(name: str | None = SERIES_NAME) -> Series:
 
 
 class FakeDiscovery:
-    """Implements the Discovery protocol: records the refs it gets, answers instantly."""
+    """Implements the Discovery protocol: records the refs it gets (one per discovery, so the
+    resolve cache is measured by their count) and answers instantly — or, with ``block`` set,
+    once that event is set; ``entered`` is set when a discovery is in progress."""
 
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
         self.refs: list[SeriesRef] = []
+        self.block: threading.Event | None = None
+        self.entered = threading.Event()
 
     def discover(self, ref: SeriesRef, options: DiscoveryOptions) -> Series:
         self.refs.append(ref)
+        self.entered.set()
+        if self.block is not None:
+            assert self.block.wait(10)
         if self.error is not None:
             raise self.error
         return make_series()
@@ -147,12 +159,15 @@ class FakeDownloader:
         self.embedded_numbers: set[int] = set()
         self.embedded_image = JPEG_BYTES
         self.embedded_format = MP4Cover.FORMAT_JPEG
+        self.block: threading.Event | None = None  # when set, every download waits for it
 
     def download(self, episode: Episode, options: DownloadOptions) -> DownloadResult:
         self.calls.append(episode.number)
         if episode.locked and not options.include_locked:
             message = "locked: " + ", ".join(episode.lock_hints)
             return DownloadResult(episode, DownloadStatus.SKIPPED_LOCKED, message=message)
+        if self.block is not None:
+            assert self.block.wait(10)
         directory = self.write_dir or options.out_dir
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / self.name_format.format(number=episode.number)
@@ -175,6 +190,8 @@ class Harness:
     downloader: FakeDownloader
     # Headers every request carries, e.g. the Bearer token while driving a protected server.
     auth: dict[str, str] = field(default_factory=dict)
+    # The bound DramaFetchServer, for the tests that reach into its series cache.
+    server: Any = None
 
     def raw(
         self,
@@ -280,7 +297,7 @@ def make_harness(tmp_path: Path) -> Iterator[Callable[..., Harness]]:
         )
         thread.start()
         servers.append((server, thread))
-        return Harness(server.server_address[1], out_dir, discovery, downloader)
+        return Harness(server.server_address[1], out_dir, discovery, downloader, server=server)
 
     yield factory
     for server, thread in servers:
@@ -334,6 +351,13 @@ def test_index_page_is_served(harness: Harness) -> None:
     assert 'id="token-form"' in body and 'id="token" name="token" type="password"' in body
     assert "/api/session" in body and "error.kind !== 'auth'" in body
     assert "localStorage" not in body and "sessionStorage" not in body
+    # Build 5: the Refresh link next to the resolved title, the cache note, and the cooldown
+    # answer — kind "cooldown" plus Retry-After — that disables the download buttons meanwhile.
+    assert "'Refresh list'" in body and "refresh: true" in body and "from_cache" in body
+    assert "kept for 15 minutes" in body
+    assert "error.kind === 'cooldown'" in body
+    assert "response.headers.get('Retry-After')" in body
+    assert "|| cooldownActive()" in body and "Downloads are disabled for another" in body
 
 
 def test_security_headers(harness: Harness) -> None:
@@ -453,6 +477,261 @@ def test_resolve_discovery_error_is_502(make_harness: Callable[..., Harness]) ->
     assert status == 502
     assert data["error"] == "page has no episode data"
     assert data["kind"] == "DiscoveryError"
+
+
+# ---------------------------------------------------------------------------- resolve cache
+
+
+def test_resolve_is_cached_for_fifteen_minutes(harness: Harness) -> None:
+    """Resolving the same series twice within the window costs one discovery; the second answer
+    says it came from the cache and when the list was fetched."""
+    assert web_server.SERIES_CACHE_TTL_S == 15 * 60
+    before = time.time()
+    status, first = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200, first
+    assert first["from_cache"] is False
+    assert before <= first["resolved_at"] <= time.time()
+    # Any spelling of the same series — here the bare id — hits the same entry.
+    status, second = harness.request("POST", "/api/resolve", {"url": SERIES_ID})
+    assert status == 200 and second["from_cache"] is True
+    assert second["resolved_at"] == first["resolved_at"]
+    assert second["episodes"] == first["episodes"]
+    assert second["series_dir"] == first["series_dir"]
+    assert len(harness.discovery.refs) == 1
+    # Another series is another entry (the fake answers the same list whatever the id).
+    status, other = harness.request("POST", "/api/resolve", {"url": OTHER_SERIES_URL})
+    assert status == 200 and other["from_cache"] is False
+    assert len(harness.discovery.refs) == 2
+
+
+def test_download_reuses_the_resolved_list(harness: Harness) -> None:
+    """Resolve, then Download all free: one discovery, not two — the point of the cache; a
+    download without a resolve first fills the cache for the next call."""
+    assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[0] == 200
+    job = harness.start_download(episodes="1-2")
+    assert harness.wait_for_job(job["job_id"])["state"] == "done"
+    assert len(harness.discovery.refs) == 1
+    job = harness.start_download(episodes="3")
+    assert harness.wait_for_job(job["job_id"])["state"] == "done"
+    assert len(harness.discovery.refs) == 1
+    # A download of a series never resolved fills the cache for the resolve that follows.
+    harness.server.series_cache = web_server.SeriesCache()  # start from an empty cache
+    job = harness.start_download(episodes="1")
+    assert harness.wait_for_job(job["job_id"])["state"] == "done"
+    status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200 and data["from_cache"] is True
+    assert len(harness.discovery.refs) == 2
+
+
+def test_refresh_bypasses_the_cache(harness: Harness) -> None:
+    status, first = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200
+    status, again = harness.request("POST", "/api/resolve", {"url": SERIES_URL, "refresh": False})
+    assert status == 200 and again["from_cache"] is True
+    assert len(harness.discovery.refs) == 1
+    status, fresh = harness.request("POST", "/api/resolve", {"url": SERIES_URL, "refresh": True})
+    assert status == 200 and fresh["from_cache"] is False
+    assert fresh["resolved_at"] >= first["resolved_at"]
+    assert len(harness.discovery.refs) == 2
+    # The fresh list is what the cache holds now.
+    status, cached = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert cached["from_cache"] is True and cached["resolved_at"] == fresh["resolved_at"]
+    # "refresh" must be a boolean...
+    status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL, "refresh": "yes"})
+    assert status == 400 and '"refresh"' in data["error"]
+    assert len(harness.discovery.refs) == 2
+    # ...and /api/download never refreshes: it takes the list it has.
+    harness.start_download(episodes="1", refresh=True)
+    assert len(harness.discovery.refs) == 2
+
+
+def test_a_failed_resolve_is_never_cached(make_harness: Callable[..., Harness]) -> None:
+    harness = make_harness(FakeDiscovery(DiscoveryError("page has no episode data")))
+    assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[0] == 502
+    assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[0] == 502
+    assert len(harness.discovery.refs) == 2  # tried again: nothing was kept
+    harness.discovery.error = None
+    status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200 and data["from_cache"] is False
+    assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[1]["from_cache"] is True
+    assert len(harness.discovery.refs) == 3
+
+
+def test_a_cached_list_expires_after_the_ttl(harness: Harness) -> None:
+    clock = [1_000_000.0]
+    harness.server.series_cache.clock = lambda: clock[0]
+    status, first = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200 and first["from_cache"] is False
+    assert first["resolved_at"] == 1_000_000.0  # the cache's clock stamps the entry
+    clock[0] += web_server.SERIES_CACHE_TTL_S - 1  # 14 min 59 s later: still the same list
+    assert harness.request("POST", "/api/resolve", {"url": SERIES_URL})[1]["from_cache"] is True
+    clock[0] += 1  # exactly 15 minutes: too old, resolved anew
+    status, renewed = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200 and renewed["from_cache"] is False
+    assert renewed["resolved_at"] == clock[0]
+    assert len(harness.discovery.refs) == 2
+
+
+def test_series_cache_keeps_the_32_most_recently_resolved() -> None:
+    clock = [0.0]
+    cache = web_server.SeriesCache(clock=lambda: clock[0])
+    assert web_server.SERIES_CACHE_SIZE == 32 and cache.size == 32
+    assert cache.ttl_s == web_server.SERIES_CACHE_TTL_S
+    for n in range(33):
+        clock[0] += 1
+        assert cache.put(f"s{n}", make_series(f"series {n}")) == clock[0]
+    assert len(cache) == 32
+    assert cache.get("s0") is None  # the oldest made room
+    entry = cache.get("s1")
+    assert entry is not None and entry[0] == 2.0 and entry[1].name == "series 1"
+    # Resolving a series again moves it to the front; the next overflow drops the next oldest.
+    clock[0] += 1
+    cache.put("s1", make_series("series 1 again"))
+    cache.put("s33", make_series("series 33"))
+    assert len(cache) == 32 and cache.get("s2") is None
+    entry = cache.get("s1")
+    assert entry is not None and entry[1].name == "series 1 again"
+    # An expired entry is dropped when it is asked for.
+    clock[0] += web_server.SERIES_CACHE_TTL_S
+    assert cache.get("s1") is None and len(cache) == 31
+    assert cache.get("unknown") is None
+
+
+def test_concurrent_resolves_of_one_series_cost_one_discovery(harness: Harness) -> None:
+    """Discoveries run one at a time: a request for a series another request is resolving waits
+    and then takes the cached list — never a second browser against TikTok."""
+    harness.discovery.block = threading.Event()
+    results: list[tuple[int, Any]] = []
+
+    def resolve() -> None:
+        results.append(harness.request("POST", "/api/resolve", {"url": SERIES_URL}))
+
+    first = threading.Thread(target=resolve)
+    first.start()
+    assert harness.discovery.entered.wait(5)  # the first request is inside the discovery...
+    second = threading.Thread(target=resolve)
+    second.start()  # ...when the second arrives
+    harness.discovery.block.set()
+    first.join(10)
+    second.join(10)
+    assert [status for status, _ in results] == [200, 200]
+    assert sorted(data["from_cache"] for _, data in results) == [False, True]
+    assert len({data["resolved_at"] for _, data in results}) == 1
+    assert len(harness.discovery.refs) == 1
+
+
+# ---------------------------------------------------------------------------- cooldown
+
+
+def test_download_is_refused_during_a_cooldown(harness: Harness) -> None:
+    """TikTok refused a request less than 30 minutes ago (the cooldown file the engines and the
+    CLI write): the web contacts it neither for the list nor for a download — a 429 of kind
+    "cooldown" with the engine's message, a hint naming the hour and a Retry-After in seconds,
+    before any discovery or job."""
+    now = time.time()
+    record_block("blocked (HTTP 403): TikTok refused the request", "yt-dlp", now=now)
+    status, headers, raw = harness.raw(
+        "POST", "/api/download", {"url": SERIES_URL, "episodes": "1"}
+    )
+    data = json.loads(raw)
+    assert status == 429, data
+    assert data["kind"] == "cooldown"
+    assert data["error"].startswith("TikTok refused a request at ")
+    assert "(blocked (HTTP 403): TikTok refused the request)" in data["error"]
+    assert "min left) before contacting TikTok again" in data["error"]
+    assert "cooldown.json" in data["error"]  # the file to delete, so the user can lift it
+    until = time.strftime("%H:%M", time.localtime(now + 30 * 60))
+    assert data["hint"] == f"wait; the server refuses to contact TikTok until {until}"
+    assert 1790 <= int(headers["Retry-After"]) <= 1800
+    assert headers["Content-Type"] == "application/json"
+    assert harness.discovery.refs == [] and harness.downloader.calls == []
+    # /api/resolve without a cached list is refused the same way.
+    status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 429 and data["kind"] == "cooldown"
+    assert harness.discovery.refs == []
+
+
+def test_a_cached_list_is_still_served_during_a_cooldown(harness: Harness) -> None:
+    """Serving a list resolved before the refusal involves no request, so it stays available;
+    anything that would contact TikTok — a refresh, another series, a download — is refused
+    until the cooldown is lifted."""
+    status, first = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200
+    record_block("TikTok is rate-limiting this address (HTTP 429 on the episode list)", "discovery")
+    status, cached = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
+    assert status == 200 and cached["from_cache"] is True
+    assert cached["resolved_at"] == first["resolved_at"]
+    for body in (
+        {"url": SERIES_URL, "refresh": True},
+        {"url": OTHER_SERIES_URL},
+    ):
+        status, data = harness.request("POST", "/api/resolve", body)
+        assert (status, data["kind"]) == (429, "cooldown"), body
+    status, data = harness.request("POST", "/api/download", {"url": SERIES_URL, "episodes": "1"})
+    assert (status, data["kind"]) == (429, "cooldown")
+    assert len(harness.discovery.refs) == 1 and harness.downloader.calls == []
+    # Lifting the cooldown (its file deleted) makes everything possible again.
+    clear_cooldown()
+    status, fresh = harness.request("POST", "/api/resolve", {"url": SERIES_URL, "refresh": True})
+    assert status == 200 and fresh["from_cache"] is False
+    job = harness.start_download(episodes="1")
+    assert harness.wait_for_job(job["job_id"])["state"] == "done"
+    assert harness.downloader.calls == [1]
+
+
+def test_cooldown_error_carries_the_message_the_kind_and_retry_after() -> None:
+    now = 1_800_000_000.0
+    cooldown = Cooldown(until=now + 90.2, reason="HTTP 429", source="web", recorded_at=now - 10)
+    error = web_server.cooldown_error(cooldown, now=now)
+    assert error.status == 429 and error.kind == "cooldown"
+    assert error.message == cooldown_message(cooldown, now=now)
+    assert error.hint == "wait; the server refuses to contact TikTok until " + time.strftime(
+        "%H:%M", time.localtime(now + 90.2)
+    )
+    assert error.headers == (("Retry-After", "91"),)  # whole seconds, rounded up...
+    nearly_over = Cooldown(until=now + 0.1, reason="HTTP 429", source="web")
+    assert web_server.cooldown_error(nearly_over, now=now).headers == (("Retry-After", "1"),)
+    assert web_server.COOLDOWN_KIND == "cooldown"  # ...never 0: the page counts from it
+
+
+def test_current_cooldown_reads_the_engines_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The web asks the engine (`engine.check_cooldown`, build 5's seam) and, until that exists,
+    the cooldown module itself; both read the cooldown file in the test's state directory."""
+    from dramafetch import engine
+
+    assert web_server.current_cooldown() is None  # no refusal recorded here
+    recorded = record_block("HTTP 429", "web")
+    assert web_server.current_cooldown() == recorded
+    marker = Cooldown(until=recorded.until + 1, reason="from the engine", source="web")
+    monkeypatch.setattr(engine, "check_cooldown", lambda: marker, raising=False)
+    assert web_server.current_cooldown() is marker
+    monkeypatch.setattr(engine, "check_cooldown", lambda: None, raising=False)
+    assert web_server.current_cooldown() is None
+
+
+def test_a_job_queued_behind_a_refusal_does_not_knock_again(harness: Harness) -> None:
+    """Job A is downloading when TikTok refuses (the engine records the cooldown); job B, queued
+    behind it, is ended as `error` with the cooldown message instead of starting its download."""
+    harness.downloader.block = threading.Event()
+    first = harness.start_download(episodes="1")
+    second = harness.start_download(episodes="2")
+    deadline = time.monotonic() + 5
+    while harness.request("GET", f"/api/jobs/{first['job_id']}")[1]["state"] != "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert harness.request("GET", f"/api/jobs/{second['job_id']}")[1]["state"] == "queued"
+    record_block("blocked (HTTP 403): TikTok refused the request", "yt-dlp")
+    harness.downloader.block.set()
+    done = harness.wait_for_job(first["job_id"])
+    assert done["state"] == "done"  # already running: its own results decide, not the gate
+    refused = harness.wait_for_job(second["job_id"])
+    assert refused["state"] == "error" and refused["results"] == []
+    assert refused["error"] is not None
+    assert refused["error"].startswith("TikTok refused a request at ")
+    assert "cooldown.json" in refused["error"]
+    assert refused["started_at"] and refused["finished_at"]
+    assert harness.downloader.calls == [1]  # episode 2 was never handed to the downloader
+    assert len(harness.discovery.refs) == 1  # and the second job reused the list
 
 
 # ---------------------------------------------------------------------------- download jobs
@@ -1307,6 +1586,37 @@ def test_job_manager_unknown_ids() -> None:
     jobs = JobManager()
     assert jobs.get("nope") is None
     assert jobs.wait("nope", timeout=0.01) is False
+
+
+def test_job_manager_gate_refuses_a_job_before_its_runner_runs() -> None:
+    """The gate is asked when a job reaches the front of the queue: a reason ends it as `error`
+    (redacted, like any error) without calling the runner; None lets the next one run."""
+    reasons: list[str | None] = ["cooling down; Cookie: sessionid=abc123"]
+    calls: list[str | None] = []
+
+    def runner(
+        series: Series,
+        episodes: list[Episode],
+        options: DownloadOptions,
+        on_result: Callable[[DownloadResult], None],
+    ) -> list[DownloadResult]:
+        calls.append(series.name)
+        return []
+
+    jobs = JobManager(gate=lambda: reasons[0])
+    refused = jobs.start(make_series("A"), _episodes(), DownloadOptions(), runner=runner)
+    assert jobs.wait(refused, timeout=5)
+    snapshot = jobs.get(refused)
+    assert snapshot is not None
+    assert snapshot["state"] == "error"
+    assert snapshot["error"] == "cooling down; Cookie=<redacted>"
+    assert snapshot["results"] == [] and snapshot["started_at"] and snapshot["finished_at"]
+    reasons[0] = None
+    allowed = jobs.start(make_series("B"), _episodes(), DownloadOptions(), runner=runner)
+    assert jobs.wait(allowed, timeout=5)
+    done = jobs.get(allowed)
+    assert done is not None and done["state"] == "done" and done["error"] is None
+    assert calls == ["B"] and jobs.running is None
 
 
 def test_redact_secrets() -> None:

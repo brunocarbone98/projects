@@ -19,8 +19,13 @@ TikTok facts this module encodes (verified October 2026):
   unknown, so :func:`parse_detail_payload` is best-effort.
 - Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
   codec and bitrate, plus ``video.playAddr``), valid until their ``expire`` query parameter.
-  :func:`play_url_candidates` orders them and :func:`url_expiry` reads the expiry; the browser
-  download engine fetches them directly instead of loading each episode's page.
+  Each ``bitrateInfo`` entry is one rendition — ``CodecType`` (``h264``, ``h265`` or ``bytevc1``,
+  TikTok's name for its H.265 streams), ``Bitrate`` in bit/s, ``GearName`` such as
+  ``normal_720_0`` or ``adapt_lower_1080_1`` (the height is in the name; ``video.ratio`` like
+  ``720p`` describes the main one) and the URLs. :func:`renditions` reads them,
+  :func:`choose_rendition` picks one per quality mode, :func:`play_url_candidates` orders the
+  URLs and :func:`url_expiry` reads the expiry; the browser download engine fetches them directly
+  instead of loading each episode's page.
 - Every item also carries the episode cover (thumbnail) as signed image URLs on
   ``p16-sign-*.tiktokcdn.com``: ``video.originCover`` (the full frame), ``video.cover`` (a
   cropped poster) and ``video.dynamicCover`` (an animated preview), each a string in the web
@@ -37,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from dramafetch.models import Episode
+from dramafetch.models import QUALITY_MODES, Episode
 
 #: How deep the recursive searches descend into a payload before giving up.
 MAX_DEPTH = 12
@@ -175,6 +180,8 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     differs from ``series_id``. The item may be wrapped in ``{"itemStruct": {...}}``.
     ``cover_url`` is the first http(s) URL among ``video.originCover``, ``video.cover`` and
     ``video.dynamicCover`` (see :func:`cover_url_of`), None when the item has none.
+    ``quality_hint`` is the label of the rendition the default quality mode takes
+    (:func:`choose_rendition` with ``"compatible"``, e.g. ``"720p h264"``), None without one.
     """
     item_id = _as_id(_field(item, "id"))
     if item_id is None:
@@ -214,6 +221,7 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
         duration_s=duration,
         lock_hints=lock_hints(item),
         cover_url=cover_url_of(item),
+        quality_hint=chosen.label if (chosen := choose_rendition(item)) is not None else None,
         raw=item,
     )
 
@@ -469,44 +477,143 @@ def _first_positive_int(container: dict[str, Any], keys: tuple[str, ...]) -> int
     return None
 
 
-# --------------------------------------------------------------------------------- play URLs
+# ---------------------------------------------------------------------- renditions & play URLs
 
 _H264_CODEC_RE = re.compile(r"h\.?264|avc", re.IGNORECASE)
+_H265_CODEC_RE = re.compile(r"h\.?265|hevc|hvc1|hev1", re.IGNORECASE)
 _URL_LIST_KEYS = ("UrlList", "urlList", "url_list")
 _MAX_URL_LIST_DEPTH = 3
+#: The height inside a ``GearName`` such as ``normal_720_0`` or ``adapt_lower_1080_1``: the only
+#: run of three or four digits (the trailing ``_0``/``_1`` is one digit).
+_GEAR_HEIGHT_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")
+#: ``video.ratio`` such as ``720p`` (or a bare ``720``).
+_RATIO_RE = re.compile(r"^\s*(\d{3,4})p?\s*$", re.IGNORECASE)
+#: Codec of a rendition whose ``CodecType`` is missing.
+UNKNOWN_CODEC = "unknown"
+#: Height part of a label when neither the ``GearName`` nor ``video.ratio`` tells it.
+UNKNOWN_HEIGHT = "?p"
 
 
-def play_url_candidates(item: dict[str, Any]) -> list[str]:
+@dataclass(frozen=True)
+class Rendition:
+    """One ``video.bitrateInfo`` entry: the play URLs of one encoding of the episode.
+
+    ``codec`` is normalised to ``h264``, ``h265`` or ``bytevc1`` (TikTok's own name for its H.265
+    streams), else the lower-cased raw ``CodecType`` (``unknown`` when absent); ``bitrate`` is
+    bit/s (0 when absent); ``height_hint`` comes from the ``GearName``, else ``video.ratio``;
+    ``label`` is what ``info`` shows — ``720p h264``, ``?p h264`` without a height.
+    """
+
+    url_list: list[str]
+    codec: str
+    bitrate: int
+    height_hint: int | None
+    label: str
+
+    @property
+    def h264(self) -> bool:
+        return self.codec == "h264"
+
+
+def codec_name(raw: Any) -> str:
+    """``h264`` for H.264/AVC spellings, ``h265`` for H.265/HEVC ones, ``bytevc1`` for TikTok's,
+    else the lower-cased raw string; :data:`UNKNOWN_CODEC` for anything that is not a string."""
+    if not isinstance(raw, str) or not raw.strip():
+        return UNKNOWN_CODEC
+    text = raw.strip()
+    if _H264_CODEC_RE.search(text):
+        return "h264"
+    if _H265_CODEC_RE.search(text):
+        return "h265"
+    if text.lower().startswith("bytevc1"):
+        return "bytevc1"
+    return text.lower()
+
+
+def renditions(item: dict[str, Any]) -> list[Rendition]:
+    """Every ``video.bitrateInfo`` entry with at least one http(s) play URL, in payload order;
+    never raises on junk. A bare ``video.playAddr`` is not a rendition: its codec and bitrate are
+    unknown (:func:`play_url_candidates` still appends it last). The item may be wrapped in
+    ``{"itemStruct": {...}}``."""
+    video = _field(item, "video") if isinstance(item, dict) else None
+    if not isinstance(video, dict):
+        return []
+    bitrate_info = video.get("bitrateInfo")
+    if not isinstance(bitrate_info, list):
+        return []
+    ratio_height = _ratio_height(video.get("ratio"))
+    found: list[Rendition] = []
+    for entry in bitrate_info:
+        if not isinstance(entry, dict):
+            continue
+        urls = _play_urls(entry.get("PlayAddr"), 0)
+        if not urls:
+            continue
+        codec = codec_name(entry.get("CodecType"))
+        height = _gear_height(entry.get("GearName"))
+        if height is None:
+            height = ratio_height
+        label = f"{height}p {codec}" if height is not None else f"{UNKNOWN_HEIGHT} {codec}"
+        found.append(Rendition(urls, codec, _as_int(entry.get("Bitrate")) or 0, height, label))
+    return found
+
+
+def ordered_renditions(item: dict[str, Any], quality: str = "compatible") -> list[Rendition]:
+    """The renditions of an item in the order ``quality`` would try them: ``compatible`` the
+    H.264 ones by bitrate descending, then the other codecs the same way; ``best`` all of them by
+    bitrate descending whatever the codec. Ties keep payload order. ValueError for a quality that
+    is not one of ``models.QUALITY_MODES``."""
+    if quality not in QUALITY_MODES:
+        raise ValueError(f"unknown quality {quality!r}: expected one of {', '.join(QUALITY_MODES)}")
+    by_bitrate = sorted(renditions(item), key=lambda rendition: -rendition.bitrate)
+    if quality == "best":
+        return by_bitrate
+    h264 = [rendition for rendition in by_bitrate if rendition.h264]
+    others = [rendition for rendition in by_bitrate if not rendition.h264]
+    return h264 + others
+
+
+def choose_rendition(item: dict[str, Any], quality: str = "compatible") -> Rendition | None:
+    """The rendition ``quality`` downloads: ``compatible`` the highest-bitrate H.264 — it plays
+    everywhere — falling back to the highest bitrate of any codec when the item lists no H.264;
+    ``best`` the highest bitrate whatever the codec. None when the item lists no renditions."""
+    ordered = ordered_renditions(item, quality)
+    return ordered[0] if ordered else None
+
+
+def play_url_candidates(item: dict[str, Any], quality: str = "compatible") -> list[str]:
     """Direct play URLs of an item, best first and de-duplicated; never raises on junk.
 
-    Order: the ``video.bitrateInfo`` entries whose ``CodecType`` is H.264/AVC (case-insensitive) by
-    ``Bitrate`` descending, every URL of their ``PlayAddr.UrlList``; then the other codecs the same
-    way; then ``video.playAddr`` (a string, or a dict with a ``UrlList``). Only ``http(s)`` strings
-    are kept, and a URL listed twice appears once, at its first position. The item may be wrapped
-    in ``{"itemStruct": {...}}``. This is what the browser download engine fetches.
+    Order: the renditions as :func:`ordered_renditions` puts them for ``quality`` — ``compatible``
+    (the default): the H.264/AVC entries by ``Bitrate`` descending, then the other codecs the same
+    way; ``best``: every entry by bitrate descending across codecs — every URL of their
+    ``PlayAddr.UrlList``; then ``video.playAddr`` (a string, or a dict with a ``UrlList``) in both
+    modes. Only ``http(s)`` strings are kept, and a URL listed twice appears once, at its first
+    position. The item may be wrapped in ``{"itemStruct": {...}}``. This is what the browser
+    download engine fetches.
     """
     video = _field(item, "video") if isinstance(item, dict) else None
     if not isinstance(video, dict):
         return []
-    h264: list[tuple[int, int, list[str]]] = []
-    others: list[tuple[int, int, list[str]]] = []
-    bitrate_info = video.get("bitrateInfo")
-    if isinstance(bitrate_info, list):
-        for index, entry in enumerate(bitrate_info):
-            if not isinstance(entry, dict):
-                continue
-            urls = _play_urls(entry.get("PlayAddr"), 0)
-            if not urls:
-                continue
-            codec = entry.get("CodecType")
-            bucket = h264 if isinstance(codec, str) and _H264_CODEC_RE.search(codec) else others
-            bucket.append((-(_as_int(entry.get("Bitrate")) or 0), index, urls))
     ordered: list[str] = []
-    for bucket in (h264, others):
-        for _, _, urls in sorted(bucket, key=lambda entry: entry[:2]):
-            ordered.extend(urls)
+    for rendition in ordered_renditions(item, quality):
+        ordered.extend(rendition.url_list)
     ordered.extend(_play_urls(video.get("playAddr"), 0))
     return list(dict.fromkeys(ordered))
+
+
+def _gear_height(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = _GEAR_HEIGHT_RE.search(value)
+    return int(match.group(1)) if match else None
+
+
+def _ratio_height(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = _RATIO_RE.match(value)
+    return int(match.group(1)) if match else None
 
 
 def _play_urls(value: Any, depth: int) -> list[str]:

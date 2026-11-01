@@ -4,7 +4,8 @@ Routes::
 
     GET  /                          the page (static/index.html, read through importlib.resources)
     POST /api/session  {"token"}    -> 204 + the session cookie, or 401 (needs no token itself)
-    POST /api/resolve  {"url"}      -> the series and its episodes (each with its cover_url)
+    POST /api/resolve  {"url", "refresh"?}  -> the series and its episodes (each with its
+                                    cover_url) plus "from_cache" and "resolved_at" (epoch seconds)
     POST /api/download {"url", "episodes", "include_locked"} -> 202 {"job_id": ...}
     GET  /api/jobs/<id>             the job snapshot (see jobs.py) -> 200, or 404 when unknown
     GET  /api/files/<job>/<number>  the finished video of that job row -> the bytes, or 404
@@ -33,6 +34,19 @@ anything else is a 404 that names no path. Errors are ``{"error": message, "kind
 with a 4xx/5xx status; cookie and token values never appear in responses or logs (the log says
 ``token: set`` or ``token: none``). Resolving a series runs synchronously inside the request: the
 discovery opens TikTok in a browser and usually takes 10-40 s, so the page shows a waiting note.
+
+Fewer requests to TikTok: a resolved episode list is kept in memory for ``SERIES_CACHE_TTL_S``
+(15 minutes; the ``SERIES_CACHE_SIZE`` most recently resolved series) and reused by both
+``POST /api/resolve`` and ``POST /api/download``, so "Resolve" followed by "Download all free"
+costs one discovery, not two; ``{"url": ..., "refresh": true}`` on ``/api/resolve`` fetches the
+list again, and a failed resolve is never cached. Discoveries run one at a time. And after TikTok
+refused a request (HTTP 403, HTTP 429, a captcha — recorded by the engines and the CLI in the
+cooldown file, see ``dramafetch.cooldown``) both routes refuse to contact TikTok until the cooldown
+ends: ``429 {"error": <the cooldown message>, "kind": "cooldown", "hint": ...}`` with a
+``Retry-After`` header in seconds. ``/api/resolve`` still serves a cached list then (no request
+involved); ``/api/download`` is refused outright, and a job already queued behind one that met the
+refusal is ended as ``error`` with the same message instead of knocking again (``JobManager``'s
+gate).
 """
 
 from __future__ import annotations
@@ -42,12 +56,16 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import socket
+import threading
+import time
 import unicodedata
-from collections.abc import Iterable, Iterator
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +75,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 from dramafetch import __version__
+from dramafetch.cooldown import Cooldown, active_cooldown, cooldown_message
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -71,6 +90,7 @@ from dramafetch.models import (
     DownloadOptions,
     DownloadStatus,
     Series,
+    SeriesRef,
     VideoRef,
 )
 from dramafetch.thumbnails import cover_sidecar
@@ -92,6 +112,16 @@ _CSP = (
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
     "connect-src 'self'; img-src 'self' data: https: http:; form-action 'none'; base-uri 'none'"
 )
+
+#: How long a resolved episode list is reused by ``POST /api/resolve`` and ``POST /api/download``
+#: (seconds): "Resolve" then "Download all free" costs one discovery, not two, and resolving the
+#: same series again within the window costs nothing (``"refresh": true`` fetches it anew).
+SERIES_CACHE_TTL_S = 15 * 60
+#: How many series the cache keeps: the most recently resolved ones (per process, in memory).
+SERIES_CACHE_SIZE = 32
+#: ``kind`` of the 429 answered while TikTok is not to be contacted (see :func:`cooldown_error`).
+COOLDOWN_KIND = "cooldown"
+COOLDOWN_HINT_PREFIX = "wait; the server refuses to contact TikTok until "
 
 SESSION_COOKIE = "dramafetch_session"
 SESSION_MAX_AGE_S = 30 * 24 * 3600  # the cookie POST /api/session sets lasts a month
@@ -143,21 +173,116 @@ VIDEO_URL_MESSAGE = (
 
 
 class HttpError(Exception):
-    """An error with the HTTP status it should be reported with."""
+    """An error with the HTTP status it should be reported with (and, for a few, extra response
+    headers: the cooldown's ``Retry-After``)."""
 
     def __init__(
-        self, status: int, message: str, *, kind: str | None = None, hint: str | None = None
+        self,
+        status: int,
+        message: str,
+        *,
+        kind: str | None = None,
+        hint: str | None = None,
+        headers: Iterable[tuple[str, str]] = (),
     ) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
         self.kind = kind or type(self).__name__
         self.hint = hint
+        self.headers = tuple(headers)
 
 
 def _no_such_file() -> HttpError:
     """The files endpoint's only failure: it never says whether the job, row or path exists."""
     return HttpError(HTTPStatus.NOT_FOUND, "no such file")
+
+
+def current_cooldown() -> Cooldown | None:
+    """The cooldown in force — TikTok refused a request (HTTP 403, HTTP 429, a captcha) less than
+    30 minutes ago, as the engines and the CLI record it in ``cooldown.json`` — read through the
+    engine's seam ``engine.check_cooldown()``, or ``None`` when TikTok may be contacted. Never
+    raises: a missing or corrupt file counts as no cooldown (``dramafetch.cooldown``)."""
+    from dramafetch import engine  # lazy: sibling module, pulls in yt-dlp
+
+    # ``engine.check_cooldown`` is build 5's seam; until it exists the cooldown module answers.
+    check: Callable[[], Cooldown | None] = getattr(engine, "check_cooldown", active_cooldown)
+    return check()
+
+
+def cooldown_error(cooldown: Cooldown, *, now: float | None = None) -> HttpError:
+    """The 429 ``/api/resolve`` (on a cache miss) and ``/api/download`` answer during a cooldown:
+    the full cooldown message (when TikTok refused, until when, the file to delete), ``kind``
+    ``"cooldown"`` — the page disables its download buttons and counts the minutes down — a hint
+    naming the hour, and a ``Retry-After`` header with the seconds left (at least 1)."""
+    current = time.time() if now is None else now
+    seconds = max(1, math.ceil(cooldown.until - current))
+    until = time.strftime("%H:%M", time.localtime(cooldown.until))
+    return HttpError(
+        HTTPStatus.TOO_MANY_REQUESTS,
+        cooldown_message(cooldown, now=current),
+        kind=COOLDOWN_KIND,
+        hint=f"{COOLDOWN_HINT_PREFIX}{until}",
+        headers=(("Retry-After", str(seconds)),),
+    )
+
+
+@dataclass(frozen=True)
+class ResolvedSeries:
+    """What ``/api/resolve`` answers with: the series, when its list was fetched (seconds since the
+    epoch) and whether it came from the cache rather than from a discovery just now."""
+
+    series: Series
+    resolved_at: float
+    from_cache: bool
+
+
+class SeriesCache:
+    """The resolved episode lists by series id, each kept for ``ttl_s`` seconds after its discovery.
+
+    In memory, per process, bounded to the ``size`` most recently resolved series (the oldest
+    entry makes room), thread-safe (requests are handled in threads). Only successful resolves are
+    stored — a failure never is — and an entry older than ``ttl_s`` is dropped when it is asked
+    for. ``clock`` is ``time.time`` unless a test injects one.
+    """
+
+    def __init__(
+        self,
+        ttl_s: float = SERIES_CACHE_TTL_S,
+        size: int = SERIES_CACHE_SIZE,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.ttl_s = ttl_s
+        self.size = size
+        self.clock = clock
+        self._entries: OrderedDict[str, tuple[float, Series]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, series_id: str) -> tuple[float, Series] | None:
+        """``(resolved_at, series)`` when the series was resolved less than ``ttl_s`` ago."""
+        with self._lock:
+            entry = self._entries.get(series_id)
+            if entry is None:
+                return None
+            if self.clock() - entry[0] >= self.ttl_s:
+                del self._entries[series_id]
+                return None
+            return entry
+
+    def put(self, series_id: str, series: Series) -> float:
+        """Store a series resolved just now (replacing an older entry) and return its
+        ``resolved_at``; beyond ``size`` entries the least recently resolved one is dropped."""
+        resolved_at = self.clock()
+        with self._lock:
+            self._entries.pop(series_id, None)
+            self._entries[series_id] = (resolved_at, series)
+            while len(self._entries) > self.size:
+                self._entries.popitem(last=False)
+        return resolved_at
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
 
 
 @dataclass(frozen=True)
@@ -315,8 +440,20 @@ class DramaFetchServer(ThreadingHTTPServer):
         self.download_options = replace(download_options, out_dir=self.out_dir)
         self.discovery = discovery
         self.downloader = downloader
-        self.jobs = jobs or JobManager()
+        self.series_cache = SeriesCache()
+        # One discovery at a time: a request for a series another request is resolving waits for
+        # it and then takes the cached list, instead of opening a second browser against TikTok.
+        self.resolve_lock = threading.Lock()
+        self.jobs = jobs or JobManager(gate=self.job_refusal)
         super().__init__(address, _Handler)
+
+    def job_refusal(self) -> str | None:
+        """Why a job may not start now — the cooldown message while TikTok refused a request less
+        than 30 minutes ago — or ``None``. The ``JobManager`` asks right before a job would start
+        downloading, so a job queued behind one that met a 429 is ended instead of knocking again
+        (``POST /api/download`` itself is already refused while the cooldown lasts)."""
+        cooldown = current_cooldown()
+        return None if cooldown is None else cooldown_message(cooldown)
 
     def runner(self) -> Runner:
         """``engine.download_series`` bound to the injected downloader (tests) or yt-dlp."""
@@ -469,8 +606,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._open_session(self._read_json_body())
         elif path == "/api/resolve":
             body = self._read_json_body()
-            series = self._resolve(body)
-            self._send_json(HTTPStatus.OK, series_to_dict(series, self.app.out_dir))
+            resolved = self._resolve(body, allow_refresh=True)
+            payload = series_to_dict(resolved.series, self.app.out_dir)
+            payload["from_cache"] = resolved.from_cache
+            payload["resolved_at"] = resolved.resolved_at
+            self._send_json(HTTPStatus.OK, payload)
         elif path == "/api/download":
             body = self._read_json_body()
             self._send_json(HTTPStatus.ACCEPTED, self._start_download(body))
@@ -532,8 +672,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ handlers
 
-    def _resolve(self, body: dict[str, Any]) -> Series:
-        from dramafetch import engine  # lazy: sibling module, pulls in Playwright on demand
+    def _resolve(self, body: dict[str, Any], *, allow_refresh: bool) -> ResolvedSeries:
+        """The series the body's ``url`` names: the cached list when it was resolved less than
+        ``SERIES_CACHE_TTL_S`` ago (``from_cache``), else one discovery — refused with the
+        cooldown's 429 while TikTok is not to be contacted. ``"refresh": true`` (honoured on
+        ``/api/resolve`` only) skips the cache. Discoveries run one at a time: a request for a
+        series another request is resolving waits and then takes the fresh entry."""
         from dramafetch.urls import parse_input
 
         url = body.get("url")
@@ -545,6 +689,29 @@ class _Handler(BaseHTTPRequestHandler):
             raise HttpError(HTTPStatus.BAD_REQUEST, str(exc), kind=type(exc).__name__) from exc
         if isinstance(ref, VideoRef):
             raise HttpError(HTTPStatus.BAD_REQUEST, VIDEO_URL_MESSAGE, kind="UnsupportedUrlError")
+        refresh = body.get("refresh", False) if allow_refresh else False
+        if not isinstance(refresh, bool):
+            raise HttpError(HTTPStatus.BAD_REQUEST, '"refresh" must be true or false')
+        app = self.app
+        cached = None if refresh else app.series_cache.get(ref.series_id)
+        if cached is not None:  # served without any request, cooldown or not
+            return ResolvedSeries(cached[1], cached[0], from_cache=True)
+        with app.resolve_lock:
+            cached = None if refresh else app.series_cache.get(ref.series_id)
+            if cached is not None:  # the request that held the lock resolved this very series
+                return ResolvedSeries(cached[1], cached[0], from_cache=True)
+            cooldown = current_cooldown()
+            if cooldown is not None:
+                raise cooldown_error(cooldown)
+            series = self._discover(ref)
+            resolved_at = app.series_cache.put(ref.series_id, series)
+        return ResolvedSeries(series, resolved_at, from_cache=False)
+
+    def _discover(self, ref: SeriesRef) -> Series:
+        """One discovery through the engine (which records the cooldown after a rate limit or a
+        captcha, so the next request meets it), its errors mapped to HTTP answers."""
+        from dramafetch import engine  # lazy: sibling module, pulls in Playwright on demand
+
         app = self.app
         try:
             return engine.resolve(ref, app.discovery_options, discovery=app.discovery)
@@ -581,7 +748,10 @@ class _Handler(BaseHTTPRequestHandler):
         include_locked = body.get("include_locked", app.download_options.include_locked)
         if not isinstance(include_locked, bool):
             raise HttpError(HTTPStatus.BAD_REQUEST, '"include_locked" must be true or false')
-        series = self._resolve(body)
+        cooldown = current_cooldown()
+        if cooldown is not None:  # a cached list changes nothing: the job itself would knock
+            raise cooldown_error(cooldown)
+        series = self._resolve(body, allow_refresh=False).series
         try:
             episodes = engine.select_episodes(series, spec)
         except ValueError as exc:
@@ -700,7 +870,7 @@ class _Handler(BaseHTTPRequestHandler):
         payload: dict[str, Any] = {"error": redact_secrets(error.message), "kind": error.kind}
         if error.hint:
             payload["hint"] = error.hint
-        extra: list[tuple[str, str]] = []
+        extra: list[tuple[str, str]] = list(error.headers)
         if error.status == HTTPStatus.UNAUTHORIZED and error.kind == "auth":
             extra.append(("WWW-Authenticate", 'Bearer realm="DramaFetch"'))
         self._send_json(error.status, payload, extra)

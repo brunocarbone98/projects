@@ -24,6 +24,7 @@ from dramafetch.downloader_browser import (
     BrowserDownloader,
 )
 from dramafetch.manifest import Manifest
+from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import DownloadOptions, DownloadStatus, Episode, Series
 from dramafetch.thumbnails import EMBED_SUFFIX, extract_cover
 
@@ -74,7 +75,8 @@ def _item(
         "id": item_id,
         "desc": f"Heiress | Episode {number}",
         "author": {"uniqueId": "muffindrama_us"},
-        "video": {"duration": 90, "playAddr": urls[0] if urls else "", "bitrateInfo": entries},
+        # 3 s: what VIDEO (the fixture) lasts, so the list and the file agree, as at the fake CDN
+        "video": {"duration": 3, "playAddr": urls[0] if urls else "", "bitrateInfo": entries},
         "dramaInfo": {
             "dramaID": SERIES_ID,
             "dramaName": "Heiress",
@@ -91,7 +93,7 @@ def _episode(number: int = 1, raw: dict[str, Any] | None = None, **overrides: An
         "series_id": SERIES_ID,
         "series_name": "Heiress",
         "author": "muffindrama_us",
-        "duration_s": 90,
+        "duration_s": 3,  # VIDEO lasts 3 s; a test about the duration check overrides it
         "raw": raw,
     }
     settings.update(overrides)
@@ -109,11 +111,16 @@ def _list_payload(
 
 class FakeAPIResponse:
     def __init__(
-        self, status: int = 200, body: bytes = VIDEO, content_type: str | None = "video/mp4"
+        self,
+        status: int = 200,
+        body: bytes = VIDEO,
+        content_type: str | None = "video/mp4",
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.status = status
         self._body = body
         self.headers = {"content-type": content_type} if content_type is not None else {}
+        self.headers.update(headers or {})  # e.g. a content-length that does not match the body
         self.disposed = False
 
     @property
@@ -770,7 +777,9 @@ def test_large_bodies_count_as_video_by_type_or_by_magic(playwright, tmp_path):
     playwright.request.answer(
         _url("c"), FakeAPIResponse(200, b"x" * MIN_VIDEO_BYTES, "Video/MP4; codecs=avc1")
     )
-    options = _options(tmp_path)
+    # what counts as a video BODY is one thing; whether the saved file is a sound MP4 is the
+    # verification's (tested below), switched off here because `x` bytes are no MP4
+    options = _options(tmp_path, verify=False)
     downloader = _downloader(playwright)
     for number, name in ((1, "a"), (2, "b"), (3, "c")):
         result = downloader.download(
@@ -1132,13 +1141,17 @@ def test_a_webp_cover_is_saved_as_a_file_because_it_cannot_be_embedded(playwrigh
 
 @pytest.mark.parametrize("mode", ["embed", "both"])
 def test_a_video_mutagen_cannot_tag_keeps_the_cover_as_a_file(playwright, tmp_path, mode):
-    """The CDN body passed the video checks but is not an MP4 mutagen can write to: the cover is
-    saved next to it instead, the video stays exactly as downloaded and no `.embed.part` is left."""
+    """With the verification off (`--no-verify`; on, such a body is quarantined before the cover
+    step — see the integrity tests): the CDN body passed the video checks but is not an MP4
+    mutagen can write to, so the cover is saved next to it instead, the video stays exactly as
+    downloaded and no `.embed.part` is left."""
     not_an_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"v" * (2 * MIN_VIDEO_BYTES)
     playwright.request.answer(_url("ep1"), FakeAPIResponse(200, not_an_mp4, "video/mp4"))
     playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
 
-    result = _downloader(playwright).download(_with_cover(), _options(tmp_path, thumbnail=mode))
+    result = _downloader(playwright).download(
+        _with_cover(), _options(tmp_path, thumbnail=mode, verify=False)
+    )
 
     assert result.status is DownloadStatus.DONE
     saved = f"saved {STEM}.mp4 ({len(not_an_mp4) / 1048576:.1f} MiB)"
@@ -1455,3 +1468,172 @@ def test_close_survives_a_failing_browser(playwright, tmp_path, caplog):
         downloader.close()  # does not raise
     assert playwright.context.closed and playwright.exited == 1  # the other steps still ran
     assert SESSION_VALUE not in caplog.text
+
+
+# --- integrity: truncation, verification, quarantine; the quality order ------------------------
+
+ITEM_1 = "7699400000000000001"
+
+
+def test_a_body_shorter_than_the_content_length_fails_without_a_next_mirror_or_a_refresh(
+    playwright, tmp_path
+):
+    """A truncation is the network's doing, not the URL's: the episode fails at once — the
+    second mirror is not tried, no fresh list is fetched, nothing is written."""
+    announced = len(VIDEO) + 4096
+    short = FakeAPIResponse(headers={"content-length": str(announced)})
+    playwright.request.answer(_url("a"), short)
+    playwright.request.answer(_url("b"), FakeAPIResponse())  # a mirror that would have worked
+    item = _item(1, ITEM_1, _url("a"), _url("b"))
+    playwright.browser.refresh_events = [_refresh_events(item)]
+    downloader = _downloader(playwright)
+
+    result = downloader.download(_episode(1, item), _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED and result.path is None
+    assert result.message == (
+        f"{INCOMPLETE_PREFIX}truncated body ({len(VIDEO)} of {announced} bytes) from {CDN_HOST}"
+    )
+    assert playwright.request.urls == [_url("a")]
+    assert downloader.refreshes == 0 and playwright.context.pages == []
+    assert not list(tmp_path.iterdir())
+    assert short.disposed
+    # a Content-Length that matches, or none at all, is no problem
+    playwright.request.answer(
+        _url("c"), FakeAPIResponse(headers={"content-length": str(len(VIDEO))})
+    )
+    ok = downloader.download(_episode(2, _item(2, "2", _url("c"))), _options(tmp_path))
+    assert ok.status is DownloadStatus.DONE
+
+
+def test_an_aborted_transfer_is_a_truncation_and_other_request_errors_stay_plain_failures(
+    playwright, tmp_path
+):
+    """Playwright's request API checks the Content-Length itself and reports a transfer the server
+    cut short as `aborted`: the same truncation failure, no next mirror, no refresh; any other
+    request error is still the plain failure it was (its first line, redacted)."""
+    playwright.request.answer(
+        _url("a"),
+        RuntimeError(
+            "APIRequestContext.get: aborted\nCall log:\n"
+            f"  - → GET {_url('a')}&sessionid=secret-session-value-that-must-never-show"
+        ),
+    )
+    item = _item(1, ITEM_1, _url("a"), _url("b"))
+    playwright.browser.refresh_events = [_refresh_events(item)]
+    downloader = _downloader(playwright)
+
+    result = downloader.download(_episode(1, item), _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED
+    assert result.message == (
+        f"{INCOMPLETE_PREFIX}truncated body (the transfer was cut short) from {CDN_HOST}"
+    )
+    assert SESSION_VALUE not in result.message
+    assert playwright.request.urls == [_url("a")] and downloader.refreshes == 0
+    assert not list(tmp_path.iterdir())
+    playwright.request.answer(_url("c"), RuntimeError("Timeout 120000ms exceeded.\nCall log:"))
+    other = downloader.download(_episode(2, _item(2, "2", _url("c"))), _options(tmp_path))
+    assert other.status is DownloadStatus.FAILED
+    assert other.message == "Timeout 120000ms exceeded."
+
+
+def test_a_video_far_shorter_than_the_list_says_is_quarantined_and_gets_no_cover(
+    playwright, tmp_path
+):
+    """The written file is verified BEFORE the cover step: a 3-second file for a 120-second
+    episode (a locked episode's preview looks like this) is renamed `<stem> (incomplete).mp4`,
+    the episode is FAILED with the reason, no cover is requested, and a rerun tries again — into
+    `(incomplete 2)`, never over the first file."""
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    episode = _episode(1, _item(1, ITEM_1, _url("ep1")), cover_url=COVER, duration_s=120)
+    downloader = _downloader(playwright)
+
+    result = downloader.download(episode, _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED and result.path is None
+    assert result.message == (
+        f"{INCOMPLETE_PREFIX}duration 3 s, expected 120 s (kept as {STEM} (incomplete).mp4)"
+    )
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM} (incomplete).mp4"]
+    assert (tmp_path / f"{STEM} (incomplete).mp4").read_bytes() == VIDEO  # untouched, no cover
+    assert playwright.request.urls == [_url("ep1")]  # no cover request for a bad download
+    again = downloader.download(episode, _options(tmp_path))
+    assert again.status is DownloadStatus.FAILED
+    assert again.message.endswith(f"(kept as {STEM} (incomplete 2).mp4)")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        f"{STEM} (incomplete 2).mp4",
+        f"{STEM} (incomplete).mp4",
+    ]
+    assert playwright.request.urls == [_url("ep1"), _url("ep1")]
+    # --no-verify accepts the same file (a debugging aid), and the cover follows as usual
+    off = downloader.download(episode, _options(tmp_path / "off", verify=False))
+    assert off.status is DownloadStatus.DONE and off.message == f"{SAVED} + cover embedded"
+
+
+def test_a_body_that_is_not_an_mp4_is_quarantined_before_any_cover_request(playwright, tmp_path):
+    not_an_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"v" * (2 * MIN_VIDEO_BYTES)
+    playwright.request.answer(_url("ep1"), FakeAPIResponse(200, not_an_mp4, "video/mp4"))
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED
+    assert result.message.startswith(f"{INCOMPLETE_PREFIX}not a valid MP4 (")
+    assert result.message.endswith(f") (kept as {STEM} (incomplete).mp4)")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM} (incomplete).mp4"]
+    assert (tmp_path / f"{STEM} (incomplete).mp4").read_bytes() == not_an_mp4
+    assert COVER not in playwright.request.urls
+
+
+def test_the_engine_marks_a_quarantined_episode_failed_and_a_rerun_tries_it_again(
+    playwright, tmp_path
+):
+    """Through engine.download_series: the manifest records `failed` with the reason, the
+    quarantined file never passes for the episode, so the next run downloads it again."""
+    series = Series(
+        SERIES_ID, "Heiress", [_episode(1, _item(1, ITEM_1, _url("ep1")), duration_s=120)]
+    )
+    options = _options(tmp_path, engine="browser")
+    results = engine.download_series(
+        series, series.episodes, options, downloader=_downloader(playwright), sleep=lambda s: None
+    )
+    assert [r.status for r in results] == [DownloadStatus.FAILED]
+    assert results[0].message.startswith(f"{INCOMPLETE_PREFIX}duration 3 s, expected 120 s")
+    target = tmp_path / "Heiress [7699393770256782354]"
+    manifest = Manifest.load(target / "dramafetch.json", SERIES_ID, "Heiress")
+    assert manifest.done_path(1) is None
+    rerun = engine.download_series(
+        series, series.episodes, options, downloader=_downloader(playwright), sleep=lambda s: None
+    )
+    assert [r.status for r in rerun] == [DownloadStatus.FAILED]  # tried again, not skipped-exists
+    assert sorted(p.name for p in target.iterdir()) == [
+        f"{STEM} (incomplete 2).mp4",
+        f"{STEM} (incomplete).mp4",
+        "dramafetch.json",
+    ]
+
+
+def test_quality_best_tries_the_highest_bitrate_rendition_first(playwright, tmp_path):
+    """`compatible` (the default) requests the H.264 rendition first, `best` the highest bitrate
+    whatever the codec — here a bytevc1 on another host, which the dry run names too."""
+    bytevc1 = f"https://v19-webapp-prime.tiktok.com/video/tos/useast2a/hi/?a=1988&expire={FRESH}"
+    entries = [_entry("h264", 1_000_000, _url("h264")), _entry("bytevc1", 2_000_000, bytevc1)]
+    downloader = _downloader(playwright)
+
+    compatible = downloader.download(
+        _episode(1, _item(1, ITEM_1, _url("h264"), bitrate_info=entries)),
+        _options(tmp_path, thumbnail="none"),
+    )
+    best = downloader.download(
+        _episode(2, _item(2, "2", _url("h264"), bitrate_info=entries)),
+        _options(tmp_path, thumbnail="none", quality="best"),
+    )
+
+    assert compatible.status is best.status is DownloadStatus.DONE
+    assert playwright.request.urls == [_url("h264"), bytevc1]
+    dry = downloader.download(
+        _episode(3, _item(3, "3", _url("h264"), bitrate_info=entries)),
+        _options(tmp_path, dry_run=True, quality="best"),
+    )
+    assert dry.message == "would download from v19-webapp-prime.tiktok.com"

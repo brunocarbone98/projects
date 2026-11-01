@@ -15,8 +15,16 @@ already watch (a locked episode has no play URL and stays skipped), one request 
 most :data:`MAX_GETS_PER_EPISODE` per episode (the engine paces the calls; this class never
 retries on its own beyond the next listed URL), a stop at the first sign of blocking (HTTP 429, a
 captcha page), Chromium with its default flags, a Chrome user agent, nothing hidden and nothing
-bypassed. Once an episode's video is written, and only then, one more small request fetches its
-cover image (``Episode.cover_url``) unless ``DownloadOptions.thumbnail`` is ``none``; by default
+bypassed. The renditions are tried in the order ``DownloadOptions.quality`` gives them
+(``catalog.play_url_candidates``). A body shorter than the announced ``Content-Length`` — or a
+transfer the server cut short, which Playwright reports as ``aborted`` — fails the episode at once
+(``FAILED``, "download looks incomplete or wrong: truncated body …"): a truncation is the network,
+not the URL, so no other mirror is tried and no list is refreshed. Every written video is then
+verified (``dramafetch.media.verify_video``, unless ``DownloadOptions.verify`` is off) BEFORE the
+cover step: a file that fails is renamed ``<name> (incomplete).mp4`` and the episode is FAILED, so
+a rerun tries it again and no cover is fetched for it. Once an episode's video is written and
+verified, and only then, one more small request fetches its cover image (``Episode.cover_url``)
+unless ``DownloadOptions.thumbnail`` is ``none``; by default
 the cover goes INTO the MP4 as its cover art (``dramafetch.thumbnails.embed_cover``, never
 touching the video in place), with ``both`` it is also kept — and with ``file`` only kept — as
 ``<stem>.jpg``/``.png``/``.webp`` next to the video. That request is outside the media budget
@@ -27,6 +35,7 @@ Cookie values and signed URLs never reach messages or logs: messages carry host 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -48,6 +57,7 @@ from dramafetch.errors import (
     ThumbnailError,
 )
 from dramafetch.manifest import episode_stem
+from dramafetch.media import INCOMPLETE_PREFIX, quarantine, verify_video
 from dramafetch.models import (
     DiscoveryOptions,
     DownloadOptions,
@@ -95,6 +105,12 @@ _MIB = 1024 * 1024
 _DENIED_STATUSES = frozenset({403, 404, 410})
 _VIDEO_CONTENT_TYPES = ("video/", "application/octet-stream")
 _MP4_MAGIC = b"ftyp"
+#: How Playwright's request API words a transfer the server ended before the announced body was
+#: complete (Node checks the ``Content-Length`` itself and gives up: ``aborted``), plus the
+#: wordings other stacks use for the same thing. A timeout or a refused connection is not one.
+_ABORTED_RE = re.compile(
+    r"\baborted\b|socket hang up|econnreset|content[- ]length mismatch|premature", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -103,6 +119,7 @@ class _Attempt:
 
     reason: str
     unavailable: bool  # denied status or a non-video body → FAILED_UNAVAILABLE, else FAILED
+    incomplete: bool = False  # a truncated transfer → FAILED "download looks incomplete or wrong"
 
 
 class BrowserDownloader:
@@ -198,11 +215,11 @@ class BrowserDownloader:
         target = options.out_dir / (episode_stem(episode, options) + ".mp4")
         tried: set[str] = set()  # every URL requested for this episode: its request budget
         refreshed = False
-        candidates = self._usable_candidates(episode.raw)
+        candidates = self._usable_candidates(episode.raw, options.quality)
         if not candidates:
             refreshed = True
             self._refresh(context, episode, options, tried)
-            candidates = self._usable_candidates(episode.raw)
+            candidates = self._usable_candidates(episode.raw, options.quality)
             if not candidates:
                 return DownloadResult(
                     episode=episode,
@@ -226,7 +243,11 @@ class BrowserDownloader:
                     status=DownloadStatus.FAILED,
                     message=f"{last.reason}; refreshing the episode list failed: {_one_line(exc)}",
                 )
-            fresh = [url for url in self._usable_candidates(episode.raw) if url not in tried]
+            fresh = [
+                url
+                for url in self._usable_candidates(episode.raw, options.quality)
+                if url not in tried
+            ]
             if fresh:
                 result, retried = self._try_candidates(
                     context, episode, options, fresh, target, tried
@@ -239,6 +260,12 @@ class BrowserDownloader:
                 episode=episode,
                 status=DownloadStatus.FAILED_UNAVAILABLE,
                 message=f"{UNAVAILABLE_MESSAGE} ({last.reason})",
+            )
+        if last.incomplete:
+            return DownloadResult(
+                episode=episode,
+                status=DownloadStatus.FAILED,
+                message=f"{INCOMPLETE_PREFIX}{last.reason}",
             )
         return DownloadResult(
             episode=episode, status=DownloadStatus.FAILED, message=f"download failed: {last.reason}"
@@ -254,9 +281,14 @@ class BrowserDownloader:
         tried: set[str],
     ) -> tuple[DownloadResult | None, _Attempt | None]:
         """GET the candidates in order, within the episode's budget of :data:`MAX_GETS_PER_EPISODE`
-        requests (``tried`` holds every URL requested so far), until one yields a video (DONE) or
-        the server rate-limits (FAILED_RATE_LIMITED). A denied status or a non-video body moves on
-        to the next URL; any other status stops. Otherwise return why the last one was no good."""
+        requests (``tried`` holds every URL requested so far), until one yields a video that passes
+        the verification (DONE) or the server rate-limits (FAILED_RATE_LIMITED). A denied status or
+        a non-video body moves on to the next URL; any other status stops, and so does a truncated
+        transfer (a body shorter than the ``Content-Length``, or one Playwright aborted) — the
+        network's fault, not the URL's. A written video that fails
+        :func:`~dramafetch.media.verify_video` is quarantined and the episode FAILED at once (the
+        same preview would come from every mirror). Otherwise return why the last one was no good.
+        """
         headers = {"Referer": options.base_url.rstrip("/") + "/", "Accept": "*/*"}
         last: _Attempt | None = None
         for url in candidates:
@@ -270,9 +302,18 @@ class BrowserDownloader:
                 break
             tried.add(url)
             host = _host(url)
-            response = context.request.get(
-                url, headers=headers, max_redirects=MAX_REDIRECTS, timeout=REQUEST_TIMEOUT_MS
-            )
+            try:
+                response = context.request.get(
+                    url, headers=headers, max_redirects=MAX_REDIRECTS, timeout=REQUEST_TIMEOUT_MS
+                )
+            except Exception as exc:
+                if not _transfer_aborted(exc):
+                    raise
+                log.debug("episode %s: transfer from %s aborted: %s", episode.number, host, exc)
+                last = _Attempt(
+                    f"truncated body (the transfer was cut short) from {host}", False, True
+                )
+                break  # the network, not this URL: no next mirror, no fresh list
             try:
                 status = response.status
                 if status == 429:
@@ -293,14 +334,40 @@ class BrowserDownloader:
                     break  # the server failing, not this URL: no next mirror, no fresh list
                 body = response.body()
                 content_type = response.headers.get("content-type", "")
+                announced = _content_length(response.headers)
             finally:
                 _dispose(response)
+            if announced is not None and announced != len(body):
+                log.debug(
+                    "episode %s: %d of %d announced bytes from %s",
+                    episode.number,
+                    len(body),
+                    announced,
+                    host,
+                )
+                last = _Attempt(
+                    f"truncated body ({len(body)} of {announced} bytes) from {host}", False, True
+                )
+                break  # the network, not this URL: no next mirror, no fresh list
             problem = _body_problem(body, content_type)
             if problem is not None:
                 log.debug("episode %s: %s from %s", episode.number, problem, host)
                 last = _Attempt(f"{problem} from {host}", True)
                 continue
             _write_atomically(target, body)
+            if options.verify:
+                failure = verify_video(target, episode.duration_s)
+                if failure is not None:
+                    kept = quarantine(target)
+                    log.debug("episode %s: %s; kept as %s", episode.number, failure, kept.name)
+                    return (
+                        DownloadResult(
+                            episode=episode,
+                            status=DownloadStatus.FAILED,
+                            message=f"{INCOMPLETE_PREFIX}{failure} (kept as {kept.name})",
+                        ),
+                        None,
+                    )
             return (
                 DownloadResult(
                     episode=episode,
@@ -314,7 +381,9 @@ class BrowserDownloader:
 
     def _dry_run_message(self, episode: Episode, options: DownloadOptions) -> str:
         cover = " + cover" if options.thumbnails and episode.cover_url else ""
-        candidates = play_url_candidates(episode.raw) if episode.raw is not None else []
+        candidates = (
+            play_url_candidates(episode.raw, options.quality) if episode.raw is not None else []
+        )
         if not candidates:
             return (
                 "would download: no play url in the episode list (it would be refreshed first)"
@@ -392,10 +461,11 @@ class BrowserDownloader:
 
     # -- play URL candidates and their expiry --------------------------------------------------
 
-    def _usable_candidates(self, item: dict[str, Any] | None) -> list[str]:
+    def _usable_candidates(self, item: dict[str, Any] | None, quality: str) -> list[str]:
+        """The item's play URLs in the order ``quality`` gives them, minus the expired ones."""
         if item is None:
             return []
-        return [url for url in play_url_candidates(item) if self._usable(url)]
+        return [url for url in play_url_candidates(item, quality) if self._usable(url)]
 
     def _usable(self, url: str) -> bool:
         """False when the URL's ``expire`` is in the past or within :data:`EXPIRY_MARGIN_S`."""
@@ -534,6 +604,20 @@ def _default_factory() -> Callable[[], Any]:
             "playwright is not installed: pip install playwright && playwright install chromium"
         ) from exc
     return sync_playwright
+
+
+def _content_length(headers: dict[str, str]) -> int | None:
+    """The numeric ``Content-Length`` a response announced, None when absent or not a number."""
+    value = headers.get("content-length", "").strip()
+    return int(value) if value.isdigit() else None
+
+
+def _transfer_aborted(exc: BaseException) -> bool:
+    """Whether a request failed because the server ended the transfer before the announced body
+    was complete (see :data:`_ABORTED_RE`): the one request error that means "truncated", which
+    fails the episode at once instead of propagating as a generic failure."""
+    lines = [line for line in str(exc).splitlines() if line.strip()]
+    return _ABORTED_RE.search(lines[0]) is not None if lines else False
 
 
 def _body_problem(body: bytes, content_type: str) -> str | None:

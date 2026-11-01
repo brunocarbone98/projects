@@ -13,7 +13,9 @@ from typing import ClassVar
 import pytest
 
 from dramafetch import engine
+from dramafetch.cooldown import active_cooldown, clear_cooldown, read_cooldown
 from dramafetch.downloader import locked_result
+from dramafetch.errors import ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError
 from dramafetch.manifest import MANIFEST_FILENAME, Manifest, series_dir
 from dramafetch.models import (
     THUMBNAIL_MODES,
@@ -942,6 +944,72 @@ def test_blocked_stops_the_run_like_a_rate_limit_and_exits_5(tmp_path):
     manifest = json.loads((series_dir(tmp_path, series) / MANIFEST_FILENAME).read_text("utf-8"))
     assert manifest["episodes"]["4"]["status"] == "failed-blocked"
     assert manifest["episodes"]["5"]["status"] == "skipped-locked"
+    # the refusal started the global cooldown: the yt-dlp engine's own message, 30 minutes
+    recorded = active_cooldown()
+    assert recorded is not None and recorded.source == "yt-dlp"
+    assert recorded.reason == "failed-blocked happened"
+    assert recorded.recorded_at is not None and recorded.until == recorded.recorded_at + 1800
+
+
+def test_a_refusal_records_the_global_cooldown_once_per_run(tmp_path, monkeypatch):
+    calls = []
+    real = engine.record_block
+
+    def counting(reason, source, **kwargs):
+        calls.append((reason, source))
+        return real(reason, source, **kwargs)
+
+    monkeypatch.setattr(engine, "record_block", counting)
+    series = make_series(numbers=(1, 2, 3, 4))
+    downloader = FakeDownloader({1: DownloadStatus.FAILED_RATE_LIMITED})
+    results, _, _ = _run(series, DownloadOptions(out_dir=tmp_path, engine="browser"), downloader)
+    assert [r.status.value for r in results] == ["failed-rate-limited"] * 4
+    assert calls == [("failed-rate-limited happened", "browser")]  # not once per stopped episode
+    assert active_cooldown().source == "browser"
+    assert engine.check_cooldown() == active_cooldown()
+    assert {
+        DownloadStatus.FAILED_RATE_LIMITED,
+        DownloadStatus.FAILED_BLOCKED,
+    } == engine.BLOCK_STATUSES
+
+
+def test_login_stops_and_failure_streaks_do_not_start_a_cooldown(tmp_path):
+    series = make_series(numbers=(1, 2, 3, 4))
+    results, _, _ = _run(
+        series, DownloadOptions(out_dir=tmp_path), FakeDownloader({1: DownloadStatus.FAILED_LOGIN})
+    )
+    assert results[0].status is DownloadStatus.FAILED_LOGIN
+    assert active_cooldown() is None and read_cooldown() is None
+    streak = FakeDownloader(
+        {1: DownloadStatus.FAILED, 2: DownloadStatus.FAILED_UNAVAILABLE, 3: DownloadStatus.FAILED}
+    )
+    results, _, _ = _run(series, DownloadOptions(out_dir=tmp_path / "b"), streak)
+    assert results[3].message.startswith("stopped: 3 consecutive failures")
+    assert active_cooldown() is None
+
+
+def test_record_block_if_refused_and_an_empty_message_falls_back_to_the_status():
+    episode = _episode(1)
+    assert (
+        engine.record_block_if_refused(DownloadResult(episode, DownloadStatus.DONE), "yt-dlp")
+        is None
+    )
+    assert (
+        engine.record_block_if_refused(
+            DownloadResult(episode, DownloadStatus.FAILED_LOGIN), "yt-dlp"
+        )
+        is None
+    )
+    assert active_cooldown() is None
+    recorded = engine.record_block_if_refused(
+        DownloadResult(episode, DownloadStatus.FAILED_BLOCKED), "yt-dlp"
+    )
+    assert (
+        recorded is not None and recorded.reason == "failed-blocked" and recorded.source == "yt-dlp"
+    )
+    assert active_cooldown() == recorded
+    clear_cooldown()
+    assert engine.check_cooldown() is None
 
 
 # --------------------------------------------------------------------------- engines & close()
@@ -1141,6 +1209,58 @@ def test_resolve_with_injected_discovery_fills_the_name():
     assert resolved is series
     assert resolved.name == NAME  # taken from the episodes
     assert discovery.calls == [(ref, options)]
+
+
+class FailingDiscovery:
+    def __init__(self, error):
+        self.error = error
+
+    def discover(self, ref, options):
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "records"),
+    [
+        (RateLimitedError("HTTP 429 while listing the episodes"), True),
+        (ChallengeError("TikTok showed a captcha page"), True),
+        (LoginRequiredError("login page"), False),
+        (DiscoveryError("no episode list within 45 s"), False),
+    ],
+)
+def test_resolve_records_a_cooldown_on_a_rate_limit_or_a_captcha_and_re_raises(error, records):
+    options = DiscoveryOptions(strategy="browser")
+    with pytest.raises(type(error)) as excinfo:
+        engine.resolve(SeriesRef(series_id=SERIES_ID), options, FailingDiscovery(error))
+    assert excinfo.value is error  # re-raised as it was
+    recorded = active_cooldown()
+    if records:
+        assert recorded is not None and recorded.source == "discovery"
+        assert recorded.reason == str(error)
+    else:
+        assert recorded is None
+
+
+def test_validate_quality_and_episode_to_dict_quality_hint(tmp_path):
+    with pytest.raises(
+        ValueError, match="unknown quality 'ultra': expected one of compatible, best"
+    ):
+        engine.validate_quality(DownloadOptions(quality="ultra"))
+    engine.validate_quality(DownloadOptions(quality="best"))
+    series = make_series()
+    with pytest.raises(ValueError, match="unknown quality"):
+        engine.download_series(
+            series,
+            series.episodes,
+            DownloadOptions(out_dir=tmp_path, quality="ultra"),
+            downloader=FakeDownloader(),
+        )
+    assert not series_dir(tmp_path, series).exists()  # refused before anything was created
+    first = series.episodes[0]
+    assert engine.episode_to_dict(first)["quality_hint"] is None
+    first.quality_hint = "720p h264"
+    assert engine.episode_to_dict(first)["quality_hint"] == "720p h264"
+    assert engine.series_to_dict(series)["episodes"][0]["quality_hint"] == "720p h264"
 
 
 def test_resolve_uses_choose_discovery_lazily(monkeypatch):

@@ -8,6 +8,9 @@ polls every couple of seconds; the engine's ``on_result`` callback updates it af
 Each row carries the file's ``path`` (what the files endpoint serves), its ``file_name`` (for
 display) and ``thumbnail`` — whether a cover is available, saved next to the video or embedded in
 it (see :func:`has_cover`); it is computed once, when the row is recorded, never while polling.
+Right before a job starts downloading the manager asks the optional ``gate`` whether it may: a
+reason refuses the job (state ``error`` with that reason, no request made) — the web server uses
+it for the TikTok cooldown, so a job queued behind one that met a 429 does not knock again.
 Nothing in this module touches the network itself, and nothing in a snapshot can contain a cookie:
 error messages are redacted defensively before they are stored.
 """
@@ -33,6 +36,9 @@ log = logging.getLogger(__name__)
 #: ``runner(series, episodes, options, on_result=callback) -> results`` — the shape of
 #: :func:`dramafetch.engine.download_series`; tests inject an instant fake.
 Runner = Callable[..., list[DownloadResult]]
+#: ``gate() -> reason | None``: asked right before a job starts downloading; a reason refuses the
+#: job (see :class:`JobManager`). ``DramaFetchServer.job_refusal`` answers the cooldown message.
+Gate = Callable[[], str | None]
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -122,14 +128,20 @@ class _Job:
 
 
 class JobManager:
-    """Thread-safe registry of download jobs; at most one job runs at a time, the rest queue."""
+    """Thread-safe registry of download jobs; at most one job runs at a time, the rest queue.
 
-    def __init__(self, default_runner: Runner | None = None) -> None:
+    ``gate`` is asked when a job reaches the front of the queue, right before its runner would
+    contact TikTok: a reason (the cooldown message) ends the job as ``error`` with that reason
+    and nothing is downloaded; ``None`` lets it run.
+    """
+
+    def __init__(self, default_runner: Runner | None = None, gate: Gate | None = None) -> None:
         self._cond = threading.Condition()
         self._jobs: dict[str, _Job] = {}
         self._queue: deque[str] = deque()
         self._running: str | None = None
         self._default_runner = default_runner
+        self._gate = gate
 
     def start(
         self,
@@ -190,19 +202,38 @@ class JobManager:
             self._running = job.id
             job.state = RUNNING
             job.started_at = _now()
-        error: str | None = None
-        try:
-            job.runner(job.series, job.episodes, job.options, on_result=self._recorder(job))
-        except Exception as exc:  # a job must never take the server down
-            error = redact_secrets(f"{type(exc).__name__}: {exc}")[:_MAX_ERROR_CHARS]
-            log.warning("job %s failed: %s", job.id, error)
-            log.debug("job %s traceback", job.id, exc_info=True)
+        error: str | None = self._refusal()
+        if error is not None:
+            log.warning("job %s refused before any request: %s", job.id, error)
+        else:
+            try:
+                job.runner(job.series, job.episodes, job.options, on_result=self._recorder(job))
+            except Exception as exc:  # a job must never take the server down
+                error = redact_secrets(f"{type(exc).__name__}: {exc}")[:_MAX_ERROR_CHARS]
+                log.warning("job %s failed: %s", job.id, error)
+                log.debug("job %s traceback", job.id, exc_info=True)
         with self._cond:
             job.error = error
             job.state = ERROR if error is not None else DONE
             job.finished_at = _now()
             self._running = None
             self._cond.notify_all()
+
+    def _refusal(self) -> str | None:
+        """The gate's reason to refuse the job about to start (redacted, capped), or ``None``. A
+        gate that fails is logged and lets the job run, the way a corrupt cooldown file counts as
+        no cooldown; it never takes the server down."""
+        if self._gate is None:
+            return None
+        try:
+            reason = self._gate()
+        except Exception as exc:  # defensive: the cooldown check never raises by contract
+            log.warning("job gate failed: %s", redact_secrets(f"{type(exc).__name__}: {exc}")[:300])
+            log.debug("job gate traceback", exc_info=True)
+            return None
+        if reason is None:
+            return None
+        return redact_secrets(reason)[:_MAX_ERROR_CHARS]
 
     def _recorder(self, job: _Job) -> Callable[[DownloadResult], None]:
         def on_result(result: DownloadResult) -> None:
