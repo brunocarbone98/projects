@@ -973,6 +973,8 @@ DRM_KEYS = [
     ("encryption", "cenc"),
     ("encryptType", 2),
 ]
+#: What TikTok's encrypted user ids (`secUid`) look like.
+ENCRYPTED_UID = "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM"
 #: The spec's "must NOT be DRM" list: HDR flags, negations and identifiers — no clue of any class.
 NOT_DRM_KEYS = [
     ("hdrMode", 1),
@@ -983,7 +985,7 @@ NOT_DRM_KEYS = [
     ("nonEncrypted", True),
     ("no_drm", 1),
     ("notEncrypted", True),
-    ("encryptedUid", "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM"),
+    ("encryptedUid", ENCRYPTED_UID),
     ("encrypted_id", "x"),
     ("unencrypted", True),
 ]
@@ -1066,7 +1068,7 @@ def test_a_real_payload_with_hdr_flags_and_encrypted_ids_keeps_its_accesses():
     expected = [(e.access, e.paid, e.drm, e.lock_hints) for e in _paid_page("logged_in")]
     for item in payload["itemList"]:
         item["video"].update({"hdrMode": 1, "HDRType": 1, "isDrmFree": True})
-        item["dramaInfo"]["encryptedUid"] = "MS4wLjABAAAAv7iSuuXDJGDvJkmH_vz1qkDZYo1apxgzaxdBSeIuPiM"
+        item["dramaInfo"]["encryptedUid"] = ENCRYPTED_UID
         item["dramaInfo"]["authorInfo"] = {"encrypted_id": "x", "no_drm": 1, "nonEncrypted": True}
     episodes = parse_item_list_payload(payload, PAID_SERIES_ID).episodes
     assert [(e.access, e.paid, e.drm, e.lock_hints) for e in episodes] == expected

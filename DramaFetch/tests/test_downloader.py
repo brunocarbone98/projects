@@ -1225,7 +1225,8 @@ def test_a_payload_flagged_drm_episode_is_skipped_with_the_drm_wording(tmp_path)
     assert log == [] and list(tmp_path.iterdir()) == []
     # without hints (the catalog always gives one) the wording still is a payload flag's, never
     # DRM_MESSAGE — the verdict of a download, which the manifest remembers
-    assert locked_result(replace(drm, lock_hints=())).message == PAYLOAD_DRM_MESSAGE == (
+    assert locked_result(replace(drm, lock_hints=())).message == PAYLOAD_DRM_MESSAGE
+    assert PAYLOAD_DRM_MESSAGE == (
         "protected by DRM (flagged in the episode list): DramaFetch does not decrypt it"
     )
     assert not PAYLOAD_DRM_MESSAGE.startswith(DRM_MESSAGE)

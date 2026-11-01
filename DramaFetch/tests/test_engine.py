@@ -2666,9 +2666,7 @@ def test_a_series_whose_only_missing_episode_is_remembered_drm_is_complete_and_t
     assert manifest.drm_protected(3) and manifest.complete_at is None
 
     downloader = FakeDownloader()
-    second = _run_series(
-        series, _quiet(tmp_path), discovery, downloader=downloader, wall=WALL + 60
-    )
+    second = _run_series(series, _quiet(tmp_path), discovery, downloader=downloader, wall=WALL + 60)
     assert discovery.calls == [SERIES_ID, SERIES_ID]  # listed again: it was not complete yet
     assert downloader.calls == []  # 1, 2, 4 on disk, 3 remembered: no download request at all
     assert [result.status for result in second.results] == [

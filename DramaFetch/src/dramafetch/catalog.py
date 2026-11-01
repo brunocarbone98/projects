@@ -326,7 +326,11 @@ def _clues(key: str, value: Any) -> list[tuple[str, str]]:
     lock_status_key = _LOCK_STATUS_KEY_RE.search(key) is not None
     is_text = isinstance(value, str)
     # a status STRING decides through the two value sets, for lockStatus as for unlockStatus
-    status = value.strip().lower() if (status_key or lock_status_key) and is_text else None
+    status = (
+        value.strip().lower()
+        if (status_key or lock_status_key) and isinstance(value, str)
+        else None
+    )
     found: list[tuple[str, str]] = []
     if truthy and is_drm_key(key):
         found.append((_DRM, hint))

@@ -316,8 +316,9 @@ def sanitize_error(message: str) -> str:
 def describe_failure(status: DownloadStatus, message: str) -> str:
     """The user-facing message for a classified failure: a FAILED_BLOCKED result is prefixed with
     :data:`BLOCKED_MESSAGE` (what happened and what to do), a FAILED_UNAVAILABLE one that names DRM
-    with :data:`~dramafetch.models.DRM_MESSAGE` (so it starts with ``DRM_MARK``, which is how the
-    manifest remembers it), the others keep yt-dlp's words."""
+    with :data:`~dramafetch.models.DRM_MESSAGE` (a verdict that starts with it is how the manifest
+    remembers it: ``Manifest.drm_protected``), the others keep yt-dlp's words — a refusal that
+    also names DRM (:meth:`YtDlpDownloader.classify_error`) included."""
     if status is DownloadStatus.FAILED_BLOCKED:
         return f"{BLOCKED_MESSAGE}: {message}" if message else BLOCKED_MESSAGE
     if status is DownloadStatus.FAILED_UNAVAILABLE and mentions_drm(message):
