@@ -49,8 +49,10 @@ MAX_RETRIES = 3
 BLOCKED_MESSAGE = (
     "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again"
 )
-#: Extensions yt-dlp's ``writethumbnail`` can give the cover: the cover URL's own, or ``.image``
-#: when the URL has none (TikTok's ``dynamicCover``); see :func:`_written_cover`.
+#: Extensions yt-dlp's ``writethumbnail`` can give the cover — always the cover URL's own:
+#: ``.jpeg`` for TikTok's ``cover``/``originCover``, ``.image`` for its ``dynamicCover`` URLs
+#: (``…~tplv-tiktokx-origin.image``), written only when the preferred covers fail; a URL without
+#: an extension would get ``.jpg``. See :func:`_written_cover`.
 WRITTEN_COVER_SUFFIXES = (*COVER_SUFFIXES, ".image")
 
 _PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
@@ -211,7 +213,7 @@ def _finish_cover(video: Path, options: DownloadOptions) -> str:
 
     The sidecar is read whole, capped at :data:`~dramafetch.thumbnails.MAX_COVER_BYTES` (over the
     cap it is deleted: ``"; cover: too large, not kept"``), and its kind sniffed from the bytes;
-    yt-dlp's generic ``.image`` is renamed to the real extension first. Then: mode ``file`` ->
+    a ``dynamicCover``'s ``.image`` is renamed to the real extension first. Then: mode ``file`` ->
     ``" + cover file"``; ``embed``/``both`` -> :func:`~dramafetch.thumbnails.embed_cover` (the
     video is copied, never edited in place) -> ``" + cover embedded"`` and the sidecar deleted,
     or ``" + cover embedded + file"`` for ``both``. Whatever cannot be embedded stays on disk, so

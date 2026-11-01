@@ -17,7 +17,7 @@ A production full-stack platform, the black-box QA suite that tests it, a TikTok
 | --- | --- | --- | --- |
 | [`FullStackHub/`](./FullStackHub) — **Shipping Hub** | International parcel shipping & tracking platform: public SSR tracking, quotes, customer/staff dashboards, a wallet backed by a double-entry ledger | Next.js 16 · Express 5 + Prisma · PostgreSQL · FastAPI ×2 · Zod contracts · pnpm 10 + Turborepo | [Live app](https://shipping-hub.up.railway.app/) · [README](./FullStackHub/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
 | [`SecureGate/`](./SecureGate) — **QA & security suite** | Black-box tests for Shipping Hub: 28 Karate API scenarios (+1 opt-in `@ratelimit` check), 6 Serenity/Screenplay UI scenarios, a Postman/Newman collection, a token-gated SonarQube gate | Java 21 · Maven · Karate · Serenity BDD + Screenplay · Selenium · Cucumber · Newman | [README](./SecureGate/README.md) · [![SecureGate CI](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml) |
-| [`DramaFetch/`](./DramaFetch) — **TikTok short-drama downloader** | Downloads the episodes of a TikTok short drama that your own account can already watch, a whole series at a time, for personal offline viewing: CLI + local web UI, resumable manifest, locked episodes listed and skipped — never unlocked | Python 3.11 · yt-dlp · Playwright · stdlib web UI | [README](./DramaFetch/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
+| [`DramaFetch/`](./DramaFetch) — **TikTok short-drama downloader** | Downloads the episodes of a TikTok short drama that your own account can already watch, a whole series at a time, for personal offline viewing: CLI + local web UI, resumable manifest, locked episodes listed and skipped — never unlocked | Python 3.11 · yt-dlp · Playwright · mutagen · stdlib web UI | [README](./DramaFetch/README.md) · [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml) |
 | [`PersonalWebsite/`](./PersonalWebsite) | Static two-page portfolio served by GitHub Pages | Vanilla HTML/CSS/JS, no dependencies | [`MainPage.html`](./PersonalWebsite/MainPage.html) · [`Portfolio.html`](./PersonalWebsite/Portfolio.html) |
 
 ## Architecture
@@ -105,7 +105,7 @@ DramaFetch — Python 3.11+; episode discovery needs Playwright's Chromium (`pla
 
 ```bash
 cd DramaFetch && python -m venv .venv && . .venv/bin/activate && pip install -e ".[impersonate,dev]"
-dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, Playwright, browser, cookies (names only, never values)
+dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg, cookies (names only, never values), mutagen
 dramafetch download "https://www.tiktok.com/shortdrama/episode/<series id>/1" --cookies cookies.txt
 ```
 

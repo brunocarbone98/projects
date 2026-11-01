@@ -137,10 +137,12 @@ def embed_cover(video: Path, image: bytes) -> None:
     Raises :class:`~dramafetch.errors.ThumbnailError` — with a message fit for the result line —
     when ``video`` is not an MP4 container (``.mp4``, ``.m4v``, ``.mov``), when ``image`` is not
     a JPEG or a PNG (a WEBP cannot live in a ``covr`` atom), when it exceeds
-    :data:`MAX_COVER_BYTES`, when mutagen is not importable, or when mutagen fails. The video is
-    never touched in place: a copy named ``<name>.embed.part`` in the same directory gets the cover
-    and then replaces the original atomically (``os.replace``); on any failure the copy is deleted
-    and the original is left exactly as it was.
+    :data:`MAX_COVER_BYTES`, when mutagen is not importable, when a directory named
+    ``<name>.embed.part`` is in the way, or when mutagen fails. The video is never touched in
+    place: a copy named ``<name>.embed.part`` in the same directory gets the cover and then
+    replaces the original atomically (``os.replace``); on any failure the copy is deleted (a copy
+    that will not go is logged, never raised: the cleanup never hides the real error) and the
+    original is left exactly as it was.
     """
     suffix = video.suffix.lower()
     if suffix not in EMBEDDABLE_SUFFIXES:
@@ -160,6 +162,8 @@ def embed_cover(video: Path, image: bytes) -> None:
         raise ThumbnailError("mutagen is not installed: pip install mutagen") from exc
     image_format = MP4Cover.FORMAT_JPEG if kind == "jpeg" else MP4Cover.FORMAT_PNG
     copy = video.with_name(video.name + EMBED_SUFFIX)
+    if copy.is_dir():  # shutil.copy2 would copy INTO it, and the cleanup could not remove it
+        raise ThumbnailError(f"{copy.name} is a directory in the way of the working copy")
     try:
         shutil.copy2(video, copy)
         # mutagen ships type hints, but FileType.__init__ and add_tags() are unannotated.
@@ -172,7 +176,10 @@ def embed_cover(video: Path, image: bytes) -> None:
         tagged.save()
         copy.replace(video)  # os.replace: atomic, same directory, same file system
     except BaseException as exc:
-        copy.unlink(missing_ok=True)
+        try:
+            copy.unlink(missing_ok=True)
+        except OSError as leftover:  # the cleanup must never hide the real error
+            log.debug("could not remove %s: %s", copy.name, _describe(leftover))
         if not isinstance(exc, Exception):  # KeyboardInterrupt and friends: cleaned up, not ours
             raise
         raise ThumbnailError(

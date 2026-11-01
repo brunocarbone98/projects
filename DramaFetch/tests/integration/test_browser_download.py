@@ -90,12 +90,16 @@ def _options(server: FakeTikTok, tmp_path: Path, **overrides: Any) -> DownloadOp
 
 
 def _assert_cover_file(path: Path, item_id: str) -> None:
-    """A JPEG by its magic bytes (`FF D8 FF` ... `FF D9`), the fake CDN's bytes for the item."""
+    """A JPEG by its magic bytes (`FF D8 FF` ... `FF D9`), the fake CDN's bytes for the item — a
+    real picture (quantisation and Huffman tables, a frame header, a scan), not a bare shell."""
     assert path.is_file()
     data = path.read_bytes()
     assert data.startswith(JPEG_SOI + b"\xff") and data.endswith(JPEG_EOI)
     assert len(data) >= COVER_MIN_SIZE
     assert data == cover_bytes(item_id)
+    assert all(
+        m in data for m in (b"\xff\xdb", b"\xff\xc4", b"\xff\xc0", b"\xff\xda")
+    )  # DQT DHT SOF0 SOS
 
 
 def _cookies_txt(tmp_path: Path) -> Path:

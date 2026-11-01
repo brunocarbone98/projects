@@ -25,7 +25,7 @@ from dramafetch.downloader_browser import (
 )
 from dramafetch.manifest import Manifest
 from dramafetch.models import DownloadOptions, DownloadStatus, Episode, Series
-from dramafetch.thumbnails import extract_cover
+from dramafetch.thumbnails import EMBED_SUFFIX, extract_cover
 
 SERIES_ID = "7699393770256782354"
 BASE = "https://www.tiktok.com"
@@ -1150,6 +1150,26 @@ def test_a_video_mutagen_cannot_tag_keeps_the_cover_as_a_file(playwright, tmp_pa
     assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM}.jpg", f"{STEM}.mp4"]
     assert (tmp_path / f"{STEM}.jpg").read_bytes() == JPEG
     assert result.path.read_bytes() == not_an_mp4
+
+
+def test_a_directory_in_the_way_of_the_working_copy_saves_the_cover_as_a_file(playwright, tmp_path):
+    """The engine never raises: a directory named `<video>.embed.part` makes the embed a
+    `ThumbnailError`, so the cover is saved next to the video and nothing is copied into it."""
+    in_the_way = tmp_path / f"{STEM}.mp4{EMBED_SUFFIX}"
+    in_the_way.mkdir()
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
+    assert result.status is DownloadStatus.DONE
+    assert result.message == (
+        f"{SAVED}; cover: could not embed ({in_the_way.name} is a directory in the way of the "
+        "working copy); saved as file"
+    )
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        f"{STEM}.jpg",
+        f"{STEM}.mp4",
+        in_the_way.name,
+    ]
+    assert list(in_the_way.iterdir()) == [] and result.path.read_bytes() == VIDEO
 
 
 def test_without_mutagen_the_cover_is_saved_as_a_file_and_the_message_says_so(

@@ -26,7 +26,7 @@ from dramafetch.downloader import (
 )
 from dramafetch.manifest import episode_stem
 from dramafetch.models import DownloadOptions, DownloadStatus, Episode
-from dramafetch.thumbnails import MAX_COVER_BYTES, extract_cover
+from dramafetch.thumbnails import EMBED_SUFFIX, MAX_COVER_BYTES, extract_cover
 
 SERIES_ID = "7699393770256782354"
 EPISODE = Episode(
@@ -698,8 +698,9 @@ def test_a_webp_cover_cannot_be_embedded_and_is_kept_as_a_file(tmp_path, mode):
 
 
 def test_yt_dlps_image_extension_is_renamed_after_the_bytes(tmp_path):
-    """A `dynamicCover` URL without an extension lands as `<stem>.image`; the bytes say what it is,
-    so it is renamed first — and then embedded, kept or both like any other cover."""
+    """A `dynamicCover` URL ends in `.image` (TikTok's own extension), so yt-dlp lands the cover
+    as `<stem>.image`; the bytes say what it is, so it is renamed first — and then embedded, kept
+    or both like any other cover."""
     both, _ = _download(tmp_path, "both", sidecar=(".image", JPEG))
     assert both.message == f"saved {STEM}.mp4 + cover embedded + file"
     assert _names(tmp_path) == [f"{STEM}.jpg", f"{STEM}.mp4"]
@@ -726,6 +727,20 @@ def test_a_failed_embed_keeps_the_file_and_the_video_byte_for_byte(tmp_path):
         assert result.message.endswith(")); file kept")
         assert _names(directory) == [f"{STEM}.jpeg", f"{STEM}.mp4"]
         assert result.path.read_bytes() == junk
+
+
+def test_a_directory_in_the_way_of_the_working_copy_is_reported_never_raised(tmp_path):
+    """`download` never raises: a directory named `<video>.embed.part` in the series directory is
+    a `ThumbnailError` the engine turns into the message, with no stray copy of the video in it."""
+    in_the_way = tmp_path / f"{STEM}.mp4{EMBED_SUFFIX}"
+    in_the_way.mkdir()
+    result, _ = _download(tmp_path)
+    assert result.message == (
+        f"saved {STEM}.mp4; cover: could not embed ({in_the_way.name} is a directory in the way "
+        "of the working copy); file kept"
+    )
+    assert _names(tmp_path) == [f"{STEM}.jpeg", f"{STEM}.mp4", in_the_way.name]
+    assert list(in_the_way.iterdir()) == [] and result.path.read_bytes() == TINY_MP4
 
 
 def test_without_mutagen_the_cover_stays_a_file_and_the_message_says_how_to_install_it(

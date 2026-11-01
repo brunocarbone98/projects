@@ -1110,7 +1110,8 @@ def doctor_as_dicts(
     browser_path: Path | None = None,
     cookies_file: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """JSON-ready doctor facts for the web UI (same checks as the ``doctor`` command)."""
+    """JSON-ready doctor facts for the web UI: the seven environment checks of
+    :func:`doctor_checks` only (the ``doctor`` command adds the ``mutagen`` and ``pace`` lines)."""
     checks = doctor_checks(
         browser_channel=browser_channel, browser_path=browser_path, cookies_file=cookies_file
     )

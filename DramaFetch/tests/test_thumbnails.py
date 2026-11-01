@@ -263,6 +263,43 @@ def test_a_keyboard_interrupt_during_the_embed_still_cleans_up(tmp_path, monkeyp
     assert _names(tmp_path) == [NAME]
 
 
+def test_a_directory_in_the_way_of_the_working_copy_is_a_thumbnail_error(tmp_path):
+    """`shutil.copy2` would copy the video INTO a directory named `<name>.embed.part`, and the
+    cleanup could not remove it: refused up front, so the engines' `except ThumbnailError` sees it
+    (an `IsADirectoryError` escaping here would end the whole run after a successful download)."""
+    video = _video(tmp_path)
+    in_the_way = tmp_path / f"{NAME}{EMBED_SUFFIX}"
+    in_the_way.mkdir()
+    with pytest.raises(
+        ThumbnailError, match="is a directory in the way of the working copy"
+    ) as info:
+        embed_cover(video, JPEG)
+    assert str(info.value).startswith(in_the_way.name)
+    assert video.read_bytes() == TINY_MP4
+    assert list(in_the_way.iterdir()) == []  # no stray copy of the video inside it
+    assert _names(tmp_path) == [NAME, in_the_way.name]
+
+
+def test_a_cleanup_that_fails_never_hides_the_real_error(tmp_path, monkeypatch):
+    """When the copy cannot be deleted after a failed write (Windows: an indexer still holds it),
+    the error reported is mutagen's, as a ThumbnailError — never the cleanup's own OSError."""
+    video = _video(tmp_path)
+
+    def failing_save(self: MP4, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("disk on fire")
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(MP4, "save", failing_save)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    with pytest.raises(ThumbnailError) as info:
+        embed_cover(video, JPEG)
+    assert str(info.value) == f"could not write the cover into {NAME} (RuntimeError: disk on fire)"
+    assert video.read_bytes() == TINY_MP4
+    assert _names(tmp_path) == [NAME, f"{NAME}{EMBED_SUFFIX}"]  # the copy stays: nothing more to do
+
+
 def test_without_mutagen_embedding_says_how_to_install_it_and_extraction_finds_nothing(
     tmp_path, monkeypatch
 ):

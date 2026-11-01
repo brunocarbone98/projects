@@ -33,8 +33,9 @@ Routes (all GET):
                                  cover URL inside an item_list payload (`video.cover`,
                                  `originCover`, `dynamicCover`) is rewritten to
                                  `{base}/cover/{item_id}.jpg`. Answers 200 `image/jpeg` with a
-                                 small hand-written JPEG (SOI, JFIF APP0, a COM segment that pads
-                                 it past 600 bytes, EOI), 429 with `cdn_rate_limit` like `/cdn/`;
+                                 real 16x16 JPEG (every decoder accepts it) carrying a COM
+                                 segment that names the item and pads it past 600 bytes, 429
+                                 with `cdn_rate_limit` like `/cdn/`;
                                  no login is needed (TikTok's covers are public).
 The request log keeps method, path and query plus three booleans; never headers or cookie values.
 """
@@ -375,14 +376,29 @@ def media_bytes(item_id: str, index: str) -> bytes:
     return TINY_MP4 + box_size.to_bytes(4, "big") + FREE_BOX + label + filler
 
 
+#: A real 16x16 baseline JPEG, 222 bytes, made once with ffmpeg (`-f lavfi -i color=c=0x404040:
+#: s=16x16 -frames:v 1 -pix_fmt yuvj420p -q:v 31`): SOI, JFIF APP0, ffmpeg's own COM, then the
+#: quantisation and Huffman tables, the frame header and the scan up to EOI — the smallest cover
+#: every decoder accepts (a shell of bare markers has the magic bytes but no picture in it).
+_REAL_JPEG = bytes.fromhex(
+    "ffd8ffe000104a46494600010200000100010000fffe00104c61766336302e33312e31303200ffdb0043"
+    "00083e3e493e49555555555555645d6468686864646464686868707070838383707070686870707c7c83"
+    "838f938f8787838793939b9b9bbabab2b2d9d9e0ffffffffc4004b000101000000000000000000000000"
+    "000000070101000000000000000000000000000000001001000000000000000000000000000000001101"
+    "00000000000000000000000000000000ffc00011080010001003012200021100031100ffda000c030100"
+    "02110311003f009f800fffd9"
+)
+_APP0_END = 4 + int.from_bytes(_REAL_JPEG[4:6], "big")  # SOI + the whole APP0 segment
+
+
 def cover_bytes(item_id: str) -> bytes:
-    """A small, valid JPEG, the same on every call for an item: SOI, a JFIF APP0 segment, one COM
-    segment naming the item and padding the file past `COVER_MIN_SIZE`, EOI. Hand-written bytes,
-    so no image library is needed to produce or recognise it (`FF D8 FF` at the start)."""
-    app0 = b"\xff\xe0" + (16).to_bytes(2, "big") + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    """A small JPEG every decoder accepts (a real 16x16 picture), the same on every call for an
+    item: the SOI and JFIF APP0 of `_REAL_JPEG`, one COM segment naming the item and padding the
+    file past `COVER_MIN_SIZE`, then its tables, frame header and scan up to EOI (`FF D8 FF` at
+    the start, `FF D9` at the end); no image library is needed to produce or recognise it."""
     comment = f"DramaFetch fake cover for item {item_id}".encode().ljust(COVER_MIN_SIZE, b".")
     com = b"\xff\xfe" + (len(comment) + 2).to_bytes(2, "big") + comment
-    return JPEG_SOI + app0 + com + JPEG_EOI
+    return _REAL_JPEG[:_APP0_END] + com + _REAL_JPEG[_APP0_END:]
 
 
 class FakeTikTok:
