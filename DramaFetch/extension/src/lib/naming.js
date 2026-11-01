@@ -62,10 +62,19 @@ export function safeFilename(text, maxLen = 80) {
   if (maxLen > 0 && pyLen(cleaned) > maxLen) cleaned = pyHead(cleaned, maxLen);
   cleaned = cleaned.replace(/[ .]+$/, "");
   if (!cleaned) return "untitled";
+  return withDeviceNameFixed(cleaned);
+}
+
+/**
+ * The last step of `safe_filename`: a Windows device name before the first dot gets a `_`.
+ * @param {string} cleaned
+ * @returns {string}
+ */
+function withDeviceNameFixed(cleaned) {
   const dot = cleaned.indexOf(".");
   const head = dot >= 0 ? cleaned.slice(0, dot) : cleaned;
   if (WINDOWS_RESERVED_NAMES.has(pyRstrip(head).toUpperCase())) {
-    cleaned = `${pyRstrip(head)}_${dot >= 0 ? cleaned.slice(dot) : ""}`;
+    return `${pyRstrip(head)}_${dot >= 0 ? cleaned.slice(dot) : ""}`;
   }
   return cleaned;
 }
@@ -95,6 +104,8 @@ export function chromeSafeFilename(text, maxLen = 80) {
     cleaned = chars.join("").replace(/[ .]+$/, "");
   }
   if (!cleaned) return "untitled";
+  // the device-name rules last, on the name as it will be saved (".CON" is "CON" by now)
+  cleaned = withDeviceNameFixed(cleaned);
   const dot = cleaned.indexOf(".");
   const head = dot >= 0 ? cleaned.slice(0, dot) : cleaned;
   if (CHROME_RESERVED_HEADS.has(head.toLowerCase()) || CHROME_RESERVED_NAMES.has(cleaned.toLowerCase())) {

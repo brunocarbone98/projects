@@ -545,7 +545,7 @@ def fuzz_rendition(rng: random.Random) -> Any:
     return entry
 
 
-def fuzz_video(rng: random.Random) -> Any:
+def fuzz_video(rng: random.Random, *, clues: bool = True) -> Any:
     if rng.random() < 0.1:
         return rng.choice([None, "x", [], 5])
     video: dict[str, Any] = {}
@@ -573,7 +573,7 @@ def fuzz_video(rng: random.Random) -> Any:
         )
     if rng.random() < 0.5:
         video[rng.choice(["originCover", "cover", "dynamicCover"])] = rng.choice(COVERS)
-    for _ in range(rng.randint(0, 3)):
+    for _ in range(rng.randint(0, 3) if clues else 0):
         video[rng.choice(FUZZ_KEYS)] = fuzz_scalar(rng)
     return video
 
@@ -582,11 +582,12 @@ def fuzz_item(rng: random.Random) -> dict[str, Any]:
     """One generated ``itemList`` entry: every field access_of and episode_from_item read, each
     sometimes missing, of the wrong type or a trap."""
     item: dict[str, Any] = {}
+    clean = rng.random() < 0.3  # no clue key at all: the structural rules alone decide
     if rng.random() < 0.9:
         item["id"] = rng.choice(
             ["7699400000000000001", 7699400, "  42  ", "", " ", None, True, 1.5]
         )
-    for _ in range(rng.randint(0, 4)):
+    for _ in range(0 if clean else rng.randint(0, 4)):
         item[rng.choice(FUZZ_KEYS)] = fuzz_scalar(rng)
     if rng.random() < 0.9:
         drama: dict[str, Any] = {
@@ -600,22 +601,22 @@ def fuzz_item(rng: random.Random) -> dict[str, Any]:
             drama["dramaID"] = rng.choice(["s", "other", 5, None, "", " s "])
         if rng.random() < 0.5:
             drama["dramaName"] = rng.choice(["Love Story", "  ", None, "\u00dc name", 7])
-        for _ in range(rng.randint(0, 4)):
+        for _ in range(0 if clean else rng.randint(0, 4)):
             drama[rng.choice(FUZZ_KEYS)] = fuzz_container(rng, 1)
-        if rng.random() < 0.3:
+        if not clean and rng.random() < 0.3:
             drama["DramaVideoData"].update(
                 {rng.choice(FUZZ_KEYS): fuzz_scalar(rng) for _ in range(rng.randint(1, 3))}
             )
         item["dramaInfo"] = drama if rng.random() < 0.95 else rng.choice(["x", [drama], None])
     if rng.random() < 0.9:
-        item["video"] = fuzz_video(rng)
+        item["video"] = fuzz_video(rng, clues=not clean)
     if rng.random() < 0.3:
         item["desc"] = rng.choice(["Episode desc", "  ", "", None, "\u00e9t\u00e9 | Ep 2"])
     if rng.random() < 0.2:
         item["author"] = rng.choice([{"uniqueId": "drama_us"}, {"uniqueId": "  "}, "x", None])
     if rng.random() < 0.15:
         outer: dict[str, Any] = {"itemStruct": item}
-        for _ in range(rng.randint(0, 2)):
+        for _ in range(0 if clean else rng.randint(0, 2)):
             outer[rng.choice(FUZZ_KEYS)] = fuzz_scalar(rng)
         return outer
     return item

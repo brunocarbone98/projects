@@ -72,6 +72,11 @@ test("Chrome-safe names: no tilde, no format or control character, no leading do
   assert.equal(chromeSafeFilename(". . ."), "untitled");
   assert.equal(chromeSafeFilename("clock$"), "clock$_");
   assert.equal(chromeSafeFilename("desktop.ini"), "desktop_.ini");
+  // the device-name rule applies to the name as saved: after the leading dot and the UTF-16 cut
+  assert.equal(chromeSafeFilename(".CON"), "CON_");
+  assert.equal(chromeSafeFilename("..aux.mp4"), "aux_.mp4");
+  assert.equal(chromeSafeFilename("\u{1f600}NUL", 3), "\u{1f600}N"); // 2 + 1 UTF-16 units
+  assert.equal(chromeSafeFilename("Nul\u{1f600}", 4), "Nul_");
   // Windows counts UTF-16 units: an astral character is two, and is never split
   const emoji = chromeSafeFilename("\u{1f600}".repeat(10), 5);
   assert.equal(emoji, "\u{1f600}\u{1f600}");
