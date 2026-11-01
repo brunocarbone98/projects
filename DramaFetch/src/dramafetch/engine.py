@@ -31,6 +31,7 @@ from dramafetch.downloader import (
 )
 from dramafetch.manifest import Manifest, manifest_path, series_dir, validate_name_format
 from dramafetch.models import (
+    THUMBNAIL_MODES,
     Discovery,
     DiscoveryOptions,
     Downloader,
@@ -245,6 +246,17 @@ def validate_naming(options: DownloadOptions) -> None:
     validate_name_format(options.name_format)
 
 
+def validate_thumbnail(options: DownloadOptions) -> None:
+    """Raise ValueError when ``options.thumbnail`` is not one of ``models.THUMBNAIL_MODES``
+    (``embed``, ``both``, ``file``, ``none``). Checked, like the pacing and the naming, before the
+    series directory is created; the CLI's ``--thumbnail`` choices refuse it even earlier."""
+    if options.thumbnail not in THUMBNAIL_MODES:
+        raise ValueError(
+            f"unknown thumbnail mode {options.thumbnail!r}: expected one of "
+            f"{', '.join(THUMBNAIL_MODES)}"
+        )
+
+
 def make_downloader(options: DownloadOptions) -> Downloader:
     """The downloader for ``options.engine``.
 
@@ -314,8 +326,9 @@ def download_series(
 ) -> list[DownloadResult]:
     """Download the given episodes of a series, one at a time, ascending, resumably, paced.
 
-    Validates the pacing options and the name format first (ValueError, see
-    :func:`validate_pacing` and :func:`validate_naming`), then creates the series directory, loads
+    Validates the pacing options, the name format and the thumbnail mode first (ValueError, see
+    :func:`validate_pacing`, :func:`validate_naming` and :func:`validate_thumbnail`), then
+    creates the series directory, loads
     its manifest (unless one is given), builds the downloader for ``options.engine`` (unless one
     is given; see :func:`make_downloader`) and, for each episode: an episode the manifest says is
     done (file still present) is skipped without network unless ``options.overwrite``; otherwise
@@ -343,6 +356,7 @@ def download_series(
     """
     validate_pacing(options)
     validate_naming(options)
+    validate_thumbnail(options)
     target_dir = series_dir(options.out_dir, series)
     target_dir.mkdir(parents=True, exist_ok=True)
     if manifest is None:

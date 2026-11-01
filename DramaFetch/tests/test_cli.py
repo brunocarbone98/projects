@@ -1341,6 +1341,8 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
             "browser",
             "--browser-channel",
             "msedge",
+            "--thumbnail",
+            "both",
         ]
     )
     assert code == 0
@@ -1364,6 +1366,9 @@ def test_serve_wires_flags_into_run_server(monkeypatch, tmp_path, capsys):
     assert download_options.max_consecutive_failures == 2
     assert download_options.engine == "browser"
     assert download_options.browser_channel == "msedge"
+    # the cover mode too: the web UI's jobs embed, keep or skip covers exactly like `download`
+    assert download_options.thumbnail == "both"
+    assert download_options.embed_cover and download_options.keep_cover_file
     assert servers[0].served and servers[0].closed
     err = capsys.readouterr().err
     assert "http://127.0.0.1:9000/" in err

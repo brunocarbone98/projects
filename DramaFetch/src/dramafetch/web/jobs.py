@@ -6,7 +6,8 @@ job downloads at a time: TikTok rate-limits aggressively and the engine already 
 queued jobs wait their turn in FIFO order. ``get()`` returns a JSON-ready snapshot that the page
 polls every couple of seconds; the engine's ``on_result`` callback updates it after each episode.
 Each row carries the file's ``path`` (what the files endpoint serves), its ``file_name`` (for
-display) and ``thumbnail`` (whether a cover sits next to the video — see :func:`cover_sidecar`).
+display) and ``thumbnail`` — whether a cover is available, saved next to the video or embedded in
+it (see :func:`has_cover`); it is computed once, when the row is recorded, never while polling.
 Nothing in this module touches the network itself, and nothing in a snapshot can contain a cookie:
 error messages are redacted defensively before they are stored.
 """
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from dramafetch.models import DownloadOptions, DownloadResult, Episode, Series
+from dramafetch.thumbnails import cover_sidecar
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +39,6 @@ RUNNING = "running"
 DONE = "done"
 ERROR = "error"
 FINISHED_STATES = frozenset({DONE, ERROR})
-
-#: Suffixes an episode cover can be saved with (yt-dlp's ``writethumbnail`` and the browser engine
-#: both write ``<video stem>.<one of these>``), in the order :func:`cover_sidecar` looks for them.
-COVER_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 
 # Anything that looks like `sessionid=...`, `Cookie: ...`, `msToken=...` or our own session cookie
 # in a message is blanked. The engine never puts cookie values in messages, but a snapshot is shown
@@ -57,22 +55,26 @@ def redact_secrets(text: str) -> str:
     return _SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
 
 
-def cover_sidecar(path: Path) -> Path | None:
-    """The thumbnail saved next to a video: the first existing ``<stem>.jpg|.jpeg|.png|.webp``."""
-    if not path.name:
-        return None
-    for suffix in COVER_SUFFIXES:
-        candidate = path.with_suffix(suffix)
-        if candidate.is_file():
-            return candidate
-    return None
+def has_cover(path: Path) -> bool:
+    """Whether a cover is available for the video at ``path``: a sidecar next to it (any engine in
+    the ``file``/``both`` modes) or one embedded in the file itself (the default ``embed`` mode).
+
+    Looks at the file system, so it is called once per row, by :func:`result_to_dict` when the
+    engine reports the episode — a snapshot never calls it: the page polls every couple of seconds.
+    """
+    if cover_sidecar(path) is not None:
+        return True
+    from dramafetch.thumbnails import has_embedded_cover  # lazy: the only web import near mutagen
+
+    return has_embedded_cover(path)
 
 
 def result_to_dict(result: DownloadResult) -> dict[str, Any]:
     """The per-episode row of a job snapshot.
 
-    ``file_name`` is the basename, for display; ``thumbnail`` says whether a cover sidecar sits next
-    to the file, so the page knows whether to offer a Cover link next to Save video.
+    ``file_name`` is the basename, for display; ``thumbnail`` says whether a cover is available —
+    a sidecar next to the file or one embedded in it (:func:`has_cover`) — so the page knows
+    whether to offer a Cover link next to Save video. Computed here, once, when the row is made.
     """
     path = result.path
     return {
@@ -82,7 +84,7 @@ def result_to_dict(result: DownloadResult) -> dict[str, Any]:
         "message": redact_secrets(result.message),
         "path": str(path) if path is not None else None,
         "file_name": path.name if path is not None else None,
-        "thumbnail": path is not None and cover_sidecar(path) is not None,
+        "thumbnail": path is not None and has_cover(path),
     }
 
 

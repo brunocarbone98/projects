@@ -32,3 +32,9 @@ class EpisodeDownloadError(DramaFetchError):
     def __init__(self, message: str, kind: str = "failed") -> None:
         super().__init__(message)
         self.kind = kind
+
+
+class ThumbnailError(DramaFetchError):
+    """The episode cover could not be embedded into its video: not an MP4 container, not a JPEG or
+    PNG, too big, mutagen missing or failing. Never escapes an engine — the episode stays DONE and
+    its message says what happened to the cover (the file is kept instead)."""

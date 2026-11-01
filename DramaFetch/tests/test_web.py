@@ -11,6 +11,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import shutil
 import socket
 import threading
 import time
@@ -21,6 +22,7 @@ from typing import Any
 from urllib.parse import quote
 
 import pytest
+from mutagen.mp4 import MP4, MP4Cover
 
 from dramafetch.errors import (
     ChallengeError,
@@ -37,8 +39,9 @@ from dramafetch.models import (
     Series,
     SeriesRef,
 )
+from dramafetch.thumbnails import cover_sidecar
 from dramafetch.web import server as web_server
-from dramafetch.web.jobs import JobManager, cover_sidecar, redact_secrets, result_to_dict
+from dramafetch.web.jobs import JobManager, redact_secrets, result_to_dict
 from dramafetch.web.server import (
     MAX_BODY_BYTES,
     content_disposition,
@@ -61,6 +64,24 @@ NOT_FOUND = (404, {"error": "no such file", "kind": "HttpError"})
 JPEG_BYTES = (
     b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00H\x00H\x00\x00" + b"\x00" * 64 + b"\xff\xd9"
 )
+# The PNG signature and an IHDR chunk header, padded: again only the magic number is real.
+PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 64
+# A real 3 s MP4 (160x120, faststart) without any cover: what the fake downloader copies when a
+# test needs a video mutagen can open.
+FIXTURE_MP4 = Path(__file__).parent / "fixtures" / "tiny.mp4"
+
+
+def embed_cover(
+    video: Path, image: bytes = JPEG_BYTES, image_format: int = MP4Cover.FORMAT_JPEG
+) -> None:
+    """Put ``image`` into the video's ``covr`` atom with mutagen directly (``MP4Cover.FORMAT_JPEG``
+    is 13, ``FORMAT_PNG`` 14), the way build 4's engines do through ``thumbnails.embed_cover``:
+    these tests are about the web side, not about the embedding."""
+    mp4 = MP4(video)
+    if mp4.tags is None:
+        mp4.add_tags()
+    mp4.tags["covr"] = [MP4Cover(image, imageformat=image_format)]
+    mp4.save()
 
 
 def make_series(name: str | None = SERIES_NAME) -> Series:
@@ -110,7 +131,10 @@ class FakeDownloader:
 
     ``write_dir`` (default: the series directory the engine passes in ``options.out_dir``) and
     ``name_format`` shape the path it reports; the episodes in ``cover_numbers`` also get a
-    ``<stem>.jpg`` sidecar, the way the real engines save a thumbnail.
+    ``<stem>.jpg`` sidecar, the way the real engines save a thumbnail in the ``file`` and ``both``
+    modes. The episodes in ``mp4_numbers`` are a copy of the real fixture instead of ``b"fake
+    video"``, and those in ``embedded_numbers`` that copy with ``embedded_image`` written into its
+    ``covr`` atom — the default ``embed`` mode's outcome.
     """
 
     def __init__(self) -> None:
@@ -118,6 +142,10 @@ class FakeDownloader:
         self.write_dir: Path | None = None
         self.name_format = "E{number:02d}.mp4"
         self.cover_numbers: set[int] = set()
+        self.mp4_numbers: set[int] = set()
+        self.embedded_numbers: set[int] = set()
+        self.embedded_image = JPEG_BYTES
+        self.embedded_format = MP4Cover.FORMAT_JPEG
 
     def download(self, episode: Episode, options: DownloadOptions) -> DownloadResult:
         self.calls.append(episode.number)
@@ -127,7 +155,12 @@ class FakeDownloader:
         directory = self.write_dir or options.out_dir
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / self.name_format.format(number=episode.number)
-        path.write_bytes(b"fake video")
+        if episode.number in self.mp4_numbers | self.embedded_numbers:
+            shutil.copyfile(FIXTURE_MP4, path)
+            if episode.number in self.embedded_numbers:
+                embed_cover(path, self.embedded_image, self.embedded_format)
+        else:
+            path.write_bytes(b"fake video")
         if episode.number in self.cover_numbers:
             path.with_suffix(".jpg").write_bytes(JPEG_BYTES)
         return DownloadResult(episode, DownloadStatus.DONE, path=path, message="ok")
@@ -294,6 +327,9 @@ def test_index_page_is_served(harness: Harness) -> None:
     assert 'id="download-all-btn" class="primary">Download all free<' in body
     assert "'Save video'" in body and "'Cover'" in body and "/api/files/" in body
     assert "Files are saved on the computer running DramaFetch" in body
+    # Build 4: the hint says where the cover lives and what the Cover link hands out.
+    assert "Covers are embedded in the video by default" in body
+    assert "the embedded one, or the file saved next to the video" in body
     assert 'id="token-form"' in body and 'id="token" name="token" type="password"' in body
     assert "/api/session" in body and "error.kind !== 'auth'" in body
     assert "localStorage" not in body and "sessionStorage" not in body
@@ -829,6 +865,190 @@ def test_files_endpoint_streams_the_finished_video_and_its_cover(harness: Harnes
     assert harness.raw("GET", f"/api/files/{job_id}/01")[0] == 200  # a padded number is fine
 
 
+def test_files_endpoint_serves_the_cover_embedded_in_the_video(harness: Harness) -> None:
+    """Build 4's default (`--thumbnail embed`): no sidecar, the cover sits in the MP4's `covr`
+    atom. The row says `thumbnail: true` and /cover answers the image from memory, with its own
+    type, its length and the video's stem as file name."""
+    harness.downloader.embedded_numbers = {1}
+    harness.downloader.mp4_numbers = {2}  # a real MP4 without any cover
+    job_id, rows = harness.finished_rows(episodes="1-2")
+    video = Path(rows[1]["path"])
+    assert cover_sidecar(video) is None
+    assert [p.name for p in video.parent.glob("E01*")] == ["E01.mp4"]  # no sidecar at all
+    assert rows[1]["thumbnail"] is True
+    assert rows[2]["thumbnail"] is False
+
+    status, headers, data = harness.raw("GET", f"/api/files/{job_id}/1/cover")
+    assert status == 200
+    assert data == JPEG_BYTES
+    assert headers["Content-Type"] == "image/jpeg"
+    assert headers["Content-Length"] == str(len(JPEG_BYTES))
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert (
+        headers["Content-Disposition"]
+        == "attachment; filename=\"E01.jpg\"; filename*=UTF-8''E01.jpg"
+    )
+    # The video is served whole, cover inside; a cover-less MP4 has no cover to serve.
+    status, headers, data = harness.raw("GET", f"/api/files/{job_id}/1")
+    assert status == 200 and data == video.read_bytes() and headers["Content-Type"] == "video/mp4"
+    assert MP4(video).info.length == pytest.approx(3.0, abs=0.1)  # still the 3 s fixture
+    assert harness.request("GET", f"/api/files/{job_id}/2/cover") == NOT_FOUND
+    # Reading the cover left nothing behind next to the video.
+    assert [p.name for p in video.parent.glob("E01*")] == ["E01.mp4"]
+
+
+def test_files_endpoint_names_an_embedded_png_cover_after_its_type(harness: Harness) -> None:
+    harness.downloader.embedded_numbers = {1}
+    harness.downloader.embedded_image = PNG_BYTES
+    harness.downloader.embedded_format = MP4Cover.FORMAT_PNG
+    job_id, rows = harness.finished_rows(episodes="1")
+    assert rows[1]["thumbnail"] is True
+    status, headers, data = harness.raw("GET", f"/api/files/{job_id}/1/cover")
+    assert status == 200 and data == PNG_BYTES
+    assert headers["Content-Type"] == "image/png"
+    assert headers["Content-Length"] == str(len(PNG_BYTES))
+    assert (
+        headers["Content-Disposition"]
+        == "attachment; filename=\"E01.png\"; filename*=UTF-8''E01.png"
+    )
+
+
+def test_files_endpoint_prefers_the_sidecar_over_the_embedded_cover(harness: Harness) -> None:
+    """`--thumbnail both` leaves a sidecar AND an embedded cover: the file next to the video is
+    what /cover serves (unchanged from build 3); the embedded one takes over only once the sidecar
+    is gone — the flag recorded on the row stays true either way."""
+    harness.downloader.cover_numbers = {1}  # E01.jpg holds JPEG_BYTES...
+    harness.downloader.embedded_numbers = {1}  # ...and the covr atom a PNG, to tell them apart
+    harness.downloader.embedded_image = PNG_BYTES
+    harness.downloader.embedded_format = MP4Cover.FORMAT_PNG
+    job_id, rows = harness.finished_rows(episodes="1")
+    assert rows[1]["thumbnail"] is True
+    status, headers, data = harness.raw("GET", f"/api/files/{job_id}/1/cover")
+    assert status == 200 and data == JPEG_BYTES and headers["Content-Type"] == "image/jpeg"
+    assert headers["Content-Disposition"].startswith('attachment; filename="E01.jpg"')
+    Path(rows[1]["path"]).with_suffix(".jpg").unlink()
+    status, headers, data = harness.raw("GET", f"/api/files/{job_id}/1/cover")
+    assert status == 200 and data == PNG_BYTES and headers["Content-Type"] == "image/png"
+    assert headers["Content-Disposition"].startswith('attachment; filename="E01.png"')
+
+
+def test_files_endpoint_never_serves_an_oversize_embedded_cover(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `covr` atom bigger than `thumbnails.MAX_COVER_BYTES` is not a cover (an error page, or
+    abuse): it is never sent from memory. The cap is read when the request is answered."""
+    import dramafetch.thumbnails as thumbnails
+
+    harness.downloader.embedded_numbers = {1}
+    job_id, _ = harness.finished_rows(episodes="1")
+    assert harness.raw("GET", f"/api/files/{job_id}/1/cover")[0] == 200
+    monkeypatch.setattr(thumbnails, "MAX_COVER_BYTES", len(JPEG_BYTES) - 1)
+    assert harness.request("GET", f"/api/files/{job_id}/1/cover") == NOT_FOUND
+    monkeypatch.setattr(thumbnails, "MAX_COVER_BYTES", len(JPEG_BYTES))
+    assert harness.raw("GET", f"/api/files/{job_id}/1/cover")[0] == 200
+
+
+def test_files_endpoint_checks_out_dir_before_reading_an_embedded_cover(
+    make_harness: Callable[..., Harness], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A done row pointing outside --out at a real MP4 with an embedded cover: the row is honest
+    (`thumbnail: true`), /cover is the one 404, and the file is never opened — the confinement
+    check comes before `extract_cover`, exactly as before the video itself."""
+    import dramafetch.thumbnails as thumbnails
+
+    harness = make_harness()
+    harness.downloader.write_dir = tmp_path / "elsewhere"
+    harness.downloader.embedded_numbers = {1}
+    outside_job, rows = harness.finished_rows(episodes="1")
+    outside = Path(rows[1]["path"])
+    assert outside.is_file() and not outside.resolve().is_relative_to(harness.out_dir.resolve())
+    assert rows[1]["status"] == "done" and rows[1]["thumbnail"] is True
+    harness.downloader.write_dir = None
+    harness.downloader.embedded_numbers = set()
+    inside_job, rows = harness.finished_rows(episodes="2")  # b"fake video", inside --out
+    inside = Path(rows[2]["path"]).resolve()
+
+    # From here on count what the files endpoint reads (recording the rows above went through the
+    # real function: `has_embedded_cover` is `extract_cover` too).
+    opened: list[Path] = []
+    real_extract = thumbnails.extract_cover
+
+    def counting_extract(video: Path) -> tuple[bytes, str] | None:
+        opened.append(video)
+        return real_extract(video)
+
+    monkeypatch.setattr(thumbnails, "extract_cover", counting_extract)
+    assert harness.request("GET", f"/api/files/{outside_job}/1/cover") == NOT_FOUND
+    assert harness.request("GET", f"/api/files/{outside_job}/1") == NOT_FOUND
+    assert opened == []  # never reached for a path outside --out
+    # Inside --out the video is read, once per request and only after the check — still a 404 here.
+    assert harness.request("GET", f"/api/files/{inside_job}/2/cover") == NOT_FOUND
+    assert opened == [inside]
+
+
+def test_files_endpoint_refuses_a_symlinked_video_with_an_embedded_cover(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link inside --out to an MP4 outside it: its embedded cover is not served either, and the
+    file behind the link is never opened."""
+    import dramafetch.thumbnails as thumbnails
+
+    secret = tmp_path / "secret.mp4"
+    shutil.copyfile(FIXTURE_MP4, secret)
+    embed_cover(secret)
+    job_id, rows = harness.finished_rows(episodes="1")
+    inside = Path(rows[1]["path"])
+    inside.unlink()
+    try:
+        inside.symlink_to(secret)
+    except OSError:  # no symlink support here
+        pytest.skip("symlinks are not available on this platform")
+    assert inside.is_file()  # through the link...
+    opened: list[Path] = []
+
+    def recording_extract(video: Path) -> tuple[bytes, str] | None:
+        opened.append(video)
+        return None
+
+    monkeypatch.setattr(thumbnails, "extract_cover", recording_extract)
+    assert harness.request("GET", f"/api/files/{job_id}/1/cover") == NOT_FOUND  # ...but not served
+    assert harness.request("GET", f"/api/files/{job_id}/1") == NOT_FOUND
+    assert opened == []
+
+
+def test_thumbnail_flag_is_computed_once_when_the_row_is_recorded(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page polls every 2 s: the flag is read from the file system once per row, when the
+    engine reports the episode, never while answering GET /api/jobs/<id>. A sidecar settles it
+    without opening the video; otherwise the video is checked for an embedded cover — once."""
+    import dramafetch.thumbnails as thumbnails
+
+    checked: list[Path] = []
+    real_has_embedded_cover = thumbnails.has_embedded_cover
+
+    def counting_has_embedded_cover(video: Path) -> bool:
+        checked.append(video)
+        return real_has_embedded_cover(video)
+
+    monkeypatch.setattr(thumbnails, "has_embedded_cover", counting_has_embedded_cover)
+    harness.downloader.embedded_numbers = {1}
+    harness.downloader.cover_numbers = {2}
+    job_id, rows = harness.finished_rows(episodes="1-3")
+    assert [rows[n]["thumbnail"] for n in (1, 2, 3)] == [True, True, False]
+    assert sorted(p.name for p in checked) == ["E01.mp4", "E03.mp4"]
+    for _ in range(5):
+        status, snapshot = harness.request("GET", f"/api/jobs/{job_id}")
+        assert status == 200
+        assert [row["thumbnail"] for row in snapshot["results"]] == [True, True, False]
+    assert len(checked) == 2  # polling never looked again
+    # Nor does the flag follow later changes on disk: it describes the row as it was recorded.
+    Path(rows[1]["path"]).unlink()
+    assert harness.request("GET", f"/api/jobs/{job_id}")[1]["results"][0]["thumbnail"] is True
+    assert len(checked) == 2
+
+
 def test_files_endpoint_names_non_ascii_files_for_every_client(harness: Harness) -> None:
     # Accents, an en dash and CJK on purpose: the ASCII fallback must still name the file.
     harness.downloader.name_format = "Épisode {number:02d} – 测试.mp4"  # noqa: RUF001
@@ -1121,6 +1341,13 @@ def test_result_to_dict(tmp_path: Path) -> None:
     # A path that does not exist (yet, or any more) simply has no thumbnail.
     missing = result_to_dict(DownloadResult(episode, DownloadStatus.DONE, path=tmp_path / "x.mp4"))
     assert missing["thumbnail"] is False and missing["file_name"] == "x.mp4"
+    # Build 4's default: the cover embedded in the video, no sidecar at all.
+    embedded = tmp_path / "Series - Episode 02.mp4"
+    shutil.copyfile(FIXTURE_MP4, embedded)
+    plain = result_to_dict(DownloadResult(episode, DownloadStatus.DONE, path=embedded))
+    assert plain["thumbnail"] is False  # a real MP4 without a cover
+    embed_cover(embedded)
+    assert result_to_dict(DownloadResult(episode, DownloadStatus.DONE, path=embedded))["thumbnail"]
 
 
 def test_cover_sidecar_prefers_jpg_then_jpeg_png_webp(tmp_path: Path) -> None:

@@ -11,6 +11,10 @@ TIKTOK_BASE_URL = "https://www.tiktok.com"
 #: Default file name of an episode (without extension); see ``manifest.episode_stem`` for the
 #: placeholders: {series} {number} {n} {title} {id}.
 DEFAULT_NAME_FORMAT = "{series} - Episode {number}"
+#: ``DownloadOptions.thumbnail`` values — where an episode's cover goes: into the MP4 as its cover
+#: art (``embed``, the default), into the MP4 and a file next to it (``both``), a file next to the
+#: video only (``file``), nowhere (``none``: no cover request at all).
+THUMBNAIL_MODES = ("embed", "both", "file", "none")
 
 
 @dataclass(frozen=True)
@@ -135,7 +139,11 @@ class DownloadOptions:
     # File names: placeholders {series} {number} (zero-padded) {n} {title} {id}; see
     # ``manifest.episode_stem``. Validated by ``engine.validate_naming`` before anything is written.
     name_format: str = DEFAULT_NAME_FORMAT
-    thumbnails: bool = True  # save the episode cover next to the video as <stem>.<jpg|png|webp>
+    # The episode cover: "embed" (default) writes it into the MP4 as its cover art (the `covr`
+    # atom) and leaves no other file; "both" embeds it and keeps <stem>.<jpeg|jpg|png|webp> next to
+    # the video; "file" keeps that file only; "none" requests no cover at all. One of
+    # THUMBNAIL_MODES, checked by ``engine.validate_thumbnail`` before anything is written.
+    thumbnail: str = "embed"
     series_name: str | None = None  # filled by engine.download_series; expands {series}
     impersonate: bool = True  # yt-dlp + curl_cffi browser impersonation when installed
     prefer_h264: bool = True
@@ -144,6 +152,21 @@ class DownloadOptions:
     include_locked: bool = False  # try episodes that look locked (they usually have no formats)
     dry_run: bool = False
     extractor_args: dict[str, dict[str, list[str]]] | None = None  # passthrough to yt-dlp
+
+    @property
+    def thumbnails(self) -> bool:
+        """Whether a cover is requested at all: every mode but ``"none"``."""
+        return self.thumbnail != "none"
+
+    @property
+    def embed_cover(self) -> bool:
+        """Whether the cover goes into the video file (modes ``embed`` and ``both``)."""
+        return self.thumbnail in ("embed", "both")
+
+    @property
+    def keep_cover_file(self) -> bool:
+        """Whether a cover file stays next to the video (modes ``both`` and ``file``)."""
+        return self.thumbnail in ("both", "file")
 
 
 class DownloadStatus(StrEnum):

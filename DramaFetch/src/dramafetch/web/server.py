@@ -8,7 +8,8 @@ Routes::
     POST /api/download {"url", "episodes", "include_locked"} -> 202 {"job_id": ...}
     GET  /api/jobs/<id>             the job snapshot (see jobs.py) -> 200, or 404 when unknown
     GET  /api/files/<job>/<number>  the finished video of that job row -> the bytes, or 404
-    GET  /api/files/<job>/<number>/cover   its thumbnail (<stem>.jpg|.jpeg|.png|.webp), or 404
+    GET  /api/files/<job>/<number>/cover   its cover: the <stem>.jpg|.jpeg|.png|.webp sidecar when
+                                    one exists, else the one embedded in the video, or 404
     GET  /api/doctor                the `dramafetch doctor` facts as JSON
 
 Rules: the server binds to the host it is given and nothing else (the CLI defaults to 127.0.0.1;
@@ -25,10 +26,11 @@ preflight we never answer, and the ``Host`` header must name the bound host or l
 against DNS rebinding; bound to every interface — ``0.0.0.0`` / ``::`` — the server cannot know
 its own addresses, so there any IP literal is accepted but still no other host name). The output
 directory is fixed server-side: the page cannot choose paths, and the files endpoint serves
-nothing but the path a finished (``done``) job row recorded, and
-only when it resolves to a regular file inside that directory (never a ``.part``) — anything else
-is a 404 that names no path. Errors are ``{"error": message, "kind": ExceptionName}`` with a
-4xx/5xx status; cookie and token values never appear in responses or logs (the log says
+nothing but the path a finished (``done``) job row recorded — or, for ``/cover``, the sidecar next
+to it, else the cover embedded in that video, read into memory only after the video passed the
+same check — and only when it resolves to a regular file inside that directory (never a ``.part``):
+anything else is a 404 that names no path. Errors are ``{"error": message, "kind": ExceptionName}``
+with a 4xx/5xx status; cookie and token values never appear in responses or logs (the log says
 ``token: set`` or ``token: none``). Resolving a series runs synchronously inside the request: the
 discovery opens TikTok in a browser and usually takes 10-40 s, so the page shows a waiting note.
 """
@@ -46,7 +48,7 @@ import shutil
 import socket
 import unicodedata
 from collections.abc import Iterable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -71,7 +73,8 @@ from dramafetch.models import (
     Series,
     VideoRef,
 )
-from dramafetch.web.jobs import JobManager, Runner, cover_sidecar, redact_secrets
+from dramafetch.thumbnails import cover_sidecar
+from dramafetch.web.jobs import JobManager, Runner, redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +116,9 @@ _CONTENT_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+#: The file name an embedded cover is offered under: ``<video stem>`` + the suffix of its MIME type
+#: (``thumbnails.extract_cover`` yields JPEG or PNG; anything else is not served).
+_COVER_SUFFIX_BY_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _CHUNK_BYTES = 64 * 1024
 # Dropped from the ASCII fallback file name (RFC 6266): quotes and backslashes would end or escape
 # the quoted-string, control characters have no place in a header.
@@ -152,6 +158,16 @@ class HttpError(Exception):
 def _no_such_file() -> HttpError:
     """The files endpoint's only failure: it never says whether the job, row or path exists."""
     return HttpError(HTTPStatus.NOT_FOUND, "no such file")
+
+
+@dataclass(frozen=True)
+class EmbeddedCover:
+    """A cover read out of the video's ``covr`` atom, served from memory: the image bytes, their
+    MIME type (``image/jpeg`` or ``image/png``) and the ``<video stem>.jpg|.png`` name to offer."""
+
+    data: bytes
+    content_type: str
+    file_name: str
 
 
 def is_loopback_host(host: str) -> bool:
@@ -317,23 +333,63 @@ class DramaFetchServer(ThreadingHTTPServer):
         return host_header_allowed(self.bound_host, host_header)
 
     def served_file(self, job_id: str, number: int, *, cover: bool = False) -> Path | None:
-        """The video (or, with ``cover``, the thumbnail) a finished job row points at, if it may be
-        served: the row must be ``done`` with a path, and that path — or its first existing
+        """The video (or, with ``cover``, the cover sidecar) a finished job row points at, if it may
+        be served: the row must be ``done`` with a path, and that path — or its first existing
         ``<stem>.jpg|.jpeg|.png|.webp`` sidecar — must resolve (symlinks followed) to a regular file
-        inside ``out_dir`` that is no ``.part``. ``None`` otherwise; the caller answers 404 without
-        saying why. The URL only ever selects a row: no part of it touches the file system."""
+        inside ``out_dir`` that is no ``.part`` (:meth:`_confined_file`). ``None`` otherwise; the
+        caller answers 404 without saying why. The URL only ever selects a row: no part of it
+        touches the file system. A cover embedded in the video is :meth:`served_cover`'s job."""
+        path = self._recorded_path(job_id, number)
+        if path is None:
+            return None
+        if cover:
+            sidecar = cover_sidecar(path)
+            if sidecar is None:
+                return None
+            path = sidecar
+        return self._confined_file(path)
+
+    def served_cover(self, job_id: str, number: int) -> Path | EmbeddedCover | None:
+        """The cover of a finished job row: the sidecar's path when one sits next to the video
+        (:meth:`served_file` with ``cover=True`` — a sidecar that exists but may not be served is
+        never replaced by the embedded one), else the cover embedded in the video itself, read into
+        memory with ``thumbnails.extract_cover`` — but only once the video passed the very same
+        confinement check, so nothing outside ``out_dir`` is ever opened. ``None`` when there is
+        neither (or the row may not be served): the caller answers the one 404."""
+        path = self._recorded_path(job_id, number)
+        if path is None:
+            return None
+        if cover_sidecar(path) is not None:
+            return self.served_file(job_id, number, cover=True)
+        video = self._confined_file(path)
+        if video is None:
+            return None
+        from dramafetch.thumbnails import MAX_COVER_BYTES, extract_cover  # lazy: may load mutagen
+
+        extracted = extract_cover(video)
+        if extracted is None:
+            return None
+        data, content_type = extracted
+        suffix = _COVER_SUFFIX_BY_TYPE.get(content_type)
+        if suffix is None or len(data) > MAX_COVER_BYTES:  # not an image we name, or not a cover
+            return None
+        return EmbeddedCover(data, content_type, video.stem + suffix)
+
+    def _recorded_path(self, job_id: str, number: int) -> Path | None:
+        """The path a ``done`` row of the job recorded, as recorded (not yet checked), or ``None``
+        for an unknown job, an unknown row, or a row that is not ``done`` with a path."""
         snapshot = self.jobs.get(job_id)
         if snapshot is None:
             return None
         row = next((row for row in snapshot["results"] if row["number"] == number), None)
         if row is None or row["status"] != DownloadStatus.DONE.value or not row["path"]:
             return None
-        path = Path(row["path"])
-        if cover:
-            sidecar = cover_sidecar(path)
-            if sidecar is None:
-                return None
-            path = sidecar
+        return Path(row["path"])
+
+    def _confined_file(self, path: Path) -> Path | None:
+        """``path`` resolved (symlinks followed) when it is a regular file inside ``out_dir`` and no
+        ``.part`` before or after resolving; ``None`` otherwise. Nothing is opened here: this is
+        the check that must pass before any file is read for a response."""
         if path.suffix.lower() == ".part":
             return None
         try:
@@ -561,16 +617,32 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_file(self, rest: str) -> None:
         """``<job id>/<number>`` or ``<job id>/<number>/cover`` after ``/api/files/``: stream the
-        file the job row points at (see :meth:`DramaFetchServer.served_file`), or the one 404."""
+        file the job row points at (:meth:`DramaFetchServer.served_file`) — for ``/cover`` the
+        sidecar, or the embedded cover sent from memory (:meth:`DramaFetchServer.served_cover`) —
+        or the one 404."""
         parts = rest.split("/")
         if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] != "cover"):
             raise _no_such_file()
         job_id, number = parts[0], parts[1]
         if not job_id or not (number.isascii() and number.isdigit()):
             raise _no_such_file()
-        target = self.app.served_file(job_id, int(number), cover=len(parts) == 3)
+        target: Path | EmbeddedCover | None
+        if len(parts) == 3:
+            target = self.app.served_cover(job_id, int(number))
+        else:
+            target = self.app.served_file(job_id, int(number))
         if target is None:
             raise _no_such_file()
+        if isinstance(target, EmbeddedCover):
+            # Already in memory (capped at MAX_COVER_BYTES): Content-Length, no-store and the
+            # other fixed headers come from _send_bytes / _send_headers like for any response.
+            self._send_bytes(
+                HTTPStatus.OK,
+                target.data,
+                target.content_type,
+                [("Content-Disposition", content_disposition(target.file_name))],
+            )
+            return
         with target.open("rb") as handle:
             size = os.fstat(handle.fileno()).st_size
             self._send_headers(

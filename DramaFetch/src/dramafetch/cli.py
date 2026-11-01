@@ -46,6 +46,7 @@ from dramafetch.errors import (
 from dramafetch.manifest import NAME_PLACEHOLDERS, series_dir, validate_name_format
 from dramafetch.models import (
     DEFAULT_NAME_FORMAT,
+    THUMBNAIL_MODES,
     DiscoveryOptions,
     DownloadOptions,
     DownloadResult,
@@ -151,7 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     video.set_defaults(func=_cmd_video)
 
     doctor = commands.add_parser(
-        "doctor", help="check Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg and cookies"
+        "doctor",
+        help="check Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg, cookies and mutagen",
     )
     _add_cookies_flag(doctor)
     doctor.add_argument("--browser-channel", choices=("chrome", "msedge", "chromium"), default=None)
@@ -260,11 +262,14 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
         f"'{VIDEO_NAME_FORMAT}' for video; {{number}} is zero-padded, {{n}} is not)",
     )
     group.add_argument(
-        "--no-thumbnails",
-        action="store_true",
-        help=(
-            "do not save the episode cover next to the video (default: <name>.jpeg|jpg|png|webp)"
-        ),
+        "--thumbnail",
+        choices=THUMBNAIL_MODES,
+        default=DownloadOptions.thumbnail,
+        help="where the episode cover goes: embed (default) writes it into the MP4 as its cover "
+        "art — what iTunes, the Apple TV app, Infuse and VLC's library show — and leaves no other "
+        "file; both also keeps it next to the video as <name>.jpeg|jpg|png|webp (for Plex, "
+        "Jellyfin, Kodi and galleries, which show a frame of the video otherwise); file keeps that "
+        "file only, nothing embedded; none fetches no cover at all",
     )
     group.add_argument("--overwrite", action="store_true", help="re-download existing files")
     group.add_argument("--dry-run", action="store_true", help="list what would be downloaded")
@@ -539,7 +544,7 @@ def _download_options(args: argparse.Namespace) -> DownloadOptions:
         if browser
         else DownloadOptions.base_url,
         name_format=name_format_for(args),
-        thumbnails=not getattr(args, "no_thumbnails", False),
+        thumbnail=getattr(args, "thumbnail", DownloadOptions.thumbnail),
         impersonate=not args.no_impersonate,
         retries=args.retries,
         overwrite=args.overwrite,
@@ -638,7 +643,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         browser_path=args.browser_path,
         cookies_file=args.cookies,
     )
-    # The pacing defaults, as information (neither ok nor fail): the web UI's doctor omits them.
+    # Whether covers can be embedded, then the pacing defaults as information (neither ok nor
+    # fail): the web UI's doctor panel keeps the seven environment facts above and omits both.
+    checks.append(_check_mutagen())
     checks.append(DoctorCheck("pace", "skip", describe_pacing()))
     # A stdout that cannot encode the check marks (a Windows pipe in cp1252) gets ASCII ones.
     lines = format_doctor(checks, ascii_marks=not _stream_is_utf8(sys.stdout))
@@ -962,6 +969,20 @@ def _check_ffmpeg() -> DoctorCheck:
         "skip",
         "not on PATH (optional: TikTok episodes are single progressive files, nothing to merge)",
     )
+
+
+def _check_mutagen() -> DoctorCheck:
+    """Whether the episode covers can be embedded into the MP4 files (``--thumbnail embed``, the
+    default, and ``both``); without mutagen every engine keeps the cover as a file and says so."""
+    try:
+        from mutagen import version_string
+    except Exception:
+        return DoctorCheck(
+            "mutagen",
+            "fail",
+            "not importable — covers are saved as files only (pip install mutagen)",
+        )
+    return DoctorCheck("mutagen", "ok", f"{version_string} (covers are embedded into the MP4)")
 
 
 def _check_cookies(cookies_file: Path | None) -> DoctorCheck:

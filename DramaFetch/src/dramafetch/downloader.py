@@ -8,6 +8,11 @@ Without a logged-in session TikTok returns no formats ("No video formats found")
 ``/login``, so a Netscape ``cookies.txt`` (or ``--cookies-from-browser``) is the normal way to run.
 Locked (paid) episodes are skipped before any network access; nothing here unlocks or bypasses
 anything. Cookie values are never logged; error messages are redacted just in case.
+
+The episode cover yt-dlp saves next to the video (``writethumbnail``) is then embedded into the
+MP4 as its cover art, kept as a file, or both, as ``DownloadOptions.thumbnail`` says (see
+:func:`_finish_cover` and ``dramafetch.thumbnails``); what became of it is appended to the DONE
+message and never changes the status.
 """
 
 from __future__ import annotations
@@ -21,8 +26,16 @@ from typing import Any
 
 from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.discovery.static import redact_tokens, safe_url
+from dramafetch.errors import ThumbnailError
 from dramafetch.manifest import episode_stem
 from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode
+from dramafetch.thumbnails import (
+    COVER_SUFFIXES,
+    MAX_COVER_BYTES,
+    embed_cover,
+    extension_for,
+    image_kind,
+)
 
 TIKTOK_REFERER = "https://www.tiktok.com/"
 H264_FORMAT = "best[vcodec^=h264]/best[vcodec=avc1]/best"
@@ -36,6 +49,9 @@ MAX_RETRIES = 3
 BLOCKED_MESSAGE = (
     "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again"
 )
+#: Extensions yt-dlp's ``writethumbnail`` can give the cover: the cover URL's own, or ``.image``
+#: when the URL has none (TikTok's ``dynamicCover``); see :func:`_written_cover`.
+WRITTEN_COVER_SUFFIXES = (*COVER_SUFFIXES, ".image")
 
 _PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
 #: Extensions that count as "the episode's video" when looking for an existing file. The cover
@@ -179,6 +195,77 @@ def describe_failure(status: DownloadStatus, message: str) -> str:
     return message
 
 
+def _written_cover(video: Path) -> Path | None:
+    """The cover yt-dlp wrote next to ``video``: the first existing ``<stem>.<ext>`` for the
+    extensions in :data:`WRITTEN_COVER_SUFFIXES`, or None."""
+    for suffix in WRITTEN_COVER_SUFFIXES:
+        candidate = video.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _finish_cover(video: Path, options: DownloadOptions) -> str:
+    """Embed into ``video``, keep, or both, the cover yt-dlp wrote next to it, as
+    ``options.thumbnail`` says; the suffix for the DONE message (empty for mode ``none``).
+
+    The sidecar is read whole, capped at :data:`~dramafetch.thumbnails.MAX_COVER_BYTES` (over the
+    cap it is deleted: ``"; cover: too large, not kept"``), and its kind sniffed from the bytes;
+    yt-dlp's generic ``.image`` is renamed to the real extension first. Then: mode ``file`` ->
+    ``" + cover file"``; ``embed``/``both`` -> :func:`~dramafetch.thumbnails.embed_cover` (the
+    video is copied, never edited in place) -> ``" + cover embedded"`` and the sidecar deleted,
+    or ``" + cover embedded + file"`` for ``both``. Whatever cannot be embedded stays on disk, so
+    nothing is lost: ``"; cover: webp cannot be embedded; file kept"``, ``"; cover: could not
+    embed (<reason>); file kept"`` (:class:`~dramafetch.errors.ThumbnailError`: not an MP4,
+    mutagen missing or failing), ``"; cover: not a JPEG, PNG or WEBP image; file kept"``. No
+    sidecar at all (yt-dlp could not get the cover) -> ``"; cover: not available"``. Never
+    raises; never changes the status.
+    """
+    if not options.thumbnails:
+        return ""
+    sidecar = _written_cover(video)
+    if sidecar is None:
+        return "; cover: not available"
+    try:
+        if sidecar.stat().st_size > MAX_COVER_BYTES:
+            sidecar.unlink()
+            return "; cover: too large, not kept"
+        data = sidecar.read_bytes()
+    except OSError as exc:
+        return f"; cover: {exc.strerror or exc.__class__.__name__}; file kept"
+    kind = image_kind(data)
+    if kind is None:
+        return "; cover: not a JPEG, PNG or WEBP image; file kept"
+    if sidecar.suffix.lower() == ".image":
+        sidecar = _rename_cover(sidecar, video.with_suffix(extension_for(kind)))
+    if not options.embed_cover:
+        return " + cover file"
+    if kind == "webp":
+        return "; cover: webp cannot be embedded; file kept"
+    try:
+        embed_cover(video, data)
+    except ThumbnailError as exc:
+        return f"; cover: could not embed ({exc}); file kept"
+    if options.keep_cover_file:
+        return " + cover embedded + file"
+    try:
+        sidecar.unlink()
+    except OSError:  # the cover is in the video; a file that would not go is reported as kept
+        return " + cover embedded + file"
+    return " + cover embedded"
+
+
+def _rename_cover(sidecar: Path, target: Path) -> Path:
+    """Rename yt-dlp's ``<stem>.image`` to the extension its bytes call for; the path to use
+    afterwards (the old one when the rename fails or ``target`` is already taken)."""
+    if target.exists():
+        return sidecar
+    try:
+        return sidecar.replace(target)
+    except OSError:
+        return sidecar
+
+
 def _default_ydl_factory(params: dict[str, Any]) -> Any:
     import yt_dlp  # lazy: importing yt-dlp is slow and tests never need it
 
@@ -198,11 +285,13 @@ class YtDlpDownloader:
 
         ``retries``/``fragment_retries`` never exceed :data:`MAX_RETRIES` and yt-dlp sleeps one
         second between its own requests (``sleep_interval_requests``): fewer, slower requests.
-        With ``options.thumbnails`` yt-dlp also saves the episode cover next to the video
-        (``writethumbnail``, no postprocessor, no ffmpeg) — its way, not the browser engine's: it
-        fetches the cover just before the video, names the file after the cover URL's extension
-        (``<stem>.jpeg`` for TikTok's covers), tries the next cover the extractor listed when one
-        fails, and says nothing when none can be had (the DONE message stays ``saved <name>``).
+        With ``options.thumbnails`` (every mode but ``none``) yt-dlp also saves the episode cover
+        next to the video (``writethumbnail``, no postprocessor, no ffmpeg) — its way, not the
+        browser engine's: it fetches the cover just before the video, names the file after the
+        cover URL's extension (``<stem>.jpeg`` for TikTok's covers), tries the next cover the
+        extractor listed when one fails, and says nothing when none can be had. What DramaFetch
+        then does with that file — embed it into the MP4, keep it, both — is
+        :func:`_finish_cover`'s job, after the download.
         """
         del episode  # the caller already folded the episode into outtmpl
         params: dict[str, Any] = {
@@ -254,7 +343,7 @@ class YtDlpDownloader:
                 message=f"already exists: {existing.name}",
             )
         if options.dry_run:
-            thumbnail = " + thumbnail" if options.thumbnails else ""
+            thumbnail = " + cover" if options.thumbnails else ""
             return DownloadResult(
                 episode=episode,
                 status=DownloadStatus.DRY_RUN,
@@ -291,7 +380,7 @@ class YtDlpDownloader:
             episode=episode,
             status=DownloadStatus.DONE,
             path=produced,
-            message=f"saved {produced.name}",
+            message=f"saved {produced.name}" + _finish_cover(produced, options),
         )
 
     @staticmethod
