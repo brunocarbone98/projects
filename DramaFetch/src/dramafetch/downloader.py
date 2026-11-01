@@ -38,6 +38,10 @@ BLOCKED_MESSAGE = (
 )
 
 _PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
+#: Extensions that count as "the episode's video" when looking for an existing file. The cover
+#: saved next to a video (``<stem>.jpg``/``.png``/``.webp``) must never pass for the video itself,
+#: or an episode whose download failed after the cover was written would be skipped for good.
+VIDEO_SUFFIXES = frozenset({".mp4", ".m4v", ".mov", ".mkv", ".webm"})
 _SECRET_RE = re.compile(
     r"\b(cookies?|sessionid(?:_ss)?|sid_tt|sid_guard|uid_tt|mstoken|ttwid|tt_chain_token"
     r"|passport_csrf_token|odin_tt|tt_csrf_token)\b\s*[:=]\s*[^\s;,&]+",
@@ -78,30 +82,38 @@ def is_partial_file(name: str) -> bool:
     return name.endswith(_PARTIAL_SUFFIXES) or ".part-Frag" in name
 
 
-def existing_episode_file(out_dir: Path, episode: Episode) -> Path | None:
-    """The newest complete file named ``<episode stem>.<ext>`` in ``out_dir``, if any."""
+def existing_episode_file(out_dir: Path, episode: Episode, options: DownloadOptions) -> Path | None:
+    """The newest complete VIDEO named ``<episode stem>.<ext>`` in ``out_dir``, if any.
+
+    The stem follows ``options.name_format`` (:func:`~dramafetch.manifest.episode_stem`); only
+    files whose extension is in :data:`VIDEO_SUFFIXES` count, so a cover sidecar (``<stem>.jpg``)
+    or an in-progress ``.part`` never passes for the episode.
+    """
     if not out_dir.is_dir():
         return None
-    prefix = episode_stem(episode) + "."
+    prefix = episode_stem(episode, options) + "."
     candidates = [
         path
         for path in out_dir.iterdir()
-        if path.is_file() and path.name.startswith(prefix) and not is_partial_file(path.name)
+        if path.is_file()
+        and path.name.startswith(prefix)
+        and path.suffix.lower() in VIDEO_SUFFIXES
+        and not is_partial_file(path.name)
     ]
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
-def output_template(out_dir: Path, episode: Episode) -> str:
+def output_template(out_dir: Path, episode: Episode, options: DownloadOptions) -> str:
     """yt-dlp ``outtmpl`` for the episode: ``<out_dir>/<episode stem>.%(ext)s``.
 
     Everything except the final ``%(ext)s`` is literal text that TikTok partly controls (the series
-    name in ``out_dir``, the episode title in the stem), so its percent signs are doubled: yt-dlp
-    expands ``%(name)s`` sequences in the template, and an unescaped ``%(cookies)s`` in a title
-    would otherwise put the session cookies into the file name.
+    name in ``out_dir`` and in the stem, the episode title in the stem), so its percent signs are
+    doubled: yt-dlp expands ``%(name)s`` sequences in the template, and an unescaped
+    ``%(cookies)s`` in a title would otherwise put the session cookies into the file name.
     """
-    return str(out_dir / episode_stem(episode)).replace("%", "%%") + ".%(ext)s"
+    return str(out_dir / episode_stem(episode, options)).replace("%", "%%") + ".%(ext)s"
 
 
 def cookies_file_problem(cookies_file: Path | None) -> str | None:
@@ -182,6 +194,9 @@ class YtDlpDownloader:
 
         ``retries``/``fragment_retries`` never exceed :data:`MAX_RETRIES` and yt-dlp sleeps one
         second between its own requests (``sleep_interval_requests``): fewer, slower requests.
+        With ``options.thumbnails`` yt-dlp also saves the episode cover next to the video as
+        ``<stem>.<jpg|webp|…>`` (``writethumbnail``; one small image request, no postprocessor,
+        no ffmpeg).
         """
         del episode  # the caller already folded the episode into outtmpl
         params: dict[str, Any] = {
@@ -205,6 +220,8 @@ class YtDlpDownloader:
             "overwrites": options.overwrite,
             "sleep_interval_requests": 1,
         }
+        if options.thumbnails:
+            params["writethumbnail"] = True
         if options.cookies_file is not None:
             params["cookiefile"] = str(options.cookies_file)
         if options.cookies_from_browser:
@@ -222,7 +239,7 @@ class YtDlpDownloader:
         out_dir = options.out_dir
         if episode.locked and not options.include_locked:
             return locked_result(episode)
-        existing = existing_episode_file(out_dir, episode)
+        existing = existing_episode_file(out_dir, episode, options)
         if existing is not None and not options.overwrite:
             return DownloadResult(
                 episode=episode,
@@ -231,15 +248,16 @@ class YtDlpDownloader:
                 message=f"already exists: {existing.name}",
             )
         if options.dry_run:
+            thumbnail = " + thumbnail" if options.thumbnails else ""
             return DownloadResult(
                 episode=episode,
                 status=DownloadStatus.DRY_RUN,
-                message=f"would download {episode.page_url}",
+                message=f"would download {episode.page_url}{thumbnail}",
             )
         problem = cookies_file_problem(options.cookies_file)
         if problem is not None:
             return DownloadResult(episode=episode, status=DownloadStatus.FAILED, message=problem)
-        params = self.build_options(episode, options, output_template(out_dir, episode))
+        params = self.build_options(episode, options, output_template(out_dir, episode, options))
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             with self._ydl_factory(params) as ydl:
@@ -256,7 +274,7 @@ class YtDlpDownloader:
                 status=DownloadStatus.FAILED,
                 message=f"yt-dlp exited with code {retcode}",
             )
-        produced = existing_episode_file(out_dir, episode)
+        produced = existing_episode_file(out_dir, episode, options)
         if produced is None:
             return DownloadResult(
                 episode=episode,

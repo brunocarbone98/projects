@@ -5,6 +5,8 @@ resolved series and a selection of its episodes. Every job gets its own worker t
 job downloads at a time: TikTok rate-limits aggressively and the engine already paces episodes, so
 queued jobs wait their turn in FIFO order. ``get()`` returns a JSON-ready snapshot that the page
 polls every couple of seconds; the engine's ``on_result`` callback updates it after each episode.
+Each row carries the file's ``path`` (what the files endpoint serves), its ``file_name`` (for
+display) and ``thumbnail`` (whether a cover sits next to the video — see :func:`cover_sidecar`).
 Nothing in this module touches the network itself, and nothing in a snapshot can contain a cookie:
 error messages are redacted defensively before they are stored.
 """
@@ -19,6 +21,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from dramafetch.models import DownloadOptions, DownloadResult, Episode, Series
@@ -35,12 +38,16 @@ DONE = "done"
 ERROR = "error"
 FINISHED_STATES = frozenset({DONE, ERROR})
 
-# Anything that looks like `sessionid=...`, `Cookie: ...` or `msToken=...` in a message is blanked.
-# The engine never puts cookie values in messages, but a snapshot is shown in a browser, so a cheap
-# second line of defence costs nothing.
+#: Suffixes an episode cover can be saved with (yt-dlp's ``writethumbnail`` and the browser engine
+#: both write ``<video stem>.<one of these>``), in the order :func:`cover_sidecar` looks for them.
+COVER_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+
+# Anything that looks like `sessionid=...`, `Cookie: ...`, `msToken=...` or our own session cookie
+# in a message is blanked. The engine never puts cookie values in messages, but a snapshot is shown
+# in a browser, so a cheap second line of defence costs nothing.
 _SECRET_RE = re.compile(
     r"(?i)\b(sessionid|sid_tt|sid_guard|ssid_ucp_v1|msToken|tt_csrf_token|passport_csrf_token|"
-    r"cookies?)\b\s*[=:]\s*[^\s;,]+"
+    r"dramafetch_session|cookies?)\b\s*[=:]\s*[^\s;,]+"
 )
 _MAX_ERROR_CHARS = 500
 
@@ -50,14 +57,32 @@ def redact_secrets(text: str) -> str:
     return _SECRET_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
 
 
+def cover_sidecar(path: Path) -> Path | None:
+    """The thumbnail saved next to a video: the first existing ``<stem>.jpg|.jpeg|.png|.webp``."""
+    if not path.name:
+        return None
+    for suffix in COVER_SUFFIXES:
+        candidate = path.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def result_to_dict(result: DownloadResult) -> dict[str, Any]:
-    """The per-episode row of a job snapshot."""
+    """The per-episode row of a job snapshot.
+
+    ``file_name`` is the basename, for display; ``thumbnail`` says whether a cover sidecar sits next
+    to the file, so the page knows whether to offer a Cover link next to Save video.
+    """
+    path = result.path
     return {
         "number": result.episode.number,
         "title": result.episode.title,
         "status": result.status.value,
         "message": redact_secrets(result.message),
-        "path": str(result.path) if result.path is not None else None,
+        "path": str(path) if path is not None else None,
+        "file_name": path.name if path is not None else None,
+        "thumbnail": path is not None and cover_sidecar(path) is not None,
     }
 
 

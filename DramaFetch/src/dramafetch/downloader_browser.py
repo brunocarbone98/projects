@@ -15,8 +15,11 @@ already watch (a locked episode has no play URL and stays skipped), one request 
 most :data:`MAX_GETS_PER_EPISODE` per episode (the engine paces the calls; this class never
 retries on its own beyond the next listed URL), a stop at the first sign of blocking (HTTP 429, a
 captcha page), Chromium with its default flags, a Chrome user agent, nothing hidden and nothing
-bypassed. Cookie values and signed URLs never reach messages or logs: messages carry host names
-only.
+bypassed. Once an episode's video is written, and only then, one more small request fetches its
+cover image (``Episode.cover_url``, saved as ``<stem>.jpg``/``.png``/``.webp`` next to the video)
+unless ``DownloadOptions.thumbnails`` is off; that request is outside the media budget
+(:data:`MAX_COVER_GETS`) and its failure never changes the episode's status. Cookie values and
+signed URLs never reach messages or logs: messages carry host names only.
 """
 
 from __future__ import annotations
@@ -60,6 +63,23 @@ MAX_REDIRECTS = 5
 #: Media requests one episode may cost, over its listed URLs and the fresh list together: a locked
 #: or region-restricted episode must not turn into a burst of requests against every mirror.
 MAX_GETS_PER_EPISODE = 4
+#: Cover (thumbnail) requests per episode, on top of the media budget: the one URL the episode
+#: list names, after the video is on disk; never a retry, never a second candidate.
+MAX_COVER_GETS = 1
+#: A cover is kilobytes; anything smaller than this is an error body, not an image.
+MIN_IMAGE_BYTES = 200
+#: Content types a cover may come with, and the extension each is saved under.
+_IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/pjpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_PNG_MAGIC = b"\x89PNG"
+_RIFF_MAGIC = b"RIFF"
+_WEBP_MAGIC = b"WEBP"  # bytes 8-12 of a RIFF container
 #: How long the in-session refresh waits for the episode list (the discovery default is 45 s too).
 REFRESH_TIMEOUT_S = 45.0
 UNAVAILABLE_MESSAGE = "no playable stream: locked, region-restricted or not logged in"
@@ -121,11 +141,14 @@ class BrowserDownloader:
         """Download into ``options.out_dir`` (already the SERIES directory). Never raises.
 
         Skip rules as for yt-dlp: a locked episode (unless ``include_locked``), an existing
-        ``<episode stem>.*`` file (unless ``overwrite``) and a dry run never touch the network.
+        ``<episode stem>.<video ext>`` file (unless ``overwrite``) and a dry run never touch the
+        network — an episode skipped for its existing video does not fetch a missing cover either.
+        After a DONE the cover is fetched (see :meth:`_thumbnail`); its outcome only ever adds to
+        the message.
         """
         if episode.locked and not options.include_locked:
             return locked_result(episode)
-        existing = existing_episode_file(options.out_dir, episode)
+        existing = existing_episode_file(options.out_dir, episode, options)
         if existing is not None and not options.overwrite:
             return DownloadResult(
                 episode=episode,
@@ -137,10 +160,10 @@ class BrowserDownloader:
             return DownloadResult(
                 episode=episode,
                 status=DownloadStatus.DRY_RUN,
-                message=self._dry_run_message(episode),
+                message=self._dry_run_message(episode, options),
             )
         try:
-            return self._download(episode, options)
+            result = self._download(episode, options)
         except LoginRequiredError as exc:
             return self._failure(episode, DownloadStatus.FAILED_LOGIN, exc)
         except RateLimitedError as exc:
@@ -151,6 +174,9 @@ class BrowserDownloader:
             return self._failure(episode, DownloadStatus.FAILED_BLOCKED, exc)
         except Exception as exc:
             return self._failure(episode, DownloadStatus.FAILED, exc)
+        if result.status is DownloadStatus.DONE and result.path is not None:
+            result.message += self._thumbnail(episode, options, result.path)
+        return result
 
     def close(self) -> None:
         """Close the context, the browser and Playwright; idempotent, fine before any launch."""
@@ -166,7 +192,7 @@ class BrowserDownloader:
 
     def _download(self, episode: Episode, options: DownloadOptions) -> DownloadResult:
         context = self._ensure_context(options)
-        target = options.out_dir / (episode_stem(episode) + ".mp4")
+        target = options.out_dir / (episode_stem(episode, options) + ".mp4")
         tried: set[str] = set()  # every URL requested for this episode: its request budget
         refreshed = False
         candidates = self._usable_candidates(episode.raw)
@@ -283,12 +309,71 @@ class BrowserDownloader:
             )
         return None, last
 
-    def _dry_run_message(self, episode: Episode) -> str:
+    def _dry_run_message(self, episode: Episode, options: DownloadOptions) -> str:
+        thumbnail = " + thumbnail" if options.thumbnails and episode.cover_url else ""
         candidates = play_url_candidates(episode.raw) if episode.raw is not None else []
         if not candidates:
-            return "would download: no play url in the episode list (it would be refreshed first)"
+            return (
+                "would download: no play url in the episode list (it would be refreshed first)"
+                + thumbnail
+            )
         suffix = "" if self._usable(candidates[0]) else " (play url expired: fresh list first)"
-        return f"would download from {_host(candidates[0])}{suffix}"
+        return f"would download from {_host(candidates[0])}{suffix}{thumbnail}"
+
+    # -- the cover (thumbnail) -----------------------------------------------------------------
+
+    def _thumbnail(self, episode: Episode, options: DownloadOptions, video: Path) -> str:
+        """Fetch the episode cover and save it next to ``video`` as ``<stem>.<jpg|png|webp>``.
+
+        Called once the video is on disk, and only when ``options.thumbnails`` and the episode
+        list named a cover. Exactly one request (:data:`MAX_COVER_GETS`), outside the media budget
+        of :data:`MAX_GETS_PER_EPISODE` and with no pause before it: a browser loads an episode's
+        cover together with the page, so the cover following the video at once is what a viewer's
+        session looks like. Returns what to append to the DONE message: ``" + thumbnail"`` on
+        success, else ``"; thumbnail: <reason>"`` — a cover that cannot be had never changes the
+        episode's status, is logged at DEBUG (host names only) and, for an HTTP 429, at WARNING:
+        the next video request will stop the run if TikTok is really limiting. Never raises.
+        """
+        if not options.thumbnails or not episode.cover_url:
+            return ""
+        context = self._context
+        if context is None:  # a DONE always has a session; stated for the type checker
+            return "; thumbnail: no browser session"
+        url = episode.cover_url
+        host = _host(url)
+        headers = {"Referer": options.base_url.rstrip("/") + "/", "Accept": "image/*,*/*"}
+        try:
+            response = context.request.get(
+                url, headers=headers, max_redirects=MAX_REDIRECTS, timeout=REQUEST_TIMEOUT_MS
+            )
+            try:
+                status = response.status
+                if status == 429:
+                    log.warning(
+                        "episode %s: HTTP 429 for the cover from %s; the video came through, so "
+                        "the run goes on",
+                        episode.number,
+                        host,
+                    )
+                    return f"; thumbnail: HTTP 429 from {host}"
+                if status != 200:
+                    log.debug("episode %s: cover HTTP %s from %s", episode.number, status, host)
+                    return f"; thumbnail: HTTP {status} from {host}"
+                body = response.body()
+                content_type = response.headers.get("content-type", "")
+            finally:
+                _dispose(response)
+            extension = _image_extension(body, content_type)
+            if extension is None:
+                problem = _image_problem(body, content_type)
+                log.debug("episode %s: cover %s from %s", episode.number, problem, host)
+                return f"; thumbnail: {problem} from {host}"
+            _write_atomically(video.with_suffix(extension), body)
+        except Exception as exc:
+            reason = _one_line(exc)
+            log.debug("episode %s: cover from %s failed: %s", episode.number, host, reason)
+            return f"; thumbnail: {reason}"
+        return " + thumbnail"
 
     def _failure(
         self, episode: Episode, status: DownloadStatus, exc: BaseException
@@ -451,6 +536,42 @@ def _body_problem(body: bytes, content_type: str) -> str | None:
     if not kind.startswith(_VIDEO_CONTENT_TYPES) and _MP4_MAGIC not in body[:32]:
         return f"{kind} instead of a video"
     return None
+
+
+def _image_extension(body: bytes, content_type: str) -> str | None:
+    """The extension to save a cover body under, or None when it is not an image.
+
+    Accepted: at least :data:`MIN_IMAGE_BYTES` and either an ``image/*`` content type or JPEG,
+    PNG or WEBP magic bytes. The extension comes from the content type (``image/jpeg`` -> ``.jpg``,
+    ``image/png`` -> ``.png``, ``image/webp`` -> ``.webp``), else from the magic, else ``.jpg``.
+    """
+    if len(body) < MIN_IMAGE_BYTES:
+        return None
+    kind = content_type.split(";")[0].strip().lower()
+    by_magic = _magic_extension(body)
+    if kind in _IMAGE_EXTENSIONS:
+        return _IMAGE_EXTENSIONS[kind]
+    if kind.startswith("image/") or by_magic is not None:
+        return by_magic or ".jpg"
+    return None
+
+
+def _magic_extension(body: bytes) -> str | None:
+    if body.startswith(_JPEG_MAGIC):
+        return ".jpg"
+    if body.startswith(_PNG_MAGIC):
+        return ".png"
+    if body.startswith(_RIFF_MAGIC) and body[8:12] == _WEBP_MAGIC:
+        return ".webp"
+    return None
+
+
+def _image_problem(body: bytes, content_type: str) -> str:
+    """Why a 200 answer is not a cover: too small, or neither an image type nor image bytes."""
+    kind = content_type.split(";")[0].strip().lower() or "an untyped body"
+    if len(body) < MIN_IMAGE_BYTES:
+        return f"{_format_size(len(body))} of {kind} instead of an image"
+    return f"{kind} instead of an image"
 
 
 def _write_atomically(target: Path, body: bytes) -> None:

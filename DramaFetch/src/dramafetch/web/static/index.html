@@ -63,7 +63,7 @@
   .hint { margin: 8px 0 0; }
   form { display: flex; flex-wrap: wrap; gap: 8px; }
   label { font-weight: 600; width: 100%; }
-  input#url {
+  input#url, input#token {
     flex: 1 1 240px;
     min-width: 0;
     padding: 10px 12px;
@@ -85,13 +85,14 @@
   }
   button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
   button:disabled { opacity: 0.55; cursor: progress; }
-  button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .status { margin: 10px 0 0; min-height: 1.2em; }
   .status.error { color: var(--bad); }
   .status.ok { color: var(--ok); }
   .status .hint-text { display: block; color: var(--muted); }
   .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
   .toolbar button { padding: 6px 10px; font-weight: 500; }
+  .toolbar button.primary { font-weight: 600; }
   .meta { margin: 0 0 8px; }
   .meta code { font-size: 0.88rem; word-break: break-all; }
   code { background: var(--soft); padding: 1px 5px; border-radius: 4px; }
@@ -103,6 +104,15 @@
   th { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
   td.num { white-space: nowrap; }
   tr.locked td { color: var(--muted); }
+  img.cover {
+    width: 36px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: var(--soft);
+    vertical-align: top;
+  }
+  td.actions a { display: inline-block; margin-right: 10px; font-weight: 600; white-space: nowrap; }
   .badge {
     display: inline-block;
     padding: 1px 8px;
@@ -135,7 +145,7 @@
     table.stack tr { display: block; padding: 6px 0; border-bottom: 1px solid var(--border); }
     table.stack td { display: flex; gap: 10px; border: 0; padding: 3px 0; }
     table.stack td::before { content: attr(data-label); flex: 0 0 5.5em; color: var(--muted); font-size: 0.82rem; }
-    table.stack td.select::before { content: ""; flex: 0 0 0; }
+    table.stack td.select::before, table.stack td.cover-cell::before { content: ""; flex: 0 0 0; }
   }
 </style>
 </head>
@@ -146,6 +156,20 @@
 </header>
 
 <main>
+  <!-- Shown only when the server was started with --token and this device has no session cookie
+       yet (an API call answered 401 of kind "auth"); the accepted token becomes an HttpOnly cookie
+       set by the server. Nothing is kept in the page or in any browser storage. -->
+  <section class="card hidden" id="token-card" aria-labelledby="token-title">
+    <h2 id="token-title">Access token</h2>
+    <form id="token-form" autocomplete="off">
+      <label for="token">This server was started with <code>--token</code>; enter it once on this device</label>
+      <input id="token" name="token" type="password" required autocomplete="off" spellcheck="false" placeholder="access token">
+      <button type="submit" id="token-btn" class="primary">Unlock</button>
+    </form>
+    <p class="hint">A session cookie (HttpOnly, 30 days) remembers it; the page itself stores nothing.</p>
+    <p id="token-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+
   <section class="card" id="resolve-card" aria-labelledby="resolve-title">
     <h2 id="resolve-title">1. Series</h2>
     <form id="resolve-form" autocomplete="off">
@@ -156,7 +180,7 @@
              placeholder="https://www.tiktok.com/shortdrama/episode/7675706520839033876/8">
       <button type="submit" id="resolve-btn" class="primary">Resolve</button>
     </form>
-    <p class="hint">The long number is the series id; the trailing number is only the episode you were watching. Resolving opens TikTok in a browser on this machine and usually takes 10–40 s.</p>
+    <p class="hint">The long number is the series id; the trailing number is only the episode you were watching. Resolving opens TikTok in a browser on this machine and usually takes 10–40 s. Then <strong>Download all free</strong> is one click, and every finished episode gets a <strong>Save</strong> link for this device.</p>
     <p id="resolve-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
@@ -176,6 +200,7 @@
           <tr>
             <th scope="col"><span class="sr-only">Select</span></th>
             <th scope="col">#</th>
+            <th scope="col"><span class="sr-only">Cover</span></th>
             <th scope="col">Title</th>
             <th scope="col">Length</th>
             <th scope="col">Status</th>
@@ -185,7 +210,8 @@
       </table>
     </div>
     <div class="toolbar">
-      <button type="button" id="download-btn" class="primary">Download selected</button>
+      <button type="button" id="download-all-btn" class="primary">Download all free</button>
+      <button type="button" id="download-btn">Download selected</button>
       <span class="muted">Locked episodes are skipped unless you tick them; they usually have no downloadable formats.</span>
     </div>
     <p id="download-status" class="status" role="status" aria-live="polite"></p>
@@ -203,11 +229,13 @@
             <th scope="col">Title</th>
             <th scope="col">Status</th>
             <th scope="col">Detail</th>
+            <th scope="col">Save</th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
     </div>
+    <p class="hint" id="job-note"></p>
   </section>
 
   <section class="card" id="doctor-card" aria-labelledby="doctor-title">
@@ -231,6 +259,8 @@
 
   var POLL_MS = 2000;
   var state = { series: null, jobId: null, pollTimer: null };
+  // While the token form is shown: the promise every refused call waits on, and its resolver.
+  var auth = { pending: null, settle: null };
 
   function $(id) { return document.getElementById(id); }
 
@@ -258,7 +288,7 @@
     if (hint) { node.appendChild(el('span', { className: 'hint-text', text: hint })); }
   }
 
-  function api(method, path, body) {
+  function rawApi(method, path, body) {
     var init = { method: method, headers: {}, cache: 'no-store' };
     if (body !== undefined) {
       init.headers['Content-Type'] = 'application/json';
@@ -270,6 +300,8 @@
         try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
         if (!response.ok) {
           var error = new Error((data && data.error) || ('HTTP ' + response.status));
+          error.status = response.status;
+          error.kind = data && data.kind;
           error.hint = data && data.hint;
           throw error;
         }
@@ -277,6 +309,45 @@
       });
     });
   }
+
+  // The server was started with --token and this device has no session yet: a 401 of kind "auth"
+  // (a TikTok login problem is also a 401, but of another kind) shows the token form, and the
+  // refused call is retried once the token has been accepted.
+  function api(method, path, body) {
+    return rawApi(method, path, body).catch(function (error) {
+      if (error.status !== 401 || error.kind !== 'auth') { throw error; }
+      return askForToken().then(function () { return rawApi(method, path, body); });
+    });
+  }
+
+  function askForToken() {
+    if (!auth.pending) {
+      auth.pending = new Promise(function (resolve) { auth.settle = resolve; });
+      setStatus($('token-status'), '');
+      $('token-card').classList.remove('hidden');
+      $('token').focus();
+    }
+    return auth.pending;
+  }
+
+  $('token-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var input = $('token');
+    var token = input.value;
+    if (!token) { return; }
+    var button = $('token-btn');
+    button.disabled = true;
+    rawApi('POST', '/api/session', { token: token }).then(function () {
+      input.value = '';
+      $('token-card').classList.add('hidden');
+      var settle = auth.settle;
+      auth.pending = null;
+      auth.settle = null;
+      if (settle) { settle(); }
+    }).catch(function (error) {
+      setStatus($('token-status'), error.message, 'error', error.hint);
+    }).then(function () { button.disabled = false; });
+  });
 
   function formatDuration(seconds) {
     if (seconds === null || seconds === undefined) { return '–'; }
@@ -305,6 +376,10 @@
     if (status.indexOf('failed') === 0) { return 'failed'; }
     if (status === 'running') { return 'running'; }
     return 'skipped';
+  }
+
+  function isHttpUrl(value) {
+    return typeof value === 'string' && /^https?:\/\//i.test(value);
   }
 
   // ---------------------------------------------------------------- resolve
@@ -336,6 +411,14 @@
       var checkbox = el('input', { type: 'checkbox', id: id, 'data-number': String(episode.number) });
       if (episode.locked) { checkbox.setAttribute('data-locked', '1'); } else { checkbox.checked = true; }
       checkbox.addEventListener('change', updateSelectionCount);
+      // The cover the episode list carries; the browser loads it like TikTok's own page would, with
+      // no referrer and no credentials, and the cell simply stays empty when it fails to load.
+      var coverCell = el('td', { className: 'cover-cell', 'data-label': 'Cover' });
+      if (isHttpUrl(episode.cover_url)) {
+        var cover = el('img', { className: 'cover', loading: 'lazy', referrerpolicy: 'no-referrer', alt: '', src: episode.cover_url });
+        cover.addEventListener('error', function () { cover.classList.add('hidden'); });
+        coverCell.appendChild(cover);
+      }
       var statusCell = el('td', { 'data-label': 'Status' });
       statusCell.appendChild(el('span', { className: 'badge ' + (episode.locked ? 'locked' : 'free'), text: episode.locked ? 'locked' : 'free' }));
       if (episode.locked && episode.lock_hints.length) {
@@ -346,6 +429,7 @@
       var row = el('tr', { className: episode.locked ? 'locked' : '' }, [
         el('td', { className: 'select', 'data-label': 'Select' }, [checkbox]),
         el('td', { className: 'num', 'data-label': '#', text: String(episode.number) }),
+        coverCell,
         titleCell,
         el('td', { className: 'num', 'data-label': 'Length', text: formatDuration(episode.duration_s) }),
         statusCell
@@ -365,6 +449,12 @@
     return checkboxes().filter(function (box) { return box.checked; });
   }
 
+  function freeNumbers() {
+    if (!state.series) { return []; }
+    return state.series.episodes.filter(function (episode) { return !episode.locked; })
+      .map(function (episode) { return episode.number; });
+  }
+
   function updateSelectionCount() {
     var boxes = selected();
     var lockedCount = boxes.filter(function (box) { return box.getAttribute('data-locked') === '1'; }).length;
@@ -372,6 +462,7 @@
     if (lockedCount) { text += ' (' + lockedCount + ' locked: will be tried, usually fails)'; }
     $('selection-count').textContent = text;
     $('download-btn').disabled = boxes.length === 0;
+    $('download-all-btn').disabled = freeNumbers().length === 0;
   }
 
   $('resolve-form').addEventListener('submit', function (event) {
@@ -401,13 +492,10 @@
 
   // ---------------------------------------------------------------- download + progress
 
-  $('download-btn').addEventListener('click', function () {
-    var boxes = selected();
-    if (!boxes.length || !state.series) { return; }
-    var numbers = boxes.map(function (box) { return parseInt(box.getAttribute('data-number'), 10); });
-    var includeLocked = boxes.some(function (box) { return box.getAttribute('data-locked') === '1'; });
-    var button = $('download-btn');
-    button.disabled = true;
+  function startDownload(numbers, includeLocked) {
+    if (!numbers.length || !state.series) { return; }
+    var buttons = [$('download-btn'), $('download-all-btn')];
+    buttons.forEach(function (button) { button.disabled = true; });
     setStatus($('download-status'), 'Starting… the series is resolved again before the job is queued.');
     api('POST', '/api/download', {
       url: $('url').value.trim(),
@@ -418,7 +506,22 @@
       startPolling(job.job_id);
     }).catch(function (error) {
       setStatus($('download-status'), error.message, 'error', error.hint);
-    }).then(function () { button.disabled = false; updateSelectionCount(); });
+    }).then(function () {
+      buttons.forEach(function (button) { button.disabled = false; });
+      updateSelectionCount();
+    });
+  }
+
+  $('download-btn').addEventListener('click', function () {
+    var boxes = selected();
+    var numbers = boxes.map(function (box) { return parseInt(box.getAttribute('data-number'), 10); });
+    var includeLocked = boxes.some(function (box) { return box.getAttribute('data-locked') === '1'; });
+    startDownload(numbers, includeLocked);
+  });
+
+  // The one-click flow: every episode the list marks as free, locked ones left alone.
+  $('download-all-btn').addEventListener('click', function () {
+    startDownload(freeNumbers(), false);
   });
 
   function startPolling(jobId) {
@@ -441,6 +544,10 @@
     });
   }
 
+  function fileUrl(job, row) {
+    return '/api/files/' + encodeURIComponent(job.id) + '/' + encodeURIComponent(String(row.number));
+  }
+
   function renderJob(job) {
     var meta = $('job-meta');
     clear(meta);
@@ -452,17 +559,28 @@
     progress.max = Math.max(job.total, 1);
     progress.value = job.results.length;
 
+    var where = state.series && state.series.series_dir ? ' (' + state.series.series_dir + ')' : '';
+    $('job-note').textContent = 'Files are saved on the computer running DramaFetch' + where + '; Save copies one to this device.';
+
     var tbody = $('job-results').getElementsByTagName('tbody')[0];
     clear(tbody);
     job.results.forEach(function (row) {
       var detail = el('td', { 'data-label': 'Detail' });
-      if (row.path) { detail.appendChild(el('span', { className: 'path', text: row.path })); }
+      if (row.file_name) { detail.appendChild(el('span', { className: 'path', text: row.file_name, title: row.path || '' })); }
       if (row.message) { detail.appendChild(el('span', { className: 'hints', text: row.message })); }
+      // Save video / Cover: the server streams the finished file (and its thumbnail) of this row;
+      // the `download` attribute makes the browser save it under the name the server sends.
+      var save = el('td', { className: 'actions', 'data-label': 'Save' });
+      if (row.status === 'done' && row.path) {
+        save.appendChild(el('a', { href: fileUrl(job, row), download: '', text: 'Save video' }));
+        if (row.thumbnail) { save.appendChild(el('a', { href: fileUrl(job, row) + '/cover', download: '', text: 'Cover' })); }
+      }
       tbody.appendChild(el('tr', null, [
         el('td', { className: 'num', 'data-label': '#', text: String(row.number) }),
         el('td', { 'data-label': 'Title', text: row.title }),
         el('td', { 'data-label': 'Status' }, [el('span', { className: 'badge ' + badgeClass(row.status), text: row.status })]),
-        detail
+        detail,
+        save
       ]));
     });
   }

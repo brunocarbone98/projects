@@ -29,7 +29,7 @@ from dramafetch.downloader import (
     locked_result,
     sanitize_error,
 )
-from dramafetch.manifest import Manifest, manifest_path, series_dir
+from dramafetch.manifest import Manifest, manifest_path, series_dir, validate_name_format
 from dramafetch.models import (
     Discovery,
     DiscoveryOptions,
@@ -236,6 +236,15 @@ def _check_range(low_name: str, low: float, high_name: str, high: float) -> None
         raise ValueError(f"{high_name} ({high:g}) must be >= {low_name} ({low:g})")
 
 
+def validate_naming(options: DownloadOptions) -> None:
+    """Raise ValueError when ``options.name_format`` cannot name episodes: an unknown placeholder
+    (the allowed ones are ``{series}``, ``{number}``, ``{n}``, ``{title}`` and ``{id}``), an
+    unmatched brace, or nothing that tells one episode from another (see
+    :func:`~dramafetch.manifest.validate_name_format`). Checked, like the pacing, before the
+    series directory is created."""
+    validate_name_format(options.name_format)
+
+
 def make_downloader(options: DownloadOptions) -> Downloader:
     """The downloader for ``options.engine``.
 
@@ -305,12 +314,14 @@ def download_series(
 ) -> list[DownloadResult]:
     """Download the given episodes of a series, one at a time, ascending, resumably, paced.
 
-    Validates the pacing options first (ValueError, see :func:`validate_pacing`), then creates the
-    series directory, loads its manifest (unless one is given), builds the downloader for
-    ``options.engine`` (unless one is given; see :func:`make_downloader`) and, for each episode:
-    an episode the manifest says is done (file still present) is skipped without network unless
-    ``options.overwrite``; otherwise the downloader runs with ``options.out_dir`` replaced by the
-    series directory.
+    Validates the pacing options and the name format first (ValueError, see
+    :func:`validate_pacing` and :func:`validate_naming`), then creates the series directory, loads
+    its manifest (unless one is given), builds the downloader for ``options.engine`` (unless one
+    is given; see :func:`make_downloader`) and, for each episode: an episode the manifest says is
+    done (file still present) is skipped without network unless ``options.overwrite``; otherwise
+    the downloader runs with ``options.out_dir`` replaced by the series directory and
+    ``options.series_name`` set to the series' display name (what ``{series}`` in the name format
+    expands to).
 
     Pacing: before every NETWORK attempt except the first the run pauses (see :func:`_next_pause`):
     a longer rest after every ``rest_every`` attempts, else the fixed or "human" pace. Each pause
@@ -331,6 +342,7 @@ def download_series(
     at the end.
     """
     validate_pacing(options)
+    validate_naming(options)
     target_dir = series_dir(options.out_dir, series)
     target_dir.mkdir(parents=True, exist_ok=True)
     if manifest is None:
@@ -339,7 +351,7 @@ def download_series(
         downloader = make_downloader(options)
     if rng is None:
         rng = random.Random()
-    episode_options = replace(options, out_dir=target_dir)
+    episode_options = replace(options, out_dir=target_dir, series_name=series.display_name)
     cookie_problem = None if options.dry_run else cookies_file_problem(options.cookies_file)
     ordered = sorted(episodes, key=lambda episode: episode.number)
     results: list[DownloadResult] = []
@@ -409,7 +421,7 @@ def _needs_network(episode: Episode, options: DownloadOptions) -> bool:
         return False
     if options.dry_run:
         return False
-    return options.overwrite or existing_episode_file(options.out_dir, episode) is None
+    return options.overwrite or existing_episode_file(options.out_dir, episode, options) is None
 
 
 def _manifest_skip(episode: Episode, done_path: Any) -> DownloadResult:
@@ -436,7 +448,9 @@ def _stopped_result(
         return _manifest_skip(episode, done_path)
     if episode.locked and not options.include_locked:
         return locked_result(episode)
-    existing = None if options.overwrite else existing_episode_file(options.out_dir, episode)
+    existing = (
+        None if options.overwrite else existing_episode_file(options.out_dir, episode, options)
+    )
     if existing is not None:
         return DownloadResult(
             episode=episode,

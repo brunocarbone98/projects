@@ -9,14 +9,23 @@ import pytest
 
 from dramafetch.manifest import (
     MANIFEST_FILENAME,
+    MAX_STEM_LEN,
     Manifest,
     ManifestEntry,
     episode_stem,
     manifest_path,
     safe_filename,
     series_dir,
+    validate_name_format,
 )
-from dramafetch.models import DownloadResult, DownloadStatus, Episode, Series
+from dramafetch.models import (
+    DEFAULT_NAME_FORMAT,
+    DownloadOptions,
+    DownloadResult,
+    DownloadStatus,
+    Episode,
+    Series,
+)
 
 
 def _episode(number, title="Title"):
@@ -79,16 +88,145 @@ def test_safe_filename_truncates_then_strips():
     assert safe_filename("x" * 10, max_len=0) == "x" * 10  # 0 disables truncation
 
 
-def test_series_dir_and_episode_stem(tmp_path):
+def test_series_dir_and_manifest_path(tmp_path):
     series = Series(series_id="7699393770256782354", name="Heiress: Part 1/2", episodes=[])
     assert series_dir(tmp_path, series) == tmp_path / "Heiress Part 1 2 [7699393770256782354]"
     unnamed = Series(series_id="42", name=None, episodes=[])
     assert series_dir(tmp_path, unnamed).name == "series-42 [42]"
-    assert episode_stem(_episode(1, "Ep | one")) == "E01 - Ep one"
-    assert episode_stem(_episode(100, "x")) == "E100 - x"
-    assert episode_stem(_episode(7, "t" * 100)) == "E07 - " + "t" * 60
-    assert episode_stem(_episode(0, "7699400000000000001")) == "E00 - 7699400000000000001"
     assert manifest_path(tmp_path) == tmp_path / MANIFEST_FILENAME
+
+
+# --------------------------------------------------------------------------- episode_stem
+
+NAME = "The Billionaire's Secret Heiress"
+
+
+def _named(number, title="Title", series_name=NAME, series_id="7699393770256782354"):
+    return Episode(
+        number=number,
+        item_id=f"76994000000000000{number:02d}",
+        title=title,
+        series_id=series_id,
+        series_name=series_name,
+    )
+
+
+def test_default_name_format_is_series_dash_episode_number():
+    assert DEFAULT_NAME_FORMAT == "{series} - Episode {number}"
+    options = DownloadOptions(series_name=NAME)
+    assert episode_stem(_named(1), options) == f"{NAME} - Episode 01"
+    assert episode_stem(_named(9), options) == f"{NAME} - Episode 09"
+    assert episode_stem(_named(10), options) == f"{NAME} - Episode 10"
+    assert episode_stem(_named(100), options) == f"{NAME} - Episode 100"  # no third digit forced
+    assert episode_stem(_named(0), options) == f"{NAME} - Episode 00"
+
+
+def test_series_placeholder_prefers_the_run_name_then_the_episode_then_the_id():
+    episode = _named(1, series_name="From the episode")
+    assert episode_stem(episode, DownloadOptions(series_name="From the run")).startswith(
+        "From the run - "
+    )
+    assert episode_stem(episode, DownloadOptions()).startswith("From the episode - ")
+    anonymous = _named(1, series_name=None)
+    assert episode_stem(anonymous, DownloadOptions()) == "series-7699393770256782354 - Episode 01"
+    bare_video = _named(0, series_name=None, series_id="")
+    assert episode_stem(bare_video, DownloadOptions()) == "video - Episode 00"
+    # the series name is made safe and cut to 80 characters before it is used
+    options = DownloadOptions(series_name="Heiress: Part 1/2 " + "x" * 100)
+    stem = episode_stem(_named(1), options)
+    assert stem.startswith("Heiress Part 1 2 xxx")
+    assert stem.endswith(" - Episode 01")
+    assert len(stem) == 80 + len(" - Episode 01")
+
+
+@pytest.mark.parametrize(
+    ("name_format", "expected"),
+    [
+        ("{series} - Episode {number}", f"{NAME} - Episode 07"),
+        ("{series} - Episode {n} - {title}", f"{NAME} - Episode 7 - Ep seven"),
+        ("{n}", "7"),
+        ("{number}", "07"),
+        ("{id}", "7699400000000000007"),
+        ("{title}", "Ep seven"),
+        ("E{number} - {title}", "E07 - Ep seven"),
+        ("{title} ({id}) [{series}]", f"Ep seven (7699400000000000007) [{NAME}]"),
+        ("{number}{number}", "0707"),  # a placeholder may repeat
+        ("  {n}  ", "7"),  # surrounding whitespace is stripped like any file name
+        ("{n}.", "7"),  # a trailing dot would be a problem on Windows
+        ("{n}/{title}", "7 Ep seven"),  # no sub-directories: the slash becomes a space
+    ],
+)
+def test_episode_stem_expands_each_placeholder(name_format, expected):
+    episode = _named(7, title="Ep | seven")
+    assert episode_stem(episode, DownloadOptions(name_format=name_format)) == expected
+
+
+def test_episode_stem_title_is_cut_to_60_and_the_whole_stem_to_150():
+    options = DownloadOptions(name_format="{number} - {title}")
+    assert episode_stem(_named(7, title="t" * 100), options) == "07 - " + "t" * 60
+    long_format = "{title} " + "y" * 200
+    stem = episode_stem(_named(1, title="short"), DownloadOptions(name_format=long_format))
+    assert len(stem) == MAX_STEM_LEN == 150
+    assert stem.startswith("short yyy")
+
+
+def test_episode_stem_never_formats_user_input():
+    """A format is user input: no attribute or index access, no str.format at all."""
+    hostile = "{series.__class__} {title[0]} {id!r} {number:02d}"
+    for piece in hostile.split():
+        with pytest.raises(ValueError, match="unknown placeholder"):
+            episode_stem(_named(1), DownloadOptions(name_format=piece + " {n}"))
+    # a percent sign is plain text here (the yt-dlp template escaping happens downstream)
+    assert episode_stem(_named(1), DownloadOptions(name_format="100% {n}")) == "100% 1"
+
+
+@pytest.mark.parametrize(
+    ("name_format", "match"),
+    [
+        ("{nope}", r"unknown placeholder \{nope\} in name format '\{nope\}': use \{series\}, "),
+        ("{series} - {episode}", r"unknown placeholder \{episode\}"),
+        ("{number:02d}", r"unknown placeholder \{number:02d\}"),
+        ("{Number}", r"unknown placeholder \{Number\}"),  # case matters
+        ("{}", r"unknown placeholder \{\}"),
+        ("{series} - Episode {number", "unmatched brace"),
+        ("{series}} - {n}", "unmatched brace"),
+        ("{{n}}", "unmatched brace"),
+        ("", "does not tell episodes apart"),
+        ("   ", "does not tell episodes apart"),
+        ("{series}", "does not tell episodes apart"),
+        ("Episode", "does not tell episodes apart"),
+    ],
+)
+def test_unusable_name_formats_are_refused_with_the_allowed_set(name_format, match):
+    with pytest.raises(ValueError, match=match) as info:
+        validate_name_format(name_format)
+    assert "{series}, {number}, {n}, {title}, {id}" in str(info.value) or "tell episodes" in str(
+        info.value
+    )
+    with pytest.raises(ValueError, match=match):
+        episode_stem(_named(1), DownloadOptions(name_format=name_format))
+    validate_name_format(DEFAULT_NAME_FORMAT)  # the default is fine
+    validate_name_format("{title}")  # and so is the bare video default
+
+
+def test_episode_stem_output_is_safe_on_windows():
+    """A device name as the series name, a device name as the title, a trailing dot in the
+    format: nothing a format can produce is a reserved Windows name."""
+    import ntpath
+
+    isreserved = getattr(ntpath, "isreserved", None)
+    con = episode_stem(_named(1), DownloadOptions(series_name="CON"))
+    assert con == "CON_ - Episode 01"
+    title_only = episode_stem(_named(1, title="aux"), DownloadOptions(name_format="{title}"))
+    assert title_only == "aux_"
+    dotted = episode_stem(_named(1, title="com1.part"), DownloadOptions(name_format="{title}"))
+    assert dotted == "com1_.part"
+    trailing = episode_stem(_named(1), DownloadOptions(name_format="{series} - {n}..."))
+    assert trailing == f"{NAME} - 1"
+    if isreserved is not None:  # Python 3.13+: Microsoft's rules
+        for stem in (con, title_only, dotted, trailing):
+            assert not isreserved(stem + ".mp4")
+            assert not isreserved(stem + ".jpg")
 
 
 # --------------------------------------------------------------------------- manifest
@@ -99,7 +237,7 @@ def test_roundtrip_relative_paths_and_sorted_json(tmp_path):
     manifest = Manifest(path, "123", "Name")
     assert manifest.entries == {}
     assert not path.exists()
-    video = tmp_path / "E02 - Title.mp4"
+    video = tmp_path / "Title - Episode 02.mp4"
     video.write_bytes(b"x")
     manifest.record(DownloadResult(_episode(2), DownloadStatus.DONE, video, "saved"))
     manifest.record(DownloadResult(_episode(1), DownloadStatus.FAILED, None, "boom"))
@@ -112,7 +250,7 @@ def test_roundtrip_relative_paths_and_sorted_json(tmp_path):
     assert data["series_name"] == "Name"
     assert list(data["episodes"]) == ["1", "2"]
     assert data["episodes"]["2"]["status"] == "done"
-    assert data["episodes"]["2"]["path"] == "E02 - Title.mp4"  # relative to the series dir
+    assert data["episodes"]["2"]["path"] == "Title - Episode 02.mp4"  # relative to the series dir
     assert data["episodes"]["1"]["path"] is None
     assert data["episodes"]["1"]["message"] == "boom"
     assert data["episodes"]["1"]["updated_at"].endswith("Z")
@@ -122,7 +260,7 @@ def test_roundtrip_relative_paths_and_sorted_json(tmp_path):
     loaded = Manifest.load(path, "123", None)
     assert loaded.series_name == "Name"
     assert loaded.entries[2] == ManifestEntry(
-        2, "id2", "done", "E02 - Title.mp4", "saved", data["episodes"]["2"]["updated_at"]
+        2, "id2", "done", "Title - Episode 02.mp4", "saved", data["episodes"]["2"]["updated_at"]
     )
     assert loaded.is_done(2)
     assert not loaded.is_done(1)
@@ -141,7 +279,7 @@ def test_given_series_name_wins_over_the_stored_one(tmp_path):
 def test_is_done_requires_the_file_to_exist(tmp_path):
     path = tmp_path / MANIFEST_FILENAME
     manifest = Manifest(path, "123", None)
-    video = tmp_path / "E01 - Title.mp4"
+    video = tmp_path / "Title - Episode 01.mp4"
     video.write_bytes(b"x")
     manifest.record(DownloadResult(_episode(1), DownloadStatus.DONE, video, ""))
     assert manifest.is_done(1)
@@ -152,7 +290,7 @@ def test_is_done_requires_the_file_to_exist(tmp_path):
 
 def test_non_done_statuses_are_never_done(tmp_path):
     manifest = Manifest(tmp_path / MANIFEST_FILENAME, "1", None)
-    existing = tmp_path / "E01 - x.mp4"
+    existing = tmp_path / "x - Episode 01.mp4"
     existing.write_bytes(b"x")
     manifest.record(DownloadResult(_episode(1), DownloadStatus.SKIPPED_EXISTS, existing, ""))
     assert not manifest.is_done(1)  # only "done" counts
@@ -161,7 +299,7 @@ def test_non_done_statuses_are_never_done(tmp_path):
 def test_record_replaces_the_previous_entry(tmp_path):
     manifest = Manifest(tmp_path / MANIFEST_FILENAME, "1", None)
     manifest.record(DownloadResult(_episode(3), DownloadStatus.FAILED, None, "first"))
-    video = tmp_path / "E03 - Title.mp4"
+    video = tmp_path / "Title - Episode 03.mp4"
     video.write_bytes(b"x")
     manifest.record(DownloadResult(_episode(3), DownloadStatus.DONE, video, "second"))
     assert len(manifest.entries) == 1
@@ -172,7 +310,7 @@ def test_record_replaces_the_previous_entry(tmp_path):
 def test_skips_and_dry_runs_never_downgrade_a_done_entry(tmp_path):
     path = tmp_path / MANIFEST_FILENAME
     manifest = Manifest(path, "1", None)
-    video = tmp_path / "E01 - Title.mp4"
+    video = tmp_path / "Title - Episode 01.mp4"
     video.write_bytes(b"x")
     manifest.record(DownloadResult(_episode(1), DownloadStatus.DONE, video, "saved"))
     done_entry = manifest.entries[1]
@@ -197,7 +335,7 @@ def test_skips_and_dry_runs_never_downgrade_a_done_entry(tmp_path):
 
 
 def test_absolute_path_outside_the_series_dir_is_kept(tmp_path):
-    other = tmp_path / "elsewhere" / "E01 - x.mp4"
+    other = tmp_path / "elsewhere" / "x - Episode 01.mp4"
     other.parent.mkdir()
     other.write_bytes(b"x")
     manifest = Manifest(tmp_path / "series" / MANIFEST_FILENAME, "1", None)
@@ -294,11 +432,14 @@ def test_save_is_atomic(tmp_path, monkeypatch):
 def test_relative_paths_survive_moving_the_folder(tmp_path):
     first = tmp_path / "a"
     first.mkdir()
-    video = first / "E01 - x.mp4"
+    video = first / "x - Episode 01.mp4"
     video.write_bytes(b"x")
     Manifest(first / MANIFEST_FILENAME, "1", None).record(
         DownloadResult(_episode(1), DownloadStatus.DONE, video, "")
     )
     moved = tmp_path / "b"
     first.rename(moved)
-    assert Manifest.load(moved / MANIFEST_FILENAME, "1", None).done_path(1) == moved / "E01 - x.mp4"
+    assert (
+        Manifest.load(moved / MANIFEST_FILENAME, "1", None).done_path(1)
+        == moved / "x - Episode 01.mp4"
+    )

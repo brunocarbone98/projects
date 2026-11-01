@@ -21,12 +21,30 @@ from dramafetch.catalog import (
 from dramafetch.downloader_browser import BrowserDownloader
 from dramafetch.models import DownloadOptions, DownloadStatus, Series
 
-from .fake_tiktok import MEDIA_SIZE, MP4_HEADER, SERIES_ID, SERIES_NAME, TOTAL_EPISODES, FakeTikTok
+from .fake_tiktok import (
+    COVER_MIN_SIZE,
+    JPEG_EOI,
+    JPEG_SOI,
+    MEDIA_SIZE,
+    MP4_HEADER,
+    SERIES_ID,
+    SERIES_NAME,
+    TOTAL_EPISODES,
+    FakeTikTok,
+    cover_bytes,
+)
 
 CHROMIUM = Path(os.environ.get("DRAMAFETCH_CHROMIUM") or "/opt/pw-browsers/chromium")
 SESSION_VALUE = "fake-session-value-that-must-never-leak"
-EPISODE_1 = "E01 - The Billionaire's Secret Heiress Episode 1.mp4"
-EPISODE_2 = "E02 - The Billionaire's Secret Heiress Episode 2.mp4"
+# The default name format, "{series} - Episode {number}"; the cover sits next to the video.
+EPISODE_1 = f"{SERIES_NAME} - Episode 01.mp4"
+EPISODE_2 = f"{SERIES_NAME} - Episode 02.mp4"
+COVER_1 = f"{SERIES_NAME} - Episode 01.jpg"
+COVER_2 = f"{SERIES_NAME} - Episode 02.jpg"
+MEDIA_1 = "/cdn/7699400000000000001/0.mp4"
+MEDIA_2 = "/cdn/7699400000000000002/0.mp4"
+COVER_PATH_1 = "/cover/7699400000000000001.jpg"
+COVER_PATH_2 = "/cover/7699400000000000002.jpg"
 
 pytestmark = [
     pytest.mark.integration,
@@ -61,9 +79,19 @@ def _options(server: FakeTikTok, tmp_path: Path, **overrides: Any) -> DownloadOp
         "engine": "browser",
         "browser_executable": CHROMIUM,
         "base_url": server.base_url,
+        "series_name": SERIES_NAME,  # what engine.download_series sets for {series}
     }
     settings.update(overrides)
     return DownloadOptions(**settings)
+
+
+def _assert_cover_file(path: Path, item_id: str) -> None:
+    """A JPEG by its magic bytes (`FF D8 FF` ... `FF D9`), the fake CDN's bytes for the item."""
+    assert path.is_file()
+    data = path.read_bytes()
+    assert data.startswith(JPEG_SOI + b"\xff") and data.endswith(JPEG_EOI)
+    assert len(data) >= COVER_MIN_SIZE
+    assert data == cover_bytes(item_id)
 
 
 def _cookies_txt(tmp_path: Path) -> Path:
@@ -100,15 +128,40 @@ def test_downloads_episodes_1_and_2_inside_one_browser_session(tmp_path: Path) -
     assert second.status is DownloadStatus.DONE
     _assert_video_file(first.path, EPISODE_1)
     _assert_video_file(second.path, EPISODE_2)
-    assert first.message == f"saved {EPISODE_1} (0.1 MiB)"
-    assert sorted(p.name for p in options.out_dir.iterdir()) == [EPISODE_1, EPISODE_2]
-    # exactly one CDN request per episode, with the Referer of the series site; no page load
-    assert [r.path for r in after] == [
-        "/cdn/7699400000000000001/0.mp4",
-        "/cdn/7699400000000000002/0.mp4",
+    assert first.message == f"saved {EPISODE_1} (0.1 MiB) + thumbnail"
+    assert second.message == f"saved {EPISODE_2} (0.1 MiB) + thumbnail"
+    # the covers (JPEG magic) sit next to the videos, under the same stem
+    _assert_cover_file(options.out_dir / COVER_1, "7699400000000000001")
+    _assert_cover_file(options.out_dir / COVER_2, "7699400000000000002")
+    assert sorted(p.name for p in options.out_dir.iterdir()) == [
+        COVER_1,
+        EPISODE_1,
+        COVER_2,
+        EPISODE_2,
     ]
+    # exactly one CDN request and one cover request per episode, the cover right after its
+    # video, all with the Referer of the series site; no page load
+    assert [r.path for r in after] == [MEDIA_1, COVER_PATH_1, MEDIA_2, COVER_PATH_2]
     assert all(r.with_referer and not r.logged_in for r in after)
+    assert len(server.cover_requests) == 2 and len(server.media_requests) == 2
     assert not downloader.browser_started  # closed by the context manager
+
+
+def test_no_thumbnails_saves_the_videos_only_and_asks_for_no_cover(tmp_path: Path) -> None:
+    with FakeTikTok() as server:
+        series = _series_from_server(server)
+        assert all(e.cover_url and e.cover_url.startswith(server.base_url) for e in series.episodes)
+        before = len(server.requests)
+        options = _options(server, tmp_path, thumbnails=False)
+        with BrowserDownloader() as downloader:
+            results = [downloader.download(series.episode(n), options) for n in (1, 2)]
+        after = server.requests[before:]
+
+    assert [r.status for r in results] == [DownloadStatus.DONE, DownloadStatus.DONE]
+    assert results[0].message == f"saved {EPISODE_1} (0.1 MiB)"
+    assert sorted(p.name for p in options.out_dir.iterdir()) == [EPISODE_1, EPISODE_2]
+    assert [r.path for r in after] == [MEDIA_1, MEDIA_2]
+    assert server.cover_requests == []
 
 
 def test_locked_episode_is_skipped_without_network(tmp_path: Path) -> None:
@@ -149,11 +202,12 @@ def test_expired_play_urls_are_refreshed_once_in_the_session(tmp_path: Path) -> 
     item_lists = [r for r in after if r.path == "/api/drama/episode/item_list/"]
     assert [r.query["cursor"] for r in item_lists] == ["0", "3"]  # the page's own, then ours
     media = [r for r in after if r.path.startswith("/cdn/")]
-    assert [r.path for r in media] == [  # the expired URLs were never requested
-        "/cdn/7699400000000000001/0.mp4",
-        "/cdn/7699400000000000002/0.mp4",
-    ]
+    assert [r.path for r in media] == [MEDIA_1, MEDIA_2]  # the expired URLs were never requested
     assert all(r.query["expire"].isdigit() and int(r.query["expire"]) > now for r in media)
+    covers = [r for r in after if r.path.startswith("/cover/")]
+    assert [r.path for r in covers] == [COVER_PATH_1, COVER_PATH_2]  # one per episode, after it
+    assert [r.path for r in after][-2:] == [MEDIA_2, COVER_PATH_2]  # the cover follows its video
+    _assert_cover_file(options.out_dir / COVER_1, "7699400000000000001")
 
 
 def test_cdn_rate_limit_is_reported_as_rate_limited(tmp_path: Path) -> None:
@@ -183,7 +237,7 @@ def test_dry_run_touches_no_network_and_starts_no_browser(tmp_path: Path) -> Non
     assert [r.status for r in results] == [DownloadStatus.DRY_RUN] * 4 + [
         DownloadStatus.SKIPPED_LOCKED
     ]
-    assert results[0].message == "would download from 127.0.0.1"
+    assert results[0].message == "would download from 127.0.0.1 + thumbnail"
     assert not downloader.browser_started
     assert not (tmp_path / "series").exists()
 
@@ -199,8 +253,8 @@ def test_cookies_log_the_session_in_at_the_cdn_and_never_leak(tmp_path: Path) ->
 
     assert result.status is DownloadStatus.DONE
     _assert_video_file(result.path, EPISODE_1)
-    assert [r.path for r in after] == ["/cdn/7699400000000000001/0.mp4"]
-    assert after[0].logged_in and after[0].with_referer
+    assert [r.path for r in after] == [MEDIA_1, COVER_PATH_1]
+    assert all(r.logged_in and r.with_referer for r in after)  # the cover goes with the session
     assert SESSION_VALUE not in result.message and SESSION_VALUE not in repr(result)
 
 

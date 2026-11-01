@@ -2,36 +2,55 @@
 
 Routes::
 
-    GET  /                 the page (static/index.html, read through importlib.resources)
-    POST /api/resolve      {"url": ...}                      -> the series and its episodes
-    POST /api/download     {"url", "episodes", "include_locked"} -> 202 {"job_id": ...}
-    GET  /api/jobs/<id>    the job snapshot (see jobs.py)     -> 200, or 404 when unknown
-    GET  /api/doctor       the `dramafetch doctor` facts as JSON
+    GET  /                          the page (static/index.html, read through importlib.resources)
+    POST /api/session  {"token"}    -> 204 + the session cookie, or 401 (needs no token itself)
+    POST /api/resolve  {"url"}      -> the series and its episodes (each with its cover_url)
+    POST /api/download {"url", "episodes", "include_locked"} -> 202 {"job_id": ...}
+    GET  /api/jobs/<id>             the job snapshot (see jobs.py) -> 200, or 404 when unknown
+    GET  /api/files/<job>/<number>  the finished video of that job row -> the bytes, or 404
+    GET  /api/files/<job>/<number>/cover   its thumbnail (<stem>.jpg|.jpeg|.png|.webp), or 404
+    GET  /api/doctor                the `dramafetch doctor` facts as JSON
 
 Rules: the server binds to the host it is given and nothing else (the CLI defaults to 127.0.0.1;
-an explicit wildcard such as 0.0.0.0 is honoured with a warning because the UI has no
-authentication, an empty host is refused). JSON bodies are capped at 64 KiB (413). POSTs must carry
+an empty host is refused), and binding to anything but loopback requires an access token
+(``DramaFetchServer(..., token=...)``; ``dramafetch serve --token``). With a token, every request
+except ``GET /`` and ``POST /api/session`` must carry ``Authorization: Bearer <token>`` or the
+cookie ``dramafetch_session=<token>`` (compared with ``hmac.compare_digest``); otherwise it is
+answered 401 ``{"error": "token required", "kind": "auth", ...}`` before anything else happens —
+in particular before any request to TikTok. ``POST /api/session`` with the right token sets that
+cookie (``HttpOnly; SameSite=Strict; Path=/; Max-Age=30 days``). Without a token (the loopback
+default) nothing is checked. JSON bodies are capped at 64 KiB (413). POSTs must carry
 ``Content-Type: application/json``, so a browser on another site cannot fire one without a CORS
 preflight we never answer, and the ``Host`` header must name the bound host or localhost (a guard
-against DNS rebinding). The output directory is fixed server-side: the page cannot choose paths.
-Errors are ``{"error": message, "kind": ExceptionName}`` with a 4xx/5xx status, cookie values never
-appear in responses or logs. Resolving a series runs synchronously inside the request: the
+against DNS rebinding). The output directory is fixed server-side: the page cannot choose paths,
+and the files endpoint serves nothing but the path a finished (``done``) job row recorded, and
+only when it resolves to a regular file inside that directory (never a ``.part``) — anything else
+is a 404 that names no path. Errors are ``{"error": message, "kind": ExceptionName}`` with a
+4xx/5xx status; cookie and token values never appear in responses or logs (the log says
+``token: set`` or ``token: none``). Resolving a series runs synchronously inside the request: the
 discovery opens TikTok in a browser and usually takes 10-40 s, so the page shows a waiting note.
 """
 
 from __future__ import annotations
 
 import functools
+import hmac
+import ipaddress
 import json
 import logging
+import os
+import re
+import shutil
 import socket
+import unicodedata
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from dramafetch import __version__
 from dramafetch.errors import (
@@ -46,10 +65,11 @@ from dramafetch.models import (
     DiscoveryOptions,
     Downloader,
     DownloadOptions,
+    DownloadStatus,
     Series,
     VideoRef,
 )
-from dramafetch.web.jobs import JobManager, Runner, redact_secrets
+from dramafetch.web.jobs import JobManager, Runner, cover_sidecar, redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -60,10 +80,41 @@ _DRAIN_LIMIT = 1024 * 1024
 _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "[::]"})
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
 _JOBS_PREFIX = "/api/jobs/"
+_FILES_PREFIX = "/api/files/"
+# Covers are loaded by the browser from TikTok's CDN (https) — or the fake server (http) in tests;
+# everything else stays same-origin and inline.
 _CSP = (
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-    "connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'"
+    "connect-src 'self'; img-src 'self' data: https: http:; form-action 'none'; base-uri 'none'"
 )
+
+SESSION_COOKIE = "dramafetch_session"
+SESSION_MAX_AGE_S = 30 * 24 * 3600  # the cookie POST /api/session sets lasts a month
+TOKEN_MIN_CHARS = 8
+TOKEN_REQUIRED_MESSAGE = "token required"
+TOKEN_HINT = "enter the token the server was started with"
+#: The only requests a token does not protect: the page itself and the endpoint that turns the
+#: token into the session cookie (which checks the token it is given).
+_PUBLIC_ROUTES = frozenset({("GET", "/"), ("GET", "/index.html"), ("POST", "/api/session")})
+# RFC 6265 cookie-octets (visible ASCII without space, double quote, comma, semicolon or
+# backslash): the token travels back in `dramafetch_session=<token>` and after `Bearer `.
+_TOKEN_RE = re.compile(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+")
+#: What the files endpoint serves, by suffix; anything else is a generic byte stream.
+_CONTENT_TYPES = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/x-m4v",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".webm": "video/webm",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+_CHUNK_BYTES = 64 * 1024
+# Dropped from the ASCII fallback file name (RFC 6266): quotes and backslashes would end or escape
+# the quoted-string, control characters have no place in a header.
+_UNSAFE_ASCII_RE = re.compile(r'[\\"\x00-\x1f\x7f]')
 
 LOGIN_HINT = (
     "Export cookies.txt (Netscape format) from the browser where you are logged in to TikTok and "
@@ -96,6 +147,55 @@ class HttpError(Exception):
         self.hint = hint
 
 
+def _no_such_file() -> HttpError:
+    """The files endpoint's only failure: it never says whether the job, row or path exists."""
+    return HttpError(HTTPStatus.NOT_FOUND, "no such file")
+
+
+def is_loopback_host(host: str) -> bool:
+    """``localhost`` or a loopback address (``127.x.x.x``, ``::1``), IPv6 brackets tolerated.
+
+    Only such a host may be bound without an access token: anything else is reachable from the
+    network. A host *name* other than ``localhost`` cannot be checked, so it counts as not loopback.
+    """
+    cleaned = host.strip()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1].strip()
+    if cleaned.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(cleaned).is_loopback
+    except ValueError:
+        return False
+
+
+def token_problem(token: str) -> str | None:
+    """Why ``token`` cannot be the access token, or ``None`` when it can; never echoes the token."""
+    if len(token) < TOKEN_MIN_CHARS:
+        return f"the token must be at least {TOKEN_MIN_CHARS} characters"
+    if not _TOKEN_RE.fullmatch(token):
+        return (
+            "the token must be visible ASCII without spaces, quotes, commas, semicolons or "
+            "backslashes (it travels in a cookie)"
+        )
+    return None
+
+
+def content_type_for(path: Path) -> str:
+    """The ``Content-Type`` of a served file, from its suffix."""
+    return _CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def content_disposition(name: str) -> str:
+    """``attachment`` with an ASCII fallback ``filename`` and the UTF-8 ``filename*`` (RFC 6266)."""
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    ascii_name = re.sub(r"\s+", " ", _UNSAFE_ASCII_RE.sub("", ascii_name)).strip()
+    if not ascii_name or ascii_name.startswith("."):  # nothing but the suffix survived
+        suffix = Path(name).suffix
+        ascii_name = "download" + (suffix if suffix.isascii() else "")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
 def index_html() -> str:
     """The page, read from the package so it works from a wheel as well as from a checkout."""
     return (resources.files("dramafetch.web") / "static" / "index.html").read_text(encoding="utf-8")
@@ -121,6 +221,7 @@ def series_to_dict(series: Series, out_dir: Path) -> dict[str, Any]:
                 "locked": episode.locked,
                 "lock_hints": list(episode.lock_hints),
                 "page_url": episode.page_url,
+                "cover_url": episode.cover_url,
             }
             for episode in sorted(series.episodes, key=lambda episode: episode.number)
         ],
@@ -143,8 +244,20 @@ class DramaFetchServer(ThreadingHTTPServer):
         discovery: Discovery | None,
         downloader: Downloader | None,
         jobs: JobManager | None = None,
+        token: str | None = None,
     ) -> None:
         self.bound_host = address[0]
+        # Both checks come before the bind: a wrongly protected server never opens a socket.
+        if token is not None:
+            problem = token_problem(token)
+            if problem is not None:
+                raise ValueError(problem)
+        elif not is_loopback_host(self.bound_host):
+            raise ValueError(
+                f"binding to {self.bound_host} needs an access token: without one the UI would be "
+                "open to everyone on the network"
+            )
+        self.token = token
         if ":" in self.bound_host:
             self.address_family = socket.AF_INET6
         self.out_dir = out_dir.expanduser().absolute()
@@ -176,6 +289,36 @@ class DramaFetchServer(ThreadingHTTPServer):
             name = name.rsplit(":", 1)[0]
         return name in _LOCAL_HOSTS or name.strip("[]") == self.bound_host.lower()
 
+    def served_file(self, job_id: str, number: int, *, cover: bool = False) -> Path | None:
+        """The video (or, with ``cover``, the thumbnail) a finished job row points at, if it may be
+        served: the row must be ``done`` with a path, and that path — or its first existing
+        ``<stem>.jpg|.jpeg|.png|.webp`` sidecar — must resolve (symlinks followed) to a regular file
+        inside ``out_dir`` that is no ``.part``. ``None`` otherwise; the caller answers 404 without
+        saying why. The URL only ever selects a row: no part of it touches the file system."""
+        snapshot = self.jobs.get(job_id)
+        if snapshot is None:
+            return None
+        row = next((row for row in snapshot["results"] if row["number"] == number), None)
+        if row is None or row["status"] != DownloadStatus.DONE.value or not row["path"]:
+            return None
+        path = Path(row["path"])
+        if cover:
+            sidecar = cover_sidecar(path)
+            if sidecar is None:
+                return None
+            path = sidecar
+        if path.suffix.lower() == ".part":
+            return None
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError):  # gone, unreadable, or a symlink loop
+            return None
+        if resolved.suffix.lower() == ".part" or not resolved.is_file():
+            return None
+        if not resolved.is_relative_to(self.out_dir.resolve()):
+            return None
+        return resolved
+
     def handle_error(self, request: Any, client_address: Any) -> None:
         log.debug("error while handling a request from %s", client_address, exc_info=True)
 
@@ -204,6 +347,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if not self.app.host_allowed(self.headers.get("Host")):
                 raise HttpError(HTTPStatus.FORBIDDEN, "unexpected Host header")
+            self._require_token(method, path)
             if method == "GET":
                 self._get(path)
             else:
@@ -232,11 +376,15 @@ class _Handler(BaseHTTPRequestHandler):
             if snapshot is None:
                 raise HttpError(HTTPStatus.NOT_FOUND, "unknown job")
             self._send_json(HTTPStatus.OK, snapshot)
+        elif path.startswith(_FILES_PREFIX):
+            self._send_file(path[len(_FILES_PREFIX) :])
         else:
             raise HttpError(HTTPStatus.NOT_FOUND, f"no such page: {path[:80]}")
 
     def _post(self, path: str) -> None:
-        if path == "/api/resolve":
+        if path == "/api/session":
+            self._open_session(self._read_json_body())
+        elif path == "/api/resolve":
             body = self._read_json_body()
             series = self._resolve(body)
             self._send_json(HTTPStatus.OK, series_to_dict(series, self.app.out_dir))
@@ -245,6 +393,52 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.ACCEPTED, self._start_download(body))
         else:
             raise HttpError(HTTPStatus.NOT_FOUND, f"no such endpoint: {path[:80]}")
+
+    # ------------------------------------------------------------------ access token
+
+    def _require_token(self, method: str, path: str) -> None:
+        """401 for everything but the page and ``POST /api/session`` when the server has a token and
+        the request carries neither ``Authorization: Bearer <token>`` nor the session cookie."""
+        token = self.app.token
+        if token is None or (method, path) in _PUBLIC_ROUTES:
+            return
+        expected = token.encode("utf-8")
+        for presented in self._presented_tokens():
+            if hmac.compare_digest(presented.encode("utf-8"), expected):
+                return
+        raise HttpError(
+            HTTPStatus.UNAUTHORIZED, TOKEN_REQUIRED_MESSAGE, kind="auth", hint=TOKEN_HINT
+        )
+
+    def _presented_tokens(self) -> Iterator[str]:
+        """The credentials a request carries: the Bearer token, then every session cookie value."""
+        authorization = str(self.headers.get("Authorization") or "")
+        scheme, _, credentials = authorization.strip().partition(" ")
+        if scheme.lower() == "bearer" and credentials.strip():
+            yield credentials.strip()
+        for header in self.headers.get_all("Cookie") or []:
+            for part in str(header).split(";"):
+                name, separator, value = part.strip().partition("=")
+                if separator and name.strip() == SESSION_COOKIE and value.strip():
+                    yield value.strip()
+
+    def _open_session(self, body: dict[str, Any]) -> None:
+        """Turn the right token into the session cookie (204); a wrong one is a 401 at once."""
+        token = self.app.token
+        if token is None:
+            raise HttpError(
+                HTTPStatus.BAD_REQUEST, "this server was started without a token; no session needed"
+            )
+        presented = body.get("token")
+        if not isinstance(presented, str):
+            raise HttpError(HTTPStatus.BAD_REQUEST, 'the JSON body needs a string "token"')
+        if not hmac.compare_digest(presented.encode("utf-8"), token.encode("utf-8")):
+            raise HttpError(HTTPStatus.UNAUTHORIZED, "wrong token", kind="auth", hint=TOKEN_HINT)
+        cookie = (
+            f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; "
+            f"Max-Age={SESSION_MAX_AGE_S}"
+        )
+        self._send_headers(HTTPStatus.NO_CONTENT, [("Set-Cookie", cookie)])
 
     # ------------------------------------------------------------------ handlers
 
@@ -331,6 +525,34 @@ class _Handler(BaseHTTPRequestHandler):
             "version": __version__,
         }
 
+    def _send_file(self, rest: str) -> None:
+        """``<job id>/<number>`` or ``<job id>/<number>/cover`` after ``/api/files/``: stream the
+        file the job row points at (see :meth:`DramaFetchServer.served_file`), or the one 404."""
+        parts = rest.split("/")
+        if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] != "cover"):
+            raise _no_such_file()
+        job_id, number = parts[0], parts[1]
+        if not job_id or not (number.isascii() and number.isdigit()):
+            raise _no_such_file()
+        target = self.app.served_file(job_id, int(number), cover=len(parts) == 3)
+        if target is None:
+            raise _no_such_file()
+        with target.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            self._send_headers(
+                HTTPStatus.OK,
+                [
+                    ("Content-Type", content_type_for(target)),
+                    ("Content-Length", str(size)),
+                    ("Content-Disposition", content_disposition(target.name)),
+                ],
+            )
+            try:
+                shutil.copyfileobj(handle, self.wfile, _CHUNK_BYTES)  # 64 KiB at a time
+            except OSError:  # the client went away mid-download (or the file did)
+                self.close_connection = True
+                log.debug("download of %s was cut short", target.name, exc_info=True)
+
     # ------------------------------------------------------------------ plumbing
 
     def _read_json_body(self) -> dict[str, Any]:
@@ -363,31 +585,43 @@ class _Handler(BaseHTTPRequestHandler):
             raise HttpError(HTTPStatus.BAD_REQUEST, "the JSON body must be an object")
         return data
 
-    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-        self._send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json")
+    def _send_json(
+        self, status: int, payload: dict[str, Any], extra: Iterable[tuple[str, str]] = ()
+    ) -> None:
+        self._send_bytes(status, json.dumps(payload).encode("utf-8"), "application/json", extra)
 
     def _send_error(self, error: HttpError) -> None:
         payload: dict[str, Any] = {"error": redact_secrets(error.message), "kind": error.kind}
         if error.hint:
             payload["hint"] = error.hint
-        self._send_json(error.status, payload)
+        extra: list[tuple[str, str]] = []
+        if error.status == HTTPStatus.UNAUTHORIZED and error.kind == "auth":
+            extra.append(("WWW-Authenticate", 'Bearer realm="DramaFetch"'))
+        self._send_json(error.status, payload, extra)
 
     def _send_html(self, html: str) -> None:
         self._send_bytes(HTTPStatus.OK, html.encode("utf-8"), "text/html; charset=utf-8")
 
-    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+    def _send_bytes(
+        self, status: int, body: bytes, content_type: str, extra: Iterable[tuple[str, str]] = ()
+    ) -> None:
+        headers = [("Content-Type", content_type), ("Content-Length", str(len(body))), *extra]
+        self._send_headers(status, headers)
+        self.wfile.write(body)
+
+    def _send_headers(self, status: int, headers: Iterable[tuple[str, str]] = ()) -> None:
+        """The status line, ``headers`` and the fixed security headers; no body (a 204 has none)."""
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+        for name, value in headers:
+            self.send_header(name, value)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy", _CSP)
         self.end_headers()
-        self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Request lines only (method, path, status): never headers, never bodies.
+        # Request lines only (method, path, status): never headers, never bodies, so never a token.
         log.info("%s %s", self.address_string(), format % args)
 
 
@@ -412,21 +646,20 @@ def run_server(
     discovery: Discovery | None = None,
     downloader: Downloader | None = None,
     serve_forever: bool = True,
+    token: str | None = None,
 ) -> ThreadingHTTPServer:
     """Bind the web UI to ``host:port`` and, by default, serve until Ctrl+C.
 
     ``out_dir`` is the only place downloads can go (``download_options.out_dir`` is replaced by it).
-    ``discovery``/``downloader`` override the engine's defaults — tests inject fakes. With
-    ``serve_forever=False`` the bound server is returned without serving, so the caller can run
-    ``server.serve_forever()`` in a thread and ``server.shutdown()`` later (``port=0`` picks a free
-    port; read it from ``server.server_address``).
+    ``discovery``/``downloader`` override the engine's defaults — tests inject fakes. ``token`` is
+    the access token every ``/api/*`` request must then carry (see the module docstring); it is
+    required for any ``host`` but loopback and is never logged. With ``serve_forever=False`` the
+    bound server is returned without serving, so the caller can run ``server.serve_forever()`` in a
+    thread and ``server.shutdown()`` later (``port=0`` picks a free port; read it from
+    ``server.server_address``). ``ValueError`` for an empty host, an off-loopback host without a
+    token, or a token that is too short or not cookie-safe — all before anything is bound.
     """
     host = normalize_host(host)
-    if host in _WILDCARD_HOSTS:
-        log.warning(
-            "binding to %s exposes the UI (it has no authentication) to every network you are on",
-            host,
-        )
     server = DramaFetchServer(
         (host, port),
         out_dir=out_dir,
@@ -434,12 +667,14 @@ def run_server(
         download_options=download_options,
         discovery=discovery,
         downloader=downloader,
+        token=token,
     )
     log.info(
-        "DramaFetch web UI on http://%s:%d/ (downloads go to %s)",
+        "DramaFetch web UI on http://%s:%d/ (downloads go to %s; token: %s)",
         host,
         server.server_address[1],
         server.out_dir,
+        "set" if server.token is not None else "none",
     )
     if serve_forever:
         try:

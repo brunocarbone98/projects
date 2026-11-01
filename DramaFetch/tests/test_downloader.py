@@ -11,6 +11,7 @@ from dramafetch.downloader import (
     BLOCKED_MESSAGE,
     H264_FORMAT,
     MAX_RETRIES,
+    VIDEO_SUFFIXES,
     YtDlpDownloader,
     cookies_file_problem,
     curl_cffi_available,
@@ -31,6 +32,7 @@ EPISODE = Episode(
     item_id="7699400000000000003",
     title="Heiress | Episode 3",
     series_id=SERIES_ID,
+    series_name="Heiress",
     author="muffindrama_us",
 )
 LOCKED = Episode(
@@ -40,7 +42,9 @@ LOCKED = Episode(
     series_id=SERIES_ID,
     lock_hints=("isFree=false", "isLocked=True", "no play address"),
 )
-STEM = "E03 - Heiress Episode 3"
+# The default name format, "{series} - Episode {number}", for EPISODE.
+STEM = "Heiress - Episode 03"
+OPTIONS = DownloadOptions()
 
 
 class FakeYdl:
@@ -109,6 +113,7 @@ def test_build_options_full(tmp_path):
     assert params["windowsfilenames"] is (sys.platform == "win32")
     assert params["overwrites"] is True
     assert params["sleep_interval_requests"] == 1
+    assert params["writethumbnail"] is True  # the cover lands next to the video, by default
     assert params["extractor_args"] == {
         "tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}
     }
@@ -135,14 +140,27 @@ def test_retries_stay_modest_whatever_the_options_say():
 
 
 def test_build_options_minimal_without_cookies_and_h264():
-    options = DownloadOptions(prefer_h264=False, impersonate=False)
+    options = DownloadOptions(prefer_h264=False, impersonate=False, thumbnails=False)
     params = YtDlpDownloader(lambda p: None).build_options(EPISODE, options, "o.%(ext)s")
     assert params["format"] == "best"
     assert "cookiefile" not in params
     assert "cookiesfrombrowser" not in params
     assert "impersonate" not in params
     assert "extractor_args" not in params
+    assert "writethumbnail" not in params
     assert params["overwrites"] is False
+
+
+def test_writethumbnail_follows_the_thumbnails_option():
+    """`--no-thumbnails` leaves the key out entirely (yt-dlp's default is off); on, it is the plain
+    `writethumbnail` with no postprocessor, so no ffmpeg is needed and no conversion happens."""
+    downloader = YtDlpDownloader(lambda p: None)
+    on = downloader.build_options(EPISODE, DownloadOptions(thumbnails=True), "o.%(ext)s")
+    assert on["writethumbnail"] is True
+    assert "postprocessors" not in on and "convertthumbnails" not in on
+    off = downloader.build_options(EPISODE, DownloadOptions(thumbnails=False), "o.%(ext)s")
+    assert "writethumbnail" not in off
+    assert DownloadOptions().thumbnails is True
 
 
 def test_build_options_omits_impersonation_when_curl_cffi_is_missing(monkeypatch):
@@ -193,14 +211,22 @@ def test_existing_file_is_skipped_and_partials_do_not_count(tmp_path):
     assert log[1]["params"]["overwrites"] is True
 
 
-def test_dry_run_reports_the_page_url(tmp_path):
+def test_dry_run_reports_the_page_url_and_the_thumbnail(tmp_path):
     factory, log = make_factory()
     result = YtDlpDownloader(factory).download(
         EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True)
     )
     assert result.status is DownloadStatus.DRY_RUN
     assert EPISODE.page_url in result.message
-    assert "https://www.tiktok.com/@muffindrama_us/video/7699400000000000003" in result.message
+    assert result.message == (
+        "would download https://www.tiktok.com/@muffindrama_us/video/7699400000000000003"
+        " + thumbnail"
+    )
+    assert log == []
+    plain = YtDlpDownloader(factory).download(
+        EPISODE, DownloadOptions(out_dir=tmp_path, dry_run=True, thumbnails=False)
+    )
+    assert plain.message == f"would download {EPISODE.page_url}"
     assert log == []
 
 
@@ -223,15 +249,20 @@ def test_output_template_escapes_literal_percent_signs():
     episode = Episode(
         number=1, item_id="1", title="Finale %(cookies)s 100%% | 50% off", series_id="s"
     )
-    template = output_template(Path("/tmp/50% off"), episode)
+    options = DownloadOptions(name_format="E{number} - {title}", series_name="50% off")
+    template = output_template(Path("/tmp/50% off"), episode, options)
     assert template == "/tmp/50%% off/E01 - Finale %%(cookies)s 100%%%% 50%% off.%(ext)s"
     assert template % {"ext": "mp4"} == "/tmp/50% off/E01 - Finale %(cookies)s 100%% 50% off.mp4"
+    # the series name is user- and TikTok-controlled text too
+    with_series = output_template(Path("/tmp/o"), episode, DownloadOptions(series_name="50% off"))
+    assert with_series == "/tmp/o/50%% off - Episode 01.%(ext)s"
 
 
 def test_percent_sequences_in_titles_stay_literal_through_the_fake_ydl(tmp_path):
     episode = Episode(number=1, item_id="1", title="Ep %(id)s | %(cookies)s", series_id="s")
     factory, _ = make_factory()
-    result = YtDlpDownloader(factory).download(episode, DownloadOptions(out_dir=tmp_path))
+    options = DownloadOptions(out_dir=tmp_path, name_format="E{number} - {title}")
+    result = YtDlpDownloader(factory).download(episode, options)
     assert result.status is DownloadStatus.DONE
     assert result.path == tmp_path / "E01 - Ep %(id)s %(cookies)s.mp4"
 
@@ -258,8 +289,11 @@ def test_yt_dlp_writes_exactly_where_dramafetch_looks(tmp_path, out_dir_name, ti
 
     out_dir = tmp_path / out_dir_name / "Series [1]"
     episode = Episode(number=1, item_id="7699400000000000001", title=title, series_id="1")
-    options = DownloadOptions(out_dir=out_dir)
-    params = YtDlpDownloader().build_options(episode, options, output_template(out_dir, episode))
+    options = DownloadOptions(
+        out_dir=out_dir, name_format="{series} - Episode {number} - {title}", series_name="100%"
+    )
+    template = output_template(out_dir, episode, options)
+    params = YtDlpDownloader().build_options(episode, options, template)
     info = {
         "id": episode.item_id,
         "title": "t",
@@ -268,7 +302,8 @@ def test_yt_dlp_writes_exactly_where_dramafetch_looks(tmp_path, out_dir_name, ti
     }
     with yt_dlp.YoutubeDL(params) as ydl:
         actual = ydl.prepare_filename(info)
-    assert actual == str(out_dir / (episode_stem(episode) + ".mp4"))
+    assert actual == str(out_dir / (episode_stem(episode, options) + ".mp4"))
+    assert actual.rsplit("/", 1)[1].startswith("100% - Episode 01 - ")
     assert "SECRET_SESSION_VALUE" not in actual
     assert episode.item_id not in actual.rsplit("/", 1)[1]  # `%(id)s` in a title is not expanded
 
@@ -335,7 +370,7 @@ def test_non_zero_return_code_is_a_failure(tmp_path):
             DownloadStatus.FAILED_UNAVAILABLE,
         ),
         ("ERROR: [TikTok] 7312000000000403001: Unable to extract", DownloadStatus.FAILED),
-        ("Permission denied: '/downloads/E03.mp4'", DownloadStatus.FAILED),
+        ("Permission denied: '/downloads/Heiress - Episode 03.mp4'", DownloadStatus.FAILED),
         ("", DownloadStatus.FAILED),
     ],
 )
@@ -488,12 +523,12 @@ def test_redact_secrets_covers_every_line_and_url_query_strings():
 
 
 def test_partial_detection_and_newest_existing_file(tmp_path):
-    assert is_partial_file("E01 - x.mp4.part")
-    assert is_partial_file("E01 - x.mp4.ytdl")
-    assert is_partial_file("E01 - x.mp4.part-Frag3")
-    assert not is_partial_file("E01 - x.mp4")
-    assert existing_episode_file(tmp_path / "missing", EPISODE) is None
-    assert existing_episode_file(tmp_path, EPISODE) is None
+    assert is_partial_file("Heiress - Episode 01.mp4.part")
+    assert is_partial_file("Heiress - Episode 01.mp4.ytdl")
+    assert is_partial_file("Heiress - Episode 01.mp4.part-Frag3")
+    assert not is_partial_file("Heiress - Episode 01.mp4")
+    assert existing_episode_file(tmp_path / "missing", EPISODE, OPTIONS) is None
+    assert existing_episode_file(tmp_path, EPISODE, OPTIONS) is None
     older = tmp_path / f"{STEM}.webm"
     older.write_bytes(b"1")
     import os
@@ -503,4 +538,36 @@ def test_partial_detection_and_newest_existing_file(tmp_path):
     newer.write_bytes(b"2")
     (tmp_path / f"{STEM}x.mp4").write_bytes(b"other stem")  # prefix without the dot: not ours
     (tmp_path / f"{STEM}.mp4.part").write_bytes(b"partial")
-    assert existing_episode_file(tmp_path, EPISODE) == newer
+    assert existing_episode_file(tmp_path, EPISODE, OPTIONS) == newer
+    # the stem follows the name format of the run
+    custom = DownloadOptions(name_format="{n} {title}")
+    assert existing_episode_file(tmp_path, EPISODE, custom) is None
+    (tmp_path / "3 Heiress Episode 3.mkv").write_bytes(b"3")
+    assert existing_episode_file(tmp_path, EPISODE, custom) == tmp_path / "3 Heiress Episode 3.mkv"
+
+
+def test_existing_episode_file_never_mistakes_a_thumbnail_for_the_video(tmp_path):
+    """A cover sidecar is `<stem>.jpg`: alone it means the video is still missing (so the episode
+    is downloaded, not skipped); next to the video, the video is what is found."""
+    assert sorted(VIDEO_SUFFIXES) == [".m4v", ".mkv", ".mov", ".mp4", ".webm"]
+    for sidecar in (".jpg", ".jpeg", ".png", ".webp", ".image", ".json", ".description"):
+        (tmp_path / f"{STEM}{sidecar}").write_bytes(b"not a video")
+    assert existing_episode_file(tmp_path, EPISODE, OPTIONS) is None
+    video = tmp_path / f"{STEM}.mp4"
+    video.write_bytes(b"video")
+    assert existing_episode_file(tmp_path, EPISODE, OPTIONS) == video
+    video.unlink()
+    upper = tmp_path / f"{STEM}.MP4"  # extensions are matched case-insensitively
+    upper.write_bytes(b"video")
+    assert existing_episode_file(tmp_path, EPISODE, OPTIONS) == upper
+    for suffix in sorted(VIDEO_SUFFIXES):
+        assert is_partial_file(f"{STEM}{suffix}.part")
+
+
+def test_a_lone_thumbnail_does_not_skip_the_download(tmp_path):
+    (tmp_path / f"{STEM}.jpg").write_bytes(b"cover")
+    factory, log = make_factory()
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.DONE
+    assert result.path == tmp_path / f"{STEM}.mp4"
+    assert len(log) == 1

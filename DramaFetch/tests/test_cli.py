@@ -102,7 +102,7 @@ class FakeDownloader:
         status = self.outcomes.get(episode.number, DownloadStatus.DONE)
         if status is DownloadStatus.DONE:
             options.out_dir.mkdir(parents=True, exist_ok=True)
-            path = options.out_dir / f"E{episode.number:02d} - fake.mp4"
+            path = options.out_dir / f"fake - Episode {episode.number:02d}.mp4"
             path.write_bytes(b"v")
             return DownloadResult(episode, status, path, "saved")
         return DownloadResult(episode, status, message=f"{status.value} from fake")
@@ -144,7 +144,7 @@ class FakeBrowserDownloader:
         if episode.locked and not options.include_locked:
             return locked_result(episode)
         options.out_dir.mkdir(parents=True, exist_ok=True)
-        path = options.out_dir / f"E{episode.number:02d} - browser.mp4"
+        path = options.out_dir / f"browser - Episode {episode.number:02d}.mp4"
         path.write_bytes(b"v")
         return DownloadResult(episode, DownloadStatus.DONE, path, "saved 0.1 MiB")
 
@@ -303,6 +303,32 @@ def _subcommand_help(command: str) -> str:
     return subparsers.choices[command].format_help()
 
 
+def test_parser_name_format_and_no_thumbnails():
+    """`--name-format FORMAT` and `--no-thumbnails` exist on download, video and serve; the format
+    defaults to DEFAULT_NAME_FORMAT for a series and to "{title}" (the item id) for video."""
+    parser = cli.build_parser()
+    for argv in (["download", SERIES_URL], ["video", VIDEO_URL], ["serve"]):
+        args = parser.parse_args(argv)
+        assert args.name_format is None and args.no_thumbnails is False
+        args = parser.parse_args([*argv, "--name-format", "{series} - {n}", "--no-thumbnails"])
+        assert args.name_format == "{series} - {n}" and args.no_thumbnails is True
+        assert cli.name_format_for(args) == "{series} - {n}"
+    assert cli.name_format_for(parser.parse_args(["download", SERIES_URL])) == (
+        cli.DEFAULT_NAME_FORMAT
+    )
+    assert cli.name_format_for(parser.parse_args(["serve"])) == "{series} - Episode {number}"
+    assert cli.name_format_for(parser.parse_args(["video", VIDEO_URL])) == "{title}"
+    assert cli.VIDEO_NAME_FORMAT == "{title}"
+    for command in ("download", "video", "serve"):
+        help_text = _subcommand_help(command)
+        assert "--name-format FORMAT" in help_text
+        assert "{series} {number} {n} {title} {id}" in help_text
+        assert "{series} - Episode {number}" in help_text  # the default is spelled out
+        assert "--no-thumbnails" in help_text
+    for command in ("info", "doctor"):
+        assert "--name-format" not in _subcommand_help(command)
+
+
 def test_parser_video_doctor_serve():
     parser = cli.build_parser()
     video = parser.parse_args(
@@ -373,6 +399,15 @@ def test_version_help_and_no_command(capsys):
         # the browser engine never reads --cookies-from-browser (a yt-dlp option): say so
         ["download", SERIES_URL, "--engine", "browser", "--cookies-from-browser", "chrome"],
         ["serve", "--engine", "browser", "--cookies-from-browser", "firefox"],
+        # the name format is checked up front too: unknown placeholder, padding spelled by hand,
+        # an unmatched brace, nothing that tells episodes apart
+        ["download", SERIES_URL, "--name-format", "{nope}"],
+        ["download", SERIES_URL, "--name-format", "{series} - Episode {number:02d}"],
+        ["download", SERIES_URL, "--name-format", "{series} - Episode {number"],
+        ["download", SERIES_URL, "--name-format", "{series}"],
+        ["download", SERIES_URL, "--name-format", ""],
+        ["video", VIDEO_URL, "--name-format", "{episode}"],
+        ["serve", "--name-format", "{{n}}"],
     ],
 )
 def test_usage_errors_exit_2_before_any_network(argv, capsys, fake_discovery, fake_downloader):
@@ -397,6 +432,13 @@ def test_usage_error_messages_say_what_to_do(capsys):
     assert "0 disables" in capsys.readouterr().err
     assert cli.main(["download", SERIES_URL, "--rest-min", "90", "--rest-max", "60"]) == 2
     assert "--rest-max must be >= --rest-min" in capsys.readouterr().err
+    assert cli.main(["download", SERIES_URL, "--name-format", "{series} - {nope}"]) == 2
+    err = capsys.readouterr().err
+    assert "--name-format: unknown placeholder {nope} in name format '{series} - {nope}'" in err
+    assert "use {series}, {number}, {n}, {title}, {id}" in err
+    assert cli.main(["download", SERIES_URL, "--name-format", "{series}"]) == 2
+    err = capsys.readouterr().err
+    assert "does not tell episodes apart" in err and "{number}, {n}, {title} or {id}" in err
 
 
 def test_parse_extractor_args():
@@ -632,20 +674,25 @@ def test_download_end_to_end(fake_discovery, fake_downloader, tmp_path, capsys):
     lines = out.splitlines()
     assert lines[0] == f"{NAME} [{SERIES_ID}]: 4 episode(s) -> {tmp_path / f'{NAME} [{SERIES_ID}]'}"
     assert lines[1].startswith("E01  done")
-    assert lines[1].endswith("E01 - fake.mp4")
+    assert lines[1].endswith("fake - Episode 01.mp4")
     assert lines[4].startswith("E05  skipped-locked")
     assert "looks locked: isFree=false; isLocked=True" in lines[4]
     assert lines[-1] == "Summary: 3 done, 1 skipped-locked"
     target = tmp_path / f"{NAME} [{SERIES_ID}]"
     assert sorted(p.name for p in target.iterdir()) == [
-        "E01 - fake.mp4",
-        "E02 - fake.mp4",
-        "E03 - fake.mp4",
         MANIFEST_FILENAME,
+        "fake - Episode 01.mp4",
+        "fake - Episode 02.mp4",
+        "fake - Episode 03.mp4",
     ]
     (downloader,) = fake_downloader.instances
     assert [episode.number for episode, _ in downloader.calls] == [1, 2, 3, 5]
     assert all(options.out_dir == target for _, options in downloader.calls)
+    # the naming defaults: "{series} - Episode {number}" with the series name, covers on
+    _, first_options = downloader.calls[0]
+    assert first_options.name_format == "{series} - Episode {number}"
+    assert first_options.series_name == NAME
+    assert first_options.thumbnails is True
     # a second run resumes: everything is skipped through the manifest, no downloader calls
     code = cli.main(["download", SERIES_URL, "--out", str(tmp_path)])
     assert code == 0
@@ -755,6 +802,9 @@ def test_download_dry_run_and_flags_reach_the_downloader(
             "0.5",
             "--delay-max",
             "0.5",
+            "--name-format",
+            "{series} - E{number} - {title}",
+            "--no-thumbnails",
         ]
     )
     assert code == 0
@@ -764,6 +814,8 @@ def test_download_dry_run_and_flags_reach_the_downloader(
     (downloader,) = fake_downloader.instances
     _, options = downloader.calls[0]
     assert options.dry_run and options.include_locked and options.overwrite
+    assert options.name_format == "{series} - E{number} - {title}"
+    assert options.thumbnails is False
     assert options.impersonate is False
     assert options.cookies_file == Path("c.txt")
     assert options.cookies_from_browser == "firefox"
@@ -912,9 +964,9 @@ def test_download_engine_browser_gets_the_browser_flags_and_is_closed(
     out = capsys.readouterr().out
     assert "Summary: 3 done, 1 skipped-locked" in out
     assert sorted(p.name for p in (tmp_path / f"{NAME} [{SERIES_ID}]").glob("*.mp4")) == [
-        "E01 - browser.mp4",
-        "E02 - browser.mp4",
-        "E03 - browser.mp4",
+        "browser - Episode 01.mp4",
+        "browser - Episode 02.mp4",
+        "browser - Episode 03.mp4",
     ]
 
 
@@ -993,9 +1045,52 @@ def test_video_downloads_directly_into_out_dir(fake_downloader, tmp_path, capsys
     assert episode.author == "ana"
     assert episode.page_url == VIDEO_URL
     assert options.out_dir == tmp_path / "vids"
-    assert (tmp_path / "vids" / "E00 - fake.mp4").exists()
+    assert options.name_format == "{title}"  # one file, named after its item id: <id>.mp4
+    assert options.thumbnails is True
+    assert (tmp_path / "vids" / "fake - Episode 00.mp4").exists()
     out = capsys.readouterr().out
     assert out.startswith("E00  done")
+
+
+def test_video_names_its_file_after_the_item_id_unless_told_otherwise(tmp_path):
+    """Through the real yt-dlp downloader with a fake YoutubeDL: `{title}` is the item id, so the
+    default is `<id>.mp4`; `--name-format` and `--no-thumbnails` apply to `video` too."""
+    from dramafetch import downloader as downloader_module
+
+    written = []
+
+    class FakeYdl:
+        def __init__(self, params):
+            self.params = params
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def download(self, urls):
+            target = Path(self.params["outtmpl"] % {"ext": "mp4"})
+            target.write_bytes(b"v")
+            written.append((target, self.params))
+            return 0
+
+    real_factory = downloader_module.YtDlpDownloader.__init__
+
+    def init_with_fake(self, ydl_factory=None):
+        real_factory(self, ydl_factory=FakeYdl)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(downloader_module.YtDlpDownloader, "__init__", init_with_fake)
+        assert cli.main(["video", VIDEO_URL, "--out", str(tmp_path)]) == 0
+        argv = ["video", VIDEO_URL, "--out", str(tmp_path), "--no-thumbnails"]
+        assert cli.main([*argv, "--name-format", "{id} - by {series}"]) == 0
+    assert [target.name for target, _ in written] == [
+        "7699400000000000001.mp4",
+        "7699400000000000001 - by video.mp4",  # no series: {series} is the word "video"
+    ]
+    assert written[0][1]["writethumbnail"] is True
+    assert "writethumbnail" not in written[1][1]
 
 
 def test_video_failure_exit_code_and_series_url_rejection(fake_downloader, tmp_path, capsys):

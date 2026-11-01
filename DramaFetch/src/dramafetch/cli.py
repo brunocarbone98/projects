@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import json
+import os
 import platform
 import re
 import shutil
@@ -42,8 +43,9 @@ from dramafetch.errors import (
     RateLimitedError,
     UnsupportedUrlError,
 )
-from dramafetch.manifest import series_dir
+from dramafetch.manifest import NAME_PLACEHOLDERS, series_dir, validate_name_format
 from dramafetch.models import (
+    DEFAULT_NAME_FORMAT,
     DiscoveryOptions,
     DownloadOptions,
     DownloadResult,
@@ -63,12 +65,12 @@ EXIT_RATE_LIMITED = 5
 EXIT_INTERRUPTED = 130
 
 DEFAULT_OUT_DIR = "downloads"
+#: ``video`` names its one file after the title, which is the item id: ``<id>.mp4``.
+VIDEO_NAME_FORMAT = "{title}"
 PACES = engine.PACES
 ENGINES = engine.ENGINES
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-# Only an explicit --host can name one of these; the web UI has no authentication, so say so.
-WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", "[::]"})
 SESSION_COOKIE_NAMES = frozenset({"sessionid", "sid_tt"})
 BROWSER_INSTALL_HINT = (
     "run `playwright install chromium`, or pass --browser-channel chrome (uses your installed "
@@ -158,10 +160,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = commands.add_parser("serve", help="run the local web UI (stdlib http.server)")
     serve.add_argument(
-        "--host", default=DEFAULT_HOST, help=f"bind address (default {DEFAULT_HOST})"
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"bind address (default {DEFAULT_HOST}: this machine only); anything but loopback "
+        "needs --token, because the whole network can then reach the page",
     )
     serve.add_argument(
         "--port", type=int, default=DEFAULT_PORT, help=f"port (default {DEFAULT_PORT})"
+    )
+    serve.add_argument(
+        "--token",
+        default=None,
+        metavar="TOKEN",
+        help="access token the page asks for once per device (also env DRAMAFETCH_TOKEN; the flag "
+        "wins): at least 8 characters, no spaces or quotes. Required with a --host other than "
+        "loopback, so that a phone or TV on your network can use the UI and nobody else can",
     )
     _add_out_flag(serve)
     _add_cookies_flag(serve)
@@ -236,6 +249,20 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
         help="yt-dlp (default) downloads each episode's page; browser fetches the play URLs the "
         "episode list already carries, inside one browser session of its own (about half the "
         "requests; series only, uses the discovery browser flags and --cookies)",
+    )
+    group.add_argument(
+        "--name-format",
+        metavar="FORMAT",
+        default=None,
+        help="file name of each episode, without extension; placeholders: "
+        + " ".join(f"{{{name}}}" for name in NAME_PLACEHOLDERS)
+        + f" (default '{DEFAULT_NAME_FORMAT}' for a series, "
+        f"'{VIDEO_NAME_FORMAT}' for video; {{number}} is zero-padded, {{n}} is not)",
+    )
+    group.add_argument(
+        "--no-thumbnails",
+        action="store_true",
+        help="do not save the episode cover next to the video (default: <name>.jpg|png|webp)",
     )
     group.add_argument("--overwrite", action="store_true", help="re-download existing files")
     group.add_argument("--dry-run", action="store_true", help="list what would be downloaded")
@@ -404,6 +431,8 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     host = getattr(args, "host", None)
     if host is not None and not host.strip().strip("[]").strip():
         parser.error("--host must name an address (127.0.0.1 keeps the UI private to this machine)")
+    if getattr(args, "command", None) == "serve":
+        _validate_serve_token(args, parser)
     page_count = getattr(args, "page_count", None)
     if page_count is not None and page_count < 1:
         parser.error("--page-count must be at least 1")
@@ -426,6 +455,43 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
             engine.parse_episode_spec(spec)
         except ValueError as exc:
             parser.error(str(exc))
+    if hasattr(args, "name_format"):
+        try:
+            validate_name_format(name_format_for(args))
+        except ValueError as exc:
+            parser.error(f"--name-format: {exc}")
+
+
+def name_format_for(args: argparse.Namespace) -> str:
+    """The name format in force: ``--name-format`` when given, else ``"{title}"`` for ``video``
+    (one file, named after its item id) and ``models.DEFAULT_NAME_FORMAT`` for a series."""
+    given = getattr(args, "name_format", None)
+    if given is not None:
+        return str(given)
+    if getattr(args, "command", None) == "video":
+        return VIDEO_NAME_FORMAT
+    return DEFAULT_NAME_FORMAT
+
+
+def _validate_serve_token(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """``serve``: resolve the access token (``--token``, else ``DRAMAFETCH_TOKEN``) into
+    ``args.token`` and refuse — before anything is bound — a token the web layer cannot use, or a
+    ``--host`` off loopback without one. The token value never appears in a message."""
+    from dramafetch.web.server import is_loopback_host, token_problem  # lazy: serve only
+
+    token: str | None = args.token
+    if token is None:
+        token = os.environ.get("DRAMAFETCH_TOKEN") or None
+    if token is not None:
+        problem = token_problem(token)
+        if problem is not None:
+            parser.error(f"--token (or DRAMAFETCH_TOKEN): {problem}")
+    args.token = token
+    if token is None and not is_loopback_host(args.host):
+        parser.error(
+            f"--host {args.host} needs --token (or DRAMAFETCH_TOKEN): without it the UI would be "
+            "open to everyone on the network"
+        )
 
 
 def _discovery_options(args: argparse.Namespace) -> DiscoveryOptions:
@@ -470,6 +536,8 @@ def _download_options(args: argparse.Namespace) -> DownloadOptions:
         base_url=getattr(args, "base_url", DownloadOptions.base_url)
         if browser
         else DownloadOptions.base_url,
+        name_format=name_format_for(args),
+        thumbnails=not getattr(args, "no_thumbnails", False),
         impersonate=not args.no_impersonate,
         retries=args.retries,
         overwrite=args.overwrite,
@@ -584,19 +652,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     discovery_options = _discovery_options(args)
     download_options = _download_options(args)
-    host = args.host.strip()
-    if host.strip("[]") in WILDCARD_HOSTS:
-        _stderr(
-            f"warning: --host {args.host} exposes the UI, which has no authentication, to every "
-            "network this machine is on"
-        )
+    token: str | None = args.token  # the flag, else DRAMAFETCH_TOKEN; checked by _validate
     try:
         server = run_server(
-            host=host,
+            host=args.host.strip(),
             port=args.port,
             out_dir=download_options.out_dir,
             discovery_options=discovery_options,
             download_options=download_options,
+            token=token,
             serve_forever=False,
         )
     except (OSError, ValueError) as exc:  # port in use, unknown host, unsupported address family
@@ -605,9 +669,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     bound_host, bound_port = str(server.server_address[0]), int(server.server_address[1])
     shown_host = f"[{bound_host}]" if ":" in bound_host else bound_host
     # Announced only after the bind succeeded, with the port actually bound (--port 0 picks one).
+    token_note = "token: set" if token is not None else "token: none (loopback only)"
     _stderr(
         f"DramaFetch web UI on http://{shown_host}:{bound_port}/ — downloads go to "
-        f"{download_options.out_dir} (Ctrl+C to stop)"
+        f"{download_options.out_dir}; {token_note} (Ctrl+C to stop)"
     )
     try:
         server.serve_forever()

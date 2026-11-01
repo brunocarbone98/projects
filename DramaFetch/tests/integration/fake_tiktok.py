@@ -26,6 +26,13 @@ Routes (all GET):
                                  makes the FIRST item_list response carry already-expired URLs and
                                  the later ones fresh URLs, to exercise the download engine's
                                  refresh.
+  /cover/<item_id>.jpg           the fake image CDN. Every `https://p16-sign-sg.tiktokcdn.com/...`
+                                 cover URL inside an item_list payload (`video.cover`,
+                                 `originCover`, `dynamicCover`) is rewritten to
+                                 `{base}/cover/{item_id}.jpg`. Answers 200 `image/jpeg` with a
+                                 small hand-written JPEG (SOI, JFIF APP0, a COM segment that pads
+                                 it past 600 bytes, EOI), 429 with `cdn_rate_limit` like `/cdn/`;
+                                 no login is needed (TikTok's covers are public).
 The request log keeps method, path and query plus three booleans; never headers or cookie values.
 """
 
@@ -54,9 +61,14 @@ PAGES = {
 }
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
 CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
+COVER_PATH_RE = re.compile(r"^/cover/(?P<id>\d+)\.jpg$")
 MEDIA_URL_PREFIX = "https://v16-webapp-prime.tiktok.com/"
+COVER_URL_PREFIX = "https://p16-sign-sg.tiktokcdn.com/"
 MP4_HEADER = b"\x00\x00\x00\x18ftypmp42"
 MEDIA_SIZE = 128 * 1024
+JPEG_SOI = b"\xff\xd8"
+JPEG_EOI = b"\xff\xd9"
+COVER_MIN_SIZE = 600  # the COM segment pads every cover past this
 EXPIRED_MEDIA_OFFSET_S = 10  # `expired_media_first` dates the first list's URLs this far back
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
@@ -217,6 +229,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self._with_media_urls(server, payload))
         elif (match := CDN_PATH_RE.match(parts.path)) is not None:
             self._media(options, query, logged_in, match.group("id"), match.group("n"))
+        elif (match := COVER_PATH_RE.match(parts.path)) is not None:
+            self._cover(options, match.group("id"))
         elif parts.path == "/api/drama/detail/":
             self._json({"dramaInfo": {"dramaName": SERIES_NAME, "totalEpisode": TOTAL_EPISODES}})
         elif parts.path.startswith("/login"):
@@ -278,6 +292,16 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send(HTTPStatus.OK, media_bytes(item_id, index), "video/mp4")
 
+    def _cover(self, options: FakeOptions, item_id: str) -> None:
+        if options.cdn_rate_limit:
+            self._send(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                b'{"statusCode": 429, "statusMsg": "too many requests"}',
+                "application/json",
+            )
+        else:
+            self._send(HTTPStatus.OK, cover_bytes(item_id), "image/jpeg")
+
     def _has_session_cookie(self) -> bool:
         jar: SimpleCookie = SimpleCookie()
         jar.load(self.headers.get("Cookie", ""))
@@ -306,9 +330,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 def rewrite_media_urls(node: Any, base: str, expire: int) -> tuple[Any, int]:
     """A copy of an item_list payload with every `https://v16-webapp-prime.tiktok.com/...` string
-    replaced by `{base}/cdn/{item_id}/{index}.mp4?expire={expire}`, plus the number of distinct
-    URLs rewritten. An item is a dict holding `video` or `dramaInfo`; `index` is the order of first
-    appearance within the item, so a URL an item lists twice stays one URL."""
+    replaced by `{base}/cdn/{item_id}/{index}.mp4?expire={expire}` and every
+    `https://p16-sign-sg.tiktokcdn.com/...` string (the covers) by `{base}/cover/{item_id}.jpg`,
+    plus the number of distinct MEDIA URLs rewritten (covers are not counted: the count tells
+    whether the list carried play URLs). An item is a dict holding `video` or `dramaInfo`; `index`
+    is the order of first appearance within the item, so a URL an item lists twice stays one
+    URL."""
     rewritten = 0
 
     def walk(value: Any, item_id: str, indexes: dict[str, int]) -> Any:
@@ -324,6 +351,8 @@ def rewrite_media_urls(node: Any, base: str, expire: int) -> tuple[Any, int]:
                 indexes[value] = len(indexes)
                 rewritten += 1
             return f"{base}/cdn/{item_id}/{indexes[value]}.mp4?expire={expire}"
+        if isinstance(value, str) and value.startswith(COVER_URL_PREFIX):
+            return f"{base}/cover/{item_id}.jpg"
         return value
 
     return walk(node, "0", {}), rewritten
@@ -333,6 +362,16 @@ def media_bytes(item_id: str, index: str) -> bytes:
     """128 KiB that start like an MP4 file (`ftypmp42`) and are the same on every call."""
     filler = random.Random(f"{item_id}/{index}").randbytes(MEDIA_SIZE - len(MP4_HEADER))
     return MP4_HEADER + filler
+
+
+def cover_bytes(item_id: str) -> bytes:
+    """A small, valid JPEG, the same on every call for an item: SOI, a JFIF APP0 segment, one COM
+    segment naming the item and padding the file past `COVER_MIN_SIZE`, EOI. Hand-written bytes,
+    so no image library is needed to produce or recognise it (`FF D8 FF` at the start)."""
+    app0 = b"\xff\xe0" + (16).to_bytes(2, "big") + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    comment = f"DramaFetch fake cover for item {item_id}".encode().ljust(COVER_MIN_SIZE, b".")
+    com = b"\xff\xfe" + (len(comment) + 2).to_bytes(2, "big") + comment
+    return JPEG_SOI + app0 + com + JPEG_EOI
 
 
 class FakeTikTok:
@@ -380,3 +419,7 @@ class FakeTikTok:
     @property
     def media_requests(self) -> list[RequestRecord]:
         return [r for r in self.requests if CDN_PATH_RE.match(r.path)]
+
+    @property
+    def cover_requests(self) -> list[RequestRecord]:
+        return [r for r in self.requests if COVER_PATH_RE.match(r.path)]

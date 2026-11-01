@@ -21,6 +21,11 @@ TikTok facts this module encodes (verified October 2026):
   codec and bitrate, plus ``video.playAddr``), valid until their ``expire`` query parameter.
   :func:`play_url_candidates` orders them and :func:`url_expiry` reads the expiry; the browser
   download engine fetches them directly instead of loading each episode's page.
+- Every item also carries the episode cover (thumbnail) as signed image URLs on
+  ``p16-sign-*.tiktokcdn.com``: ``video.originCover`` (the full frame), ``video.cover`` (a
+  cropped poster) and ``video.dynamicCover`` (an animated preview), each a string in the web
+  payload (a ``UrlList`` dict or a list elsewhere). :func:`episode_from_item` keeps the first of
+  them as ``Episode.cover_url``, in that order.
 """
 
 from __future__ import annotations
@@ -45,6 +50,9 @@ _EPISODE_NUMBER_KEYS = ("EpisodeNumber", "episodeNumber", "episode_number")
 _NAME_KEYS = ("dramaName", "title", "name")
 _TOTAL_KEYS = ("totalEpisode", "totalEpisodes", "episodeCount", "total", "episodeTotal")
 _DETAIL_CONTAINER_KEYS = ("dramaInfo", "drama", "detail")
+#: Where an item's cover image lives, best first: the full frame, the cropped poster, the animated
+#: preview.
+_COVER_KEYS = ("originCover", "cover", "dynamicCover")
 _FALSY_STRINGS = frozenset({"", "0", "false", "no", "none", "null"})
 _MAX_HINT_VALUE_LEN = 40
 
@@ -165,6 +173,8 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     Skipped: no item id; no (or invalid) ``dramaInfo.DramaVideoData.EpisodeNumber`` — trailers and
     teasers; a ``dramaInfo`` series id (``dramaID``/``dramaId``/``DramaID``/``albumId``) that
     differs from ``series_id``. The item may be wrapped in ``{"itemStruct": {...}}``.
+    ``cover_url`` is the first http(s) URL among ``video.originCover``, ``video.cover`` and
+    ``video.dynamicCover`` (see :func:`cover_url_of`), None when the item has none.
     """
     item_id = _as_id(_field(item, "id"))
     if item_id is None:
@@ -203,8 +213,24 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
         author=author,
         duration_s=duration,
         lock_hints=lock_hints(item),
+        cover_url=cover_url_of(item),
         raw=item,
     )
+
+
+def cover_url_of(item: dict[str, Any]) -> str | None:
+    """The episode cover of an item: the first http(s) URL found under ``video.originCover``,
+    ``video.cover`` or ``video.dynamicCover``, in that order (each a string, a list of strings or
+    a dict with a ``UrlList``, like a play address); None when there is none. Never raises on
+    junk. The item may be wrapped in ``{"itemStruct": {...}}``."""
+    video = _field(item, "video") if isinstance(item, dict) else None
+    if not isinstance(video, dict):
+        return None
+    for key in _COVER_KEYS:
+        urls = _play_urls(video.get(key), 0)
+        if urls:
+            return urls[0]
+    return None
 
 
 def _field(item: dict[str, Any], key: str) -> Any:

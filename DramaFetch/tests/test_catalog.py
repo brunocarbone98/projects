@@ -7,6 +7,7 @@ import copy
 from dramafetch.catalog import (
     PagePayload,
     catalog_warnings,
+    cover_url_of,
     episode_from_item,
     find_item_lists,
     lock_hints,
@@ -21,6 +22,7 @@ from dramafetch.models import Episode
 SERIES_ID = "7699393770256782354"
 OTHER_SERIES_ID = "7600000000000000000"
 NAME = "The Billionaire's Secret Heiress"
+COVER_CDN = "https://p16-sign-sg.tiktokcdn.com/"
 
 
 def _episode(number, item_id=None, hints=(), title="t"):
@@ -80,6 +82,13 @@ def test_page1_parses_three_episodes_and_skips_the_trailer(item_list_pages):
     assert not first.locked
     assert first.raw is item_list_pages[0]["itemList"][0]
     assert first.page_url == "https://www.tiktok.com/@muffindrama_us/video/7699400000000000001"
+    # the cover: originCover (the full frame) wins over cover (the cropped poster)
+    assert first.cover_url == first.raw["video"]["originCover"]
+    assert first.cover_url is not None
+    assert first.cover_url.startswith(COVER_CDN) and "~tplv-tiktokx-origin.jpeg" in first.cover_url
+    second = page.episodes[1]  # episode 2 carries no originCover: the cropped cover is next
+    assert second.cover_url == second.raw["video"]["cover"]
+    assert second.cover_url is not None and "cropcenter:300:400" in second.cover_url
 
 
 def test_page2_nested_list_drops_the_other_series(item_list_pages):
@@ -108,6 +117,11 @@ def test_merging_the_fixture_pages_gives_episodes_1_to_5(item_list_pages):
     assert "unlockPrice=30" in locked.lock_hints
     assert "no play address" in locked.lock_hints
     assert catalog_warnings(merged, 5) == ["1 episode looks locked"]
+    # every episode, the locked one included, has a cover on TikTok's image CDN, and the cover
+    # fields never read as lock hints
+    assert all(e.cover_url is not None and e.cover_url.startswith(COVER_CDN) for e in merged)
+    assert len({e.cover_url for e in merged}) == 5
+    assert not any("cover" in hint.lower() for e in merged for hint in e.lock_hints)
 
 
 # --------------------------------------------------------------------------- merge
@@ -272,8 +286,66 @@ def test_episode_title_fallbacks_and_missing_optionals():
     assert episode.series_name is None
     assert episode.author is None
     assert episode.duration_s is None
+    assert episode.cover_url is None
     assert episode.page_url == "https://www.tiktok.com/@_/video/1"
     assert episode.lock_hints == ("no play address",)
+
+
+# --------------------------------------------------------------------------- cover_url_of
+
+
+def test_cover_url_precedence_origin_then_cover_then_dynamic():
+    item = _base_item()
+    item["video"].update(
+        {
+            "dynamicCover": "https://p16-sign-sg.tiktokcdn.com/obj/d~tplv-tiktokx-origin.image?x=1",
+            "cover": "https://p16-sign-sg.tiktokcdn.com/c~tplv-tiktokx-cropcenter:300:400.jpeg?x=1",
+            "originCover": "https://p16-sign-sg.tiktokcdn.com/o~tplv-tiktokx-origin.jpeg?x=1",
+        }
+    )
+    assert cover_url_of(item) == item["video"]["originCover"]
+    del item["video"]["originCover"]
+    assert cover_url_of(item) == item["video"]["cover"]
+    del item["video"]["cover"]
+    assert cover_url_of(item) == item["video"]["dynamicCover"]
+    del item["video"]["dynamicCover"]
+    assert cover_url_of(item) is None
+    episode = episode_from_item(_base_item(), SERIES_ID)
+    assert episode is not None and episode.cover_url is None
+
+
+def test_cover_url_accepts_lists_url_list_dicts_and_the_item_struct_wrapper():
+    as_dict = _base_item()
+    as_dict["video"]["originCover"] = {"UrlList": ["https://p16/a.jpeg", "https://p16/b.jpeg"]}
+    assert cover_url_of(as_dict) == "https://p16/a.jpeg"
+    as_list = _base_item()
+    as_list["video"]["cover"] = ["", "https://p16/c.jpeg"]
+    assert cover_url_of(as_list) == "https://p16/c.jpeg"
+    snake = _base_item()
+    snake["video"]["cover"] = {"url_list": [" https://p16/d.jpeg "]}
+    assert cover_url_of(snake) == "https://p16/d.jpeg"
+    wrapped = {"itemStruct": {**_base_item()}}
+    wrapped["itemStruct"]["video"]["cover"] = "https://p16/e.jpeg"
+    assert cover_url_of(wrapped) == "https://p16/e.jpeg"
+    episode = episode_from_item(wrapped, SERIES_ID)
+    assert episode is not None and episode.cover_url == "https://p16/e.jpeg"
+    # an empty or junk originCover does not hide a usable cover
+    skipped = _base_item()
+    skipped["video"].update({"originCover": "", "cover": "https://p16/f.jpeg"})
+    assert cover_url_of(skipped) == "https://p16/f.jpeg"
+    junk = _base_item()
+    junk["video"].update({"originCover": {"UrlList": [1, None]}, "cover": ["ftp://x", "nope"]})
+    assert cover_url_of(junk) is None
+
+
+def test_cover_url_never_raises_on_junk():
+    for junk in (None, "x", 1, [], {}, {"video": None}, {"video": "s"}, {"video": {}}):
+        assert cover_url_of(junk) is None
+    assert cover_url_of({"video": {"cover": 7, "originCover": None, "dynamicCover": {}}}) is None
+    deep = "https://p16/deep.jpeg"
+    for _ in range(10):
+        deep = [deep]
+    assert cover_url_of({"video": {"cover": deep}}) is None  # depth-limited like play URLs
 
 
 # --------------------------------------------------------------------------- parse payload

@@ -1,9 +1,12 @@
 """Output layout and the resumable per-series manifest (``dramafetch.json``).
 
-Layout: ``<out_dir>/<series name> [<series id>]/E01 - <title>.mp4`` with the manifest next to the
-videos. The manifest records one entry per episode number (status, file, message, timestamp) so a
-rerun skips what is already on disk and retries the rest; it never contains cookies or URLs with
-tokens. Writes are atomic (temp file + replace) so a Ctrl+C mid-run leaves a valid file.
+Layout: ``<out_dir>/<series name> [<series id>]/<series name> - Episode 01.mp4`` (the episode
+cover, when saved, sits next to it as ``<same stem>.jpg``) with the manifest next to the videos.
+The file name comes from ``DownloadOptions.name_format`` (see :func:`episode_stem`; the default is
+``models.DEFAULT_NAME_FORMAT``). The manifest records one entry per episode number (status, file,
+message, timestamp) so a rerun skips what is already on disk and retries the rest, whatever name
+format the run uses; it never contains cookies or URLs with tokens. Writes are atomic (temp file +
+replace) so a Ctrl+C mid-run leaves a valid file.
 """
 
 from __future__ import annotations
@@ -16,12 +19,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from dramafetch.models import DownloadResult, DownloadStatus, Episode, Series
+from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode, Series
 
 log = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = "dramafetch.json"
 MANIFEST_VERSION = 1
+#: The placeholders a name format may use (in braces); anything else in braces is refused.
+NAME_PLACEHOLDERS = ("series", "number", "n", "title", "id")
+#: Placeholders that tell one episode from another. A format needs at least one of them: with
+#: ``"{series}"`` alone every episode of a series would get the same file name, and every episode
+#: after the first would be skipped as already existing.
+_EPISODE_PLACEHOLDERS = frozenset({"number", "n", "title", "id"})
+_PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
+#: Longest file stem produced from a name format; the extension comes on top.
+MAX_STEM_LEN = 150
 # Results that mean "nothing was attempted"; they never overwrite the memory of a finished download.
 _NON_ATTEMPT_STATUSES = frozenset(
     {DownloadStatus.SKIPPED_EXISTS, DownloadStatus.SKIPPED_LOCKED, DownloadStatus.DRY_RUN}
@@ -73,9 +85,63 @@ def series_dir(out_dir: Path, series: Series) -> Path:
     return out_dir / f"{safe_filename(series.display_name)} [{series.series_id}]"
 
 
-def episode_stem(episode: Episode) -> str:
-    """``E01 - <title>`` (three digits from episode 100 on); the extension comes from yt-dlp."""
-    return f"E{episode.number:02d} - {safe_filename(episode.title, 60)}"
+def validate_name_format(name_format: str) -> None:
+    """Raise ValueError when ``name_format`` cannot name episodes.
+
+    Refused: a placeholder outside :data:`NAME_PLACEHOLDERS` (``{number:02d}`` included — the
+    padding is built in), a brace that does not close a placeholder, and a format without any of
+    ``{number}``, ``{n}``, ``{title}`` or ``{id}`` — it would give every episode the same name.
+    """
+    allowed = ", ".join(f"{{{name}}}" for name in NAME_PLACEHOLDERS)
+    found = _PLACEHOLDER_RE.findall(name_format)
+    for name in found:
+        if name not in NAME_PLACEHOLDERS:
+            raise ValueError(
+                f"unknown placeholder {{{name}}} in name format {name_format!r}: use {allowed}"
+            )
+    leftover = _PLACEHOLDER_RE.sub("", name_format)
+    if "{" in leftover or "}" in leftover:
+        raise ValueError(
+            f"unmatched brace in name format {name_format!r}: placeholders are {allowed}"
+        )
+    if not _EPISODE_PLACEHOLDERS.intersection(found):
+        raise ValueError(
+            f"name format {name_format!r} does not tell episodes apart: use at least one of "
+            "{number}, {n}, {title} or {id}"
+        )
+
+
+def episode_stem(episode: Episode, options: DownloadOptions) -> str:
+    """The file name of an episode without its extension, from ``options.name_format``.
+
+    The placeholders are replaced one by one (never ``str.format``: a format is user input and
+    must not reach attributes or indexes): ``{series}`` is ``options.series_name``, else the
+    episode's own series name, else ``series-<series id>`` (``video`` for a bare video), cut to 80
+    safe characters; ``{number}`` is the episode number zero-padded to two digits (``01``, ``100``)
+    and ``{n}`` the bare number; ``{title}`` is the title cut to 60 safe characters; ``{id}`` the
+    TikTok item id. The whole stem then goes through :func:`safe_filename` (150 characters), so a
+    series called ``CON`` or a format ending in a dot stays harmless on Windows. The default,
+    ``"{series} - Episode {number}"``, gives ``The Billionaire's Secret Heiress - Episode 01``.
+    Raises ValueError for an unusable format (see :func:`validate_name_format`).
+    """
+    validate_name_format(options.name_format)
+    if options.series_name:
+        series = options.series_name
+    elif episode.series_name:
+        series = episode.series_name
+    elif episode.series_id:
+        series = f"series-{episode.series_id}"
+    else:
+        series = "video"
+    values = {
+        "series": safe_filename(series, 80),
+        "number": f"{episode.number:02d}",
+        "n": str(episode.number),
+        "title": safe_filename(episode.title, 60),
+        "id": episode.item_id,
+    }
+    stem = _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], options.name_format)
+    return safe_filename(stem, MAX_STEM_LEN)
 
 
 def manifest_path(directory: Path) -> Path:

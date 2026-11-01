@@ -66,7 +66,7 @@ class FakeDownloader:
         status = self.outcomes.get(episode.number, DownloadStatus.DONE)
         if status is DownloadStatus.DONE:
             options.out_dir.mkdir(parents=True, exist_ok=True)
-            path = options.out_dir / f"E{episode.number:02d} - x.mp4"
+            path = options.out_dir / f"fake - Episode {episode.number:02d}.mp4"
             path.write_bytes(b"video")
             return DownloadResult(episode, status, path, "saved")
         return DownloadResult(episode, status, message=f"{status.value} happened")
@@ -247,7 +247,7 @@ def test_manifest_done_episodes_are_skipped_without_network(tmp_path):
     series = make_series(numbers=(1, 2, 3))
     target = series_dir(tmp_path, series)
     target.mkdir(parents=True)
-    done_file = target / "E02 - earlier run.mp4"
+    done_file = target / "earlier run - Episode 02.mp4"
     done_file.write_bytes(b"v")
     manifest = Manifest(target / MANIFEST_FILENAME, SERIES_ID, NAME)
     manifest.record(DownloadResult(series.episodes[1], DownloadStatus.DONE, done_file, "saved"))
@@ -324,13 +324,13 @@ def test_existing_file_on_disk_is_not_a_network_attempt(tmp_path):
     series = make_series(numbers=(1, 2, 3))
     target = series_dir(tmp_path, series)
     target.mkdir(parents=True)
-    (target / f"E02 - {NAME} Episode 2.mp4").write_bytes(b"v")  # matches episode_stem(ep 2)
+    (target / f"{NAME} - Episode 02.mp4").write_bytes(b"v")  # matches episode_stem(ep 2)
 
     class SkipsExisting(FakeDownloader):
         def download(self, episode, options):
             from dramafetch.downloader import existing_episode_file
 
-            existing = existing_episode_file(options.out_dir, episode)
+            existing = existing_episode_file(options.out_dir, episode, options)
             if existing is not None:
                 self.calls.append((episode.number, options.out_dir))
                 return DownloadResult(episode, DownloadStatus.SKIPPED_EXISTS, existing, "exists")
@@ -402,7 +402,7 @@ def test_early_stop_on_rate_limit_keeps_done_episodes_as_skipped(tmp_path):
     series = make_series(numbers=(1, 2, 3, 4))
     target = series_dir(tmp_path, series)
     target.mkdir(parents=True)
-    done_file = target / "E03 - earlier.mp4"
+    done_file = target / "earlier - Episode 03.mp4"
     done_file.write_bytes(b"v")
     Manifest(target / MANIFEST_FILENAME, SERIES_ID, NAME).record(
         DownloadResult(series.episodes[2], DownloadStatus.DONE, done_file, "saved")
@@ -653,6 +653,85 @@ def test_inconsistent_pacing_is_refused_before_anything_is_written(tmp_path, opt
     engine.validate_pacing(DownloadOptions(delay_min_s=0.0, delay_max_s=0.0, rest_every=0))
 
 
+@pytest.mark.parametrize(
+    ("name_format", "match"),
+    [
+        ("{nope}", r"unknown placeholder \{nope\}"),
+        ("{series} - Episode {number:02d}", r"unknown placeholder \{number:02d\}"),
+        ("{series} - Episode {number", "unmatched brace"),
+        ("{series}", "does not tell episodes apart"),
+        ("", "does not tell episodes apart"),
+    ],
+)
+def test_an_unusable_name_format_is_refused_before_the_series_directory_exists(
+    tmp_path, name_format, match
+):
+    series = make_series(numbers=(1, 2))
+    options = DownloadOptions(out_dir=tmp_path, name_format=name_format)
+    with pytest.raises(ValueError, match=match):
+        engine.validate_naming(options)
+    downloader = ClosingDownloader()
+    with pytest.raises(ValueError, match=match):
+        engine.download_series(series, series.episodes, options, downloader=downloader)
+    assert downloader.calls == [] and downloader.closed == 0
+    assert not series_dir(tmp_path, series).exists()
+    assert list(tmp_path.iterdir()) == []
+    engine.validate_naming(DownloadOptions())  # the default is fine
+    engine.validate_naming(DownloadOptions(name_format="{title}"))  # the bare-video default too
+
+
+def test_the_downloader_gets_the_series_name_for_the_series_placeholder(tmp_path):
+    """`{series}` expands to the series' display name on every call, which is also what the
+    engine's own skip rule (`existing_episode_file`) looks for; the caller's options are left
+    alone."""
+    series = make_series(numbers=(1, 2), name="Heiress: Part 1/2")
+    options = DownloadOptions(out_dir=tmp_path, name_format="{series} - Ep {number}")
+    calls = []
+
+    class Recording(FakeDownloader):
+        def download(self, episode, options):
+            calls.append(options)
+            return super().download(episode, options)
+
+    results, _, _ = _run(series, options, Recording())
+    assert [r.status.value for r in results] == ["done", "done"]
+    assert [o.series_name for o in calls] == ["Heiress: Part 1/2"] * 2
+    assert all(o.name_format == "{series} - Ep {number}" for o in calls)
+    assert options.series_name is None  # not mutated
+
+    unnamed = make_series(numbers=(1,), name=None)
+    calls.clear()
+    _run(unnamed, options, Recording())
+    assert [o.series_name for o in calls] == [f"series-{SERIES_ID}"]
+
+    # a file named the way the format and the series name say is a skip, not a network attempt
+    second_out = tmp_path / "second"
+    target = series_dir(second_out, series)
+    target.mkdir(parents=True)
+    on_disk = target / "Heiress Part 1 2 - Ep 01.mp4"
+    on_disk.write_bytes(b"hand-made")
+
+    class SkipsExisting(Recording):
+        def download(self, episode, options):
+            from dramafetch.downloader import existing_episode_file
+
+            existing = existing_episode_file(options.out_dir, episode, options)
+            if existing is not None:
+                calls.append(options)
+                return DownloadResult(episode, DownloadStatus.SKIPPED_EXISTS, existing, "exists")
+            return super().download(episode, options)
+
+    calls.clear()
+    results, sleeps, _ = _run(
+        series,
+        DownloadOptions(out_dir=second_out, name_format="{series} - Ep {number}"),
+        SkipsExisting(),
+    )
+    assert [r.status.value for r in results] == ["skipped-exists", "done"]
+    assert results[0].path == on_disk
+    assert sleeps == []  # one network attempt only: nothing to pause between
+
+
 # --------------------------------------------------------------------------- early stops
 
 
@@ -732,7 +811,7 @@ def test_failure_stop_keeps_done_and_locked_episodes_as_skips(tmp_path):
     series = make_series(numbers=(1, 2, 3, 4, 5, 6), locked=(5,))
     target = series_dir(tmp_path, series)
     target.mkdir(parents=True)
-    done_file = target / "E04 - earlier.mp4"
+    done_file = target / "earlier - Episode 04.mp4"
     done_file.write_bytes(b"v")
     Manifest(target / MANIFEST_FILENAME, SERIES_ID, NAME).record(
         DownloadResult(series.episodes[3], DownloadStatus.DONE, done_file, "saved")
@@ -758,7 +837,7 @@ def test_failure_stop_skips_an_episode_whose_file_is_already_on_disk(tmp_path):
     series = make_series(numbers=(1, 2, 3, 4, 5))
     target = series_dir(tmp_path, series)
     target.mkdir(parents=True)
-    on_disk = target / f"E05 - {NAME} Episode 5.mp4"  # matches episode_stem(ep 5)
+    on_disk = target / f"{NAME} - Episode 05.mp4"  # matches episode_stem(ep 5)
     on_disk.write_bytes(b"v")
     downloader = FakeDownloader(dict.fromkeys((1, 2, 3), DownloadStatus.FAILED))
 
