@@ -15,11 +15,12 @@ TikTok facts this module encodes (verified October 2026):
   THIS session may play one are undocumented, so :func:`access_of` applies key-name heuristics to
   the payload TikTok served to the user's own session and sorts each episode into ``free``,
   ``unlocked`` (sold, and this account may play it: an entitlement flag such as ``isUnlocked``,
-  or a play address TikTok gave this session for a sold episode) or ``locked`` (a lock, preview,
-  trial, paywall or DRM flag, or no play address at all); :func:`lock_hints` lists every clue it
-  found. Locked episodes are listed and skipped. Nothing here unlocks, buys, fakes entitlement or
-  bypasses anything: the decision only reads what TikTok already sent to that session. The field
-  names were inferred without access to TikTok; ``--dump-raw`` from a real run confirms them.
+  or a play URL TikTok gave this session for a sold episode) or ``locked`` (a lock, preview,
+  trial, paywall or DRM flag, on a sold episode an entitlement flag that says no, or no play
+  address at all); :func:`lock_hints` lists every clue it found. Locked episodes are listed and
+  skipped. Nothing here unlocks, buys, fakes entitlement or bypasses anything: the decision only
+  reads what TikTok already sent to that session. The field names were inferred without access to
+  TikTok; ``--dump-raw`` from a real run confirms them.
 - ``GET /api/drama/detail/`` carries the series name and announced total; its exact shape is
   unknown, so :func:`parse_detail_payload` is best-effort.
 - Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
@@ -62,6 +63,9 @@ _FREE_KEY_RE = re.compile(r"free", re.IGNORECASE)
 # The clue classes of :func:`access_of` and the key patterns behind them (case-insensitive).
 _DRM = "drm"
 _ENTITLED = "entitled"
+#: An ENTITLED full key with a falsy value (``isUnlocked: false``): on a sold episode, the payload
+#: saying the account has NOT unlocked it — the flag a client shows its paywall from.
+_NOT_ENTITLED = "not-entitled"
 _VIEWER_LOCK = "viewer-lock"
 _AMBIGUOUS = "ambiguous"
 _PRICING = "pricing"
@@ -158,6 +162,9 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
       entitled)``, ``has_?(paid|purchased|unlocked|bought|access)`` or
       ``paid_?by_?(user|viewer|me)``, truthy; or an ``(unlock|pay|purchase)_?status`` key whose
       string value is ``unlocked``, ``paid``, ``purchased``, ``bought`` or ``entitled``.
+    - NOT-ENTITLED: one of those full keys with a falsy value (``isUnlocked: false``,
+      ``hasPaid: 0``): the payload says the account has not unlocked it. It decides only for a
+      sold episode (rule 5) and is not counted in ``paid``.
     - VIEWER-LOCK (this session cannot play it): a FULL key ``(is_?)?locked``; a key containing
       ``need_?(pay|unlock|buy|purchase)``, ``preview``, ``trial`` or ``paywall`` (a preview or
       trial clip is not the episode); a ``lock_?status`` key (not ``unlock…``) — all truthy; or an
@@ -176,12 +183,15 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     Decision, first match wins: a DRM clue -> ``locked`` with ``drm`` (DramaFetch never decrypts);
     an ENTITLED clue -> ``unlocked`` (even without a play address: the account is entitled, and
     the downloader finds out what TikTok serves); a VIEWER-LOCK clue -> ``locked``; no play address
-    -> ``locked`` (free-looking items included); a PRICING clue -> ``unlocked``; else ``free``.
-    ``paid`` is any PRICING or ENTITLED clue. Why a sold episode WITH a play address counts as
-    unlocked: a client that is to show a paywall or a preview needs a flag for it, and with none
-    the address is what TikTok's own web player plays for this session. Should it ever turn out to
-    be a preview after all, the integrity check of every download (``media.verify_video``: the
-    duration) quarantines it.
+    -> ``locked`` (free-looking items included); a PRICING clue -> ``unlocked`` when this session's
+    payload holds a real play URL for it (:func:`play_url_candidates`: an http(s) URL — a
+    ``bitrateInfo`` entry without one, or a ``playAddr`` such as ``"null"``, is no address) and no
+    NOT-ENTITLED clue, else ``locked`` (without a URL with the hint :data:`NO_PLAY_ADDRESS`); else
+    ``free``. ``paid`` is any PRICING or ENTITLED clue. Why a sold episode WITH a play URL counts as
+    unlocked: a client that is to show a paywall or a preview needs a flag for it — a lock, preview
+    or paywall flag, or an entitlement flag that says no — and with none the URL is what TikTok's
+    own web player plays for this session. Should it ever turn out to be a preview after all, the
+    integrity check of every download (``media.verify_video``: the duration) quarantines it.
     """
     if not isinstance(item, dict):
         item = {}
@@ -208,7 +218,13 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     elif _VIEWER_LOCK in classes or not playable:
         access = "locked"
     elif _PRICING in classes:
-        access = "unlocked"
+        # Sold: unlocked only for a real play URL this session got (a rendition without any URL
+        # is no address) and no entitlement flag saying no.
+        if not play_url_candidates(item):
+            access = "locked"
+            hints.append(NO_PLAY_ADDRESS)
+        else:
+            access = "locked" if _NOT_ENTITLED in classes else "unlocked"
     else:
         access = "free"
     paid = _PRICING in classes or _ENTITLED in classes
@@ -266,6 +282,8 @@ def _clues(key: str, value: Any) -> list[tuple[str, str]]:
         found.append((_DRM, hint))
     if (truthy and entitled_key) or status in _ENTITLED_STATUS_VALUES:
         found.append((_ENTITLED, hint))
+    elif entitled_key:  # falsy: the payload says the account has NOT unlocked it
+        found.append((_NOT_ENTITLED, hint))
     viewer_lock_key = (
         _LOCKED_KEY_RE.fullmatch(key) is not None
         or _VIEWER_LOCK_KEY_RE.search(key) is not None

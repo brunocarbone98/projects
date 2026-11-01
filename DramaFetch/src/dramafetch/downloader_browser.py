@@ -51,11 +51,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from dramafetch.catalog import play_url_candidates, url_expiry
+from dramafetch.catalog import access_of, play_url_candidates, url_expiry
 from dramafetch.discovery.browser import VIEWPORT, PlaywrightDiscovery
 from dramafetch.discovery.cookies import load_netscape_cookies
 from dramafetch.discovery.static import chrome_user_agent, cookie_domain_filter
-from dramafetch.downloader import existing_episode_file, locked_result, sanitize_error
+from dramafetch.downloader import (
+    existing_episode_file,
+    existing_file_result,
+    locked_result,
+    sanitize_error,
+)
 from dramafetch.errors import (
     ChallengeError,
     DramaFetchError,
@@ -66,6 +71,7 @@ from dramafetch.errors import (
 from dramafetch.manifest import episode_stem
 from dramafetch.media import INCOMPLETE_PREFIX, drm_problem_in, quarantine_note, verify_video
 from dramafetch.models import (
+    DRM_MARK,
     DiscoveryOptions,
     DownloadOptions,
     DownloadResult,
@@ -182,12 +188,7 @@ class BrowserDownloader:
             return locked_result(episode)
         existing = existing_episode_file(options.out_dir, episode, options)
         if existing is not None and not options.overwrite:
-            return DownloadResult(
-                episode=episode,
-                status=DownloadStatus.SKIPPED_EXISTS,
-                path=existing,
-                message=f"already exists: {existing.name}",
-            )
+            return existing_file_result(episode, existing, options)  # an encrypted one: deleted
         if options.dry_run:
             return DownloadResult(
                 episode=episode,
@@ -230,7 +231,9 @@ class BrowserDownloader:
         candidates = self._usable_candidates(episode.raw, options.quality)
         if not candidates:
             refreshed = True
-            self._refresh(context, episode, options, tried)
+            refused = self._refresh(context, episode, options, tried)
+            if refused is not None:
+                return refused
             candidates = self._usable_candidates(episode.raw, options.quality)
             if not candidates:
                 return DownloadResult(
@@ -246,7 +249,7 @@ class BrowserDownloader:
         # this URL) and while the episode's request budget has room to try what it brings.
         if not refreshed and last.unavailable and len(tried) < MAX_GETS_PER_EPISODE:
             try:
-                self._refresh(context, episode, options, tried)
+                refused = self._refresh(context, episode, options, tried)
             except (LoginRequiredError, RateLimitedError, ChallengeError):
                 raise
             except DramaFetchError as exc:
@@ -255,6 +258,8 @@ class BrowserDownloader:
                     status=DownloadStatus.FAILED,
                     message=f"{last.reason}; refreshing the episode list failed: {_one_line(exc)}",
                 )
+            if refused is not None:
+                return refused
             fresh = [
                 url
                 for url in self._usable_candidates(episode.raw, options.quality)
@@ -505,21 +510,43 @@ class BrowserDownloader:
 
     def _refresh(
         self, context: BrowserContext, episode: Episode, options: DownloadOptions, stale: set[str]
-    ) -> None:
-        """Replace ``episode.raw`` with the item from a fresh episode list.
+    ) -> DownloadResult | None:
+        """Replace ``episode.raw`` with the item from a fresh episode list, and return None.
 
         The series is resolved again — through a new page of the same context, with the
         discovery's own logic, cookies and user agent — only when this run holds no fresh list for
         it yet, or when that list's entry for the episode is spent (see :meth:`_cache_spent`); the
         result is cached, so a run over a long series refreshes once, not once per episode.
+
+        The fresh item is access-checked like the first list's (``catalog.access_of``): one that
+        now reads as ``locked`` — a lapsed subscription, a lock, preview or paywall flag, DRM — is
+        not this session's to play, so unless ``options.include_locked`` it is NOT adopted:
+        ``episode.raw`` stays as it was, none of its URLs is requested, and the FAILED_UNAVAILABLE
+        result to return is ``"<UNAVAILABLE_MESSAGE> (locked in a fresh episode list: <hints>)"``
+        (``"protected by DRM (in a fresh episode list: <hints>): …"`` for a DRM flag, which the
+        manifest then remembers like any DRM verdict).
         """
         fresh = self._fresh_items.get(episode.series_id)
         if fresh is None or self._cache_spent(fresh.get(episode.item_id), stale):
             fresh = self._resolve_in_session(context, episode, options)
             self._fresh_items[episode.series_id] = fresh
         cached = fresh.get(episode.item_id)
-        if cached is not None:
-            episode.raw = cached
+        if cached is None:
+            return None
+        access, _, drm, hints = access_of(cached)
+        if access == "locked" and not options.include_locked:
+            listed = "; ".join(hints) or "locked"
+            log.debug("episode %s: locked in the fresh list (%s)", episode.number, listed)
+            message = (
+                f"{DRM_MARK} (in a fresh episode list: {listed}): DramaFetch does not decrypt it"
+                if drm
+                else f"{UNAVAILABLE_MESSAGE} (locked in a fresh episode list: {listed})"
+            )
+            return DownloadResult(
+                episode=episode, status=DownloadStatus.FAILED_UNAVAILABLE, message=message
+            )
+        episode.raw = cached
+        return None
 
     def _cache_spent(self, item: dict[str, Any] | None, stale: set[str]) -> bool:
         """Whether the fresh list's entry for an episode calls for a newer list: it names play URLs,

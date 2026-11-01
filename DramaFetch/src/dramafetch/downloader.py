@@ -13,8 +13,11 @@ are redacted just in case.
 Every file yt-dlp produces is first checked for encrypted tracks (``dramafetch.media.drm_problem``,
 ALWAYS, ``--no-verify`` or not): an encrypted file can never play and DramaFetch never decrypts, so
 it is deleted with the cover and any partial file next to it, and the episode is
-FAILED_UNAVAILABLE with ``models.DRM_MESSAGE``. yt-dlp's own "This video is DRM protected" maps to
-the same status and message (:meth:`YtDlpDownloader.classify_error`, :func:`describe_failure`), and
+FAILED_UNAVAILABLE with ``models.DRM_MESSAGE`` — also when yt-dlp failed after writing it, and
+when a run finds it already under the episode's name (:func:`existing_file_result`, shared with
+the browser engine), so that no encrypted file is ever adopted as the episode. yt-dlp's own "This
+video is DRM protected" maps to the same status and message
+(:meth:`YtDlpDownloader.classify_error`, :func:`describe_failure`), and
 ``allow_unplayable_formats`` is never set. Then every file is verified
 (``dramafetch.media.verify_video``: an MP4 that parses, is not cut short, has an audio track and
 lasts about ``Episode.duration_s``) unless ``DownloadOptions.verify`` is off; a file that fails is
@@ -112,6 +115,8 @@ _BLOCKED_RE = re.compile(r"http error 403|\b403\b\s*:?\s*forbidden|\bforbidden\b
 # drops while `allow_unplayable_formats` is off — and DramaFetch never turns it on). A whole token,
 # so that no id or word that merely contains the letters counts. No retry can change the verdict.
 _DRM_RE = re.compile(r"\bdrm\b")
+#: Failures an encrypted file left behind turns into its DRM verdict (the stop statuses are kept).
+_PLAIN_FAILURES = frozenset({DownloadStatus.FAILED, DownloadStatus.FAILED_UNAVAILABLE})
 
 
 def curl_cffi_available() -> bool:
@@ -214,6 +219,67 @@ def locked_result(episode: Episode) -> DownloadResult:
     else:
         message = f"looks locked: {hints}" if hints else "looks locked"
     return DownloadResult(episode=episode, status=DownloadStatus.SKIPPED_LOCKED, message=message)
+
+
+def existing_file_result(
+    episode: Episode, existing: Path, options: DownloadOptions
+) -> DownloadResult:
+    """What a run makes of the episode's video already in the series directory
+    (:func:`existing_episode_file`) — both engines share it, and so does a run's stop:
+    SKIPPED_EXISTS, without a request. Unless that file has encrypted tracks
+    (:func:`~dramafetch.media.drm_problem`: a download whose deletion the OS refused, one a failed
+    yt-dlp run left behind): DramaFetch never keeps encrypted media, nor adopts it as the episode,
+    so it is deleted like any encrypted download (:func:`discard_encrypted`) and the episode is
+    FAILED_UNAVAILABLE with :data:`~dramafetch.models.DRM_MESSAGE` — still without a request —
+    which the manifest then remembers. A dry run changes nothing on disk: it reports the file as it
+    finds it."""
+    if not options.dry_run:
+        problem = drm_problem(existing)
+        if problem is not None:
+            return discard_encrypted(episode, existing, problem)
+    return DownloadResult(
+        episode=episode,
+        status=DownloadStatus.SKIPPED_EXISTS,
+        path=existing,
+        message=f"already exists: {existing.name}",
+    )
+
+
+def discard_encrypted(episode: Episode, video: Path, problem: str) -> DownloadResult:
+    """The FAILED_UNAVAILABLE result for a video with encrypted tracks
+    (:func:`~dramafetch.media.drm_problem`): DramaFetch never keeps encrypted media, so the video
+    is deleted — not quarantined: no rerun makes it play — and so are the cover yt-dlp wrote next
+    to it and any partial file of that download (:func:`_leftovers`); no cover is embedded or
+    kept. The message is ``problem`` (:data:`~dramafetch.models.DRM_MESSAGE`), followed by
+    ``(could not delete <name>: …)`` only when the OS refused to delete the video
+    (:func:`~dramafetch.media.discard_note`)."""
+    for leftover in _leftovers(video):
+        try:
+            leftover.unlink(missing_ok=True)
+        except OSError as exc:
+            log.debug("could not delete %s: %s", leftover.name, exc.strerror)
+    note = discard_note(video)
+    log.debug("episode %s: %s (%s)", episode.number, problem, note or "deleted")
+    return DownloadResult(
+        episode=episode,
+        status=DownloadStatus.FAILED_UNAVAILABLE,
+        message=problem if note is None else f"{problem} ({note})",
+    )
+
+
+def _unless_encrypted_left(failed: DownloadResult, options: DownloadOptions) -> DownloadResult:
+    """``failed`` — a yt-dlp run that raised or exited non-zero — after a look at what that run
+    may have left under the episode's name anyway: a video with encrypted tracks is deleted like
+    any encrypted download (:func:`discard_encrypted`; left there, the next run would adopt it as
+    the episode), and its DRM verdict replaces a plain failure (FAILED, FAILED_UNAVAILABLE) so that
+    the manifest remembers it. A status that stops the run (login, HTTP 403, HTTP 429) is kept: the
+    stop and the cooldown matter more, and the file is gone either way."""
+    produced = existing_episode_file(options.out_dir, failed.episode, options)
+    problem = drm_problem(produced) if produced is not None else None
+    if produced is None or problem is None:
+        return failed
+    discarded = discard_encrypted(failed.episode, produced, problem)
+    return discarded if failed.status in _PLAIN_FAILURES else failed
 
 
 def redact_secrets(text: str) -> str:
@@ -414,8 +480,11 @@ class YtDlpDownloader:
 
         After yt-dlp returns, the produced file is checked for encrypted tracks first — always,
         whatever ``options.verify`` says (:func:`~dramafetch.media.drm_problem`): an encrypted
-        file is deleted with its cover and partial files (see :meth:`_discard_encrypted`) and the
-        episode is FAILED_UNAVAILABLE. Then it is verified (``options.verify``, see
+        file is deleted with its cover and partial files (see :func:`discard_encrypted`) and the
+        episode is FAILED_UNAVAILABLE. So is one a FAILED run left under the episode's name
+        (:func:`_unless_encrypted_left`) and one already there before the run
+        (:func:`existing_file_result`): no encrypted file is ever kept, or skipped as the episode
+        by a later run. Then the file is verified (``options.verify``, see
         :func:`~dramafetch.media.verify_video`) BEFORE the cover step: a file that fails is
         quarantined (see :meth:`_quarantine`) and the episode is FAILED; a file that passes gets
         its cover handled by :func:`_finish_cover`.
@@ -425,12 +494,7 @@ class YtDlpDownloader:
             return locked_result(episode)
         existing = existing_episode_file(out_dir, episode, options)
         if existing is not None and not options.overwrite:
-            return DownloadResult(
-                episode=episode,
-                status=DownloadStatus.SKIPPED_EXISTS,
-                path=existing,
-                message=f"already exists: {existing.name}",
-            )
+            return existing_file_result(episode, existing, options)
         if options.dry_run:
             cover = " + cover" if options.thumbnails else ""
             return DownloadResult(
@@ -449,15 +513,17 @@ class YtDlpDownloader:
         except Exception as exc:
             message = sanitize_error(str(exc) or exc.__class__.__name__)
             status = self.classify_error(message)
-            return DownloadResult(
+            failed = DownloadResult(
                 episode=episode, status=status, message=describe_failure(status, message)
             )
+            return _unless_encrypted_left(failed, options)
         if retcode not in (0, None):
-            return DownloadResult(
+            failed = DownloadResult(
                 episode=episode,
                 status=DownloadStatus.FAILED,
                 message=f"yt-dlp exited with code {retcode}",
             )
+            return _unless_encrypted_left(failed, options)
         produced = existing_episode_file(out_dir, episode, options)
         if produced is None:
             return DownloadResult(
@@ -467,7 +533,7 @@ class YtDlpDownloader:
             )
         encrypted = drm_problem(produced)  # always, whatever options.verify says
         if encrypted is not None:
-            return self._discard_encrypted(episode, produced, encrypted)
+            return discard_encrypted(episode, produced, encrypted)
         if options.verify:
             problem = verify_video(produced, episode.duration_s)
             if problem is not None:
@@ -500,28 +566,6 @@ class YtDlpDownloader:
             episode=episode,
             status=DownloadStatus.FAILED,
             message=f"{INCOMPLETE_PREFIX}{problem} ({note})",
-        )
-
-    @staticmethod
-    def _discard_encrypted(episode: Episode, produced: Path, problem: str) -> DownloadResult:
-        """The FAILED_UNAVAILABLE result for a file with encrypted tracks
-        (:func:`~dramafetch.media.drm_problem`): DramaFetch never keeps encrypted media, so the
-        video is deleted — not quarantined: no rerun makes it play — and so are the cover yt-dlp
-        wrote next to it and any partial file of that download (:func:`_leftovers`); no cover is
-        embedded or kept. The message is ``problem`` (:data:`~dramafetch.models.DRM_MESSAGE`),
-        followed by ``(could not delete <name>: …)`` only when the OS refused to delete the video
-        (:func:`~dramafetch.media.discard_note`)."""
-        for leftover in _leftovers(produced):
-            try:
-                leftover.unlink(missing_ok=True)
-            except OSError as exc:
-                log.debug("could not delete %s: %s", leftover.name, exc.strerror)
-        note = discard_note(produced)
-        log.debug("episode %s: %s (%s)", episode.number, problem, note or "deleted")
-        return DownloadResult(
-            episode=episode,
-            status=DownloadStatus.FAILED_UNAVAILABLE,
-            message=problem if note is None else f"{problem} ({note})",
         )
 
     @staticmethod

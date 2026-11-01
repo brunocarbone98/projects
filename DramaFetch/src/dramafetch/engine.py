@@ -47,6 +47,7 @@ from dramafetch.downloader import (
     YtDlpDownloader,
     cookies_file_problem,
     existing_episode_file,
+    existing_file_result,
     locked_result,
     sanitize_error,
 )
@@ -707,9 +708,10 @@ def _stopped_result(
 ) -> DownloadResult:
     """The result for an episode the run gave up on before reaching it: the skip it would have had
     anyway — done in the manifest, remembered as DRM-protected, locked, its file already in
-    ``options.out_dir`` (the series directory) — or ``status`` with ``"stopped: <reason>"``.
-    Mirrors :func:`download_series` and :func:`_needs_network` (so a stop never overwrites the
-    DRM memory of an episode with a ``stopped`` entry)."""
+    ``options.out_dir`` (the series directory; an encrypted one is deleted and FAILED_UNAVAILABLE,
+    as both downloaders do: ``downloader.existing_file_result``) — or ``status`` with
+    ``"stopped: <reason>"``. Mirrors :func:`download_series` and :func:`_needs_network` (so a stop
+    never overwrites the DRM memory of an episode with a ``stopped`` entry)."""
     done_path = None if options.overwrite else manifest.done_path(episode.number)
     if done_path is not None:
         return _manifest_skip(episode, done_path)
@@ -720,13 +722,8 @@ def _stopped_result(
     existing = (
         None if options.overwrite else existing_episode_file(options.out_dir, episode, options)
     )
-    if existing is not None:
-        return DownloadResult(
-            episode=episode,
-            status=DownloadStatus.SKIPPED_EXISTS,
-            path=existing,
-            message=f"already exists: {existing.name}",
-        )
+    if existing is not None:  # skipped-exists, or deleted as encrypted: what a downloader says
+        return existing_file_result(episode, existing, options)
     return DownloadResult(episode=episode, status=status, message=f"{STOPPED_PREFIX}{reason}")
 
 

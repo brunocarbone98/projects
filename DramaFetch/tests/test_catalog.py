@@ -196,8 +196,11 @@ def test_lock_hints_free_playable_and_edge_cases():
     assert lock_hints({"video": {"playAddr": "", "bitrateInfo": [{"PlayAddr": {}}]}}) == ()
     # no video object at all
     assert lock_hints({"id": "1"}) == ("no play address",)
-    # string flags
-    strings = {"video": {"playAddr": "u"}, "dramaInfo": {"isPaid": "true", "isFree": "false"}}
+    # string flags (a sold item with a real play URL: no "no play address" hint)
+    strings = {
+        "video": {"playAddr": "https://v/x"},
+        "dramaInfo": {"isPaid": "true", "isFree": "false"},
+    }
     assert lock_hints(strings) == ("isPaid=true", "isFree=false")
     # containers are scanned, never reported as values; None is ignored
     nested = {"video": {"playAddr": "u"}, "dramaInfo": {"lockInfo": {"status": 1}, "vip": None}}
@@ -206,7 +209,7 @@ def test_lock_hints_free_playable_and_edge_cases():
     deep_video = {"video": {"playAddr": "u", "bitrateInfo": [{"PlayAddr": {"isLocked": True}}]}}
     assert lock_hints(deep_video) == ()
     # long values are truncated
-    long_value = {"video": {"playAddr": "u"}, "dramaInfo": {"unlockToken": "a" * 100}}
+    long_value = {"video": {"playAddr": "https://v/x"}, "dramaInfo": {"unlockToken": "a" * 100}}
     (hint,) = lock_hints(long_value)
     assert hint.startswith("unlockToken=aaaa")
     assert len(hint) < 60
@@ -809,7 +812,12 @@ def test_the_third_series_without_the_session_locks_the_paid_episode():
         (_item({"unlockStatus": "unlocked"}, video={}), ("unlocked", True, False)),
         (_item({"payStatus": "Paid"}), ("unlocked", True, False)),
         (_item({"hasPaid": False}), ("free", False, False)),  # not an entitlement, not a price
-        (_item({"isUnlocked": False, "isFree": False}), ("unlocked", True, False)),  # 5. pricing
+        (_item({"isUnlocked": False}), ("free", False, False)),  # nothing says it is sold
+        # 5. ... but on a sold episode an entitlement flag that says no is the paywall's flag
+        (_item({"isUnlocked": False, "isFree": False}), ("locked", True, False)),
+        (_item({"hasPaid": 0, "unlockPrice": 30}), ("locked", True, False)),
+        (_item({"is_purchased": "false", "coinCount": 5}), ("locked", True, False)),
+        (_item({"isUnlocked": True, "hasPaid": False, "isFree": False}), ("unlocked", True, False)),
         # 1. DRM wins over everything, entitlement included: locked, never decrypted
         (_item({"isUnlocked": True, "drmType": "widevine"}), ("locked", True, True)),
         (_item(None, video={**PLAYABLE, "isEncrypted": True}), ("locked", False, True)),
@@ -847,6 +855,75 @@ def _has_play(item):
     return isinstance(video, dict) and (
         bool(video.get("playAddr")) or bool(video.get("bitrateInfo"))
     )
+
+
+#: Play addresses that hold no URL at all — renditions without one, a placeholder string — and
+#: what a FREE-looking item with that address is: free as in build 6 when the address has the
+#: payload's shape (renditions, a playAddr string), locked when it has none.
+URL_LESS_VIDEOS = [
+    pytest.param(
+        {
+            "playAddr": "",
+            "bitrateInfo": [
+                {"Bitrate": 0, "CodecType": "h264", "GearName": "normal_720_0", "PlayAddr": {}}
+            ],
+        },
+        "free",
+        id="rendition-without-UrlList",
+    ),
+    pytest.param(
+        {"playAddr": "", "bitrateInfo": [{"Bitrate": 1088000, "PlayAddr": {"UrlList": []}}]},
+        "free",
+        id="empty-UrlList",
+    ),
+    pytest.param({"playAddr": "", "bitrateInfo": [{}]}, "free", id="empty-rendition"),
+    pytest.param({"bitrateInfo": [{"PlayAddr": None}]}, "free", id="PlayAddr-null"),
+    pytest.param({"playAddr": "null", "bitrateInfo": []}, "free", id="playAddr-null-string"),
+    pytest.param({"playAddr": "about:blank"}, "free", id="playAddr-not-http"),
+    pytest.param({"playAddr": {"UrlList": ["/relative/path"]}}, "locked", id="playAddr-relative"),
+]
+
+
+@pytest.mark.parametrize(("video", "free_access"), URL_LESS_VIDEOS)
+def test_a_sold_episode_needs_a_real_play_url_to_count_as_unlocked(tmp_path, video, free_access):
+    """Rule 5 is about the URL TikTok gave THIS session for a sold episode: a play address that
+    holds none — renditions without a URL, a placeholder string — is no address, so the episode
+    is locked with the `no play address` hint and never handed to yt-dlp unless
+    `--include-locked`. An entitlement flag still wins, and a free-looking item keeps its
+    build-6 meaning (the yt-dlp engine never needed the payload's URLs for it)."""
+    from dramafetch.downloader import YtDlpDownloader
+    from dramafetch.engine import download_series
+    from dramafetch.models import DownloadOptions, DownloadStatus, Series
+
+    sold = _item({"isFree": False, "unlockPrice": 30}, video=video)
+    access, paid, drm, hints = access_of(sold)
+    assert (access, paid, drm) == ("locked", True, False)
+    assert hints[-1] == NO_PLAY_ADDRESS and hints.count(NO_PLAY_ADDRESS) == 1
+    assert hints[:2] == ("isFree=false", "unlockPrice=30")
+    assert play_url_candidates(sold) == [] and lock_hints(sold) == hints
+    assert access_of(_item({"isFree": False, "isUnlocked": True}, video=video))[0] == "unlocked"
+    assert access_of(_item({"isFree": True}, video=video))[0] == free_access
+
+    item = {**sold, "id": "7699400000000000203"}
+    item["dramaInfo"]["DramaVideoData"]["EpisodeNumber"] = 3
+    episode = episode_from_item(item, PAID_SERIES_ID)
+    assert episode is not None and episode.locked
+    asked = []
+
+    def ydl_factory(params):
+        asked.append(params)
+        raise AssertionError("a locked episode is never handed to yt-dlp")
+
+    series = Series(series_id=PAID_SERIES_ID, name="Paid Love Story", episodes=[episode])
+    (result,) = download_series(
+        series,
+        [episode],
+        DownloadOptions(out_dir=tmp_path),
+        downloader=YtDlpDownloader(ydl_factory),
+        sleep=lambda seconds: pytest.fail("a skip never pauses"),
+    )
+    assert result.status is DownloadStatus.SKIPPED_LOCKED and asked == []
+    assert result.message == f"looks locked: isFree=false; unlockPrice=30; {NO_PLAY_ADDRESS}"
 
 
 @pytest.mark.parametrize("value", [0, 1, 2, -1, 1.0, True, False])
