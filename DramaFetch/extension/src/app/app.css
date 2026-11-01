@@ -76,4 +76,10 @@ img.cover { width: 40px; height: 54px; object-fit: cover; border-radius: 4px; ba
 .grid { display: grid; grid-template-columns: minmax(180px, 1fr) 2fr; gap: 8px 12px; align-items: center; }
 .grid label { margin: 0; }
 .legal { max-width: 980px; margin: 0 auto; padding: 0 16px 28px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); }
-@media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+@media (max-width: 560px) {
+  .grid { grid-template-columns: 1fr; }
+  /* a narrow window keeps what choosing episodes needs: the box, number, title, length, access */
+  #episode-table th:nth-child(2), #episode-table td:nth-child(2),
+  #episode-table th:nth-child(6), #episode-table td:nth-child(6) { display: none; }
+  th, td { padding: 6px 5px; }
+}

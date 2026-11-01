@@ -223,7 +223,7 @@
             <div>
                 <div class="block">
                     <div class="block-label">What it is</div>
-                    <p>A downloader for whole short-drama series that your own TikTok account can already watch — several series in one run — for personal offline viewing, with three front ends: a Python CLI, a small local web page (usable from a phone or TV on the home network with an access token) and a Chrome extension for Windows, macOS and Linux. Episodes are saved as “&lt;Series&gt; - Episode NN.mp4”, exactly as served (nothing is re-encoded), with the cover embedded in the MP4; every file is verified — complete, with an audio track, the expected length — before it counts, and interrupted runs resume. Paid episodes the account has unlocked download like free ones; locked ones are listed and skipped. It never unlocks paid episodes or bypasses DRM or access controls: encrypted media is detected and never kept.</p>
+                    <p>A downloader for whole short-drama series that your own TikTok account can already watch — several series in one run — for personal offline viewing, with three front ends: a Python CLI, a small local web page (usable from a phone or TV on the home network with an access token) and a Chrome extension for Windows, macOS and Linux. Episodes are saved as <span style="white-space:nowrap">“&lt;Series&gt; - Episode NN.mp4”</span>, exactly as served (nothing is re-encoded), with the cover embedded in the MP4; every file is verified — complete, with an audio track, the expected length — before it counts, and interrupted runs resume. Paid episodes the account has unlocked download like free ones; locked ones are listed and skipped. It never unlocks paid episodes or bypasses DRM or access controls: encrypted media is detected and never kept.</p>
                 </div>
                 <div class="block">
                     <div class="block-label">Purpose</div>
@@ -233,12 +233,12 @@
 
             <div class="spec">
                 <div class="spec-head">Stack used</div>
-                <div class="spec-row"><div class="tech">Python · mypy · Ruff</div><div class="role">CLI and shared engine, type hints everywhere, mypy --strict and Ruff</div></div>
+                <div class="spec-row"><div class="tech">Python · mypy · Ruff</div><div class="role">CLI and shared engine: type hints everywhere, mypy in strict mode, Ruff</div></div>
                 <div class="spec-row"><div class="tech">Playwright · Chromium</div><div class="role">Reads the episode list the way TikTok's web app does</div></div>
                 <div class="spec-row"><div class="tech">yt-dlp</div><div class="role">Default download engine, one episode at a time</div></div>
                 <div class="spec-row"><div class="tech">mutagen</div><div class="role">Cover art embedded into the MP4; integrity checks on every file</div></div>
                 <div class="spec-row"><div class="tech">Python http.server</div><div class="role">Standard-library local web UI, reachable from a phone or TV with an access token</div></div>
-                <div class="spec-row"><div class="tech">JavaScript · Chrome Extensions (Manifest V3)</div><div class="role">The extension: zero dependencies, @ts-check, type-checked with TypeScript's checker</div></div>
+                <div class="spec-row"><div class="tech">JavaScript · Chrome Extensions (Manifest&nbsp;V3)</div><div class="role">The extension: zero dependencies, @ts-check, type-checked with TypeScript's checker</div></div>
                 <div class="spec-row"><div class="tech">pytest · node:test</div><div class="role">Unit tests, a local fake TikTok server, Python–JavaScript parity tests and real-Chromium integration tests</div></div>
                 <div class="spec-row"><div class="tech">FFmpeg</div><div class="role">In the tests: a frame-checksum proof that embedding a cover changes no frame</div></div>
                 <div class="spec-row"><div class="tech">GitHub Actions</div><div class="role">CI on every change: Ruff, mypy, unit and real-Chromium integration tests</div></div>
