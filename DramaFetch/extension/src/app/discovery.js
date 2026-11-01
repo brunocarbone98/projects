@@ -18,7 +18,9 @@
  *   included; it falls back to scrolling the list ({@link scrollInPage}, DOM scrolling in the
  *   ISOLATED world) and re-fetching, once each, the exact item_list URLs the page requested;
  * - it stops at a login redirect, a captcha page ({@link looksLikeChallenge}, the page text read
- *   in the ISOLATED world) or an HTTP 429, and closes the tab it opened on every path.
+ *   in the ISOLATED world) or an HTTP 429, and closes the tab it opened on every path — also when
+ *   the DramaFetch tab goes away mid-listing: the tab is recorded ({@link DISCOVERY_TAB_KEY}) for
+ *   the background worker and the next DramaFetch page to close.
  *
  * Nothing here patches, wraps or overrides anything in TikTok's page, unlocks anything or sends
  * anything back: the payload is parsed by `lib/catalog.js` exactly as the Python code parses it.
@@ -33,7 +35,7 @@ import {
   parseItemListPayload,
 } from "../lib/catalog.js";
 import { LIST_RATE_LIMIT_MESSAGE, TIKTOK_BASE_URL, pyFormatG } from "../lib/messages.js";
-import { PAGE_DELAY_S, defaultRng, pagePause } from "../lib/pacing.js";
+import { PAGE_DELAY_S, defaultRng, pagePause, sleepSeconds } from "../lib/pacing.js";
 import { seriesPageUrl } from "../lib/urls.js";
 
 /** Substrings of the two API requests the page makes (`browser.ITEM_LIST_MARKER` / `DETAIL_MARKER`). */
@@ -59,6 +61,15 @@ export const SCROLL_ROUNDS_WITHOUT_NEWS = 4;
 export const PAGE_COUNT = 30;
 /** At most this many list pages per series (`DiscoveryOptions.max_pages`). */
 export const MAX_PAGES = 60;
+/** How long the new tab may take to finish loading `about:blank` before it is sent to the series. */
+export const BLANK_TAB_WAIT_S = 2;
+/**
+ * The `chrome.storage.session` record of the TikTok tab a discovery has open, `{tabId, appTabId}`:
+ * the background worker closes that tab when its DramaFetch tab goes away mid-listing (closed,
+ * navigated elsewhere, discarded — the page's own `finally` never runs then), and a new engine
+ * page closes what an earlier one left behind (a reload).
+ */
+export const DISCOVERY_TAB_KEY = "discoveryTab";
 
 /** Login redirect (the Python text names `--cookies`; the extension uses the browser's session). */
 export const LOGIN_REDIRECT_MESSAGE =
@@ -312,10 +323,78 @@ export function pageTextInPage() {
  */
 
 /**
- * The real browser: chrome.tabs, chrome.webRequest (observation only) and chrome.scripting.
+ * Record the TikTok tab a discovery opened, with the DramaFetch tab it belongs to
+ * ({@link DISCOVERY_TAB_KEY}).
+ * @param {number} tabId
+ * @param {number | undefined} appTabId
+ * @returns {Promise<void>}
+ */
+async function rememberDiscoveryTab(tabId, appTabId) {
+  await chrome.storage.session.set({ [DISCOVERY_TAB_KEY]: { tabId, appTabId: appTabId ?? null } });
+}
+
+/**
+ * The recorded discovery tab, or null.
+ * @returns {Promise<{tabId: number, appTabId: number | null} | null>}
+ */
+async function recordedDiscoveryTab() {
+  const record = (await chrome.storage.session.get(DISCOVERY_TAB_KEY))[DISCOVERY_TAB_KEY];
+  if (!isDict(record) || typeof record["tabId"] !== "number") return null;
+  const appTabId = record["appTabId"];
+  return { tabId: record["tabId"], appTabId: typeof appTabId === "number" ? appTabId : null };
+}
+
+/**
+ * Forget the recorded discovery tab when it is `tabId` (it has been closed).
+ * @param {number} tabId
+ * @returns {Promise<void>}
+ */
+async function forgetDiscoveryTab(tabId) {
+  const recorded = await recordedDiscoveryTab();
+  if (recorded !== null && recorded.tabId === tabId) await chrome.storage.session.remove(DISCOVERY_TAB_KEY);
+}
+
+/**
+ * Close the TikTok tab a discovery left open and forget it: the one of the DramaFetch tab
+ * `appTabId` (the background worker, when that tab is removed or leaves the app), or — without
+ * `appTabId` — whatever is recorded (a new engine page: no discovery of its own runs yet).
+ * Whether a tab was closed.
+ * @param {number} [appTabId]
+ * @returns {Promise<boolean>}
+ */
+export async function closeLeftoverDiscoveryTab(appTabId) {
+  const recorded = await recordedDiscoveryTab();
+  if (recorded === null || (appTabId !== undefined && recorded.appTabId !== appTabId)) return false;
+  await chrome.tabs.remove(recorded.tabId).catch(() => undefined);
+  await forgetDiscoveryTab(recorded.tabId);
+  return true;
+}
+
+/**
+ * Wait (at most {@link BLANK_TAB_WAIT_S}) until a new tab has finished loading `about:blank`: a
+ * navigation started before that first commit can be cancelled by it, which leaves the tab on
+ * `about:blank` while the series page was already requested.
+ * @param {number} tabId
+ * @param {(seconds: number) => Promise<void>} sleep
+ * @returns {Promise<void>}
+ */
+async function blankTabLoaded(tabId, sleep) {
+  const deadline = Date.now() + BLANK_TAB_WAIT_S * 1000;
+  while ((await chrome.tabs.get(tabId)).status !== "complete" && Date.now() < deadline) {
+    await sleep(0.02);
+  }
+}
+
+/**
+ * The real browser: chrome.tabs, chrome.webRequest (observation only) and chrome.scripting. The tab
+ * it opens is recorded with `appTabId` (the DramaFetch tab) until it is closed
+ * ({@link DISCOVERY_TAB_KEY}).
+ * @param {number} [appTabId]
+ * @param {{sleep?: (seconds: number) => Promise<void>}} [options] the polling of a new tab's first load
  * @returns {DiscoveryBrowser}
  */
-export function chromeBrowser() {
+export function chromeBrowser(appTabId, options = {}) {
+  const sleep = options.sleep ?? ((seconds) => sleepSeconds(seconds));
   return {
     async openTab(windowId) {
       /** @type {chrome.tabs.CreateProperties} */
@@ -323,8 +402,17 @@ export function chromeBrowser() {
       if (windowId !== undefined) properties.windowId = windowId;
       const tab = await chrome.tabs.create(properties);
       if (tab.id === undefined) throw new DiscoveryError("Chrome did not open a tab for the series");
-      await chrome.tabs.update(tab.id, { muted: true });
-      return tab.id;
+      const tabId = tab.id;
+      try {
+        await rememberDiscoveryTab(tabId, appTabId); // first: closed even if this page goes away
+        await chrome.tabs.update(tabId, { muted: true });
+        await blankTabLoaded(tabId, sleep);
+      } catch (error) {
+        await chrome.tabs.remove(tabId).catch(() => undefined);
+        await forgetDiscoveryTab(tabId).catch(() => undefined);
+        throw error;
+      }
+      return tabId;
     },
     async navigate(tabId, url) {
       await chrome.tabs.update(tabId, { url });
@@ -337,7 +425,11 @@ export function chromeBrowser() {
       await chrome.tabs.update(tabId, { active: true });
     },
     async closeTab(tabId) {
-      await chrome.tabs.remove(tabId);
+      try {
+        await chrome.tabs.remove(tabId);
+      } finally {
+        await forgetDiscoveryTab(tabId);
+      }
     },
     observe(tabId, urls, handlers) {
       /** @param {chrome.webRequest.CompletedDetails} details */
@@ -390,7 +482,8 @@ export function chromeBrowser() {
  * @property {number} [pageCount]
  * @property {number} [maxPages]
  * @property {number} [windowId] the window the tab opens in (the app's)
- * @property {number} [returnTabId] the tab to activate again when the series tab was activated
+ * @property {number} [returnTabId] the DramaFetch tab: activated again when the series tab was
+ *   activated, and the owner the series tab is recorded with ({@link DISCOVERY_TAB_KEY})
  * @property {Rng} [rng]
  * @property {(seconds: number) => Promise<void>} [sleep] the pauses and the polling
  * @property {() => number} [clock] seconds, for the deadlines
@@ -482,7 +575,7 @@ class Capture {
  * @returns {Promise<void>}
  */
 function realSleep(seconds) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, seconds) * 1000));
+  return sleepSeconds(seconds);
 }
 
 /**
@@ -507,7 +600,7 @@ export function observedUrlPatterns(base) {
  */
 export async function discoverSeries(ref, options = {}) {
   const base = (options.baseUrl ?? TIKTOK_BASE_URL).replace(/\/+$/, "");
-  const browser = options.browser ?? chromeBrowser();
+  const browser = options.browser ?? chromeBrowser(options.returnTabId);
   const sleep = options.sleep ?? realSleep;
   const clock = options.clock ?? (() => performance.now() / 1000);
   const rng = options.rng ?? defaultRng;

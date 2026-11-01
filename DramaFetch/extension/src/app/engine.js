@@ -12,9 +12,10 @@
  *   `longRestEvery` attempts of the run (an idle gap of `longRestMinS` counts as that break);
  * - the cooldown asked before every series and again right before every network attempt, after its
  *   pause: one recorded meanwhile stops the run (`cooldown until HH:MM`);
- * - a stop status (login, HTTP 403 / captcha, HTTP 429) records the cooldown once (403 / 429 /
- *   captcha) and marks the rest `stopped: …` with no request; 3 failures in a row (across the
- *   series of a run) stop it too;
+ * - a stop status (login, captcha, HTTP 429) records the cooldown once (429 / captcha) and marks
+ *   the rest `stopped: …` with no request; 3 failures in a row (across the series of a run) stop
+ *   it too — an HTTP 403, 404 or 410 on a video URL is not a stop (the browser engine's rule: the
+ *   next URL, then one fresh list, then `failed-unavailable`, which counts toward the three);
  * - a batch resolves each series right before its own downloads (never every list up front), rests
  *   between two series that contact TikTok (or takes the long break there, before the resolve),
  *   and after any stop marks every remaining series `not started: batch stopped in <name>
@@ -602,6 +603,39 @@ export async function runSelection(engine, series, numbers, job) {
     errorKind: null,
     contacted: rested,
   };
+}
+
+/**
+ * A selection job (**Download all available** / **Download selected**): never from a list an
+ * earlier job resolved — whoever is logged in to TikTok in this Chrome NOW decides what may be
+ * played and with which signed URLs (the web's list cache serves a list only to the session that
+ * resolved it; the extension cannot tell sessions apart, so it lists again) —, so the series is
+ * listed right before its downloads: the cooldown (refused: no request), the rest between jobs or
+ * the long break (before the list, so the fresh play URLs never wait through it), the cooldown
+ * again, the resolve (a failure is the run's error and a stop, as in a batch), then
+ * {@link runSelection} over the fresh list, whose access decisions apply: an episode it now calls
+ * locked is `skipped-locked` unless includeLocked.
+ * @param {Engine} engine
+ * @param {SeriesRef} ref
+ * @param {readonly number[]} numbers the episodes picked from the list shown
+ * @param {{lastContactAt: number | null}} job when the last job contacted TikTok (the job rest)
+ * @returns {Promise<SeriesRun>}
+ */
+export async function runSelectionJob(engine, ref, numbers, job) {
+  let cooldown = await checkCooldown(engine);
+  if (cooldown !== null) return cooldownRefusal(ref, cooldown, engine.wallClock());
+  await restBetweenJobs(engine, { lastContactAt: job.lastContactAt, batchJob: true });
+  cooldown = await checkCooldown(engine); // a refusal may have been met meanwhile
+  if (cooldown !== null) return cooldownRefusal(ref, cooldown, engine.wallClock());
+  let series;
+  try {
+    series = await resolve(engine, ref);
+  } catch (error) {
+    if (error instanceof DiscoveryError) return resolveFailure(ref, error);
+    throw error;
+  }
+  const run = await runSelection(engine, series, numbers, { lastContactAt: null }); // rested already
+  return { ...run, contacted: true };
 }
 
 /** The user asked the run to stop: it ends at the next pause or between two episodes. */

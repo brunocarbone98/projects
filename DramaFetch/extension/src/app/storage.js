@@ -53,6 +53,8 @@ export const HISTORY_MAX_BYTES = 1024 * 1024;
  * @property {number} [activateAfterS] 10 s outside test mode
  * @property {number} [detailGraceS] 2 s outside test mode
  * @property {number} [existenceDelayMs] the wait after asking Chrome to re-check its files (300 ms)
+ * @property {number} [existenceRateLimitS] Chrome's 10 s between two such checks, which a job's
+ *   first look at the downloads waits out; 0: never wait (tests that delete no file)
  *
  * @typedef {object} StoredPacing The run's pacing as stored (wall-clock seconds).
  * @property {PacingState} pacing
@@ -88,6 +90,7 @@ const TEST_NUMBER_KEYS = /** @type {const} */ ([
   "activateAfterS",
   "detailGraceS",
   "existenceDelayMs",
+  "existenceRateLimitS",
 ]);
 
 /**

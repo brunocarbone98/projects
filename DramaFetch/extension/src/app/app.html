@@ -140,15 +140,15 @@
           <option value="human" data-i18n="paceHuman">Human: about one episode's length</option>
         </select>
         <label for="setting-delay-min" data-i18n="settingDelayMin">Pause between episodes, at least (s)</label>
-        <input type="number" id="setting-delay-min" min="0" step="0.1">
+        <input type="number" id="setting-delay-min" min="0" max="86400" step="0.1">
         <label for="setting-delay-max" data-i18n="settingDelayMax">Pause between episodes, at most (s)</label>
-        <input type="number" id="setting-delay-max" min="0" step="0.1">
+        <input type="number" id="setting-delay-max" min="0" max="86400" step="0.1">
         <label for="setting-rest-every" data-i18n="settingRestEvery">A longer rest every (episodes)</label>
         <input type="number" id="setting-rest-every" min="1" step="1">
         <label for="setting-rest-min" data-i18n="settingRestMin">Longer rest, at least (s)</label>
-        <input type="number" id="setting-rest-min" min="0" step="1">
+        <input type="number" id="setting-rest-min" min="0" max="86400" step="1">
         <label for="setting-rest-max" data-i18n="settingRestMax">Longer rest, at most (s)</label>
-        <input type="number" id="setting-rest-max" min="0" step="1">
+        <input type="number" id="setting-rest-max" min="0" max="86400" step="1">
       </div>
       <p class="hint" data-i18n="settingsHint">File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.</p>
       <div class="buttons">

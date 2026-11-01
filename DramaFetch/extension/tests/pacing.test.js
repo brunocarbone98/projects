@@ -8,6 +8,8 @@ import {
   COUNTED_FAILURES,
   JOB_REST,
   LONG_REST,
+  MAX_PAUSE_S,
+  MAX_TIMER_MS,
   NO_NETWORK,
   PACE,
   PACING_DEFAULTS,
@@ -29,6 +31,7 @@ import {
   pauseBetweenSeries,
   pauseMessage,
   seededRng,
+  sleepSeconds,
   validatePacing,
 } from "../src/lib/pacing.js";
 
@@ -136,6 +139,85 @@ test("the announcements and the pacing lines read like the Python CLI's", () => 
   assert.equal(pauseMessage(LONG_REST, 1320, { runAttempts: 100 }), "long break 22 min after 100 episodes");
   assert.equal(describePacing(), "4–9 s between episodes, 60–120 s rest every 10; stop after 3 failures / 403 / 429");
   assert.equal(describeBatchPacing(), "60–120 s rest between series, a 15–30 min break every 100 episodes");
+});
+
+test("a pause too long for a timer is refused: over one day, in any mode", () => {
+  // 4294967.5 s is 2^32 ms + 204 ms: a setTimeout that long wraps to 204 ms and fires at once
+  const huge = pacingOptions({ delayMinS: 4294967.5, delayMaxS: 4294967.5 });
+  assert.equal(pacingProblem(huge), "delay_min_s (4.29497e+06) must be at most 86400 s (one day)");
+  assert.equal(pacingProblem(huge, { testMode: true }), "delay_min_s (4.29497e+06) must be at most 86400 s (one day)");
+  assert.equal(pacingProblem(pacingOptions({ restMaxS: 1e7 })), "rest_max_s (1e+07) must be at most 86400 s (one day)");
+  assert.equal(pacingProblem(pacingOptions({ restMinS: MAX_PAUSE_S, restMaxS: MAX_PAUSE_S })), null);
+  assert.equal(pacingProblem(pacingOptions({ delayMinS: MAX_PAUSE_S, delayMaxS: MAX_PAUSE_S, pace: "human" })), null);
+});
+
+/**
+ * Fake timers for {@link sleepSeconds}: `run()` fires the pending timer, `ms` lists every delay
+ * asked for; the clock moves exactly by each delay unless `late` adds to it.
+ * @param {{late?: number}} [options]
+ */
+function fakeTimers(options = {}) {
+  let clock = 1_000_000;
+  /** @type {{callback: () => void, ms: number} | null} */
+  let pending = null;
+  /** @type {number[]} */
+  const ms = [];
+  return {
+    ms,
+    now: () => clock,
+    /** @param {() => void} callback @param {number} delay */
+    setTimer: (callback, delay) => {
+      ms.push(delay);
+      pending = { callback, ms: delay };
+      return ms.length;
+    },
+    clearTimer: () => {
+      pending = null;
+    },
+    run() {
+      const timer = pending;
+      if (timer === null) return false;
+      pending = null;
+      clock += timer.ms + (options.late ?? 0);
+      timer.callback();
+      return true;
+    },
+  };
+}
+
+test("sleepSeconds: a long pause in timer-sized pieces up to its deadline, never shorter", async () => {
+  const timers = fakeTimers();
+  let done = false;
+  const sleeping = sleepSeconds(4294967.5, timers).then(() => {
+    done = true;
+  });
+  while (timers.run()) await Promise.resolve();
+  await sleeping;
+  assert.equal(done, true);
+  assert.deepEqual(timers.ms, [MAX_TIMER_MS, MAX_TIMER_MS, 4294967500 - 2 * MAX_TIMER_MS]);
+  assert.ok(timers.ms.every((delay) => delay > 0 && delay <= MAX_TIMER_MS));
+  // a late timer only makes the pause longer: nothing is re-armed to catch up
+  const late = fakeTimers({ late: 500 });
+  const short = sleepSeconds(2, late);
+  while (late.run()) await Promise.resolve();
+  await short;
+  assert.deepEqual(late.ms, [2000]);
+  // nothing to sleep still waits for one timer turn; junk sleeps 0 s
+  const zero = fakeTimers();
+  const none = sleepSeconds(Number.NaN, zero);
+  assert.equal(zero.run(), true);
+  await none;
+  assert.deepEqual(zero.ms, [0]);
+});
+
+test("sleepSeconds: an abort ends the pause at once with the signal's reason", async () => {
+  const timers = fakeTimers();
+  const controller = new AbortController();
+  const sleeping = sleepSeconds(90, { ...timers, signal: controller.signal });
+  controller.abort(new Error("stopped by you"));
+  await assert.rejects(sleeping, /stopped by you/);
+  assert.equal(timers.run(), false); // the timer was cleared
+  await assert.rejects(sleepSeconds(1, { ...fakeTimers(), signal: controller.signal }), /stopped by you/);
 });
 
 test("the random sources: 0.8-1.6 s list pauses, seeded draws repeat, crypto draws stay in range", () => {

@@ -10,7 +10,9 @@
  * cookies (`credentials: "include"` — the extension never reads them) and `Referer:
  * https://www.tiktok.com/`, which a declarativeNetRequest SESSION rule scoped to the extension's
  * own requests sets ({@link applyRefererRule}; what `downloader_browser` sends). A URL whose host
- * the manifest does not cover is never requested. The body is judged in memory, in this order:
+ * the manifest does not cover is never requested, and no redirect is ever followed (`redirect:
+ * "manual"`: its target could be any host) — such a URL counts like a refused one, the next
+ * candidate is tried. The body is judged in memory, in this order:
  * the transfer (a body shorter or longer than an identity-encoded `Content-Length`, or cut off →
  * `failed`, no next mirror), the content (`lib/mp4.bodyProblem` → next URL), encrypted tracks
  * (`lib/mp4.drmProblem` → `failed-unavailable` with `DRM_MESSAGE`, nothing saved, no other
@@ -51,7 +53,7 @@ import {
   verifyVideo,
 } from "../lib/mp4.js";
 import { downloadFilename, episodeStem, fileBaseName } from "../lib/naming.js";
-import { EXPIRY_MARGIN_S, MAX_GETS_PER_EPISODE } from "../lib/pacing.js";
+import { EXPIRY_MARGIN_S, MAX_GETS_PER_EPISODE, sleepSeconds } from "../lib/pacing.js";
 import { lockedResult } from "../lib/report.js";
 import { ChallengeError, DiscoveryError, LoginRequiredError, RateLimitedError } from "./discovery.js";
 
@@ -256,6 +258,61 @@ export async function readBody(response, limits = {}) {
 }
 
 /**
+ * Whether a `redirect: "manual"` answer is a redirect the browser did not follow (an
+ * `opaqueredirect`: status 0, no headers, no body — the target stays unknown and is never
+ * requested).
+ * @param {Response} response
+ * @returns {boolean}
+ */
+export function isRedirect(response) {
+  return response.type === "opaqueredirect" || response.status === 0;
+}
+
+/**
+ * @typedef {{ok: true, data: Uint8Array, kind: import("../lib/mp4.js").ImageKind} | {ok: false, note: string}} ImageResult
+ */
+
+/**
+ * One image GET of the extension's own (the downloader's cover, a thumbnail of the episode list):
+ * only to a host the manifest covers, never following a redirect (its target could be any host),
+ * with the session's cookies; at most {@link MAX_COVER_BYTES} read, accepted per
+ * `thumbnails.image_kind` (the bytes first) from {@link MIN_IMAGE_BYTES} on. Never throws: a
+ * failure is `{ok: false, note: "; cover: <reason>"}`, host names only.
+ * @param {string} url
+ * @param {{fetch: typeof fetch, hostPatterns: readonly string[], idleMs?: number}} options
+ * @returns {Promise<ImageResult>}
+ */
+export async function fetchImage(url, options) {
+  const host = hostOf(url);
+  if (!hostCovered(url, options.hostPatterns)) {
+    return { ok: false, note: `; cover: ${host} is not a host this extension may contact` };
+  }
+  try {
+    const response = await options.fetch(url, {
+      credentials: "include",
+      cache: "no-store",
+      redirect: "manual",
+      headers: { Accept: "image/*,*/*" },
+    });
+    if (isRedirect(response)) return { ok: false, note: `; cover: a redirect from ${host}, not followed` };
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => undefined);
+      return { ok: false, note: `; cover: HTTP ${response.status} from ${host}` };
+    }
+    const contentType = response.headers.get("content-type") ?? "";
+    const data = await readBody(response, { idleMs: options.idleMs, maxBytes: MAX_COVER_BYTES });
+    const kind = imageKind(data, contentType);
+    if (kind === null || data.length < MIN_IMAGE_BYTES) {
+      return { ok: false, note: `; cover: ${imageProblem(data, contentType)} from ${host}` };
+    }
+    if (data.length > MAX_COVER_BYTES) return { ok: false, note: "; cover: too large, not kept" };
+    return { ok: true, data, kind };
+  } catch (error) {
+    return { ok: false, note: `; cover: ${oneLine(error)}` };
+  }
+}
+
+/**
  * Install (or replace) the session rule that sets `Referer: <base>/` on the requests the
  * extension's own pages make to TikTok's hosts — never on TikTok's page's requests (the rule's
  * initiator is the extension itself). Called before every job; session rules end with the browser.
@@ -287,43 +344,94 @@ export async function applyRefererRule(base) {
 // ------------------------------------------------------------------- Chrome's downloads
 
 /**
+ * Chrome re-checks whether its downloaded files still exist when an extension searches its
+ * downloads — but at most once every 10 s, counted in whole seconds (its
+ * `kFileExistenceRateLimitSeconds`); a search sooner than that reads the old answer, so a file
+ * deleted a moment ago would still count as on disk.
+ */
+export const EXISTENCE_CHECK_RATE_LIMIT_S = 10;
+
+/**
+ * @typedef {object} ExistenceChecks When one of this page's searches last made Chrome re-check its
+ * files, as far as the page can tell (Chrome's own rule applied to the page's searches).
+ * @property {number} lastMs milliseconds since the epoch; -Infinity before the first search
+ */
+
+/** @type {ExistenceChecks} the page's (every view and every save share it) */
+const pageExistenceChecks = { lastMs: Number.NEGATIVE_INFINITY };
+
+/**
+ * `chrome.downloads.search`, noting whether this call makes Chrome re-check its files (Chrome's
+ * rule: more than {@link EXISTENCE_CHECK_RATE_LIMIT_S} whole seconds since the last check).
+ * @param {typeof chrome.downloads} api
+ * @param {chrome.downloads.DownloadQuery} query
+ * @param {ExistenceChecks} [checks]
+ * @param {number} [nowMs]
+ * @returns {Promise<chrome.downloads.DownloadItem[]>}
+ */
+function searchDownloads(api, query, checks = pageExistenceChecks, nowMs = Date.now()) {
+  if (Math.floor(nowMs / 1000) - Math.floor(checks.lastMs / 1000) > EXISTENCE_CHECK_RATE_LIMIT_S) {
+    checks.lastMs = nowMs;
+  }
+  return api.search(query);
+}
+
+/**
  * What Chrome's download history says, taken once per series (`refresh`) and kept up to date with
  * the files this run saves: which recorded download still exists (the state's {@link exists}
  * answer) and which completed download sits exactly at a target path ({@link completedAt}).
  */
 export class DownloadsView {
   /**
-   * @param {{api?: typeof chrome.downloads, sleep?: (seconds: number) => Promise<void>, existenceDelayMs?: number}} [options]
+   * @param {{api?: typeof chrome.downloads, sleep?: (seconds: number) => Promise<void>, existenceDelayMs?: number, rateLimitS?: number, now?: () => number, checks?: ExistenceChecks}} [options]
+   *   `rateLimitS` Chrome's {@link EXISTENCE_CHECK_RATE_LIMIT_S} (0, test mode only: never wait for
+   *   it); `now` in milliseconds (`Date.now`); `checks` the page's existence checks by default
    */
   constructor(options = {}) {
     this.api = options.api ?? chrome.downloads;
-    this.sleep = options.sleep ?? ((seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)));
+    this.sleep = options.sleep ?? ((seconds) => sleepSeconds(seconds));
     this.existenceDelayMs = options.existenceDelayMs ?? 300;
+    this.rateLimitS = options.rateLimitS ?? EXISTENCE_CHECK_RATE_LIMIT_S;
+    this.now = options.now ?? (() => Date.now());
+    this.checks = options.checks ?? pageExistenceChecks;
+    /** whether this view (one per job) made Chrome check its files already */
+    this.checked = false;
     /** @type {Map<number, chrome.downloads.DownloadItem>} */
     this.byId = new Map();
   }
 
   /**
-   * Ask Chrome to check whether its downloaded files still exist (any search does; the answer
-   * arrives a moment later), wait for it, then read the completed downloads.
+   * Make Chrome check whether its downloaded files still exist, wait for the answer, then read the
+   * completed downloads. The view's first refresh — a job's — first waits, when one of this page's
+   * searches made Chrome check less than {@link EXISTENCE_CHECK_RATE_LIMIT_S} s ago, until its rate
+   * limit lets a search check again (only waiting, never a request): a file deleted since the last
+   * job is then seen as gone.
    * @returns {Promise<void>}
    */
   async refresh() {
-    await this.api.search({ limit: 1 });
+    if (!this.checked && this.rateLimitS > 0) {
+      const allowedAtMs = (Math.floor(this.checks.lastMs / 1000) + this.rateLimitS + 1) * 1000;
+      const waitMs = allowedAtMs - this.now();
+      if (waitMs > 0) await this.sleep(waitMs / 1000);
+    }
+    this.checked = true;
+    await searchDownloads(this.api, { limit: 1 }, this.checks, this.now());
     await this.sleep(this.existenceDelayMs / 1000);
-    const items = await this.api.search({ state: "complete", limit: 0 });
+    const items = await searchDownloads(this.api, { state: "complete", limit: 0 }, this.checks, this.now());
     this.byId = new Map(items.map((item) => [item.id, item]));
   }
 
   /**
-   * The state's "file still exists" answer: the entry's download is complete and its file exists.
-   * @param {{download_id?: number | null}} entry
+   * The state's "file still exists" answer: the entry's download is complete, is the very file the
+   * entry recorded (Chrome hands its ids out again once its download history is cleared) and that
+   * file still exists.
+   * @param {{download_id?: number | null, path?: string | null}} entry
    * @returns {boolean}
    */
   exists(entry) {
     if (entry.download_id === null || entry.download_id === undefined) return false;
     const item = this.byId.get(entry.download_id);
-    return item !== undefined && item.state === "complete" && item.exists;
+    return item !== undefined && item.state === "complete" && item.exists && item.filename === entry.path;
   }
 
   /**
@@ -373,7 +481,7 @@ function waitForDownload(id, api) {
     let settled = false;
     const settle = async () => {
       try {
-        const [item] = await api.search({ id });
+        const [item] = await searchDownloads(api, { id });
         if (settled) return;
         if (item === undefined) {
           settled = true;
@@ -605,10 +713,20 @@ export class Downloader {
       /** @type {Response} */
       let response;
       try {
-        response = await this.fetch(url, { credentials: "include", cache: "no-store", headers: { Accept: "*/*" } });
+        // never follow a redirect: its target could be any host, and none but the manifest's is contacted
+        response = await this.fetch(url, {
+          credentials: "include",
+          cache: "no-store",
+          redirect: "manual",
+          headers: { Accept: "*/*" },
+        });
       } catch (error) {
         last = { reason: `no response (${oneLine(error)}) from ${host}`, unavailable: true };
         continue;
+      }
+      if (isRedirect(response)) {
+        last = { reason: `a redirect from ${host}, not followed`, unavailable: true };
+        continue; // like a denied URL: the next candidate (this GET counts in the budget)
       }
       const status = response.status;
       if (status === 429) {
@@ -733,34 +851,10 @@ export class Downloader {
    * a failure only ever becomes the note `; cover: <reason>` (a 429 included: the video came
    * through, and the next video request stops the run if TikTok is really limiting).
    * @param {string} url
-   * @returns {Promise<{ok: true, data: Uint8Array, kind: import("../lib/mp4.js").ImageKind} | {ok: false, note: string}>}
+   * @returns {Promise<ImageResult>}
    */
-  async fetchCover(url) {
-    const host = hostOf(url);
-    if (!hostCovered(url, this.config.hostPatterns)) {
-      return { ok: false, note: `; cover: ${host} is not a host this extension may contact` };
-    }
-    try {
-      const response = await this.fetch(url, {
-        credentials: "include",
-        cache: "no-store",
-        headers: { Accept: "image/*,*/*" },
-      });
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        return { ok: false, note: `; cover: HTTP ${response.status} from ${host}` };
-      }
-      const contentType = response.headers.get("content-type") ?? "";
-      const data = await readBody(response, { idleMs: this.config.idleMs, maxBytes: MAX_COVER_BYTES });
-      const kind = imageKind(data, contentType);
-      if (kind === null || data.length < MIN_IMAGE_BYTES) {
-        return { ok: false, note: `; cover: ${imageProblem(data, contentType)} from ${host}` };
-      }
-      if (data.length > MAX_COVER_BYTES) return { ok: false, note: "; cover: too large, not kept" };
-      return { ok: true, data, kind };
-    } catch (error) {
-      return { ok: false, note: `; cover: ${oneLine(error)}` };
-    }
+  fetchCover(url) {
+    return fetchImage(url, { fetch: this.fetch, hostPatterns: this.config.hostPatterns, idleMs: this.config.idleMs });
   }
 
   /**
@@ -832,4 +926,100 @@ export class Downloader {
  */
 function failure(episode, status, message) {
   return { episode, status, path: null, message };
+}
+
+// ---------------------------------------------------------------- the list's thumbnails
+
+/**
+ * @typedef {object} CoverLoaderOptions
+ * @property {readonly string[]} hostPatterns the manifest's host permissions
+ * @property {() => Promise<boolean>} allowed whether a request may go out now — no job running or
+ *   waiting, no cooldown in force — asked before each pause and again right before each request
+ * @property {() => Promise<void>} pause the pause before each request (the list-page pause)
+ * @property {(itemId: string, url: string) => void} onCover a thumbnail is ready (an object URL)
+ * @property {typeof fetch} [fetch]
+ * @property {(blob: Blob) => string} [objectUrl] `URL.createObjectURL`
+ */
+
+/**
+ * The cover thumbnails of the episode list (**Load list**), fetched by the extension itself — not
+ * by the page's own `<img>` loads, which go out all at once, follow a redirect to any host and know
+ * nothing of a cooldown or a running job: ONE request at a time, each after its pause, only while
+ * `allowed()`, through {@link fetchImage} (the manifest's hosts, no redirect followed). Each
+ * thumbnail is kept by item id for the page's life, so showing the list again costs no request;
+ * one that failed is not asked for again.
+ */
+export class CoverLoader {
+  /** @param {CoverLoaderOptions} options */
+  constructor(options) {
+    this.options = options;
+    this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
+    this.objectUrl = options.objectUrl ?? ((blob) => URL.createObjectURL(blob));
+    /** @type {Map<string, string>} item id → object URL */
+    this.loaded = new Map();
+    /** @type {Set<string>} item ids asked for already (shown or failed): never twice */
+    this.asked = new Set();
+    /** @type {{itemId: string, url: string}[]} still to fetch, in order */
+    this.wanted = [];
+    /** @type {Promise<void> | null} the loop, while it runs */
+    this.running = null;
+  }
+
+  /**
+   * The thumbnails a list wants, in order (instead of an earlier list's), and start fetching.
+   * @param {readonly {itemId: string, coverUrl: string | null}[]} episodes
+   */
+  show(episodes) {
+    this.wanted = [];
+    for (const episode of episodes) {
+      if (episode.coverUrl && !this.asked.has(episode.itemId)) this.wanted.push({ itemId: episode.itemId, url: episode.coverUrl });
+    }
+    this.resume();
+  }
+
+  /**
+   * @param {string} itemId
+   * @returns {string | null} the item's thumbnail (an object URL), once fetched
+   */
+  urlOf(itemId) {
+    return this.loaded.get(itemId) ?? null;
+  }
+
+  /** Go on fetching what the list wants (after a job, after a cooldown); one loop at a time. */
+  resume() {
+    if (this.running !== null || this.wanted.length === 0) return;
+    this.running = this.loop()
+      .catch(() => undefined)
+      .finally(() => {
+        this.running = null;
+      });
+  }
+
+  /** @returns {Promise<void>} once no thumbnail request is in flight (a job waits for it) */
+  async idle() {
+    while (this.running !== null) await this.running;
+  }
+
+  /** @returns {Promise<void>} */
+  async loop() {
+    for (let next = this.wanted[0]; next !== undefined; next = this.wanted[0]) {
+      if (this.asked.has(next.itemId) || !hostCovered(next.url, this.options.hostPatterns)) {
+        this.wanted.shift(); // never requested: no pause either
+        this.asked.add(next.itemId);
+        continue;
+      }
+      if (!(await this.options.allowed())) return;
+      await this.options.pause();
+      if (!(await this.options.allowed())) return; // asked again right before the request
+      if (this.wanted[0] !== next) continue; // another list was shown meanwhile
+      this.wanted.shift();
+      this.asked.add(next.itemId);
+      const image = await fetchImage(next.url, { fetch: this.fetch, hostPatterns: this.options.hostPatterns });
+      if (!image.ok) continue;
+      const blob = new Blob([/** @type {Uint8Array<ArrayBuffer>} */ (image.data)], { type: mimeTypeFor(image.kind) });
+      const url = this.objectUrl(blob);
+      this.loaded.set(next.itemId, url);
+      this.options.onCover(next.itemId, url);
+    }
+  }
 }

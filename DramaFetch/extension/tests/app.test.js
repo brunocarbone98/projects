@@ -9,19 +9,23 @@ import { test } from "node:test";
 import { makeEpisode } from "../src/lib/catalog.js";
 import { DRM_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
 import { PacingState, pacingOptions } from "../src/lib/pacing.js";
-import { newState } from "../src/lib/state.js";
+import { completeSkip } from "../src/lib/report.js";
+import { donePath, markComplete, missingFiles, newState, record } from "../src/lib/state.js";
 import {
   ChallengeError,
+  DISCOVERY_TAB_KEY,
   LoginRequiredError,
   RateLimitedError,
+  chromeBrowser,
+  closeLeftoverDiscoveryTab,
   discoverSeries,
   isLoginUrl,
   looksLikeChallenge,
   queryParam,
   withQueryParams,
 } from "../src/app/discovery.js";
-import { Downloader, contentLength, sanitizeError } from "../src/app/downloader.js";
-import { downloadSeries, runBatch } from "../src/app/engine.js";
+import { CoverLoader, DownloadsView, Downloader, contentLength, sanitizeError } from "../src/app/downloader.js";
+import { downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
 
 const TINY = readFileSync(new URL("../../tests/fixtures/tiny.mp4", import.meta.url));
 const SERIES_ID = "7699393770256782354";
@@ -521,4 +525,297 @@ test("Content-Length counts only for identity-encoded bodies; messages carry no 
     sanitizeError("failed https://v16.tiktok.com/x.mp4?expire=1&sig=abc sessionid=SECRET\nmore"),
     "failed https://v16.tiktok.com/x.mp4 sessionid=<redacted>",
   );
+});
+
+// ------------------------------------------------------------- redirects, ids, re-listing
+
+/** What `fetch(url, {redirect: "manual"})` answers for a 3xx: an opaque redirect, target unknown. */
+const opaqueRedirect = () =>
+  /** @type {Response} */ (/** @type {unknown} */ ({ type: "opaqueredirect", status: 0, headers: new Headers(), body: null }));
+
+test("download: a redirect is never followed — counted, the next URL tried; a cover's only noted", async () => {
+  /** @type {string[]} */
+  const log = [];
+  /** @type {(string | undefined)[]} */
+  const modes = [];
+  const urls = ["https://v1.tiktok.com/a.mp4", "https://v2.tiktok.com/b.mp4"];
+  const routes = fakeFetch(
+    {
+      "https://v1.tiktok.com/": opaqueRedirect,
+      "https://v2.tiktok.com/": () => new Response(video(), { headers: { "content-type": "video/mp4" } }),
+      "https://p16-sign-sg.tiktokcdn.com/": opaqueRedirect,
+    },
+    log,
+  );
+  const fetchFn = /** @type {typeof fetch} */ (
+    (input, init) => {
+      modes.push(init?.redirect);
+      return routes(input, init);
+    }
+  );
+  /** @type {string[]} */
+  const saved = [];
+  const result = await downloader({ saved, fetch: fetchFn }).download(episode(1, { urls }), CONTEXT);
+  assert.equal(result.status, "done");
+  assert.equal(
+    result.message,
+    "saved Test Series - Episode 01.mp4 (0.1 MiB); cover: a redirect from p16-sign-sg.tiktokcdn.com, not followed",
+  );
+  assert.deepEqual(log, [...urls, "https://p16-sign-sg.tiktokcdn.com/c/1.jpeg"]);
+  assert.deepEqual(modes, ["manual", "manual", "manual"]);
+  assert.equal(saved.length, 1); // the video only: no cover was kept
+
+  // every URL redirecting: refused like a 403, at most 4 GETs, nothing saved
+  log.length = 0;
+  const many = [1, 2, 3, 4, 5].map((n) => `https://v${n}.tiktok.com/v.mp4`);
+  const all = downloader({ saved, fetch: fakeFetch({ "https://v": opaqueRedirect }, log) });
+  const refused = await all.download(episode(2, { urls: many }), CONTEXT);
+  assert.equal(refused.status, "failed-unavailable");
+  assert.equal(
+    refused.message,
+    "no playable stream: locked, region-restricted or not logged in (a redirect from v4.tiktok.com, not followed)",
+  );
+  assert.equal(log.length, 4);
+  assert.equal(saved.length, 1);
+});
+
+/**
+ * A fake `chrome.downloads` whose search answers `items` and logs every query with the clock.
+ * @param {chrome.downloads.DownloadItem[]} items
+ * @param {() => number} clock
+ */
+function fakeDownloads(items, clock) {
+  /** @type {[number, chrome.downloads.DownloadQuery][]} */
+  const searches = [];
+  const api = /** @type {typeof chrome.downloads} */ (
+    /** @type {unknown} */ ({
+      search: async (/** @type {chrome.downloads.DownloadQuery} */ query) => {
+        searches.push([clock(), query]);
+        return items;
+      },
+    })
+  );
+  return { api, searches };
+}
+
+/** @param {number} id @param {string} filename @returns {chrome.downloads.DownloadItem} */
+const item = (id, filename) =>
+  /** @type {chrome.downloads.DownloadItem} */ (/** @type {unknown} */ ({ id, filename, state: "complete", exists: true }));
+
+test("the downloads view: a recorded id that now names another file is not the episode on disk", async () => {
+  const episode01 = "/home/me/Downloads/DramaFetch/S [1]/S - Episode 01.mp4";
+  const episode02 = "/home/me/Downloads/DramaFetch/S [1]/S - Episode 02.mp4";
+  // the history was cleared and Chrome restarted: id 2 went to an unrelated download
+  const { api } = fakeDownloads([item(1, episode01), item(2, "/home/me/Downloads/invoice.pdf")], () => 0);
+  const view = new DownloadsView({ api, sleep: async () => undefined, checks: { lastMs: Number.NEGATIVE_INFINITY } });
+  await view.refresh();
+  const state = newState(SERIES_ID, "S");
+  const at = 1_800_000_000;
+  const none = () => false;
+  record(state, { episode: { number: 1, itemId: "a" }, status: "done", path: episode01, message: "saved", downloadId: 1 }, { exists: none, now: at });
+  record(state, { episode: { number: 2, itemId: "b" }, status: "done", path: episode02, message: "saved", downloadId: 2 }, { exists: none, now: at });
+  markComplete(state, at, 2);
+  const exists = (/** @type {import("../src/lib/state.js").StateEntry} */ entry) => view.exists(entry);
+  assert.equal(donePath(state, 1, exists), episode01);
+  assert.equal(donePath(state, 2, exists), null);
+  assert.deepEqual(missingFiles(state, exists), [2]);
+  assert.equal(completeSkip(state, { seriesId: SERIES_ID, nowS: at + 60, exists }), null); // it downloads E02 again
+});
+
+test("the downloads view: a job's first look waits out Chrome's 10 s between two file checks", async () => {
+  let clock = 1_000_000_500; // ms
+  /** @type {number[]} */
+  const sleeps = [];
+  const { api, searches } = fakeDownloads([], () => clock);
+  const checks = { lastMs: Number.NEGATIVE_INFINITY };
+  const sleep = async (/** @type {number} */ seconds) => {
+    sleeps.push(seconds);
+    clock += seconds * 1000;
+  };
+  const view = () => new DownloadsView({ api, sleep, now: () => clock, checks, existenceDelayMs: 300 });
+  const first = view();
+  await first.refresh(); // no check made yet: no wait
+  assert.equal(checks.lastMs, 1_000_000_500);
+  clock += 200;
+  await first.refresh(); // the same job again: no wait
+  assert.deepEqual(sleeps, [0.3, 0.3]);
+  const next = view(); // the next job, a moment later: Chrome checks again from second 1_000_011 on
+  const before = clock;
+  await next.refresh();
+  assert.deepEqual(sleeps, [0.3, 0.3, (1_000_011_000 - before) / 1000, 0.3]);
+  assert.equal(searches[4]?.[0], 1_000_011_000);
+  assert.equal(checks.lastMs, 1_000_011_000);
+  // the test copy may skip the wait (no scenario of its deletes a file but one)
+  const quick = new DownloadsView({ api, sleep, now: () => clock, checks, existenceDelayMs: 0, rateLimitS: 0 });
+  sleeps.length = 0;
+  await quick.refresh();
+  assert.deepEqual(sleeps, [0]);
+});
+
+test("a selection lists the series again, after the rest between jobs, and the fresh list decides", async () => {
+  // listed earlier with E02 playable; whoever is logged in now gets it locked
+  const fresh = series([episode(1), episode(2, { locked: true }), episode(3)]);
+  /** @type {number[]} */
+  const listedAt = [];
+  const fake = fakeEngine({
+    discover: async () => {
+      listedAt.push(fake.engine.clock());
+      return fresh;
+    },
+  });
+  const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
+  const start = fake.engine.clock();
+  const run = await runSelectionJob(fake.engine, ref, [1, 2, 3], { lastContactAt: start - 30 });
+  assert.deepEqual(fake.pauses.map((p) => `${p.kind} ${p.seconds}`), ["job-rest 60", "pace 4"]); // no second rest
+  assert.equal(fake.pauses[0]?.text, "resting 60 s before the next series");
+  assert.deepEqual(listedAt, [start + 60]); // the rest first, then the list
+  assert.deepEqual(run.results.map((r) => r.status), ["done", "skipped-locked", "done"]);
+  assert.deepEqual(fake.downloads, [1, 3]);
+  assert.equal(run.contacted, true);
+  assert.equal(run.series, fresh);
+
+  // a cooldown recorded during the rest: refused before the list, no request
+  const refused = fakeEngine({
+    discover: async () => {
+      throw new Error("no list expected");
+    },
+  });
+  refused.engine.sleep = async (seconds) => {
+    refused.tick(seconds);
+    refused.setCooldown({ until: refused.engine.wallClock() + 1800, reason: "elsewhere", source: "web", recorded_at: refused.engine.wallClock() });
+  };
+  const stopped = await runSelectionJob(refused.engine, ref, [1], { lastContactAt: refused.engine.clock() - 5 });
+  assert.equal(stopped.errorKind, "cooldown");
+  assert.equal(stopped.stop, true);
+  assert.equal(stopped.contacted, false);
+  assert.deepEqual(refused.downloads, []);
+});
+
+/**
+ * A fake `chrome` with the tabs and the session storage the discovery's tab handling uses.
+ * @param {{completeAfter?: number}} [options] how many `tabs.get` calls see the tab still loading
+ */
+function fakeChrome(options = {}) {
+  /** @type {Map<string, unknown>} */
+  const session = new Map();
+  /** @type {unknown[][]} */
+  const calls = [];
+  let gets = 0;
+  const chrome = {
+    tabs: {
+      create: async (/** @type {{url: string, active: boolean}} */ props) => {
+        calls.push(["create", props.url, props.active]);
+        return { id: 42 };
+      },
+      update: async (/** @type {number} */ id, /** @type {object} */ props) => {
+        calls.push(["update", id, props]);
+        return undefined;
+      },
+      get: async (/** @type {number} */ id) => {
+        gets += 1;
+        calls.push(["get", id]);
+        return { id, url: "about:blank", status: gets > (options.completeAfter ?? 0) ? "complete" : "loading" };
+      },
+      remove: async (/** @type {number} */ id) => {
+        calls.push(["remove", id]);
+      },
+    },
+    storage: {
+      session: {
+        get: async (/** @type {string} */ key) => (session.has(key) ? { [key]: session.get(key) } : {}),
+        set: async (/** @type {Record<string, unknown>} */ items) => {
+          for (const [key, value] of Object.entries(items)) session.set(key, value);
+        },
+        remove: async (/** @type {string} */ key) => {
+          session.delete(key);
+        },
+      },
+    },
+  };
+  Object.assign(globalThis, { chrome });
+  return { session, calls, restore: () => Reflect.deleteProperty(globalThis, "chrome") };
+}
+
+test("the discovery tab: muted, sent on only once about:blank has loaded, recorded until it is closed", async () => {
+  const fake = fakeChrome({ completeAfter: 2 });
+  try {
+    /** @type {number[]} */
+    const polls = [];
+    const browser = chromeBrowser(7, { sleep: async (seconds) => void polls.push(seconds) });
+    assert.equal(await browser.openTab(3), 42);
+    assert.deepEqual(fake.calls.slice(0, 2), [["create", "about:blank", false], ["update", 42, { muted: true }]]);
+    assert.deepEqual(fake.calls.filter((call) => call[0] === "get").length, 3); // loading, loading, complete
+    assert.deepEqual(polls, [0.02, 0.02]);
+    assert.deepEqual(fake.session.get(DISCOVERY_TAB_KEY), { tabId: 42, appTabId: 7 });
+    await browser.closeTab(42);
+    assert.deepEqual(fake.calls.at(-1), ["remove", 42]);
+    assert.equal(fake.session.has(DISCOVERY_TAB_KEY), false);
+    // a tab left behind: closed for its own DramaFetch tab (the worker), or for a new engine page
+    fake.session.set(DISCOVERY_TAB_KEY, { tabId: 43, appTabId: 7 });
+    assert.equal(await closeLeftoverDiscoveryTab(8), false);
+    assert.equal(fake.session.has(DISCOVERY_TAB_KEY), true);
+    assert.equal(await closeLeftoverDiscoveryTab(7), true);
+    assert.deepEqual(fake.calls.at(-1), ["remove", 43]);
+    assert.equal(fake.session.has(DISCOVERY_TAB_KEY), false);
+    fake.session.set(DISCOVERY_TAB_KEY, { tabId: 44, appTabId: null });
+    assert.equal(await closeLeftoverDiscoveryTab(), true);
+    assert.deepEqual(fake.calls.at(-1), ["remove", 44]);
+    assert.equal(await closeLeftoverDiscoveryTab(), false); // nothing left
+  } finally {
+    fake.restore();
+  }
+});
+
+test("the list's thumbnails: one request at a time, only while allowed, each kept by item id", async () => {
+  /** @type {string[]} */
+  const log = [];
+  let inFlight = 0;
+  let most = 0;
+  const fetchFn = /** @type {typeof fetch} */ (
+    async (input, init) => {
+      log.push(String(input));
+      assert.equal(init?.redirect, "manual");
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      inFlight -= 1;
+      if (String(input).includes("/moved/")) return opaqueRedirect();
+      return new Response(COVER, { headers: { "content-type": "image/jpeg" } });
+    }
+  );
+  let allowed = false;
+  let pauses = 0;
+  /** @type {string[]} */
+  const shown = [];
+  const loader = new CoverLoader({
+    hostPatterns: ["https://*.tiktokcdn.com/*"],
+    allowed: async () => allowed,
+    pause: async () => {
+      pauses += 1;
+    },
+    onCover: (itemId, url) => void shown.push(`${itemId} ${url}`),
+    fetch: fetchFn,
+    objectUrl: (blob) => `blob:${blob.type}:${blob.size}`,
+  });
+  const list = [
+    ...[1, 2, 3].map((n) => ({ itemId: `i${n}`, coverUrl: `https://p16.tiktokcdn.com/c/${n}.jpeg` })),
+    { itemId: "i4", coverUrl: "https://evil.example.com/4.jpeg" }, // never requested, no pause either
+    { itemId: "i5", coverUrl: "https://p16.tiktokcdn.com/moved/5.jpeg" }, // a redirect: not followed
+    { itemId: "i6", coverUrl: null },
+  ];
+  loader.show(list); // a job runs or waits, or a cooldown: nothing goes out
+  await loader.idle();
+  assert.deepEqual(log, []);
+  allowed = true;
+  loader.resume();
+  await loader.idle();
+  assert.equal(most, 1);
+  assert.deepEqual(log, [1, 2, 3].map((n) => `https://p16.tiktokcdn.com/c/${n}.jpeg`).concat("https://p16.tiktokcdn.com/moved/5.jpeg"));
+  assert.equal(pauses, 4);
+  assert.deepEqual(shown, ["i1 blob:image/jpeg:600", "i2 blob:image/jpeg:600", "i3 blob:image/jpeg:600"]);
+  assert.equal(loader.urlOf("i2"), "blob:image/jpeg:600");
+  assert.equal(loader.urlOf("i5"), null);
+  loader.show(list); // the list shown again: every thumbnail asked for once already
+  await loader.idle();
+  assert.equal(log.length, 4);
 });

@@ -51,6 +51,10 @@ export const MAX_GETS_PER_EPISODE = 4;
 export const MAX_COVER_GETS = 1;
 /** A play URL expiring within this many seconds counts as expired (`EXPIRY_MARGIN_S`). */
 export const EXPIRY_MARGIN_S = 60;
+/** The longest pause a setting may ask for: one day (pauses may be raised, but within reason). */
+export const MAX_PAUSE_S = 86400;
+/** The longest delay one timer honours (2^31 - 1 ms): a longer `setTimeout` overflows and fires at once. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** One of these stops the run at once: TikTok said no (`engine._STOP_STATUSES`). */
 export const STOP_STATUSES = Object.freeze(new Set([FAILED_LOGIN, FAILED_RATE_LIMITED, FAILED_BLOCKED]));
@@ -154,7 +158,8 @@ const CEILINGS = /** @type {const} */ ([
  * Why the pacing cannot be honoured, or null (`engine.validate_pacing` and its messages), and —
  * outside test mode — why it would be lighter than the Python defaults: every pause at least its
  * default, every count (`restEvery`, `maxConsecutiveFailures`, `longRestEvery`) between 1 and its
- * default. A value that is not a finite number is refused in any mode.
+ * default. A value that is not a finite number, and a pause over {@link MAX_PAUSE_S}, are refused
+ * in any mode.
  * @param {PacingOptions} options
  * @param {{testMode?: boolean}} [mode]
  * @returns {string | null}
@@ -180,6 +185,11 @@ export function pacingProblem(options, mode = {}) {
     }
     if (high < low) return `${highName} (${pyFormatG(high)}) must be >= ${lowName} (${pyFormatG(low)})`;
   }
+  for (const [name, key] of FLOORS) {
+    if (options[key] > MAX_PAUSE_S) {
+      return `${name} (${pyFormatG(options[key])}) must be at most ${MAX_PAUSE_S} s (one day)`;
+    }
+  }
   if (options.restEvery < 0 || options.longRestEvery < 0) {
     return "rest_every/long_rest_every must not be negative (0 disables)";
   }
@@ -198,6 +208,50 @@ export function pacingProblem(options, mode = {}) {
     }
   }
   return null;
+}
+
+/**
+ * Sleep `seconds` of wall-clock time through timers of at most {@link MAX_TIMER_MS} each, re-armed
+ * until the deadline — one longer `setTimeout` would overflow and fire at once — so a pause can
+ * only come out longer (a late timer, a background tab), never shorter. A negative or non-finite
+ * duration sleeps 0 s (one timer turn). With `signal`, aborting it ends the sleep at once: the
+ * promise rejects with `signal.reason`.
+ * @param {number} seconds
+ * @param {{signal?: AbortSignal, now?: () => number, setTimer?: (callback: () => void, ms: number) => unknown, clearTimer?: (handle: unknown) => void}} [options]
+ *   `now` in milliseconds (`Date.now`), the timers (`setTimeout` / `clearTimeout`) injectable for tests
+ * @returns {Promise<void>}
+ */
+export function sleepSeconds(seconds, options = {}) {
+  const now = options.now ?? (() => Date.now());
+  const setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
+  const clearTimer =
+    options.clearTimer ?? ((handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)));
+  const { signal } = options;
+  const total = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+  const end = now() + total;
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    /** @type {unknown} */
+    let handle;
+    const onAbort = () => {
+      clearTimer(handle);
+      reject(signal?.reason);
+    };
+    const tick = () => {
+      const left = end - now();
+      if (left > 0) {
+        handle = setTimer(tick, Math.min(left, MAX_TIMER_MS));
+        return;
+      }
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    handle = setTimer(tick, Math.min(total, MAX_TIMER_MS));
+  });
 }
 
 /**

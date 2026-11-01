@@ -81,6 +81,7 @@ declare namespace chrome {
       status?: string;
       url?: string;
       title?: string;
+      discarded?: boolean;
     }
     function create(createProperties: CreateProperties): Promise<Tab>;
     function update(tabId: number, updateProperties: UpdateProperties): Promise<Tab | undefined>;
@@ -273,6 +274,8 @@ declare namespace chrome {
       remove(keys: string | string[]): Promise<void>;
     }
     const local: StorageArea;
+    /** In memory for the browser session, extension pages and the worker only (the `storage` permission). */
+    const session: StorageArea;
     const onChanged: ChromeEvent<(changes: Record<string, StorageChange>, areaName: string) => void>;
   }
 }

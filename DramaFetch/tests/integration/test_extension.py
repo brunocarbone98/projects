@@ -80,8 +80,9 @@ def _media_of(server: FakeTikTok, item_id: str) -> list[Any]:
 
 
 def _downloader_covers(server: FakeTikTok, item_id: str | None = None) -> list[Any]:
-    """Cover requests of the downloader (the extension's Referer rule marks them; the app
-    page's own `<img>` thumbnails go without a Referer)."""
+    """Cover requests the extension made with its Referer rule: the downloader's — and, once
+    **Load list** shows a series, the list's thumbnails, which the extension fetches itself, one at
+    a time (only test_b lists a series before counting: it waits for them first)."""
     return [
         r
         for r in server.cover_requests
@@ -203,7 +204,9 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
     skipped, zero media requests; a third run within 24 h is the complete skip — zero requests at
     all, no tab opened, and the line points at recheck for the locked episode."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        ext.download_all(MAIN_LINK)
+        first = ext.download_all(MAIN_LINK)
+        assert first["error"] is None and first["stopped"] is None  # a failed listing is no skip
+        assert _statuses(first["series"][0]) == ["done"] * 4 + ["skipped-locked"]
         media = len(server.media_requests)
         covers = len(_downloader_covers(server))
 
@@ -227,6 +230,10 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
             assert row.locator(".badge.ondisk").count() == (1 if number < 5 else 0)
             assert row.locator("input[type=checkbox]").is_checked() is False  # on disk, or locked
         assert table.locator("tr[data-number='5']").get_attribute("data-access") == "locked"
+        # the list's thumbnails: the extension's own requests, one per episode, then none again
+        ext.wait_for(lambda: table.locator("img.cover").count() == 5, 20, "no thumbnails shown")
+        assert len(_downloader_covers(server)) == covers + 5
+        covers += 5
         selection = ext.download_available()
         (selected,) = selection["series"]
         assert _statuses(selected) == ["skipped-exists"] * 4
@@ -457,3 +464,200 @@ def test_i_login_redirect_stops_without_a_cooldown(tmp_path: Path) -> None:
         assert ext.cooldown() is None
         assert not server.media_requests and not server.series_requests(SECOND_SERIES_ID)
         assert not any(url.startswith(server.base_url) for url in ext.tab_urls())
+
+
+def _job_rests(entry: dict[str, Any]) -> list[str]:
+    """The rests between jobs a finished job announced (`resting N s before the next series`)."""
+    return [pause["text"] for pause in entry["pauses"] if pause["kind"] == "job-rest"]
+
+
+def test_j_a_redirect_is_never_followed(tmp_path: Path) -> None:
+    """A 302 from the fake CDN to a host the test copy does not cover (`localhost`) is never
+    followed: not for a video — refused like a 403, the next URL, `failed-unavailable`, nothing
+    saved — and not for a thumbnail of **Load list** (none shown): no request reaches that host."""
+    with (
+        FakeTikTok(redirect_media=True, redirect_covers=True) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        ext.load(MAIN_LINK)
+        ext.wait_for(lambda: len(server.cover_requests) == 5, 20, "no thumbnail was asked for")
+        entry = ext.download_all(MAIN_LINK)
+        (series,) = entry["series"]
+        rows = _rows(series)
+        assert _statuses(series) == ["failed-unavailable"] * 3 + ["failed", "skipped-locked"]
+        assert rows[1]["message"].endswith("(a redirect from 127.0.0.1, not followed)")
+        assert rows[4]["message"].startswith("stopped: 3 consecutive failures (last: ")
+        assert ext.page.locator("#episode-table img.cover").count() == 0
+        assert ext.saved_files() == []
+        assert len(server.cover_requests) == 5  # each thumbnail asked for once; no cover GET
+    assert server.media_requests and not server.elsewhere_requests
+
+
+def test_k_a_selection_lists_the_series_again_for_the_session_logged_in_now(
+    tmp_path: Path,
+) -> None:
+    """**Download all available** never takes the list shown — someone else, or nobody, may be
+    logged in by now: listed with the session (episode 3 unlocked), logged out, the selection lists
+    the series again after the rest between jobs, and that list decides — episode 3 is skipped
+    without a request; nothing of the earlier session's list is used."""
+    settings = {"restMinS": 0.5, "restMaxS": 6}
+    with (
+        FakeTikTok() as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
+    ):
+        ext.add_session_cookie(SESSION_VALUE)
+        ext.load(THIRD_LINK)
+        table = ext.page.locator("#episode-table tbody")
+        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "unlocked"
+        ext.context.clear_cookies()  # logged out of the fake TikTok
+        pages = len(server.series_page_requests)
+        entry = ext.download_available()
+        (series,) = entry["series"]
+        assert _statuses(series) == ["done", "done", "skipped-locked"]
+        assert _rows(series)[3]["message"].startswith("looks locked: ")
+        assert not _media_of(server, THIRD[3])
+        assert len(server.series_page_requests) == pages + 1  # listed again, without the session
+        assert not server.item_list_requests[-1].logged_in
+        assert len(_job_rests(entry)) == 1  # the rest came first: the list follows right after it
+        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "locked"
+
+
+def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
+    tmp_path: Path,
+) -> None:
+    """The rest between two jobs that contact TikTok counts from the last contact, whatever ended
+    the job — a **Load list**, a run the user stopped, a run whose tab was closed (the contact is
+    stored as it happens) — so the next job rests before its first request."""
+    settings = {"delayMinS": 1, "delayMaxS": 1, "restMinS": 0.5, "restMaxS": 6}
+    with (
+        FakeTikTok() as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
+    ):
+
+        def contact() -> float:
+            stored = ext.storage("pacing")["pacing"]["lastContactAt"]
+            assert isinstance(stored, (int, float))
+            return float(stored)
+
+        started = time.time()
+        ext.load(SECOND_LINK)
+        assert contact() >= started  # a listing contacts TikTok too
+        assert len(_job_rests(ext.download_all(SECOND_LINK))) == 1
+
+        page = ext.page
+        page.fill("#links", MAIN_LINK)
+        jobs = ext.finished_jobs()
+        page.click("#download-all-button")
+        ext.wait_for(lambda: bool(_media_of(server, MAIN_ITEMS[1])), 30, "no first episode")
+        seen = time.time()
+        ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 30, "no pause")
+        page.click("#stop-button")
+        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30, "not stopped")
+        assert ext.history()[0]["stopped"] is not None
+        assert contact() >= seen  # the stopped run's end
+        assert len(_job_rests(ext.download_all(THIRD_LINK))) == 1
+
+        page.fill("#links", MAIN_LINK)
+        page.click("#download-all-button")
+        ext.wait_for(lambda: bool(_media_of(server, MAIN_ITEMS[2])), 30, "no second episode")
+        seen = time.time()
+        ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 30, "no pause")
+        page.close()  # mid-run: the job's own clean-up never runs
+        ext.reopen_app()
+        assert contact() >= seen - 1  # stored when the episode was fetched
+        assert len(_job_rests(ext.download_all(MAIN_LINK))) == 1
+
+
+def test_m_the_tiktok_tab_is_closed_when_the_app_tab_goes_away_mid_listing(tmp_path: Path) -> None:
+    """The DramaFetch tab closed — or reloaded — while a series is being listed: its own clean-up
+    never runs, yet the muted TikTok tab it opened is closed (by the background worker; by the
+    reloaded page)."""
+    with (
+        FakeTikTok(slow_pagination_s=20) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        series_page = f"{server.base_url}/shortdrama/episode/"
+        watcher = ext.context.new_page()
+        watcher.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
+
+        def tiktok_tabs() -> list[str]:
+            urls: list[str] = watcher.evaluate(
+                "async () => (await chrome.tabs.query({}))"
+                ".map((tab) => tab.url || tab.pendingUrl || '')"
+            )
+            return [url for url in urls if url.startswith(series_page)]
+
+        for how in ("close", "reload"):
+            lists = len(server.item_list_requests)
+            ext.page.fill("#links", MAIN_LINK)
+            ext.page.click("#load-button")
+            # the page's own list request, the repeated first page, then the slow second page
+            ext.wait_for(lambda: len(server.item_list_requests) >= lists + 3, 30, "not listing")  # noqa: B023
+            assert len(tiktok_tabs()) == 1
+            if how == "close":
+                ext.page.close()
+                ext.wait_for(lambda: not tiktok_tabs(), 10, "the TikTok tab stayed open")
+                ext.reopen_app()
+            else:
+                ext.page.reload()
+                ext.wait_for(lambda: not tiktok_tabs(), 10, "the TikTok tab stayed open")
+
+
+def test_n_a_file_deleted_right_after_a_run_is_downloaded_again(tmp_path: Path) -> None:
+    """Chrome re-checks whether its downloads still exist at most once every 10 s: the run right
+    after an episode's file was deleted waits that out (no request meanwhile), finds the file gone
+    and downloads that episode again — never the complete skip over a missing file."""
+    chrome_rate_limit = {"existenceRateLimitS": 10}
+    with (
+        FakeTikTok() as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=chrome_rate_limit) as ext,
+    ):
+        assert ext.download_all(MAIN_LINK)["series"][0]["status"] == "complete"
+        _episode_file(ext, 2).unlink()
+        media = len(server.media_requests)
+        (series,) = ext.download_all(MAIN_LINK)["series"]
+        assert _statuses(series) == [
+            "skipped-exists",
+            "done",
+            "skipped-exists",
+            "skipped-exists",
+            "skipped-locked",
+        ]
+        assert series["line"] == "complete: 4 of 5 (1 downloaded, 3 already on disk) — 1 locked (5)"
+        assert [r.path for r in server.media_requests[media:]] == [f"/cdn/{MAIN_ITEMS[2]}/0.mp4"]
+        assert _episode_file(ext, 2).is_file()
+
+
+def test_o_a_download_id_chrome_hands_out_again_is_not_the_episode(tmp_path: Path) -> None:
+    """Once Chrome's download history is cleared and Chrome restarts, it hands its download ids out
+    again — here to four unrelated downloads: the episodes recorded under those ids are not on disk
+    (the recorded file decides, not the id), so the next run downloads them again."""
+    profile = tmp_path / "profile"
+    with FakeTikTok() as server:
+        with ExtensionHarness(tmp_path, server.base_url, profile=profile) as ext:
+            ext.download_all(MAIN_LINK)
+            state = ext.series_state(SERIES_ID)
+            assert state is not None
+            ids = sorted(state["episodes"][str(n)]["download_id"] for n in range(1, 5))
+            ext.page.evaluate("() => chrome.downloads.erase({})")
+            shutil.rmtree(ext.downloads / "DramaFetch")
+        with ExtensionHarness(tmp_path, server.base_url, profile=profile) as ext:
+            reused: list[int] = ext.page.evaluate(
+                """async () => {
+                  const ids = [];
+                  for (let i = 0; i < 4; i += 1) {
+                    const url = URL.createObjectURL(new Blob(['unrelated ' + i]));
+                    const filename = 'unrelated-' + i + '.txt';
+                    ids.push(await chrome.downloads.download({url, filename}));
+                  }
+                  return ids;
+                }"""
+            )
+            assert sorted(reused) == ids  # the very ids the episodes were saved under
+            media = len(server.media_requests)
+            (series,) = ext.download_all(MAIN_LINK)["series"]
+            assert _statuses(series) == ["done"] * 4 + ["skipped-locked"]
+            assert len(server.media_requests) == media + 4
+            assert [path.name for path in ext.saved_files() if path.suffix == ".mp4"] == [
+                f"{SERIES_NAME} - Episode {n:02d}.mp4" for n in range(1, 5)
+            ]

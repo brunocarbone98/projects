@@ -10,13 +10,22 @@
 import { isLocked } from "../lib/catalog.js";
 import { COOLDOWN_STORAGE_KEY, activeCooldown, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
-import { PacingState, defaultRng, describeBatchPacing, describePacing, pacingOptions } from "../lib/pacing.js";
+import {
+  PAGE_DELAY_S,
+  PacingState,
+  defaultRng,
+  describeBatchPacing,
+  describePacing,
+  pacingOptions,
+  pagePause,
+  sleepSeconds,
+} from "../lib/pacing.js";
 import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib/report.js";
 import { doneEntries, readState } from "../lib/state.js";
 import { parseSeriesList } from "../lib/urls.js";
-import { discoverSeries } from "./discovery.js";
-import { DownloadsView, Downloader, applyRefererRule, hostCovered, oneLine } from "./downloader.js";
-import { StopRequested, checkCooldown, episodeContext, resolve, restBetweenJobs, runBatch, runSelection } from "./engine.js";
+import { closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
+import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine } from "./downloader.js";
+import { StopRequested, checkCooldown, episodeContext, resolve, restBetweenJobs, runBatch, runSelectionJob } from "./engine.js";
 import { localize, t } from "./i18n.js";
 import {
   DEFAULT_SETTINGS,
@@ -34,8 +43,6 @@ import {
   writeSeriesState,
 } from "./storage.js";
 
-/** A list loaded less than this long ago is reused by a download (the web's resolve cache). */
-const SERIES_CACHE_TTL_S = 15 * 60;
 /** The Web Lock that makes this tab the only engine of the browser. */
 const ENGINE_LOCK = "dramafetch-engine";
 
@@ -58,6 +65,7 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @property {number[]} numbers
  * @property {boolean} includeLocked
  * @property {boolean} recheck
+ * @property {boolean} [contacted] whether the job made a request to TikTok (set while it runs)
  *
  * @typedef {object} JobRecord What a finished job leaves in the history.
  * @property {{kind: string, seconds: number, text: string}[]} pauses
@@ -79,7 +87,7 @@ const app = {
   finished: 0,
   nextJobId: 1,
   pacing: new PacingState(),
-  /** @type {number | null} */
+  /** @type {number | null} when DramaFetch last contacted TikTok (a request, or a finished job that made one) */
   lastContactAt: null,
   stopRequested: false,
   /** @type {Set<() => void>} */
@@ -195,26 +203,29 @@ function effectivePacing() {
 }
 
 /**
- * The cancellable sleep of every pause: Stop ends it at once.
+ * The cancellable sleep of every pause (timer-sized pieces up to its deadline: never shorter, even
+ * for a pause longer than one timer can hold): Stop ends it at once.
  * @param {number} seconds
  * @returns {Promise<void>}
  */
 function sleep(seconds) {
-  return new Promise((resolvePause, reject) => {
-    if (app.stopRequested) {
-      reject(new StopRequested());
-      return;
-    }
-    const cancel = () => {
-      clearTimeout(timer);
-      reject(new StopRequested());
-    };
-    const timer = setTimeout(() => {
-      app.stopWaiters.delete(cancel);
-      resolvePause();
-    }, Math.max(0, seconds) * 1000);
-    app.stopWaiters.add(cancel);
-  });
+  if (app.stopRequested) return Promise.reject(new StopRequested());
+  const controller = new AbortController();
+  const cancel = () => controller.abort(new StopRequested());
+  app.stopWaiters.add(cancel);
+  return sleepSeconds(seconds, { signal: controller.signal }).finally(() => app.stopWaiters.delete(cancel));
+}
+
+/**
+ * The job made (or is about to make) a request to TikTok: remember when, in storage too, so the
+ * rest between jobs holds even when this tab is closed mid-job.
+ * @param {Job} job
+ * @returns {Promise<void>}
+ */
+async function noteContact(job) {
+  job.contacted = true;
+  app.lastContactAt = now();
+  await savePacing(app.pacing, app.lastContactAt);
 }
 
 /**
@@ -225,14 +236,23 @@ function sleep(seconds) {
 function buildEngine(job, jobRecord) {
   const base = baseUrl();
   const test = app.testMode ? app.testSettings : {};
-  const view = new DownloadsView({ existenceDelayMs: test.existenceDelayMs ?? 300 });
+  const networkBefore = app.pacing.lastNetworkAt;
+  const view = new DownloadsView({ existenceDelayMs: test.existenceDelayMs ?? 300, rateLimitS: test.existenceRateLimitS });
   /** @type {import("./discovery.js").DiscoveryOptions} */
   const discoveryOptions = { baseUrl: base, rng: defaultRng, sleep, windowId: app.windowId, returnTabId: app.tabId };
   if (test.discoveryTimeoutS !== undefined) discoveryOptions.timeoutS = test.discoveryTimeoutS;
   if (test.activateAfterS !== undefined) discoveryOptions.activateAfterS = test.activateAfterS;
   if (test.detailGraceS !== undefined) discoveryOptions.detailGraceS = test.detailGraceS;
   if (test.pageDelayS !== undefined) discoveryOptions.pageDelayS = test.pageDelayS;
-  const discover = (/** @type {SeriesRef} */ ref) => discoverSeries(ref, discoveryOptions);
+  /** A listing contacts TikTok from its first request to its last: noted at both ends. */
+  const discover = async (/** @type {SeriesRef} */ ref) => {
+    await noteContact(job);
+    try {
+      return await discoverSeries(ref, discoveryOptions);
+    } finally {
+      await noteContact(job);
+    }
+  };
   const downloader = new Downloader({
     baseUrl: base,
     quality: app.settings.quality,
@@ -262,7 +282,15 @@ function buildEngine(job, jobRecord) {
     view,
     readState: readSeriesState,
     writeState: writeSeriesState,
-    persist: () => savePacing(app.pacing, app.lastContactAt),
+    persist: async () => {
+      // after every network attempt (and pause): a download contacted TikTok at lastNetworkAt
+      const network = app.pacing.lastNetworkAt;
+      if (network !== null && network !== networkBefore) {
+        job.contacted = true;
+        if (app.lastContactAt === null || network > app.lastContactAt) app.lastContactAt = network;
+      }
+      await savePacing(app.pacing, app.lastContactAt);
+    },
     stopRequested: () => app.stopRequested,
     onPause: (kind, seconds, text) => {
       jobRecord.pauses.push({ kind, seconds: Math.round(seconds * 10) / 10, text });
@@ -407,12 +435,17 @@ function enqueue(job) {
 }
 
 async function pump() {
-  if (app.running !== null || app.queue.length === 0 || !app.owner) return;
+  if (app.running !== null || !app.owner) return;
+  if (app.queue.length === 0) {
+    covers.resume(); // nothing to run: the list's thumbnails may go on
+    return;
+  }
   const job = /** @type {Job} */ (app.queue.shift());
   app.running = job;
   app.stopRequested = false;
   renderAppStatus();
   try {
+    await covers.idle(); // a thumbnail request in flight ends first: one request at a time
     await runJob(job);
   } finally {
     app.running = null;
@@ -496,24 +529,22 @@ async function runJob(job) {
     }
     await applyRefererRule(baseUrl());
     if (job.kind === "load") {
-      await runLoad(job, engine, entry);
+      stop = await runLoad(job, engine, entry);
     } else if (job.kind === "batch") {
+      const lastContactAt = app.lastContactAt; // the previous job's: this one's own come later
       const runs = await runBatch(engine, job.refs, {
-        beforeFirstNetwork: () => restBetweenJobs(engine, { lastContactAt: app.lastContactAt, batchJob: true }),
+        beforeFirstNetwork: () => restBetweenJobs(engine, { lastContactAt, batchJob: true }),
       });
-      if (runs.some((run) => run.contacted)) app.lastContactAt = now();
       entry["series"] = runs.map(runToHistory);
       renderBatchTable(runs);
       stopping = runs.find((run) => run.stop) ?? null;
       if (stopping !== null) stop = stopping.report.stopped || stopping.error || "stopped";
     } else {
-      let series = /** @type {Series} */ (job.series);
-      if (app.loaded !== null && app.loaded.series === series && now() - app.loaded.resolvedAt > SERIES_CACHE_TTL_S) {
-        series = await resolve(engine, /** @type {SeriesRef} */ (job.refs[0])); // the list is old: list it again
-        app.loaded = { series, resolvedAt: now() };
-      }
-      const run = await runSelection(engine, series, job.numbers, { lastContactAt: app.lastContactAt });
-      if (run.contacted) app.lastContactAt = now();
+      // never the list shown (an earlier job's): listed again, for the session logged in now
+      const run = await runSelectionJob(engine, /** @type {SeriesRef} */ (job.refs[0]), job.numbers, {
+        lastContactAt: app.lastContactAt,
+      });
+      if (run.series !== null) app.loaded = { series: run.series, resolvedAt: now() };
       renderReportLine(run);
       renderBatchTable([run]);
       entry["series"] = [runToHistory(run)];
@@ -538,6 +569,7 @@ async function runJob(job) {
     clearPause();
     entry["stopped"] = stop;
     entry["finished_at"] = new Date().toISOString();
+    if (job.contacted) app.lastContactAt = now(); // the rest between jobs counts from the job's end
     await savePacing(app.pacing, app.lastContactAt);
     if (stopping !== null) await cancelQueue(notStartedMessage(stopping));
     else if (stop !== null) await cancelQueue(`not started: batch stopped in ${job.label} (${stop})`);
@@ -547,14 +579,25 @@ async function runJob(job) {
 }
 
 /**
- * **Load list**: list one series (no download) and show its episodes.
+ * **Load list**: list one series (no download) and show its episodes — a job like any other: the
+ * rest between jobs first (no long break: a listing alone is no download attempt), the cooldown
+ * asked again after it. Returns why the job stopped (a cooldown met meanwhile), or null.
  * @param {Job} job
  * @param {Engine} engine
  * @param {Record<string, unknown>} entry
+ * @returns {Promise<string | null>}
  */
 async function runLoad(job, engine, entry) {
   const ref = /** @type {SeriesRef} */ (job.refs[0]);
   setStatus($("input-status"), t("loading"));
+  await restBetweenJobs(engine, { lastContactAt: app.lastContactAt, batchJob: false });
+  const refused = await checkCooldown(engine);
+  if (refused !== null) {
+    const message = cooldownMessage(refused, { now: now() });
+    setStatus($("input-status"), message, "error");
+    entry["error"] = message;
+    return message;
+  }
   let series;
   try {
     series = await resolve(engine, ref);
@@ -564,7 +607,7 @@ async function runLoad(job, engine, entry) {
     setStatus($("input-status"), message, "error");
     entry["error"] = message;
     entry["series"] = [{ series_id: ref.seriesId, name: null, error: message, episodes: 0 }];
-    return;
+    return null;
   }
   app.loaded = { series, resolvedAt: now() };
   entry["series"] = [
@@ -572,6 +615,7 @@ async function runLoad(job, engine, entry) {
   ];
   setStatus($("input-status"), t("loaded", [series.episodes.length]), "ok");
   await renderSeries(series, engine.view);
+  return null;
 }
 
 // ------------------------------------------------------------------ the loaded series
@@ -603,33 +647,22 @@ async function renderSeries(series, view) {
   warnings.textContent = "";
   for (const warning of series.warnings) warnings.append(el("li", { text: warning }));
   const body = /** @type {HTMLTableSectionElement} */ ($("episode-table").querySelector("tbody"));
-  /** @type {Map<string, HTMLImageElement>} covers already shown, by URL: moved, never fetched again */
-  const shownCovers = new Map();
-  for (const image of body.querySelectorAll("img.cover")) {
-    const src = image.getAttribute("src");
-    if (src) shownCovers.set(src, /** @type {HTMLImageElement} */ (image));
-  }
   body.textContent = "";
-  const patterns = chrome.runtime.getManifest().host_permissions ?? [];
-  for (const episode of [...series.episodes].sort((a, b) => a.number - b.number)) {
+  const episodes = [...series.episodes].sort((a, b) => a.number - b.number);
+  for (const episode of episodes) {
     const box = /** @type {HTMLInputElement} */ (
       el("input", { attrs: { type: "checkbox", "data-number": String(episode.number), "data-locked": isLocked(episode) ? "1" : "0" } })
     );
     box.checked = !isLocked(episode) && !onDisk.has(episode.number);
     box.addEventListener("change", updateSelection);
-    const cover = el("td");
-    if (episode.coverUrl && hostCovered(episode.coverUrl, patterns)) {
-      const shown = shownCovers.get(episode.coverUrl);
-      shownCovers.delete(episode.coverUrl); // an element lives in one row only
-      cover.append(
-        shown ?? el("img", { className: "cover", attrs: { src: episode.coverUrl, alt: "", loading: "lazy", referrerpolicy: "no-referrer" } }),
-      );
-    }
+    const cover = el("td", { className: "cover-cell" });
+    const thumbnail = covers.urlOf(episode.itemId); // fetched already: no request
+    if (thumbnail !== null) cover.append(coverImage(thumbnail));
     const access = el("td", {}, [accessBadge(episode)]);
     if (onDisk.has(episode.number)) access.append(el("span", { className: "badge ondisk", text: t("badgeOnDisk"), title: t("badgeOnDiskTitle") }));
     if (isLocked(episode) && episode.lockHints.length > 0) access.append(el("span", { className: "hints", text: episode.lockHints.join("; ") }));
     body.append(
-      el("tr", { attrs: { "data-number": String(episode.number), "data-access": episode.access } }, [
+      el("tr", { attrs: { "data-number": String(episode.number), "data-access": episode.access, "data-item-id": episode.itemId } }, [
         el("td", {}, [box]),
         cover,
         el("td", { text: String(episode.number) }),
@@ -641,7 +674,34 @@ async function renderSeries(series, view) {
     );
   }
   updateSelection();
+  covers.show(episodes); // the missing thumbnails, one at a time, while no job runs
 }
+
+/**
+ * @param {string} url a thumbnail's object URL
+ * @returns {HTMLElement}
+ */
+function coverImage(url) {
+  return el("img", { className: "cover", attrs: { src: url, alt: "" } });
+}
+
+/**
+ * A thumbnail arrived: into its row, when the list still shows that episode.
+ * @param {string} itemId
+ * @param {string} url
+ */
+function showCover(itemId, url) {
+  const cell = $("episode-table").querySelector(`tbody tr[data-item-id="${CSS.escape(itemId)}"] td.cover-cell`);
+  if (cell !== null && cell.querySelector("img") === null) cell.append(coverImage(url));
+}
+
+/** The list's thumbnails: the extension's own requests, one at a time, never during a job or a cooldown. */
+const covers = new CoverLoader({
+  hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
+  allowed: async () => app.owner && app.running === null && app.queue.length === 0 && (await checkCooldownNow()) === null,
+  pause: () => sleepSeconds(pagePause(defaultRng, app.testMode ? (app.testSettings.pageDelayS ?? PAGE_DELAY_S) : PAGE_DELAY_S)),
+  onCover: showCover,
+});
 
 /** @returns {HTMLInputElement[]} */
 function episodeBoxes() {
@@ -766,6 +826,7 @@ async function refreshCooldown() {
   }
   tickCooldown();
   updateButtons();
+  if (app.cooldown === null && app.running === null) covers.resume(); // the cooldown is over
 }
 
 /** @returns {Promise<import("../lib/cooldown.js").Cooldown | null>} */
@@ -895,6 +956,8 @@ async function main() {
   app.testMode = isTestMode();
   app.owner = await acquireEngine();
   $("duplicate-banner").hidden = app.owner;
+  // a TikTok tab an earlier DramaFetch page left listing (it was reloaded mid-listing): closed
+  if (app.owner) await closeLeftoverDiscoveryTab().catch(() => undefined);
   const tab = await chrome.tabs.getCurrent().catch(() => undefined);
   app.tabId = tab?.id;
   app.windowId = tab?.windowId;

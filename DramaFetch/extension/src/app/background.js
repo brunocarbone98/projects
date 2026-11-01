@@ -2,10 +2,22 @@
 /**
  * The service worker: opens the DramaFetch tab — or re-focuses the one already open (one per
  * browser) — when the popup asks, and hands it a series to list. It holds no long-running work:
- * the engine runs in the DramaFetch tab while that tab is open.
+ * the engine runs in the DramaFetch tab while that tab is open. When that tab goes away in the
+ * middle of a listing — closed, navigated elsewhere or discarded, so its own clean-up never runs —
+ * the worker closes the muted TikTok tab the listing had open (`discovery.DISCOVERY_TAB_KEY`).
  */
 
+import { closeLeftoverDiscoveryTab } from "./discovery.js";
+
 const APP_PATH = "src/app/app.html";
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void closeLeftoverDiscoveryTab(tabId).catch(() => undefined);
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  const leftTheApp = changeInfo.url !== undefined && !changeInfo.url.startsWith(chrome.runtime.getURL(APP_PATH));
+  if (leftTheApp || changeInfo.discarded === true) void closeLeftoverDiscoveryTab(tabId).catch(() => undefined);
+});
 
 /**
  * @param {unknown} value

@@ -41,6 +41,9 @@ APP_PATH = "src/app/app.html"
 #: Test pacing: no pause between episodes, a short (announced) rest between series and jobs. The
 #: long break keeps its defaults: it is due only every 100 attempts, and a shorter
 #: `longRestMinS` would make every gap an "idle break" that resets the failure streak.
+#: `existenceRateLimitS: 0`: a job's first look at Chrome's downloads does not wait out Chrome's
+#: 10 s between two file-existence checks — no scenario deletes a file but the one that sets it
+#: back to 10.
 TEST_PACING: dict[str, float] = {
     "delayMinS": 0,
     "delayMaxS": 0,
@@ -51,6 +54,7 @@ TEST_PACING: dict[str, float] = {
     "activateAfterS": 2,
     "detailGraceS": 0.5,
     "existenceDelayMs": 150,
+    "existenceRateLimitS": 0,
 }
 POLL_S = 0.1
 JOB_TIMEOUT_S = 90.0
@@ -253,6 +257,19 @@ class ExtensionHarness:
             10,
             "the test settings were not saved",
         )
+
+    def reopen_app(self) -> Page:
+        """Open the app page in a new tab (the test closed the old one) and make it `page`, once
+        it is idle; the test settings are in storage already."""
+        page = self.context.new_page()
+        page.goto(self.app_url)
+        self._page = page
+        self.wait_for(
+            lambda: page.locator("#app-status").get_attribute("data-state") == "idle",
+            20,
+            "the reopened app page did not start",
+        )
+        return page
 
     def add_session_cookie(self, value: str) -> None:
         """A `sessionid` cookie for the fake TikTok (the value is never printed or asserted on)."""
