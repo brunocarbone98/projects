@@ -54,6 +54,7 @@ import {
   discoverSeries,
 } from "../src/app/discovery.js";
 import { Downloader, SaveError } from "../src/app/downloader.js";
+import { RedirectTracker, fetchFollowing } from "../src/app/redirects.js";
 import { StopRequested, resolve } from "../src/app/engine.js";
 import { settingsProblem, DEFAULT_SETTINGS } from "../src/app/storage.js";
 
@@ -556,6 +557,36 @@ async function downloaderTexts() {
   return texts;
 }
 
+/**
+ * @returns {Promise<string[]>} why a redirect is not followed (`redirects.fetchFollowing`), as the
+ *   message of a video that found none (`no playable stream … (<why>)`) and as a cover's note
+ */
+async function redirectTexts() {
+  const initiator = "chrome-extension://abc";
+  /** @param {(url: string) => string} next where each URL redirects to */
+  const refusal = async (next) => {
+    const tracker = new RedirectTracker({ initiator, waitMs: 0 });
+    const fetchFn = /** @type {typeof fetch} */ (
+      async (input) => {
+        tracker.record({ url: String(input), redirectUrl: next(String(input)), initiator });
+        return opaqueRedirect();
+      }
+    );
+    try {
+      await fetchFollowing(`https://${MEDIA_HOST}/v/0.mp4`, { fetch: fetchFn, init: { redirect: "manual" }, redirects: tracker, allowed: () => true });
+    } catch (error) {
+      return /** @type {Error} */ (error).message;
+    }
+    return assert.fail("followed");
+  };
+  const reasons = [
+    await refusal((url) => url), // a loop
+    await refusal((url) => `${url}x`), // one hop after another, more than five
+    await refusal(() => `http://${COVER_HOST}/c.jpeg`), // down from https
+  ];
+  return [...reasons, ...reasons.map((reason) => `${messages.UNAVAILABLE_MESSAGE} (${reason})`)];
+}
+
 /** @returns {Promise<string[]>} the discovery's failures, made by the real discoverSeries / resolve */
 async function discoveryTexts() {
   const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
@@ -696,8 +727,8 @@ test("every exported message constant reads in Spanish; the remembered DRM verdi
 });
 
 test("the downloader's results read in Spanish: file and host names, sizes and lock hints kept", async () => {
-  const texts = await downloaderTexts();
-  assert.ok(texts.length >= 30);
+  const texts = [...(await downloaderTexts()), ...(await redirectTexts())];
+  assert.ok(texts.length >= 36);
   for (const text of texts) assertSpanish(text);
   const saved = texts[0] ?? "";
   assert.equal(saved, `saved ${FILE_01} (0.1 MiB) + cover embedded`);

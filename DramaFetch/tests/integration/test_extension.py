@@ -233,8 +233,13 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
             assert row.locator(".badge.ondisk").count() == (1 if number < 5 else 0)
             assert row.locator("input[type=checkbox]").is_checked() is False  # on disk, or locked
         assert table.locator("tr[data-number='5']").get_attribute("data-access") == "locked"
-        # the list's thumbnails: the extension's own requests, one per episode, then none again
-        ext.wait_for(lambda: table.locator("img.cover").count() == 5, 20, "no thumbnails shown")
+        # the list's thumbnails: the extension's own requests, one per episode, each once its row
+        # is in view (scrolled to, row by row), then none again
+        for number in range(1, 6):
+            row = table.locator(f"tr[data-number='{number}']")
+            row.locator("td.cover-cell").scroll_into_view_if_needed()
+            ext.wait_for(lambda row=row: row.locator("img.cover").count() == 1, 20, "no thumbnail")
+        assert table.locator("img.cover").count() == 5
         assert len(_downloader_covers(server)) == covers + 5
         covers += 5
         selection = ext.download_available()
@@ -483,6 +488,15 @@ def test_j_a_redirect_is_never_followed(tmp_path: Path) -> None:
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         ext.load(MAIN_LINK)
+        for number, item in MAIN_ITEMS.items():  # each row's thumbnail is asked for once in view
+            row = ext.page.locator(f"#episode-table tbody tr[data-number='{number}']")
+            row.locator("td.cover-cell").scroll_into_view_if_needed()
+            asked = f"/cover/{item}.jpg"
+            ext.wait_for(
+                lambda asked=asked: any(r.path == asked for r in server.cover_requests),
+                20,
+                "no thumbnail was asked for",
+            )
         ext.wait_for(lambda: len(server.cover_requests) == 5, 20, "no thumbnail was asked for")
         entry = ext.download_all(MAIN_LINK)
         (series,) = entry["series"]

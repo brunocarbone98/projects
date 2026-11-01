@@ -739,7 +739,7 @@ const RULES = [
   [new RegExp(`^a redirect from ${HOST}, not followed$`), (m) => `una redirección de ${m[1]}, que no se siguió`],
   [
     new RegExp(`^a redirect from ${HOST} down to (\\S+) on ${HOST}, not followed$`),
-    (m) => `una redirección de ${m[1]} que bajaba a ${m[2]} en ${m[3]}, que no se siguió`,
+    (m) => `una redirección de ${m[1]} que pasaba a ${m[2]} en ${m[3]}, que no se siguió`,
   ],
   [new RegExp(`^a redirect loop at ${HOST}, not followed$`), (m) => `un bucle de redirecciones en ${m[1]}, que no se siguió`],
   [new RegExp(`^more than (\\d+) redirects from ${HOST}, not followed$`), (m) => `más de ${m[1]} redirecciones desde ${m[2]}, que no se siguieron`],
