@@ -444,7 +444,8 @@ def test_index_page_is_served(harness: Harness) -> None:
     assert 'type="url"' not in body
     # The SnapAny-style pieces: covers, the one-click button, Save links, the token form.
     assert "className: 'cover', loading: 'lazy', referrerpolicy: 'no-referrer', alt: ''" in body
-    assert 'id="download-all-btn" class="primary">Download all free<' in body
+    assert 'id="download-all-btn" class="primary">Download all available<' in body
+    assert "Download all free" not in body and "Select all free" not in body
     assert "'Save video'" in body and "'Cover'" in body and "/api/files/" in body
     assert "Files are saved on the computer running DramaFetch" in body
     # Build 4: the hint says where the cover lives and what the Cover link hands out.
@@ -470,6 +471,14 @@ def test_index_page_is_served(harness: Harness) -> None:
     assert "stored, never recompressed" in body
     assert "className: 'badge ondisk', text: 'on disk'" in body
     assert "row.status === 'skipped-exists'" in body  # Save links for files already on disk
+    # Build 7: three access badges — free, paid · unlocked (ticked, like a free one), locked
+    # (unticked) — and Download all available takes the free AND the unlocked episodes.
+    assert "unlocked: { text: 'paid · unlocked'" in body
+    assert "free: { text: 'free'" in body and "locked: { text: 'locked'" in body
+    assert "className: 'badge ' + access" in body
+    assert "episodeAccess(episode) !== 'locked'" in body
+    assert "startDownload(availableNumbers(), false)" in body
+    assert "if (episode.locked) { checkbox.setAttribute('data-locked', '1'); }" in body
 
 
 def test_security_headers(harness: Harness) -> None:

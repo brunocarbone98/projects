@@ -49,7 +49,7 @@ TikTok in a browser and usually takes 10-40 s, so the page shows a waiting note.
 
 Fewer requests to TikTok: a resolved episode list is kept in memory for ``SERIES_CACHE_TTL_S``
 (15 minutes; the ``SERIES_CACHE_SIZE`` most recently resolved series) and reused by both
-``POST /api/resolve`` and ``POST /api/download``, so "Resolve" followed by "Download all free"
+``POST /api/resolve`` and ``POST /api/download``, so "Resolve" followed by "Download all available"
 costs one discovery, not two; ``{"url": ..., "refresh": true}`` on ``/api/resolve`` fetches the
 list again, and a failed resolve is never cached. Discoveries run one at a time. And after TikTok
 refused a request (HTTP 403, HTTP 429, a captcha — recorded by the engines and the CLI in the
@@ -149,8 +149,8 @@ _CSP = (
 )
 
 #: How long a resolved episode list is reused by ``POST /api/resolve`` and ``POST /api/download``
-#: (seconds): "Resolve" then "Download all free" costs one discovery, not two, and resolving the
-#: same series again within the window costs nothing (``"refresh": true`` fetches it anew).
+#: (seconds): "Resolve" then "Download all available" costs one discovery, not two, and resolving
+#: the same series again within the window costs nothing (``"refresh": true`` fetches it anew).
 SERIES_CACHE_TTL_S = 15 * 60
 #: How many series the cache keeps: the most recently resolved ones (per process, in memory).
 SERIES_CACHE_SIZE = 32
@@ -475,9 +475,11 @@ def on_disk_numbers(out_dir: Path, series_id: str, directory: Path | None = None
 
 
 def series_to_dict(series: Series, out_dir: Path) -> dict[str, Any]:
-    """The JSON the page renders after `/api/resolve`: per episode ``on_disk`` — the manifest of
-    the folder a download of it would use, ``series_dir``, says it is on disk (see
-    :func:`on_disk_numbers`) — and ``on_disk_count`` for the whole list."""
+    """The JSON the page renders after `/api/resolve`: per episode ``access`` (``free``,
+    ``unlocked`` — paid, playable with the user's own session — or ``locked``), ``paid``, ``drm``,
+    ``locked`` and ``lock_hints`` (the badges), ``on_disk`` — the manifest of the folder a download
+    of it would use, ``series_dir``, says it is on disk (see :func:`on_disk_numbers`) — and
+    ``on_disk_count`` for the whole list."""
     from dramafetch.manifest import series_dir  # lazy: sibling module, engine side
 
     on_disk = on_disk_numbers(out_dir, series.series_id, series_dir(out_dir, series))
@@ -496,6 +498,9 @@ def series_to_dict(series: Series, out_dir: Path) -> dict[str, Any]:
                 "item_id": episode.item_id,
                 "title": episode.title,
                 "duration_s": episode.duration_s,
+                "access": episode.access,
+                "paid": episode.paid,
+                "drm": episode.drm,
                 "locked": episode.locked,
                 "lock_hints": list(episode.lock_hints),
                 "page_url": episode.page_url,

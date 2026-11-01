@@ -124,7 +124,8 @@
     border: 1px solid var(--border);
     white-space: nowrap;
   }
-  .badge.free, .badge.done { color: var(--ok); border-color: var(--ok); }
+  .badge.free, .badge.unlocked, .badge.done { color: var(--ok); border-color: var(--ok); }
+  .badge.unlocked { border-style: dashed; }
   .badge.locked, .badge.skipped { color: var(--warn); border-color: var(--warn); }
   .badge.failed { color: var(--bad); border-color: var(--bad); }
   .badge.running, .badge.ondisk { color: var(--accent); border-color: var(--accent); }
@@ -185,7 +186,7 @@
              placeholder="https://www.tiktok.com/shortdrama/episode/7675706520839033876/8">
       <button type="submit" id="resolve-btn" class="primary">Resolve</button>
     </form>
-    <p class="hint">The long number is the series id; the trailing number is only the episode you were watching. Resolving opens TikTok in a browser on this machine and usually takes 10–40 s; the list is kept for 15 minutes, so downloading right after it costs no second visit (<strong>Refresh list</strong> fetches it again). Then <strong>Download all free</strong> is one click, and every episode it downloads gets a <strong>Save</strong> link for this device. Covers are embedded in the video by default (<code>serve --thumbnail both</code> saves a separate image as well); the <strong>Cover</strong> link gives you the embedded one, or the file saved next to the video.</p>
+    <p class="hint">The long number is the series id; the trailing number is only the episode you were watching. Resolving opens TikTok in a browser on this machine and usually takes 10–40 s; the list is kept for 15 minutes, so downloading right after it costs no second visit (<strong>Refresh list</strong> fetches it again). Then <strong>Download all available</strong> is one click — every free episode, and every paid one your own TikTok account has unlocked (<strong>paid · unlocked</strong>: downloaded with your session, like a free one) — and every episode it downloads gets a <strong>Save</strong> link for this device. Covers are embedded in the video by default (<code>serve --thumbnail both</code> saves a separate image as well); the <strong>Cover</strong> link gives you the embedded one, or the file saved next to the video.</p>
     <p id="resolve-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
@@ -196,7 +197,7 @@
       <textarea id="batch-urls" name="urls" rows="4" spellcheck="false" placeholder="https://www.tiktok.com/shortdrama/episode/7675706520839033876/1&#10;https://www.tiktok.com/shortdrama/episode/7699393770256782399/1"></textarea>
       <button type="submit" id="batch-btn" class="primary">Queue all</button>
     </form>
-    <p class="hint">Every free episode of every series, one series at a time: each series is resolved right before its own downloads (never all the lists up front), with a rest between two series that contact TikTok, and the first sign of trouble — a refusal, a login wall — cancels the series still waiting, without another request. A series already complete on disk costs no request for 24 hours. Up to 50 links; blank lines and lines starting with <code>#</code> are skipped. When a series is done, <strong>Save all (ZIP)</strong> copies the whole series to this device in one file — stored, never recompressed, so picture and sound are untouched.</p>
+    <p class="hint">Every free or unlocked episode of every series, one series at a time: each series is resolved right before its own downloads (never all the lists up front), with a rest between two series that contact TikTok, and the first sign of trouble — a refusal, a login wall — cancels the series still waiting, without another request. A series already complete on disk costs no request for 24 hours. Up to 50 links; blank lines and lines starting with <code>#</code> are skipped. When a series is done, <strong>Save all (ZIP)</strong> copies the whole series to this device in one file — stored, never recompressed, so picture and sound are untouched.</p>
     <p id="batch-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
@@ -206,7 +207,7 @@
     <p class="meta muted" id="series-dir"></p>
     <ul class="warnings" id="series-warnings" aria-label="Warnings"></ul>
     <div class="toolbar">
-      <button type="button" id="select-free">Select all free</button>
+      <button type="button" id="select-free">Select all available</button>
       <button type="button" id="select-none">Select none</button>
       <span class="muted" id="selection-count"></span>
     </div>
@@ -226,9 +227,9 @@
       </table>
     </div>
     <div class="toolbar">
-      <button type="button" id="download-all-btn" class="primary">Download all free</button>
+      <button type="button" id="download-all-btn" class="primary">Download all available</button>
       <button type="button" id="download-btn">Download selected</button>
-      <span class="muted">Locked episodes are skipped unless you tick them; they usually have no downloadable formats.</span>
+      <span class="muted">Locked episodes — ones your account has not unlocked — are skipped unless you tick them; ticked, TikTok is asked with your session and decides (it usually serves nothing), and nothing is ever unlocked. To get one, unlock it in the TikTok app, export fresh cookies and press <strong>Refresh list</strong>.</span>
     </div>
     <p id="download-status" class="status" role="status" aria-live="polite"></p>
   </section>
@@ -428,6 +429,25 @@
     return typeof value === 'string' && /^https?:\/\//i.test(value);
   }
 
+  // free, unlocked (a paid episode your own account has unlocked) or locked, as the server
+  // decided it from what TikTok sent to your session.
+  function episodeAccess(episode) {
+    if (episode.access === 'free' || episode.access === 'unlocked' || episode.access === 'locked') { return episode.access; }
+    return episode.locked ? 'locked' : 'free';
+  }
+
+  var ACCESS_BADGES = {
+    free: { text: 'free', title: 'Free to watch: downloaded with your session' },
+    unlocked: { text: 'paid · unlocked', title: 'A paid episode your TikTok account has unlocked: downloaded with your session, like a free one' },
+    locked: { text: 'locked', title: 'Your account has not unlocked it (or it is protected by DRM): skipped unless you tick it; nothing is ever unlocked' }
+  };
+
+  function accessBadge(episode) {
+    var access = episodeAccess(episode);
+    var badge = ACCESS_BADGES[access];
+    return el('span', { className: 'badge ' + access, text: badge.text, title: badge.title });
+  }
+
   function isFinished(job) {
     return job.state === 'done' || job.state === 'error' || job.state === 'cancelled';
   }
@@ -541,7 +561,7 @@
         coverCell.appendChild(cover);
       }
       var statusCell = el('td', { 'data-label': 'Status' });
-      statusCell.appendChild(el('span', { className: 'badge ' + (episode.locked ? 'locked' : 'free'), text: episode.locked ? 'locked' : 'free' }));
+      statusCell.appendChild(accessBadge(episode));
       // Its manifest says it is on disk already: a download skips it without any request.
       if (episode.on_disk) {
         statusCell.appendChild(document.createTextNode(' '));
@@ -575,9 +595,10 @@
     return checkboxes().filter(function (box) { return box.checked; });
   }
 
-  function freeNumbers() {
+  // What "available" means: free episodes and the paid ones this account has unlocked.
+  function availableNumbers() {
     if (!state.series) { return []; }
-    return state.series.episodes.filter(function (episode) { return !episode.locked; })
+    return state.series.episodes.filter(function (episode) { return episodeAccess(episode) !== 'locked'; })
       .map(function (episode) { return episode.number; });
   }
 
@@ -588,7 +609,7 @@
     if (lockedCount) { text += ' (' + lockedCount + ' locked: will be tried, usually fails)'; }
     $('selection-count').textContent = text;
     $('download-btn').disabled = boxes.length === 0 || cooldownActive();
-    $('download-all-btn').disabled = freeNumbers().length === 0 || cooldownActive();
+    $('download-all-btn').disabled = availableNumbers().length === 0 || cooldownActive();
   }
 
   // `refresh` asks the server for a fresh list instead of the one it may have kept (15 minutes).
@@ -655,9 +676,9 @@
     startDownload(numbers, includeLocked);
   });
 
-  // The one-click flow: every episode the list marks as free, locked ones left alone.
+  // The one-click flow: every free or unlocked episode of the list, locked ones left alone.
   $('download-all-btn').addEventListener('click', function () {
-    startDownload(freeNumbers(), false);
+    startDownload(availableNumbers(), false);
   });
 
   function startPolling(jobId) {

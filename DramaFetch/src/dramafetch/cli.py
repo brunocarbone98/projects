@@ -5,8 +5,9 @@ watch, a whole series at a time, for personal offline viewing. The series URL is
 ``https://www.tiktok.com/shortdrama/episode/<series_id>/<n>``; yt-dlp does not understand it, so
 ``info``/``download`` first resolve the episode list (TikTok's ``/api/drama/episode/item_list/``)
 and then hand each episode's ordinary ``/@user/video/<id>`` page to yt-dlp. A logged-in session
-(``--cookies cookies.txt``) is normally required; cookie values are never printed. Locked (paid)
-episodes are listed and skipped — nothing here unlocks or bypasses anything. Downloads are paced
+(``--cookies cookies.txt``) is normally required; cookie values are never printed. Paid episodes
+that account has unlocked download like free ones, with its cookies; episodes it has not unlocked
+are listed and skipped — nothing here unlocks or bypasses anything. Downloads are paced
 like one person watching (see ``engine``): the pauses, rests and early stops are printed on stderr
 as they happen, so stdout stays a clean list of results.
 
@@ -277,7 +278,8 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
         group.add_argument(
             "--include-locked",
             action="store_true",
-            help="also try episodes that look locked (they usually have no formats)",
+            help="also ask TikTok, with your session, for episodes that look locked or that an "
+            "earlier run found protected by DRM (TikTok decides; nothing is unlocked)",
         )
         group.add_argument(
             "--recheck",
@@ -900,7 +902,8 @@ def _print_series_table(series: Series, target_dir: Path, on_disk: set[int] | No
     """The ``info`` table: number, item id, duration, quality (the rendition the default
     ``--quality compatible`` downloads, e.g. ``720p h264``; ``-`` when the list names none),
     disk (``✓`` — ``yes`` on a stdout that cannot encode it — when the series' manifest says the
-    episode is on disk and its file exists: ``on_disk``), title and free/locked status."""
+    episode is on disk and its file exists: ``on_disk``), title and status (:func:`access_status`:
+    ``free``, ``unlocked (paid)`` or ``locked: <hints>``)."""
     on_disk = on_disk or set()
     disk_mark = "✓" if _stream_is_utf8(sys.stdout) else "yes"
     episodes = sorted(series.episodes, key=lambda episode: episode.number)
@@ -922,7 +925,7 @@ def _print_series_table(series: Series, target_dir: Path, on_disk: set[int] | No
         f"{'disk':<4}  {'title':<{title_width}}  status"
     )
     for episode in episodes:
-        status = "free" if not episode.locked else "locked: " + "; ".join(episode.lock_hints)
+        status = access_status(episode)
         disk = disk_mark if episode.number in on_disk else ""
         print(
             f"{episode.number:>4}  {_printable(episode.item_id):<{id_width}}  "
@@ -936,6 +939,17 @@ def _print_series_table(series: Series, target_dir: Path, on_disk: set[int] | No
         print("Warnings:")
         for warning in series.warnings:
             print(f"  - {_printable(warning)}")
+
+
+def access_status(episode: Episode) -> str:
+    """The ``info`` status of an episode, from ``Episode.access``: ``free``, ``unlocked (paid)`` —
+    a paid episode your own account unlocked, downloaded like a free one with your session — or
+    ``locked: <hints>`` (skipped unless ``--include-locked``)."""
+    if episode.access == "unlocked":
+        return "unlocked (paid)"
+    if episode.locked:
+        return "locked: " + "; ".join(episode.lock_hints)
+    return "free"
 
 
 #: Where a DONE message starts telling what became of the cover (``downloader._finish_cover``,

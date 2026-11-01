@@ -1,13 +1,16 @@
 """downloader_browser: the browser engine driven through a fake Playwright object graph (no
 browser, no socket): skip rules, candidate order and expiry, 403 -> next URL -> in-session refresh
 (bounded by the per-episode request budget, cached per run), 429, a captcha wall during the
-refresh, bad bodies, error sanitising, atomic writes and close()."""
+refresh, bad bodies, error sanitising, atomic writes and close(); and DRM: an encrypted body is
+never written and costs no other request, a payload-flagged DRM episode is skipped with its own
+wording."""
 
 from __future__ import annotations
 
 import errno
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +30,9 @@ from dramafetch.downloader_browser import (
 )
 from dramafetch.manifest import Manifest
 from dramafetch.media import INCOMPLETE_PREFIX
-from dramafetch.models import DownloadOptions, DownloadStatus, Episode, Series
+from dramafetch.models import DRM_MESSAGE, DownloadOptions, DownloadStatus, Episode, Series
 from dramafetch.thumbnails import EMBED_SUFFIX, extract_cover
+from encrypted_mp4 import encrypted_mp4, with_drm_words_in_mdat
 
 SERIES_ID = "7699393770256782354"
 BASE = "https://www.tiktok.com"
@@ -1701,3 +1705,134 @@ def test_quality_best_tries_the_highest_bitrate_rendition_first(playwright, tmp_
         _options(tmp_path, dry_run=True, quality="best"),
     )
     assert dry.message == "would download from v19-webapp-prime.tiktok.com"
+
+
+# --- DRM: an encrypted body is never written ---------------------------------------------------
+
+
+def _padded(data: bytes, size: int) -> bytes:
+    """`data` followed by one top-level `free` box padding it to `size` bytes (like VIDEO)."""
+    box = size - len(data)
+    return data + box.to_bytes(4, "big") + b"free" + b"\0" * (box - 8)
+
+
+#: `encv` + `enca` sample entries and a top-level `pssh`, above MIN_VIDEO_BYTES like any episode.
+ENCRYPTED_VIDEO = _padded(encrypted_mp4(), 2 * MIN_VIDEO_BYTES)
+
+
+@pytest.mark.parametrize("verify", [True, False], ids=["verify", "no-verify"])
+def test_an_encrypted_body_is_never_written_and_costs_no_other_request(
+    playwright, tmp_path, monkeypatch, verify
+):
+    """Checked in memory BEFORE anything is written, whatever `--no-verify` says: an encrypted
+    body is FAILED_UNAVAILABLE with the DRM message — no file, no `.part`, no next mirror (every
+    mirror serves the same encrypted file), no fresh list, no cover request."""
+    writes = []
+    real_write = downloader_browser._write_atomically
+
+    def recording(target, body):
+        writes.append(target.name)
+        real_write(target, body)
+
+    monkeypatch.setattr(downloader_browser, "_write_atomically", recording)
+    playwright.request.answer(_url("a"), FakeAPIResponse(200, ENCRYPTED_VIDEO, "video/mp4"))
+    playwright.request.answer(_url("b"), FakeAPIResponse())  # a mirror that would "work"
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    item = _item(1, ITEM_1, _url("a"), _url("b"))
+    playwright.browser.refresh_events = [_refresh_events(item)]
+    downloader = _downloader(playwright)
+
+    result = downloader.download(
+        _episode(1, item, cover_url=COVER), _options(tmp_path, verify=verify)
+    )
+
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
+    assert result.message == DRM_MESSAGE
+    assert playwright.request.urls == [_url("a")]
+    assert downloader.refreshes == 0 and playwright.context.pages == []
+    assert writes == [] and list(tmp_path.iterdir()) == []
+    assert all(response.disposed for response in playwright.request.responses)
+
+
+def test_drm_words_inside_the_samples_are_written_and_get_their_cover(playwright, tmp_path):
+    """No false positive: `encv`/`enca`/`pssh` spelled inside the `mdat` are samples, not boxes."""
+    body = _padded(with_drm_words_in_mdat(), 2 * MIN_VIDEO_BYTES)
+    playwright.request.answer(_url("ep1"), FakeAPIResponse(200, body, "video/mp4"))
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+
+    result = _downloader(playwright).download(_with_cover(), _options(tmp_path))
+
+    assert result.status is DownloadStatus.DONE
+    assert result.message == f"saved {STEM}.mp4 (0.1 MiB) + cover embedded"
+    assert playwright.request.urls == [_url("ep1"), COVER]
+    assert extract_cover(tmp_path / f"{STEM}.mp4") == (JPEG, "image/jpeg")
+
+
+def test_encrypted_episodes_count_toward_the_streak_and_the_next_run_skips_them(
+    playwright, tmp_path
+):
+    """Through engine.download_series: a DRM failure counts toward the failure streak like any
+    other — three in a row stop the run before the fourth — and the manifest remembers the
+    verdict: the next run skips those three as locked without a single request and fetches the
+    fourth; `--include-locked` asks for them again."""
+    episodes = [
+        _episode(n, _item(n, f"76994000000000000{n:02d}", _url(f"ep{n}"))) for n in range(1, 5)
+    ]
+    for number in (1, 2, 3):
+        playwright.request.answer(
+            _url(f"ep{number}"), FakeAPIResponse(200, ENCRYPTED_VIDEO, "video/mp4")
+        )
+    series = Series(SERIES_ID, "Heiress", episodes)
+    options = _options(tmp_path)
+
+    def run(**overrides: Any) -> list[Any]:
+        return engine.download_series(
+            series,
+            episodes,
+            replace(options, **overrides),
+            downloader=_downloader(playwright),
+            sleep=lambda seconds: None,
+        )
+
+    first = run()
+    assert [r.status for r in first] == [DownloadStatus.FAILED_UNAVAILABLE] * 3 + [
+        DownloadStatus.FAILED
+    ]
+    assert [r.message for r in first[:3]] == [DRM_MESSAGE] * 3
+    assert first[3].message.startswith("stopped: 3 consecutive failures")
+    assert playwright.request.urls == [_url("ep1"), _url("ep2"), _url("ep3")]
+    target = tmp_path / f"Heiress [{SERIES_ID}]"
+    assert sorted(p.name for p in target.iterdir()) == ["dramafetch.json"]  # nothing encrypted
+
+    second = run()
+    assert [r.status for r in second] == [DownloadStatus.SKIPPED_LOCKED] * 3 + [DownloadStatus.DONE]
+    assert all(
+        r.message.startswith("protected by DRM (found by an earlier run)") for r in second[:3]
+    )
+    assert playwright.request.urls == [_url(f"ep{n}") for n in (1, 2, 3, 4)]  # only the fourth
+
+    third = run(include_locked=True)  # asks again; this time the CDN serves a playable file
+    assert [r.status for r in third] == [DownloadStatus.DONE] * 3 + [DownloadStatus.SKIPPED_EXISTS]
+    assert playwright.request.urls[4:] == [_url("ep1"), _url("ep2"), _url("ep3")]
+
+
+def test_a_payload_flagged_drm_episode_is_skipped_without_a_browser(playwright, tmp_path):
+    drm = _episode(
+        6, _item(6, "7699400000000000006", _url("drm")), lock_hints=("isDrm=1",), drm=True
+    )
+    result = _downloader(playwright).download(drm, _options(tmp_path))
+    assert result.status is DownloadStatus.SKIPPED_LOCKED
+    assert result.message == "protected by DRM (isDrm=1): DramaFetch does not decrypt it"
+    assert playwright.launches == 0 and playwright.request.calls == []
+
+
+def test_a_paid_episode_the_account_unlocked_is_fetched_like_a_free_one(playwright, tmp_path):
+    """`access == "unlocked"`: the play URL TikTok gave THIS session for a sold episode is
+    fetched like any other — one request, the same checks."""
+    item = _item(3, "7699400000000000003", _url("paid"), free=False)
+    unlocked = _episode(
+        3, item, access="unlocked", paid=True, lock_hints=("isFree=false", "isUnlocked=True")
+    )
+    result = _downloader(playwright).download(unlocked, _options(tmp_path, thumbnail="none"))
+    assert result.status is DownloadStatus.DONE
+    assert playwright.request.urls == [_url("paid")]
