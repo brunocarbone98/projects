@@ -23,7 +23,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode, Series
+from dramafetch.models import (
+    DRM_MARK,
+    DownloadOptions,
+    DownloadResult,
+    DownloadStatus,
+    Episode,
+    Series,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +52,12 @@ _NON_ATTEMPT_STATUSES = frozenset(
 #: Entry statuses that mean "the episode's file is on disk": downloaded (``done``), or found already
 #: there by a run (``skipped-exists`` with the file it found).
 _ON_DISK_STATUSES = frozenset({DownloadStatus.DONE.value, DownloadStatus.SKIPPED_EXISTS.value})
+#: Entry statuses that carry a DRM verdict when their message starts with ``models.DRM_MARK``: the
+#: download was encrypted (``failed-unavailable``), or a later run skipped it for that reason or
+#: because the payload itself says DRM (``skipped-locked``).
+_DRM_STATUSES = frozenset(
+    {DownloadStatus.FAILED_UNAVAILABLE.value, DownloadStatus.SKIPPED_LOCKED.value}
+)
 
 _RESERVED_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
 # C0 controls except \t \n \v \f \r (those are whitespace and become spaces), plus DEL.
@@ -269,6 +282,28 @@ class Manifest:
             and entry.path
             and not self.resolve_path(entry.path).exists()
         ]
+
+    def locked_numbers(self) -> list[int]:
+        """Numbers of the entries recorded ``skipped-locked`` (an episode a run listed and skipped
+        as locked, or as protected by DRM), ascending. Read-only: what the complete skip reports
+        as still locked."""
+        return [
+            number
+            for number, entry in sorted(self.entries.items())
+            if entry.status == DownloadStatus.SKIPPED_LOCKED.value
+        ]
+
+    def drm_protected(self, number: int) -> bool:
+        """True when an earlier run found the episode protected by DRM: its entry is
+        ``failed-unavailable`` or ``skipped-locked`` and its message starts with
+        ``models.DRM_MARK``. Retrying does not change that verdict, so ``engine.download_series``
+        skips such an episode without a request unless ``include_locked``."""
+        entry = self.entries.get(number)
+        return (
+            entry is not None
+            and entry.status in _DRM_STATUSES
+            and entry.message.startswith(DRM_MARK)
+        )
 
     def mark_complete(self, when: float, episodes: int) -> None:
         """Remember that a run found the series complete at ``when`` (seconds since the epoch)

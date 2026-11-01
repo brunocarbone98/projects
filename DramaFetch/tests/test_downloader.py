@@ -1,4 +1,5 @@
-"""downloader: yt-dlp params, the no-network paths, success, and every error classification."""
+"""downloader: yt-dlp params, the no-network paths, success, every error classification, and DRM
+(an encrypted file deleted, yt-dlp's "DRM protected", the payload's DRM flag)."""
 
 from __future__ import annotations
 
@@ -26,14 +27,22 @@ from dramafetch.downloader import (
     format_for,
     impersonate_target,
     is_partial_file,
+    locked_result,
+    mentions_drm,
     output_template,
     redact_secrets,
     sanitize_error,
 )
 from dramafetch.manifest import episode_stem
 from dramafetch.media import INCOMPLETE_PREFIX
-from dramafetch.models import DownloadOptions, DownloadStatus, Episode
+from dramafetch.models import DRM_MARK, DRM_MESSAGE, DownloadOptions, DownloadStatus, Episode
 from dramafetch.thumbnails import EMBED_SUFFIX, MAX_COVER_BYTES, extract_cover
+from encrypted_mp4 import (
+    encrypted_mp4,
+    with_drm_words_in_mdat,
+    with_moov_pssh,
+    with_top_level_pssh,
+)
 
 SERIES_ID = "7699393770256782354"
 EPISODE = Episode(
@@ -886,3 +895,219 @@ def test_the_embed_goes_through_a_copy_that_replaces_the_video(tmp_path, monkeyp
     monkeypatch.setattr(Path, "replace", recording)
     _download(tmp_path)
     assert replaced == [(f"{STEM}.mp4.embed.part", f"{STEM}.mp4")]
+
+
+# --------------------------------------------------------------------------- DRM
+
+#: `encv` + `enca` sample entries and a top-level `pssh`: what an encrypted episode declares.
+ENCRYPTED = encrypted_mp4()
+
+
+def test_build_options_never_allows_unplayable_formats(tmp_path):
+    """yt-dlp drops the formats it knows to be DRM-protected unless `allow_unplayable_formats` is
+    set; DramaFetch never sets it, whatever the options — every thumbnail mode, both qualities,
+    include_locked, cookies, overwrite, extractor args, --no-verify."""
+    downloader = YtDlpDownloader(lambda p: None)
+    variants = [
+        DownloadOptions(),
+        DownloadOptions(include_locked=True, quality="best", verify=False, overwrite=True),
+        DownloadOptions(
+            cookies_file=tmp_path / "cookies.txt",
+            cookies_from_browser="chrome",
+            extractor_args={"tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}},
+            impersonate=False,
+        ),
+        *(DownloadOptions(thumbnail=mode) for mode in ("embed", "both", "file", "none")),
+    ]
+    for options in variants:
+        params = downloader.build_options(EPISODE, options, "o.%(ext)s")
+        assert "allow_unplayable_formats" not in params
+        assert [key for key in params if "unplayable" in key or "drm" in key.lower()] == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "ERROR: [TikTok] 7699400000000000003: This video is DRM protected",
+        "This video is DRM protected",
+        "drm-protected stream",
+        # DRM wins over whatever else the message says: no login, wait or retry changes it
+        "ERROR: [TikTok] 123: This video is DRM protected; log in for more",
+        "HTTP Error 403: Forbidden (DRM)",
+        "HTTP Error 429 while fetching the DRM license",
+    ],
+)
+def test_drm_wordings_are_unavailable_and_checked_first(message):
+    assert mentions_drm(message)
+    assert YtDlpDownloader.classify_error(message) is DownloadStatus.FAILED_UNAVAILABLE
+    described = describe_failure(DownloadStatus.FAILED_UNAVAILABLE, message)
+    assert described == f"{DRM_MESSAGE}: {message}"
+    assert described.startswith(DRM_MARK)  # how the manifest remembers a DRM verdict
+
+
+def test_the_letters_drm_inside_a_word_or_an_id_are_not_drm():
+    for message in (
+        "ERROR: [TikTok] 123: Unable to extract; hydrmetric",
+        "eDRMs",
+        "ERROR: [TikTok] 7699400000000000003: Video not available",
+    ):
+        assert not mentions_drm(message)
+    assert YtDlpDownloader.classify_error("Unable to extract; hydrmetric") is DownloadStatus.FAILED
+    # an unavailable failure that does not name DRM keeps yt-dlp's own words
+    text = "ERROR: [TikTok] 123: No video formats found!"
+    assert describe_failure(DownloadStatus.FAILED_UNAVAILABLE, text) == text
+
+
+def test_yt_dlps_drm_error_is_unavailable_with_the_drm_message(tmp_path):
+    from yt_dlp.utils import DownloadError
+
+    error = "ERROR: [TikTok] 7699400000000000003: This video is DRM protected"
+    factory, log = make_factory(error=DownloadError(error))
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
+    assert result.message == f"{DRM_MESSAGE}: {error}"
+    assert len(log) == 1  # one attempt; nothing here retries
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("verify", [True, False], ids=["verify", "no-verify"])
+def test_an_encrypted_file_is_deleted_with_its_cover_and_partials_whatever_verify_says(
+    tmp_path, monkeypatch, verify
+):
+    """The DRM check runs right after yt-dlp returns — before the verification and the cover
+    step, and whatever `--no-verify` says: the encrypted video, the cover yt-dlp wrote next to it
+    and the in-progress files of that video are deleted (not quarantined: no rerun makes it
+    play), nothing is embedded, and the episode is FAILED_UNAVAILABLE with the DRM message.
+    Other files in the series directory stay, even this episode's earlier `(incomplete)` one."""
+    import dramafetch.downloader as downloader_module
+
+    def no_embedding(video, image):
+        raise AssertionError("an encrypted file must never reach the cover step")
+
+    monkeypatch.setattr(downloader_module, "embed_cover", no_embedding)
+    (tmp_path / f"{STEM}.mp4.part").write_bytes(b"left by an earlier attempt")
+    (tmp_path / f"{STEM}.mp4.part-Frag2").write_bytes(b"a fragment")
+    neighbours = [
+        "Heiress - Episode 04.mp4",
+        "Heiress - Episode 04.mp4.part",
+        "Heiress - Episode 04.jpeg",
+        f"{STEM} (incomplete).mp4",
+    ]
+    for name in neighbours:
+        (tmp_path / name).write_bytes(b"another file")
+    factory, log = make_factory(video_bytes=ENCRYPTED, sidecar=(".jpeg", JPEG))
+    options = DownloadOptions(out_dir=tmp_path, verify=verify)
+
+    result = YtDlpDownloader(factory).download(EPISODE, options)
+
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
+    assert result.message == DRM_MESSAGE
+    assert _names(tmp_path) == sorted(neighbours)
+    assert len(log) == 1
+    assert existing_episode_file(tmp_path, EPISODE, options) is None
+
+
+def test_drm_comes_before_the_integrity_check_so_nothing_encrypted_is_ever_quarantined(tmp_path):
+    """An encrypted file that would ALSO fail the verification (120 s announced, 3 s served) is
+    deleted as encrypted — never kept as `(incomplete)`: a quarantined file stays on disk."""
+    factory, _ = make_factory(video_bytes=ENCRYPTED, sidecar=None)
+    result = YtDlpDownloader(factory).download(
+        replace(EPISODE, duration_s=120), DownloadOptions(out_dir=tmp_path, thumbnail="none")
+    )
+    assert (result.status, result.message) == (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE)
+    assert _names(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "video_bytes",
+    [
+        pytest.param(encrypted_mp4(audio=False, pssh=False), id="encv"),
+        pytest.param(encrypted_mp4(video=False, pssh=False), id="enca"),
+        pytest.param(with_top_level_pssh(), id="top-level-pssh"),
+        pytest.param(with_moov_pssh(), id="pssh-in-moov"),
+    ],
+)
+def test_every_declared_encryption_is_refused(tmp_path, video_bytes):
+    factory, _ = make_factory(video_bytes=video_bytes, sidecar=(".jpeg", JPEG))
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert (result.status, result.message) == (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE)
+    assert _names(tmp_path) == []
+
+
+def test_drm_words_inside_the_samples_are_an_ordinary_download(tmp_path):
+    """No false positive: the bytes `encv`/`enca`/`pssh` inside the `mdat` are samples, not boxes —
+    the episode is DONE and gets its cover like any other."""
+    result, _ = _download(tmp_path, video_bytes=with_drm_words_in_mdat())
+    assert result.message == f"saved {STEM}.mp4 + cover embedded"
+    assert extract_cover(result.path) == (JPEG, "image/jpeg")
+
+
+def test_an_encrypted_file_the_os_will_not_delete_is_reported_with_what_to_do(
+    tmp_path, monkeypatch
+):
+    def refuse(path, **_):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(media_module, "discard", refuse)
+    factory, _ = make_factory(video_bytes=ENCRYPTED, sidecar=(".jpeg", JPEG))
+    result = YtDlpDownloader(factory).download(EPISODE, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE
+    assert result.message == (
+        f"{DRM_MESSAGE} (could not delete {STEM}.mp4: Permission denied — delete it by hand: it "
+        "cannot play, and left there it would pass for the episode)"
+    )
+    assert result.message.startswith(DRM_MARK)
+    assert _names(tmp_path) == [f"{STEM}.mp4"]  # the cover went; the video is left to the user
+
+
+def test_a_payload_flagged_drm_episode_is_skipped_with_the_drm_wording(tmp_path):
+    drm = Episode(
+        number=6,
+        item_id="7699400000000000006",
+        title="Ep 6",
+        series_id=SERIES_ID,
+        lock_hints=("drmProtected=true", "isFree=false"),
+        drm=True,
+    )
+    assert drm.locked and drm.access == "locked"
+    factory, log = make_factory()
+    result = YtDlpDownloader(factory).download(drm, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.SKIPPED_LOCKED and result.path is None
+    assert result.message == (
+        "protected by DRM (drmProtected=true; isFree=false): DramaFetch does not decrypt it"
+    )
+    assert log == [] and list(tmp_path.iterdir()) == []
+    assert locked_result(replace(drm, lock_hints=())).message == DRM_MESSAGE
+    assert locked_result(LOCKED).message == (
+        "looks locked: isFree=false; isLocked=True; no play address"
+    )
+    assert locked_result(replace(EPISODE, access="locked")).message == "looks locked"
+
+
+def test_include_locked_asks_for_a_drm_flagged_episode_and_keeps_nothing_encrypted(tmp_path):
+    """`--include-locked` asks TikTok anyway, with the user's own session — TikTok decides, and
+    nothing is unlocked; what comes back encrypted is deleted like any encrypted download."""
+    drm = replace(EPISODE, drm=True, access="locked", lock_hints=("isDrm=true",))
+    factory, log = make_factory(video_bytes=ENCRYPTED, sidecar=(".jpeg", JPEG))
+    result = YtDlpDownloader(factory).download(
+        drm, DownloadOptions(out_dir=tmp_path, include_locked=True)
+    )
+    assert len(log) == 1
+    assert (result.status, result.message) == (DownloadStatus.FAILED_UNAVAILABLE, DRM_MESSAGE)
+    assert _names(tmp_path) == []
+
+
+def test_a_paid_episode_the_account_unlocked_downloads_like_a_free_one(tmp_path):
+    """`access == "unlocked"`: TikTok gave THIS session the episode it sells — no skip, the same
+    download, the same verification, the same cover."""
+    unlocked = replace(
+        EPISODE,
+        access="unlocked",
+        paid=True,
+        lock_hints=("isFree=false", "unlockPrice=30", "isUnlocked=True"),
+    )
+    assert not unlocked.locked
+    factory, log = make_factory(sidecar=(".jpeg", JPEG))
+    result = YtDlpDownloader(factory).download(unlocked, DownloadOptions(out_dir=tmp_path))
+    assert result.status is DownloadStatus.DONE and len(log) == 1
+    assert result.message == f"saved {STEM}.mp4 + cover embedded"

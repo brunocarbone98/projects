@@ -59,6 +59,7 @@ from dramafetch.manifest import (
     validate_name_format,
 )
 from dramafetch.models import (
+    DRM_MARK,
     QUALITY_MODES,
     RECHECK_AFTER_S,
     THUMBNAIL_MODES,
@@ -152,6 +153,15 @@ ERROR_KINDS = (
 COOKIES_STOP = "malformed cookies file"
 #: Message of the rows synthesized for a series skipped as complete (and of manifest skips).
 MANIFEST_SKIP_PREFIX = "already downloaded (manifest): "
+#: Message of an episode an earlier run found protected by DRM (``Manifest.drm_protected``): it is
+#: skipped as locked without a request — retrying cannot change the verdict — unless
+#: ``include_locked``.
+DRM_REMEMBERED_MESSAGE = (
+    f"{DRM_MARK} (found by an earlier run): DramaFetch does not decrypt it; "
+    "--include-locked tries again"
+)
+#: What the report line of a series skipped as complete adds when locked episodes remain.
+RECHECK_HINT = "unlocked more in the TikTok app since? --recheck looks again"
 
 
 def resolve(
@@ -516,7 +526,10 @@ def download_series(
     and :func:`validate_quality`), then creates the series directory, loads
     its manifest (unless one is given), builds the downloader for ``options.engine`` (unless one
     is given; see :func:`make_downloader`) and, for each episode: an episode the manifest says is
-    done (file still present) is skipped without network unless ``options.overwrite``; otherwise
+    done (file still present) is skipped without network unless ``options.overwrite``; one an
+    earlier run found protected by DRM (``Manifest.drm_protected``) is ``skipped-locked`` with
+    :data:`DRM_REMEMBERED_MESSAGE` — no request, no pause, nothing counted: retrying cannot
+    change that verdict — unless ``options.include_locked``; otherwise
     the downloader runs with ``options.out_dir`` replaced by the series directory and
     ``options.series_name`` set to the series' display name (what ``{series}`` in the name format
     expands to).
@@ -592,6 +605,10 @@ def download_series(
             done_path = None if options.overwrite else manifest.done_path(episode.number)
             if done_path is not None:
                 emit(_manifest_skip(episode, done_path))
+                continue
+            if not options.include_locked and manifest.drm_protected(episode.number):
+                # an earlier run found it encrypted: no request, no pause, nothing counted
+                emit(_drm_memory_skip(episode))
                 continue
             needs_network = _needs_network(episode, episode_options)
             if needs_network and cookie_problem is not None:
@@ -673,6 +690,14 @@ def _manifest_skip(episode: Episode, done_path: Path) -> DownloadResult:
     )
 
 
+def _drm_memory_skip(episode: Episode) -> DownloadResult:
+    """``skipped-locked`` with :data:`DRM_REMEMBERED_MESSAGE`: the manifest says an earlier run
+    found the episode protected by DRM (the message keeps ``DRM_MARK``, so the memory stays)."""
+    return DownloadResult(
+        episode=episode, status=DownloadStatus.SKIPPED_LOCKED, message=DRM_REMEMBERED_MESSAGE
+    )
+
+
 def _stopped_result(
     episode: Episode,
     status: DownloadStatus,
@@ -681,11 +706,15 @@ def _stopped_result(
     manifest: Manifest,
 ) -> DownloadResult:
     """The result for an episode the run gave up on before reaching it: the skip it would have had
-    anyway — done in the manifest, locked, its file already in ``options.out_dir`` (the series
-    directory) — or ``status`` with ``"stopped: <reason>"``. Mirrors :func:`_needs_network`."""
+    anyway — done in the manifest, remembered as DRM-protected, locked, its file already in
+    ``options.out_dir`` (the series directory) — or ``status`` with ``"stopped: <reason>"``.
+    Mirrors :func:`download_series` and :func:`_needs_network` (so a stop never overwrites the
+    DRM memory of an episode with a ``stopped`` entry)."""
     done_path = None if options.overwrite else manifest.done_path(episode.number)
     if done_path is not None:
         return _manifest_skip(episode, done_path)
+    if not options.include_locked and manifest.drm_protected(episode.number):
+        return _drm_memory_skip(episode)
     if episode.locked and not options.include_locked:
         return locked_result(episode)
     existing = (
@@ -732,6 +761,9 @@ def episode_to_dict(episode: Episode) -> dict[str, Any]:
         "series_name": episode.series_name,
         "author": episode.author,
         "duration_s": episode.duration_s,
+        "access": episode.access,
+        "paid": episode.paid,
+        "drm": episode.drm,
         "locked": episode.locked,
         "lock_hints": list(episode.lock_hints),
         "page_url": episode.page_url,
@@ -779,17 +811,21 @@ class SeriesReport:
     ``failed-*`` status (``stopped: …`` included). ``listed`` is the length of TikTok's list (0
     when the series was skipped as complete: see ``on_disk``) and ``gaps`` the numbers missing
     from it between 1 and ``max(highest listed number, total_hint)``. ``complete``: something is
-    listed, every listed free episode is done or on disk, nothing failed, no gaps, and as many
-    listed as TikTok announced (when it announced a total) — or the series was skipped as complete
-    (``skipped_complete``: its manifest said so less than ``RECHECK_AFTER_S`` ago and every file
-    is still there; no request was made). ``stopped`` says why the run stopped in this series (a
-    stop status, a failure streak, a cooldown, a failed resolve), shortly.
+    listed, every listed free or unlocked episode (every one that is not ``locked``) is done or on
+    disk, nothing failed, no gaps, and as many listed as TikTok announced (when it announced a
+    total) — or the series was skipped as complete (``skipped_complete``: its manifest said so
+    less than ``RECHECK_AFTER_S`` ago and every file is still there; no request was made; ``locked``
+    then counts the episodes its manifest recorded ``skipped-locked``). ``stopped`` says why the
+    run stopped in this series (a stop status, a failure streak, a cooldown, a failed resolve),
+    shortly.
 
     The fields after ``stopped`` complete the picture for :func:`report_line`: ``total`` (the
     episodes the series has as far as anyone knows: the largest of the count listed, the highest
     number listed and TikTok's total — for a skipped series, the episodes on disk), the numbers
-    behind ``locked`` and ``failed``, TikTok's announced ``total_hint`` and, for a series skipped
-    as complete, how long ago its manifest found it complete (``checked_ago_s``).
+    behind ``locked`` and ``failed``, TikTok's announced ``total_hint``, for a series skipped as
+    complete how long ago its manifest found it complete (``checked_ago_s``), and ``unlocked`` /
+    ``unlocked_numbers``: the episodes done or on disk in this run whose ``Episode.access`` is
+    ``"unlocked"`` — paid episodes the user's own account unlocked.
     """
 
     series_id: str
@@ -808,6 +844,8 @@ class SeriesReport:
     failed_numbers: tuple[int, ...] = ()
     total_hint: int | None = None
     checked_ago_s: float | None = None
+    unlocked: int = 0
+    unlocked_numbers: tuple[int, ...] = ()
 
 
 def series_report(
@@ -833,13 +871,16 @@ def series_report(
     else:
         report_id = series_id or (first.series_id if first is not None else "")
         report_name = name if name is not None else (first.series_name if first else None)
-    statuses: dict[int, DownloadStatus] = {}
+    rows: dict[int, DownloadResult] = {}
     for result in results:
-        statuses[result.episode.number] = result.status
+        rows[result.episode.number] = result
+    statuses = {number: row.status for number, row in rows.items()}
     done = sorted(n for n, status in statuses.items() if status is DownloadStatus.DONE)
     on_disk = sorted(n for n, status in statuses.items() if status is DownloadStatus.SKIPPED_EXISTS)
     locked = sorted(n for n, status in statuses.items() if status is DownloadStatus.SKIPPED_LOCKED)
     failed = sorted(n for n, status in statuses.items() if not status.ok)
+    # paid episodes the user's own account unlocked, among those obtained (downloaded or on disk)
+    unlocked = tuple(n for n in sorted({*done, *on_disk}) if rows[n].episode.access == "unlocked")
     if series is None:
         return SeriesReport(
             series_id=report_id,
@@ -857,6 +898,8 @@ def series_report(
             locked_numbers=tuple(locked),
             failed_numbers=tuple(failed),
             checked_ago_s=checked_ago_s,
+            unlocked=len(unlocked),
+            unlocked_numbers=unlocked,
         )
     numbers = {episode.number for episode in series.episodes}
     listed = len(series.episodes)
@@ -888,6 +931,8 @@ def series_report(
         failed_numbers=tuple(failed),
         total_hint=hint,
         checked_ago_s=checked_ago_s,
+        unlocked=len(unlocked),
+        unlocked_numbers=unlocked,
     )
 
 
@@ -895,13 +940,14 @@ def report_rows(
     series: Series, results: list[DownloadResult], manifest: Manifest | None
 ) -> list[DownloadResult]:
     """What the report of a run of a SELECTION counts (``download --episodes``, the web UI's
-    **Download selected** and **Download all free**, which selects the free episodes): ``results``
-    plus, for every listed episode they do not cover, a ``skipped-exists`` row (``already
-    downloaded (manifest): <file>``) when ``manifest`` knows it to be on disk
-    (``Manifest.done_entries``: the file still there), else a ``skipped-locked`` row when it is
-    locked. The report then says how complete the series is, as a whole-series run would — what
-    an earlier run saved is ``already on disk`` and a locked episode ``locked``, not ``not
-    downloaded``. Read-only; ``results`` itself is not changed."""
+    **Download selected** and **Download all available**, which selects the free and unlocked
+    episodes): ``results`` plus, for every listed episode they do not cover, a ``skipped-exists``
+    row (``already downloaded (manifest): <file>``) when ``manifest`` knows it to be on disk
+    (``Manifest.done_entries``: the file still there), else a ``skipped-locked`` row when the
+    manifest remembers it as protected by DRM (``Manifest.drm_protected``) or it is locked. The
+    report then says how complete the series is, as a whole-series run would — what an earlier
+    run saved is ``already on disk`` (an unlocked one counted as such) and a locked episode
+    ``locked``, not ``not downloaded``. Read-only; ``results`` itself is not changed."""
     covered = {result.episode.number for result in results}
     on_disk = dict(manifest.done_entries()) if manifest is not None else {}
     extra: list[DownloadResult] = []
@@ -910,6 +956,8 @@ def report_rows(
             continue
         if episode.number in on_disk:
             extra.append(_manifest_skip(episode, on_disk[episode.number]))
+        elif manifest is not None and manifest.drm_protected(episode.number):
+            extra.append(_drm_memory_skip(episode))
         elif episode.locked:
             extra.append(locked_result(episode))
     return [*results, *extra]
@@ -952,17 +1000,31 @@ def report_line(report: SeriesReport) -> str:
         incomplete: 26 of 30 — 2 locked (5, 6), 1 failed (12); episode 17 missing from TikTok's list
 
     A complete series with locked episodes says so (``complete: 28 of 30 (28 downloaded) — 2
-    locked (5, 6)``); an incomplete one lists what is locked, failed or not downloaded, the gaps
-    in TikTok's list, a total TikTok exceeded, and why the run stopped."""
+    locked (5, 6)``), and so do the paid episodes the user's own account unlocked, named before
+    the locked ones (``complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked
+    (3), 1 locked (4)``); an incomplete one lists the unlocked, locked, failed and not downloaded
+    episodes, the gaps in TikTok's list, a total TikTok exceeded, and why the run stopped. A series
+    skipped as complete while its manifest recorded locked episodes points at ``--recheck``
+    (``complete, nothing to do: 3 episodes already on disk, 1 locked (4) (checked 2 h ago) —
+    unlocked more in the TikTok app since? --recheck looks again``)."""
+    locked = f"{report.locked} locked ({_numbers_text(report.locked_numbers)})"
     if report.skipped_complete:
         noun = "episode" if report.on_disk == 1 else "episodes"
         line = f"complete, nothing to do: {report.on_disk} {noun} already on disk"
+        if report.locked:
+            line += f", {locked}"
         if report.checked_ago_s is not None:
             line += f" (checked {_ago(report.checked_ago_s)})"
+        if report.locked:
+            line += f" — {RECHECK_HINT}"
         return line
     have = report.done + report.on_disk
     total = max(report.total, have)
-    locked = f"{report.locked} locked ({_numbers_text(report.locked_numbers)})"
+    noun = "episode" if report.unlocked == 1 else "episodes"
+    unlocked = (
+        f"{report.unlocked} paid {noun} your account unlocked "
+        f"({_numbers_text(report.unlocked_numbers)})"
+    )
     if report.complete:
         obtained = []
         if report.done:
@@ -972,10 +1034,15 @@ def report_line(report: SeriesReport) -> str:
         line = f"complete: {have} of {total}"
         if obtained:
             line += f" ({', '.join(obtained)})"
+        notes = [unlocked] if report.unlocked else []
         if report.locked:
-            line += f" — {locked}"
+            notes.append(locked)
+        if notes:
+            line += f" — {', '.join(notes)}"
         return line
     details = []
+    if report.unlocked:
+        details.append(unlocked)
     if report.locked:
         details.append(locked)
     if report.failed:
@@ -1019,6 +1086,8 @@ def report_to_dict(report: SeriesReport) -> dict[str, Any]:
         "failed_numbers": list(report.failed_numbers),
         "total_hint": report.total_hint,
         "checked_ago_s": report.checked_ago_s,
+        "unlocked": report.unlocked,
+        "unlocked_numbers": list(report.unlocked_numbers),
         "line": report_line(report),
     }
 
@@ -1213,7 +1282,10 @@ def _skip_if_complete(
 ) -> tuple[SeriesRun, SeriesStart] | None:
     """The run of a series its manifest says was complete less than ``RECHECK_AFTER_S`` ago with
     every file it counted still on disk — rows rebuilt from the manifest, no request — or None
-    when anything is missing, stale or unreadable (then the series is resolved as usual)."""
+    when anything is missing, stale or unreadable (then the series is resolved as usual). The
+    entries the manifest recorded ``skipped-locked`` become the report's ``locked`` /
+    ``locked_numbers`` (no rows), so its line can say that ``--recheck`` looks again: the user may
+    have unlocked them in the TikTok app since."""
     directory = find_series_dir(options.out_dir, ref.series_id)
     if directory is None:
         return None
@@ -1250,6 +1322,10 @@ def _skip_if_complete(
         name=name,
         checked_ago_s=age,
     )
+    on_disk = {number for number, _ in entries}
+    still_locked = tuple(n for n in manifest.locked_numbers() if n not in on_disk)
+    if still_locked:
+        report = replace(report, locked=len(still_locked), locked_numbers=still_locked)
     run = SeriesRun(
         ref=ref,
         series=None,

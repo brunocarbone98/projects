@@ -308,3 +308,224 @@ def test_quarantine_note_says_what_to_do_when_the_file_cannot_be_deleted_either(
     )
     assert video.read_bytes() == b"x"  # still there, under the episode's name
     assert "it would pass for the episode" in caplog.text
+
+
+# --------------------------------------------------------------------------- DRM
+
+
+def _record_reads(monkeypatch):
+    """From now on, every read through `Path.open` is recorded as `(offset, size asked)` — call
+    it after the test has written its files (the wrapper reads, it does not write)."""
+    reads = []
+    real_open = Path.open
+
+    class Recording:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            self._handle.close()
+
+        def seek(self, offset, whence=0):
+            return self._handle.seek(offset, whence)
+
+        def read(self, size=-1):
+            reads.append((self._handle.tell(), size))
+            return self._handle.read(size)
+
+    monkeypatch.setattr(Path, "open", lambda self, *a, **k: Recording(real_open(self, *a, **k)))
+    return reads
+
+
+def test_the_drm_constants():
+    assert sorted(ENCRYPTED_SAMPLE_ENTRIES) == [b"enca", b"encv"] and PSSH_BOX == b"pssh"
+    assert DRM_MARK == "protected by DRM"
+    assert DRM_MESSAGE == "protected by DRM (encrypted tracks): DramaFetch does not decrypt it"
+    # the helper's structural edit renames what the fixture really has, nothing else
+    assert [kind for _, kind in sample_entries(TINY_MP4)] == [b"avc1", b"mp4a"]
+    assert [kind for _, kind in sample_entries(encrypted_mp4())] == [b"encv", b"enca"]
+    assert len(encrypted_mp4(pssh=False)) == len(TINY_MP4) == len(with_moov_pssh())
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        pytest.param(lambda: encrypted_mp4(audio=False, pssh=False), id="encv-video-entry"),
+        pytest.param(lambda: encrypted_mp4(video=False, pssh=False), id="enca-audio-entry"),
+        pytest.param(with_top_level_pssh, id="top-level-pssh"),
+        pytest.param(with_moov_pssh, id="pssh-in-moov"),
+        pytest.param(encrypted_mp4, id="all-three"),
+    ],
+)
+def test_encrypted_tracks_are_found_in_the_box_structure(tmp_path, variant):
+    """An `encv`/`enca` sample entry in moov/trak/mdia/minf/stbl/stsd, or a `pssh` box at the top
+    level or in `moov`, is DRM — in a saved file and in a body still in memory alike. The
+    integrity check alone would let every one of them through (mutagen parses them, they last
+    3 s, `enca` even passes for an audio codec): that is why the DRM check exists."""
+    data = variant()
+    path = _write(tmp_path, "ep.mp4", data)
+    assert drm_problem(path) == DRM_MESSAGE
+    assert drm_problem_in(data) == DRM_MESSAGE
+    assert verify_video(path, 3) is None
+
+
+def test_ordinary_videos_are_not_drm(tmp_path):
+    """The fixture, the fake CDN's padded episodes and a video whose cover mutagen embedded (a
+    `moov` rewritten with `udta/meta/ilst/covr`) carry no encryption: never a false positive —
+    a false positive would delete a playable episode."""
+    from dramafetch.thumbnails import embed_cover
+
+    padded = _padded(128 * 1024)
+    for name, data in (("tiny.mp4", TINY_MP4), ("padded.mp4", padded)):
+        assert drm_problem(_write(tmp_path, name, data)) is None
+        assert drm_problem_in(data) is None
+    tagged = _write(tmp_path, "tagged.mp4", TINY_MP4)
+    embed_cover(tagged, b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"j" * 600 + b"\xff\xd9")
+    assert tagged.read_bytes() != TINY_MP4
+    assert drm_problem(tagged) is None and drm_problem_in(tagged.read_bytes()) is None
+
+
+def test_the_bytes_of_drm_boxes_inside_mdat_are_samples_not_drm(tmp_path, monkeypatch):
+    """`encv`, `enca` and a whole `pssh` box spelled inside the `mdat` — after the last sample,
+    so the episode still plays — are what a raw byte search would condemn; the walk reads box
+    headers only (8 bytes at a time, with seek) and never one byte of the `mdat`'s payload."""
+    data = with_drm_words_in_mdat()
+    assert b"encv" in data and b"enca" in data and b"pssh" in data
+    assert b"encv" not in TINY_MP4 and b"pssh" not in TINY_MP4
+    path = _write(tmp_path, "ep.mp4", data)
+    assert drm_problem_in(data) is None
+    assert verify_video(path, 3) is None  # a fine episode
+    mdat, mdat_size = child(data, b"mdat")
+    reads = _record_reads(monkeypatch)
+    assert drm_problem(path) is None
+    assert reads and all(size == 8 for _, size in reads)
+    assert [offset for offset, _ in reads if mdat + 8 <= offset < mdat + mdat_size] == []
+    assert len(reads) < 40  # a few dozen headers for a whole episode
+
+
+def test_a_drm_box_type_outside_its_place_is_not_drm(tmp_path):
+    """Only a sample entry is a sample entry: a top-level box that happens to be called `encv`
+    is an unknown box, not an encrypted track."""
+    stray = TINY_MP4 + (16).to_bytes(4, "big") + b"encv" + bytes(8)
+    assert drm_problem_in(stray) is None
+    assert drm_problem(_write(tmp_path, "stray.mp4", stray)) is None
+
+
+def test_an_encrypted_file_cut_short_still_declares_its_encryption(tmp_path):
+    """A box cut short is examined as far as it goes: an encrypted download that stopped early
+    must not slip through as merely incomplete — a quarantined file is kept, encrypted media
+    never is (the engines run the DRM check before the integrity check)."""
+    data = encrypted_mp4(audio=False, pssh=False)
+    encv_at = next(pos for pos, kind in sample_entries(data) if kind == b"encv")
+    cut = data[: encv_at + 8]  # the file ends right after the `encv` entry's header
+    path = _write(tmp_path, "cut.mp4", cut)
+    assert drm_problem_in(cut) == DRM_MESSAGE
+    assert drm_problem(path) == DRM_MESSAGE
+    assert verify_video(path, 3).startswith("not a valid MP4 (")  # it would only be quarantined
+
+
+def test_junk_is_no_drm_and_never_raises(tmp_path):
+    rng = random.Random(7)
+    junk = [
+        b"",
+        b"\0" * 7,
+        b"\0\0\0\x07pssh",  # a size smaller than the header
+        b"\0\0\0\x01moov\0\0",  # a 64-bit size cut short
+        b"\0\0\0\x01moov" + (8).to_bytes(8, "big"),  # a 64-bit size smaller than its header
+        (1 << 31).to_bytes(4, "big") + b"moov" + b"\0\0\0\x10trak" + bytes(8),  # runs past the end
+        TINY_MP4[:32] + b"\xff" * 64,
+        rng.randbytes(70_000),
+        os.urandom(4096),
+    ]
+    for index, data in enumerate(junk):
+        assert drm_problem_in(data) is None, index
+        assert drm_problem(_write(tmp_path, f"junk{index}.mp4", data)) is None, index
+    assert drm_problem(tmp_path / "missing.mp4") is None
+    assert drm_problem(tmp_path) is None  # a directory: unreadable, not DRM, no exception
+
+
+def test_mutated_files_never_raise_and_both_variants_agree(tmp_path):
+    """A seeded fuzz over the fixture and its encrypted variant: bytes flipped (half of them in
+    `ftyp`/`moov`, where the structure is), sizes broken, files cut anywhere — the answer is
+    always None or the DRM message, never an exception, and the file and in-memory walks agree."""
+    rng = random.Random(20261101)
+    sources = [TINY_MP4, encrypted_mp4()]
+    moov_end = child(TINY_MP4, b"moov")[0] + child(TINY_MP4, b"moov")[1]
+    path = tmp_path / "fuzz.mp4"
+    for _ in range(400):
+        data = bytearray(rng.choice(sources))
+        for _ in range(rng.randint(1, 12)):
+            position = rng.randrange(moov_end) if rng.random() < 0.5 else rng.randrange(len(data))
+            data[position] = rng.randrange(256)
+        if rng.random() < 0.3:
+            data = data[: rng.randrange(len(data) + 1)]
+        blob = bytes(data)
+        answer = drm_problem_in(blob)
+        assert answer in (None, DRM_MESSAGE)
+        path.write_bytes(blob)
+        assert drm_problem(path) == answer
+
+
+def test_the_walk_is_bounded(tmp_path, monkeypatch):
+    """At most `_MAX_DRM_BOXES` box headers per walk, every level together: thousands of empty
+    boxes end the walk with "no DRM found" instead of costing thousands of reads."""
+    limit = media._MAX_DRM_BOXES
+    empty = (8).to_bytes(4, "big") + b"free"
+    near = TINY_MP4[:32] + empty * 10 + pssh_box()
+    assert drm_problem_in(near) == DRM_MESSAGE
+    far = TINY_MP4[:32] + empty * (limit + 10) + pssh_box()
+    assert drm_problem_in(far) is None
+    path = _write(tmp_path, "far.mp4", far)
+    reads = _record_reads(monkeypatch)
+    assert drm_problem(path) is None
+    assert 0 < len(reads) <= limit
+
+
+def test_discard_deletes_and_retries_a_refused_deletion(tmp_path, monkeypatch):
+    """An encrypted file is deleted, not quarantined (no rerun makes it play). A deletion the OS
+    refuses is tried again RENAME_RETRIES times through the injected sleep; refused for good, the
+    last OSError propagates. A file already gone is fine."""
+    real_unlink = Path.unlink
+    refusals = {"left": 2}
+
+    def flaky(self, missing_ok=False):
+        if refusals["left"]:
+            refusals["left"] -= 1
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    video = _write(tmp_path, "Heiress - Episode 01.mp4", encrypted_mp4())
+    monkeypatch.setattr(Path, "unlink", flaky)
+    pauses = []
+    discard(video, sleep=pauses.append)
+    assert not video.exists() and pauses == [RENAME_RETRY_DELAY_S] * RENAME_RETRIES
+    discard(video, sleep=pauses.append)  # already gone
+    refusals["left"], pauses[:] = 10, []
+    other = _write(tmp_path, "Heiress - Episode 02.mp4", b"y")
+    with pytest.raises(PermissionError):
+        discard(other, sleep=pauses.append)
+    assert pauses == [RENAME_RETRY_DELAY_S] * RENAME_RETRIES and other.read_bytes() == b"y"
+
+
+def test_discard_note_says_what_to_do_when_the_file_cannot_be_deleted(
+    tmp_path, monkeypatch, caplog
+):
+    video = _write(tmp_path, "Heiress - Episode 01.mp4", encrypted_mp4())
+    assert discard_note(video) is None and list(tmp_path.iterdir()) == []
+
+    def refuse(path, **_):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(media, "discard", refuse)
+    video = _write(tmp_path, "Heiress - Episode 01.mp4", encrypted_mp4())
+    with caplog.at_level(logging.WARNING, logger="dramafetch.media"):
+        note = discard_note(video)
+    assert note == (
+        "could not delete Heiress - Episode 01.mp4: Permission denied — delete it by hand: it "
+        "cannot play, and left there it would pass for the episode"
+    )
+    assert video.exists()
+    assert "an encrypted file would pass for the episode" in caplog.text
