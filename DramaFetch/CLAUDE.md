@@ -16,7 +16,7 @@ Rules for agents working in `DramaFetch/`. The repo-wide rules in `../AGENTS.md`
 
 ## The owner's acceptance criteria
 
-What the owner asked DramaFetch to do. Every change keeps all eight true, and every maintenance agent (`.claude/agents/` here) judges a change, an upstream release or a defect report against them — inside the Scope above, never against it:
+What the owner asked DramaFetch to do. Every change keeps all eight true, and every maintenance agent (`download-guardian` and `vuln-sentinel` in the root `.claude/agents/`, `code-reviewer` and `test-runner` in `DramaFetch/.claude/agents/`) judges a change, an upstream release or a defect report against them — inside the Scope above, never against it:
 
 1. **Whole series, in batches.** One link gets every episode the session may play; several links (`download URL [URL ...]`, `--from-file`, the web's "Several series" box, the extension's batch box) run strictly one series after the other — `engine.run_batch` / `run_series`, `extension/src/app/engine.js`. Proven by `tests/test_engine.py`, `tests/test_cli.py`, `tests/test_web.py` and the batch scenarios of `tests/integration/`.
 2. **Files named `<Series name> - Episode NN`.** `models.DEFAULT_NAME_FORMAT = "{series} - Episode {number}"`, inside `<Series name> [<series id>]/`; the extension's `lib/naming.js` gives the same names (parity-tested) within Windows' path limits.
