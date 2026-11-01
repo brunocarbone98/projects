@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from dramafetch.models import (
-    DRM_MARK,
+    DRM_MESSAGE,
+    DRM_REMEMBERED_MESSAGE,
     DownloadOptions,
     DownloadResult,
     DownloadStatus,
@@ -52,12 +53,19 @@ _NON_ATTEMPT_STATUSES = frozenset(
 #: Entry statuses that mean "the episode's file is on disk": downloaded (``done``), or found already
 #: there by a run (``skipped-exists`` with the file it found).
 _ON_DISK_STATUSES = frozenset({DownloadStatus.DONE.value, DownloadStatus.SKIPPED_EXISTS.value})
-#: Entry statuses that carry a DRM verdict when their message starts with ``models.DRM_MARK``: the
-#: download was encrypted (``failed-unavailable``), or a later run skipped it for that reason or
-#: because the payload itself says DRM (``skipped-locked``).
+#: Entry statuses that carry a DRM verdict when their message starts with one of
+#: :data:`_DRM_VERDICTS`: the download was encrypted (``failed-unavailable``), or a later run
+#: skipped it for that reason (``skipped-locked``).
 _DRM_STATUSES = frozenset(
     {DownloadStatus.FAILED_UNAVAILABLE.value, DownloadStatus.SKIPPED_LOCKED.value}
 )
+#: How a DRM verdict of a DOWNLOAD starts: ``models.DRM_MESSAGE`` (an encrypted file, both engines;
+#: yt-dlp's own "DRM protected", which ``downloader.describe_failure`` puts it before) or
+#: ``models.DRM_REMEMBERED_MESSAGE`` (a run that skipped the episode for that verdict). A payload's
+#: DRM flag (``protected by DRM (<hints>): …``, also from a fresh episode list) is none of them: the
+#: payload is read again on every run, so remembering it would add nothing and would keep skipping
+#: the episode after TikTok stopped flagging it.
+_DRM_VERDICTS = (DRM_MESSAGE, DRM_REMEMBERED_MESSAGE)
 
 _RESERVED_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
 # C0 controls except \t \n \v \f \r (those are whitespace and become spaces), plus DEL.
@@ -285,8 +293,8 @@ class Manifest:
 
     def locked_numbers(self) -> list[int]:
         """Numbers of the entries recorded ``skipped-locked`` (an episode a run listed and skipped
-        as locked, or as protected by DRM), ascending. Read-only: what the complete skip reports
-        as still locked."""
+        as locked, or as protected by DRM: a payload flag, or a verdict :meth:`drm_protected`
+        remembers), ascending. Read-only: what the complete skip reports as still locked."""
         return [
             number
             for number, entry in sorted(self.entries.items())
@@ -294,15 +302,19 @@ class Manifest:
         ]
 
     def drm_protected(self, number: int) -> bool:
-        """True when an earlier run found the episode protected by DRM: its entry is
+        """True when an earlier run's DOWNLOAD found the episode protected by DRM: its entry is
         ``failed-unavailable`` or ``skipped-locked`` and its message starts with
-        ``models.DRM_MARK``. Retrying does not change that verdict, so ``engine.download_series``
-        skips such an episode without a request unless ``include_locked``."""
+        ``models.DRM_MESSAGE`` (the verdict of a downloaded file, both engines, or yt-dlp's own
+        "DRM protected") or ``models.DRM_REMEMBERED_MESSAGE`` (a run that skipped it since).
+        Retrying does not change that verdict, so ``engine.download_series`` skips such an
+        episode without a request unless ``include_locked``. A row written for a payload's DRM
+        flag (``downloader.locked_result``, a fresh list's refusal in the browser engine) is not
+        remembered: the next run reads the payload again."""
         entry = self.entries.get(number)
         return (
             entry is not None
             and entry.status in _DRM_STATUSES
-            and entry.message.startswith(DRM_MARK)
+            and entry.message.startswith(_DRM_VERDICTS)
         )
 
     def mark_complete(self, when: float, episodes: int) -> None:

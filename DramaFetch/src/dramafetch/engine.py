@@ -60,7 +60,7 @@ from dramafetch.manifest import (
     validate_name_format,
 )
 from dramafetch.models import (
-    DRM_MARK,
+    DRM_REMEMBERED_MESSAGE,
     QUALITY_MODES,
     RECHECK_AFTER_S,
     THUMBNAIL_MODES,
@@ -154,13 +154,6 @@ ERROR_KINDS = (
 COOKIES_STOP = "malformed cookies file"
 #: Message of the rows synthesized for a series skipped as complete (and of manifest skips).
 MANIFEST_SKIP_PREFIX = "already downloaded (manifest): "
-#: Message of an episode an earlier run found protected by DRM (``Manifest.drm_protected``): it is
-#: skipped as locked without a request — retrying cannot change the verdict — unless
-#: ``include_locked``.
-DRM_REMEMBERED_MESSAGE = (
-    f"{DRM_MARK} (found by an earlier run): DramaFetch does not decrypt it; "
-    "--include-locked tries again"
-)
 #: What the report line of a series skipped as complete adds when locked episodes remain.
 RECHECK_HINT = "unlocked more in the TikTok app since? --recheck looks again"
 
@@ -528,9 +521,10 @@ def download_series(
     its manifest (unless one is given), builds the downloader for ``options.engine`` (unless one
     is given; see :func:`make_downloader`) and, for each episode: an episode the manifest says is
     done (file still present) is skipped without network unless ``options.overwrite``; one an
-    earlier run found protected by DRM (``Manifest.drm_protected``) is ``skipped-locked`` with
-    :data:`DRM_REMEMBERED_MESSAGE` — no request, no pause, nothing counted: retrying cannot
-    change that verdict — unless ``options.include_locked``; otherwise
+    earlier run's download found protected by DRM (``Manifest.drm_protected``: the verdict of a
+    file or of yt-dlp, never a payload flag) is ``skipped-locked`` with
+    :data:`~dramafetch.models.DRM_REMEMBERED_MESSAGE` — no request, no pause, nothing counted:
+    retrying cannot change that verdict — unless ``options.include_locked``; otherwise
     the downloader runs with ``options.out_dir`` replaced by the series directory and
     ``options.series_name`` set to the series' display name (what ``{series}`` in the name format
     expands to).
@@ -692,8 +686,9 @@ def _manifest_skip(episode: Episode, done_path: Path) -> DownloadResult:
 
 
 def _drm_memory_skip(episode: Episode) -> DownloadResult:
-    """``skipped-locked`` with :data:`DRM_REMEMBERED_MESSAGE`: the manifest says an earlier run
-    found the episode protected by DRM (the message keeps ``DRM_MARK``, so the memory stays)."""
+    """``skipped-locked`` with :data:`~dramafetch.models.DRM_REMEMBERED_MESSAGE`: the manifest says
+    an earlier run's download found the episode protected by DRM (the message is one
+    ``Manifest.drm_protected`` reads back, so the memory stays)."""
     return DownloadResult(
         episode=episode, status=DownloadStatus.SKIPPED_LOCKED, message=DRM_REMEMBERED_MESSAGE
     )
@@ -808,13 +803,15 @@ class SeriesReport:
     ``failed-*`` status (``stopped: …`` included). ``listed`` is the length of TikTok's list (0
     when the series was skipped as complete: see ``on_disk``) and ``gaps`` the numbers missing
     from it between 1 and ``max(highest listed number, total_hint)``. ``complete``: something is
-    listed, every listed free or unlocked episode (every one that is not ``locked``) is done or on
-    disk, nothing failed, no gaps, and as many listed as TikTok announced (when it announced a
-    total) — or the series was skipped as complete (``skipped_complete``: its manifest said so
-    less than ``RECHECK_AFTER_S`` ago and every file is still there; no request was made; ``locked``
-    then counts the episodes its manifest recorded ``skipped-locked``). ``stopped`` says why the
-    run stopped in this series (a stop status, a failure streak, a cooldown, a failed resolve),
-    shortly.
+    listed, every listed episode that can be downloaded is done or on disk — every one that is
+    not ``locked`` and was not skipped as locked by the run (``skipped-locked``: an episode an
+    earlier run's download found protected by DRM, which the manifest remembers, although its
+    payload reads as playable) —, nothing failed, no gaps, and as many listed as TikTok announced
+    (when it announced a total) — or the series was skipped as complete (``skipped_complete``: its
+    manifest said so less than ``RECHECK_AFTER_S`` ago and every file is still there; no request
+    was made; ``locked`` then counts the episodes its manifest recorded ``skipped-locked``).
+    ``stopped`` says why the run stopped in this series (a stop status, a failure streak, a
+    cooldown, a failed resolve), shortly.
 
     The fields after ``stopped`` complete the picture for :func:`report_line`: ``total`` (the
     episodes the series has as far as anyone knows: the largest of the count listed, the highest
@@ -904,9 +901,18 @@ def series_report(
     highest = max(max(numbers, default=0), hint or 0)
     gaps = tuple(n for n in range(1, min(highest, MAX_EPISODE_NUMBER) + 1) if n not in numbers)
     obtained = set(done) | set(on_disk)
+    # What cannot be downloaded is left out of "every downloadable episode is on disk": a locked
+    # episode, and one this run skipped as locked although its payload reads as playable — a DRM
+    # verdict the manifest remembers (it is counted in `locked` all the same). With
+    # --include-locked such an episode is attempted instead, and a failure is a failure.
+    skipped_locked = set(locked)
     complete = (
         listed > 0
-        and all(episode.number in obtained for episode in series.episodes if not episode.locked)
+        and all(
+            episode.number in obtained
+            for episode in series.episodes
+            if not episode.locked and episode.number not in skipped_locked
+        )
         and not failed
         and not gaps
         and (hint is None or listed == hint)

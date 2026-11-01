@@ -31,8 +31,18 @@ RECHECK_AFTER_S = 24 * 3600
 ACCESS_MODES = ("free", "unlocked", "locked")
 #: Every DRM message starts with this: DramaFetch never decrypts and never keeps encrypted media.
 DRM_MARK = "protected by DRM"
-#: Why an encrypted download is deleted (``media.drm_problem``) or an episode is refused.
+#: Why an encrypted download is deleted (``media.drm_problem``) or an episode is refused: the
+#: verdict of a downloaded file (both engines) and of yt-dlp's own "DRM protected"
+#: (``downloader.describe_failure`` puts it first).
 DRM_MESSAGE = f"{DRM_MARK} (encrypted tracks): DramaFetch does not decrypt it"
+#: The message of an episode skipped because an earlier run's DOWNLOAD found it protected by DRM
+#: (``Manifest.drm_protected``): no request — retrying cannot change that verdict — unless
+#: ``--include-locked``. A row with it keeps the memory; a payload's DRM flag is never remembered
+#: (the payload is read again on every run).
+DRM_REMEMBERED_MESSAGE = (
+    f"{DRM_MARK} (found by an earlier run): DramaFetch does not decrypt it; "
+    "--include-locked tries again"
+)
 
 
 @dataclass(frozen=True)
