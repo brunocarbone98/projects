@@ -355,6 +355,7 @@ FUZZ_KEYS = (
     # re.IGNORECASE traps: \u0130 I with dot, \u0131 dotless i, \u017f long s, \u212a Kelvin
     "\u0130sLocked",
     "is\u212aocked",
+    "isLoc\u212aed",
     "\u0131s_locked",
     "unloc\u212aStatus",
     "has\u0130aid",
@@ -1606,9 +1607,7 @@ def test_series_report_report_line_and_report_to_dict_match_on_a_table_of_runs()
     )
 
 
-def test_report_line_matches_on_the_documented_lines_and_the_complete_skip_with_locked_episodes() -> (
-    None
-):
+def test_report_line_matches_on_the_documented_lines_and_the_complete_skip() -> None:
     base = engine.SeriesReport(
         "S1",
         "Name",
@@ -1627,7 +1626,7 @@ def test_report_line_matches_on_the_documented_lines_and_the_complete_skip_with_
         unlocked_numbers=(3,),
     )
     reports = [
-        base,  # complete: 3 of 4 (3 downloaded) - 1 paid episode your account unlocked (3), 1 locked (4)
+        base,  # complete: 3 of 4 (3 downloaded), 1 paid episode unlocked (3), 1 locked (4)
         replace(base, unlocked=2, unlocked_numbers=(2, 3)),
         replace(base, unlocked=0, unlocked_numbers=(), locked=0, locked_numbers=()),
         replace(
@@ -1717,7 +1716,8 @@ def test_report_line_matches_on_the_documented_lines_and_the_complete_skip_with_
     )
     assert (
         values[0]
-        == "complete: 3 of 4 (3 downloaded) \u2014 1 paid episode your account unlocked (3), 1 locked (4)"
+        == "complete: 3 of 4 (3 downloaded) \u2014 1 paid episode your account unlocked (3), "
+        "1 locked (4)"
     )
     assert values[10].endswith(f" \u2014 {engine.RECHECK_HINT}")
 
@@ -1802,7 +1802,8 @@ def test_the_text_box_follows_the_from_file_rules(tmp_path: Path) -> None:
     import argparse
 
     texts = [
-        f"# my list\n\n{SERIES_ID}\nhttps://www.tiktok.com/shortdrama/episode/{SECOND_SERIES_ID}/3  # second\n",
+        f"# my list\n\n{SERIES_ID}\n"
+        f"https://www.tiktok.com/shortdrama/episode/{SECOND_SERIES_ID}/3  # second\n",
         f"\ufeff{SERIES_ID}\r\n{SERIES_ID}\r{PAID_SERIES_ID}\n   \n\t# tab comment\n",
         f"  {SERIES_ID}\t#x\n{SERIES_ID}#not a comment\n",
         f"{SERIES_ID}\u3000# ideographic space before the hash\n\x85{PAID_SERIES_ID}\x85\n",
@@ -2072,7 +2073,7 @@ def test_the_pause_before_every_attempt_and_between_series_match() -> None:
         got = values[index * 3 : index * 3 + 3]
         before = engine.PacingState(attempts, last, streak)
         kind, seconds = engine._pause_before_attempt(
-            options, ScriptedRandom([draw]), before, lambda: now, made, previous
+            options, ScriptedRandom([draw]), before, lambda now=now: now, made, previous
         )
         rows.append(
             (
@@ -2087,8 +2088,8 @@ def test_the_pause_before_every_attempt_and_between_series_match() -> None:
             options,
             ScriptedRandom([draw]),
             between,
-            lambda: now,
-            lambda k, s: pauses.append((k, s)),
+            lambda now=now: now,
+            lambda k, s, pauses=pauses: pauses.append((k, s)),
             lambda _s: None,
         )
         js_between = dict(got[1]["pacing"])
@@ -2109,7 +2110,7 @@ def test_the_pause_before_every_attempt_and_between_series_match() -> None:
         rows.append(
             (
                 (index, "due"),
-                (engine.long_rest_due(options, due, lambda: now), js_pacing(due)),
+                (engine.long_rest_due(options, due, lambda now=now: now), js_pacing(due)),
                 (got[2]["due"], got[2]["pacing"]),
             )
         )
@@ -2118,42 +2119,47 @@ def test_the_pause_before_every_attempt_and_between_series_match() -> None:
     assert kinds == {engine.PACE, engine.REST, engine.LONG_REST}
 
 
+class ScriptedDownloader:
+    """A downloader that answers each episode with the next scripted ``(status, message)``."""
+
+    def __init__(self, queue: list[tuple[DownloadStatus, str]]) -> None:
+        self.queue = queue
+
+    def download(self, episode: Episode, options: DownloadOptions) -> DownloadResult:
+        status, message = self.queue.pop(0)
+        return DownloadResult(episode, status, message=message)
+
+
 def test_the_stop_rules_of_download_series_match(tmp_path: Path) -> None:
     """Scripted downloads through engine.download_series and the same results through the
     extension's afterResult: the same stop, the same summary, the same `stopped: \u2026` reason."""
-    S = DownloadStatus
+    ds = DownloadStatus
     scripts = [
         [
-            (S.DONE, "ok"),
-            (S.FAILED, "f1"),
-            (S.FAILED_UNAVAILABLE, "f2"),
-            (S.FAILED, "f3"),
-            (S.DONE, "x"),
+            (ds.DONE, "ok"),
+            (ds.FAILED, "f1"),
+            (ds.FAILED_UNAVAILABLE, "f2"),
+            (ds.FAILED, "f3"),
+            (ds.DONE, "x"),
         ],
-        [(S.FAILED, ""), (S.DONE, "ok"), (S.FAILED, "a"), (S.FAILED, "b"), (S.FAILED, "c")],
-        [(S.DONE, "ok"), (S.FAILED_RATE_LIMITED, "rate limited (HTTP 429)"), (S.DONE, "x")],
-        [(S.FAILED_BLOCKED, BLOCKED_MESSAGE), (S.DONE, "x")],
-        [(S.FAILED_LOGIN, ""), (S.DONE, "x")],
-        [(S.FAILED, "a"), (S.FAILED, "b"), (S.DONE, "ok"), (S.FAILED, "c"), (S.DONE, "y")],
+        [(ds.FAILED, ""), (ds.DONE, "ok"), (ds.FAILED, "a"), (ds.FAILED, "b"), (ds.FAILED, "c")],
+        [(ds.DONE, "ok"), (ds.FAILED_RATE_LIMITED, "rate limited (HTTP 429)"), (ds.DONE, "x")],
+        [(ds.FAILED_BLOCKED, BLOCKED_MESSAGE), (ds.DONE, "x")],
+        [(ds.FAILED_LOGIN, ""), (ds.DONE, "x")],
+        [(ds.FAILED, "a"), (ds.FAILED, "b"), (ds.DONE, "ok"), (ds.FAILED, "c"), (ds.DONE, "y")],
     ]
     for index, script in enumerate(scripts):
         cooldown.clear_cooldown()
         episodes = [Episode(n, f"i{n}", f"t{n}", "S1") for n in range(1, len(script) + 1)]
         series = Series("S1", "Name", episodes)
         queue = list(script)
-
-        class Scripted:
-            def download(self, episode: Episode, options: DownloadOptions) -> DownloadResult:
-                status, message = queue.pop(0)
-                return DownloadResult(episode, status, message=message)
-
         stops: list[str] = []
         pacing = engine.PacingState()
         results = engine.download_series(
             series,
             episodes,
             DownloadOptions(out_dir=tmp_path / str(index)),
-            downloader=Scripted(),
+            downloader=ScriptedDownloader(queue),
             sleep=lambda _s: None,
             rng=random.Random(1),
             pacing=pacing,
@@ -2161,53 +2167,30 @@ def test_the_stop_rules_of_download_series_match(tmp_path: Path) -> None:
             on_stop=stops.append,
         )
         made = len(script) - len(queue)
+        fresh = {"$pacing": {"runAttempts": 0, "lastNetworkAt": None, "consecutiveFailures": 0}}
+        scripted = [
+            {"episode": {"number": n}, "status": status.value, "message": message}
+            for n, (status, message) in enumerate(script, start=1)
+        ]
         replay = js_values(
             [
                 call(
-                    "parity.afterResult",
+                    "parity.afterResults",
                     js_pacing_options(DownloadOptions()),
-                    {
-                        "$pacing": {
-                            "runAttempts": 0,
-                            "lastNetworkAt": None,
-                            "consecutiveFailures": 0,
-                        }
-                    },
+                    fresh,
                     {"$clock": [50.0]},
-                    {"episode": {"number": n}, "status": status.value, "message": message},
+                    scripted,
                 )
-                for n, (status, message) in enumerate(script[:made], start=1)
             ]
-        )
-        # each replayed call starts from a fresh state: chain them the way download_series does
-        streak = 0
-        js_stop = None
-        for n, (status, message) in enumerate(script[:made], start=1):
-            chained = js_values(
-                [
-                    call(
-                        "parity.afterResult",
-                        js_pacing_options(DownloadOptions()),
-                        {
-                            "$pacing": {
-                                "runAttempts": n - 1,
-                                "lastNetworkAt": None,
-                                "consecutiveFailures": streak,
-                            }
-                        },
-                        {"$clock": [50.0]},
-                        {"episode": {"number": n}, "status": status.value, "message": message},
-                    )
-                ]
-            )[0]
-            streak = chained["pacing"]["consecutiveFailures"]
-            if chained["stop"] is not None:
-                js_stop = chained["stop"]
-                break
-        assert replay  # every scripted result went through the extension's rule too
+        )[0]
+        # the extension stops at the same result, with the run's attempts counted alike
+        assert replay["made"] == made, index
+        assert replay["pacing"]["runAttempts"] == made, index
+        js_stop = replay["stop"]
         stopped_rows = [r.message for r in results if r.message.startswith(engine.STOPPED_PREFIX)]
         if js_stop is None:
             assert stops == [] and stopped_rows == [], index
+            assert pacing.consecutive_failures == replay["pacing"]["consecutiveFailures"], index
             continue
         assert stops == [js_stop["summary"]], index
         assert all(
@@ -2449,7 +2432,7 @@ def test_the_state_follows_the_manifest_rules(tmp_path: Path) -> None:
     readable = [(index, raw) for index, raw in enumerate(saved) if raw is not None]
     reread = js_values([call("state.readState", raw, "S1") for _, raw in readable])
     rows = []
-    for (index, raw), value in zip(readable, reread, strict=True):
+    for (index, _raw), value in zip(readable, reread, strict=True):
         read = manifest.read_manifest(tmp_path / f"series{index}", "S1")
         assert read is not None
         expected = (
@@ -2584,7 +2567,7 @@ def test_report_rows_and_the_complete_skip_match(tmp_path: Path) -> None:
         run, start = skipped
         expected = {
             "results": [
-                (r.episode.number, r.episode.item_id, r.episode.title, r.status.value, r.message)
+                [r.episode.number, r.episode.item_id, r.episode.title, r.status.value, r.message]
                 for r in run.results
             ],
             "report": engine.report_to_dict(run.report),

@@ -37,6 +37,7 @@ import {
   hasEmbeddedCover,
   imageKind,
   imageProblem,
+  mebibytes,
   mimeTypeFor,
   probe,
   verifyVideo,
@@ -677,6 +678,14 @@ test("imageKind, imageProblem, formatSize, extensionFor and mimeTypeFor", () => 
       "5.0 MiB",
     ],
   );
+  // the DONE message's `saved <name> (1.2 MiB)`: Python's :.1f, ties to even
+  assert.deepEqual([0, 1_310_720, 1_572_864, 2_621_440, 104_857_600].map(mebibytes), [
+    "0.0",
+    "1.2",
+    "1.5",
+    "2.5",
+    "100.0",
+  ]);
   assert.deepEqual(["jpeg", "png", "webp"].map(extensionFor), [".jpg", ".png", ".webp"]);
   assert.deepEqual(["jpeg", "png", "webp"].map(mimeTypeFor), [
     "image/jpeg",
@@ -782,6 +791,30 @@ test("embedCover with a udta but no meta puts mutagen's meta first in it", () =>
   );
   assert.deepEqual(extractCover(out)?.data, PNG);
   assert.equal(verifyVideo(out, 3), null);
+});
+
+test("embedCover with the udta before the tracks moves the offset tables themselves", () => {
+  const [moov, moovSize] = at(TINY, "moov");
+  const children = boxes(TINY, moov + 8, moov + moovSize);
+  const order = ["mvhd", "udta", "trak"].flatMap((kind) =>
+    children.filter(([, , k]) => k === kind),
+  );
+  const early = concat(
+    TINY.subarray(0, moov + 8),
+    ...order.map(([pos, size]) => TINY.subarray(pos, pos + size)),
+    TINY.subarray(moov + moovSize),
+  );
+  assert.equal(early.length, TINY.length);
+  assert.equal(verifyVideo(early, 3), null);
+  const out = embedCover(early, JPEG);
+  const delta = BigInt(8 + 16 + JPEG.length);
+  assert.deepEqual(
+    chunkOffsets(out),
+    chunkOffsets(early).map((offset) => offset + delta),
+  );
+  assert.deepEqual(extractCover(out)?.data, JPEG);
+  assert.equal(verifyVideo(out, 3), null);
+  assert.deepEqual(probe(out), probe(TINY));
 });
 
 test("embedCover with the moov behind the mdat moves no chunk offset", () => {

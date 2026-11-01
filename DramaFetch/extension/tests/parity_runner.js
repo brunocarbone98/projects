@@ -34,7 +34,7 @@ import {
   record,
 } from "../src/lib/state.js";
 import { afterResult, longRestDue, pauseBeforeAttempt, pauseBetweenJobs, pauseBetweenSeries } from "../src/lib/pacing.js";
-import { reportToDict, seriesReport } from "../src/lib/report.js";
+import { completeSkip, reportRows, reportToDict, seriesReport } from "../src/lib/report.js";
 
 /** @typedef {{fn: string, args?: unknown[], omit?: string[]}} Call */
 
@@ -239,6 +239,39 @@ const ADAPTERS = {
   },
   stateRun([plan]) {
     return stateRun(/** @type {Parameters<typeof stateRun>[0]} */ (plan));
+  },
+  reportRows([series, results, raw, seriesId, exists]) {
+    const state = readState(raw, String(seriesId));
+    return reportRows(
+      /** @type {import("../src/lib/catalog.js").Series} */ (series),
+      /** @type {import("../src/lib/report.js").DownloadResult[]} */ (results),
+      state,
+      /** @type {import("../src/lib/state.js").FileExists} */ (exists),
+    );
+  },
+  completeSkip([raw, context, exists]) {
+    const where = /** @type {{seriesId: string, nowS: number}} */ (context);
+    const skipped = completeSkip(readState(raw, where.seriesId), {
+      seriesId: where.seriesId,
+      nowS: where.nowS,
+      exists: /** @type {import("../src/lib/state.js").FileExists} */ (exists),
+    });
+    if (skipped === null) return null;
+    return {
+      results: skipped.results.map((r) => [r.episode.number, r.episode.itemId, r.episode.title, r.status, r.message]),
+      report: reportToDict(skipped.report),
+      name: skipped.name,
+    };
+  },
+  afterResults([options, pacing, clock, results]) {
+    const state = /** @type {PacingState} */ (pacing);
+    let made = 0;
+    for (const result of /** @type {{episode: {number: number}, status: string, message: string}[]} */ (results)) {
+      made += 1;
+      const outcome = afterResult(/** @type {PacingOptions} */ (options), state, /** @type {Clock} */ (clock), result);
+      if (outcome.stop !== null) return { stop: outcome.stop, made, pacing: state };
+    }
+    return { stop: null, made, pacing: state };
   },
   seriesReportToDict([series, results, options]) {
     const report = seriesReport(

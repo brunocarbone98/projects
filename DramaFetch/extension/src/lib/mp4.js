@@ -1925,6 +1925,16 @@ export function formatSize(size) {
 }
 
 /**
+ * `f"{size / 2**20:.1f}"`: the size in MiB with one decimal, rounded half to even like Python —
+ * the number in the browser engine's DONE message, `saved <name> (<mebibytes> MiB)`.
+ * @param {number} size
+ * @returns {string}
+ */
+export function mebibytes(size) {
+  return pyFixed1(size, MIB);
+}
+
+/**
  * `thumbnails.extension_for`: `.jpg`, `.png` or `.webp`.
  * @param {string} kind
  * @returns {string}

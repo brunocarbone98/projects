@@ -17,6 +17,7 @@
  * - `{"op": "imageKind", "path", "contentType"}` → `imageKind`
  * - `{"op": "imageProblem", "path", "contentType"}` → `imageProblem`
  * - `{"op": "formatSize", "size"}` → `formatSize`
+ * - `{"op": "mebibytes", "size"}` → `mebibytes`
  * - `{"op": "embed", "video", "image", "kind"?, "name"?, "out"}` → `embedCover`, the result
  *   written to `out` (nothing is written when it throws); the value is `{"size": <bytes>}`
  * - `{"op": "extract", "path"}` → `extractCover`: `{"mime", "base64"}` or null
@@ -35,6 +36,7 @@ import {
   hasEmbeddedCover,
   imageKind,
   imageProblem,
+  mebibytes,
   probe,
   verifyVideo,
 } from "../src/lib/mp4.js";
@@ -95,6 +97,8 @@ function run(item) {
       return imageProblem(bytesOf(item.path), item.contentType ?? "");
     case "formatSize":
       return formatSize(Number(item.size));
+    case "mebibytes":
+      return mebibytes(Number(item.size));
     case "embed": {
       if (typeof item.out !== "string") throw new TypeError("an embed case needs an out path");
       const embedded = embedCover(
