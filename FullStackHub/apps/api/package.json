@@ -20,7 +20,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
-    "@prisma/client": "^6.5.0",
+    "@prisma/client": "^7.10.1",
     "@shipping-hub/shared": "workspace:*",
     "cors": "^2.8.5",
     "dotenv": "^18.0.9",
