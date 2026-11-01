@@ -170,7 +170,7 @@ def test_build_options_full(tmp_path):
     assert params["extractor_args"] == {
         "tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}
     }
-    # curl_cffi is installed in the venv, so impersonation is on by default
+    # curl_cffi is installed in the venv, in a version this yt-dlp supports: impersonation is on
     assert curl_cffi_available()
     from yt_dlp.networking.impersonate import ImpersonateTarget
 
@@ -223,6 +223,25 @@ def test_writethumbnail_follows_the_thumbnail_mode():
 def test_build_options_omits_impersonation_when_curl_cffi_is_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "curl_cffi", None)  # makes `import curl_cffi` fail
     assert not curl_cffi_available()
+    assert impersonate_target() is None
+    params = YtDlpDownloader(lambda p: None).build_options(EPISODE, DownloadOptions(), "o.%(ext)s")
+    assert "impersonate" not in params
+
+
+def test_impersonation_is_off_when_yt_dlp_cannot_use_the_installed_curl_cffi(monkeypatch):
+    """A curl_cffi outside the range yt-dlp supports leaves yt-dlp without an impersonation
+    handler; asked to impersonate anyway, its YoutubeDL refuses to start, so every episode would
+    fail. DramaFetch asks yt-dlp first and downloads without impersonation instead."""
+    import yt_dlp
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+
+    monkeypatch.setattr(
+        yt_dlp.YoutubeDL, "_impersonate_target_available", lambda self, target: False
+    )
+    assert curl_cffi_available()
+    # what DramaFetch avoids: yt-dlp refuses to start
+    with pytest.raises(yt_dlp.utils.YoutubeDLError, match="is not available"):
+        yt_dlp.YoutubeDL({"quiet": True, "impersonate": ImpersonateTarget("chrome")})
     assert impersonate_target() is None
     params = YtDlpDownloader(lambda p: None).build_options(EPISODE, DownloadOptions(), "o.%(ext)s")
     assert "impersonate" not in params

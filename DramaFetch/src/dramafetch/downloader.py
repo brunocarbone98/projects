@@ -157,14 +157,31 @@ def curl_cffi_available() -> bool:
 
 
 def impersonate_target() -> Any | None:
-    """``ImpersonateTarget("chrome")`` when both curl_cffi and yt-dlp's impersonation exist."""
+    """``ImpersonateTarget("chrome")`` when yt-dlp can impersonate Chrome, else None (off).
+
+    curl_cffi importing is not enough: yt-dlp supports a range of curl_cffi versions only (0.10
+    through 0.17.x in yt-dlp 2026.10.26, ``yt_dlp/networking/_curlcffi.py``). Outside it, yt-dlp's
+    curl_cffi handler does not load, and a YoutubeDL asked to impersonate refuses to start
+    (``Impersonate target "chrome" is not available``): every episode would fail. So the target
+    is returned only when yt-dlp's own check, the one its constructor runs on ``impersonate``,
+    accepts it; otherwise impersonation is off, as without curl_cffi.
+    """
     if not curl_cffi_available():
         return None
     try:
+        import yt_dlp
         from yt_dlp.networking.impersonate import ImpersonateTarget
     except Exception:
         return None
-    return ImpersonateTarget("chrome")
+    target = ImpersonateTarget("chrome")
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as probe:
+            available = getattr(probe, "_impersonate_target_available", None)
+            if available is not None and not available(target):
+                return None
+    except Exception:
+        return None
+    return target
 
 
 def format_for(quality: str) -> str:

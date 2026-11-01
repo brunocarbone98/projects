@@ -1636,6 +1636,18 @@ def test_doctor_runs_without_a_browser_and_exits_0(capsys):
     assert [check["name"] for check in cli.doctor_as_dicts(browser_channel="chrome")] == names[:7]
 
 
+def test_doctor_says_impersonation_is_off_when_yt_dlp_cannot_use_curl_cffi(monkeypatch, capsys):
+    """curl_cffi installed in a version this yt-dlp does not support: no check mark, but what that
+    means (downloads without impersonation) and how to get a version yt-dlp supports."""
+    monkeypatch.setattr(cli, "impersonate_target", lambda: None)
+    assert cli.main(["doctor"]) == 0
+    line = next(x for x in capsys.readouterr().out.splitlines() if " curl_cffi: " in x)
+    assert line == (
+        "– curl_cffi: installed, but this yt-dlp does not support its version: "  # noqa: RUF001
+        "impersonation off (pip install -U 'yt-dlp[curl-cffi]' installs one it supports)"
+    )
+
+
 def test_doctor_without_mutagen_says_covers_stay_files(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "mutagen", None)  # `import mutagen` now fails
     assert cli.main(["doctor", "--browser-channel", "chrome"]) == 0

@@ -48,7 +48,7 @@ from typing import Any
 from dramafetch import __version__, engine
 from dramafetch.cooldown import cooldown_message, cooldown_summary
 from dramafetch.discovery.cookies import cookie_file_problems
-from dramafetch.downloader import MAX_RETRIES, curl_cffi_available
+from dramafetch.downloader import MAX_RETRIES, curl_cffi_available, impersonate_target
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -1272,14 +1272,21 @@ def _check_yt_dlp() -> DoctorCheck:
 
 
 def _check_curl_cffi() -> DoctorCheck:
-    if curl_cffi_available():
+    if not curl_cffi_available():
         return DoctorCheck(
-            "curl_cffi", "ok", "importable: yt-dlp impersonates Chrome's TLS fingerprint"
+            "curl_cffi",
+            "skip",
+            "not installed: impersonation off (optional: pip install 'dramafetch[impersonate]')",
+        )
+    if impersonate_target() is None:
+        return DoctorCheck(
+            "curl_cffi",
+            "skip",
+            "installed, but this yt-dlp does not support its version: impersonation off "
+            "(pip install -U 'yt-dlp[curl-cffi]' installs one it supports)",
         )
     return DoctorCheck(
-        "curl_cffi",
-        "skip",
-        "not installed: impersonation off (optional: pip install 'dramafetch[impersonate]')",
+        "curl_cffi", "ok", "importable: yt-dlp impersonates Chrome's TLS fingerprint"
     )
 
 

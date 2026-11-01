@@ -358,6 +358,7 @@ A hosted "paste a link, get the file" site would have to do four things this too
 | "no episode list within N s" | The page did not load the list → `--timeout 90`, `--headful` to watch, `--strategy browser`; then `--dump-raw raw/` and open an issue with the files |
 | Episodes missing / "gap" warning | TikTok paginated differently or hides locked items → `info` prints the warnings; `--dump-raw` shows what the API returned |
 | Short link `vm.tiktok.com/…` rejected | Short links are not resolved → open it in the browser and paste the full `/shortdrama/episode/` address |
+| `doctor` shows `– curl_cffi: installed, but this yt-dlp does not support its version` | The installed curl_cffi is outside the range your yt-dlp accepts (yt-dlp 2026.10.26: 0.10 through 0.17.x), so yt-dlp cannot impersonate Chrome with it; DramaFetch then downloads without impersonation instead of failing every episode → `pip install -U "yt-dlp[curl-cffi]"` installs a curl_cffi that yt-dlp supports |
 
 ## Limitations
 
