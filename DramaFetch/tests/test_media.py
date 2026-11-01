@@ -3,6 +3,7 @@ the `(incomplete)` quarantine naming."""
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import sys
@@ -18,10 +19,13 @@ from dramafetch.media import (
     DURATION_TOLERANCE_S,
     INCOMPLETE_MARK,
     INCOMPLETE_PREFIX,
+    RENAME_RETRIES,
+    RENAME_RETRY_DELAY_S,
     VideoProbe,
     atom_problem,
     probe_video,
     quarantine,
+    quarantine_note,
     verify_video,
 )
 from dramafetch.models import DownloadOptions, Episode
@@ -215,3 +219,75 @@ def test_a_quarantined_file_never_counts_as_the_episode(tmp_path):
     quarantine(video)
     assert existing_episode_file(tmp_path, episode, options) is None
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Heiress - Episode 01 (incomplete).mp4"]
+
+
+def test_quarantine_retries_a_refused_rename_before_giving_up(tmp_path, monkeypatch):
+    """A rename the OS refuses (on Windows, a just-written file an antivirus or indexer still
+    holds) is tried again RENAME_RETRIES times, RENAME_RETRY_DELAY_S apart, through the injected
+    sleep — no test waits for real; refused for good, the last OSError propagates."""
+    real_rename = Path.rename
+    refusals = {"left": 2}
+
+    def flaky(self, target):
+        if refusals["left"]:
+            refusals["left"] -= 1
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    pauses = []
+    kept = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"x"), sleep=pauses.append)
+    assert kept == tmp_path / "Heiress - Episode 01 (incomplete).mp4" and kept.read_bytes() == b"x"
+    assert (RENAME_RETRIES, RENAME_RETRY_DELAY_S) == (2, 0.5) and pauses == [0.5, 0.5]
+    refusals["left"], pauses[:] = 10, []
+    with pytest.raises(PermissionError):
+        quarantine(_write(tmp_path, "Heiress - Episode 02.mp4", b"y"), sleep=pauses.append)
+    assert pauses == [RENAME_RETRY_DELAY_S] * RENAME_RETRIES
+    assert (tmp_path / "Heiress - Episode 02.mp4").read_bytes() == b"y"
+
+
+def test_quarantine_note_names_the_kept_file(tmp_path):
+    video = _write(tmp_path, "Heiress - Episode 01.mp4", b"x")
+    assert quarantine_note(video) == "kept as Heiress - Episode 01 (incomplete).mp4"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Heiress - Episode 01 (incomplete).mp4"]
+
+
+def test_quarantine_note_deletes_a_file_the_os_will_not_rename(tmp_path, monkeypatch, caplog):
+    """The one case in which a download is deleted: left under the episode's name, the bad file
+    would be taken for the episode and the next run would skip it as done. Logged at WARNING."""
+
+    def refuse(path, **_):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(media, "quarantine", refuse)
+    video = _write(tmp_path, "Heiress - Episode 01.mp4", b"x")
+    with caplog.at_level(logging.WARNING, logger="dramafetch.media"):
+        note = quarantine_note(video)
+    assert note == (
+        "could not rename Heiress - Episode 01.mp4: Permission denied; deleted, so that it does "
+        "not pass for the episode"
+    )
+    assert not video.exists() and list(tmp_path.iterdir()) == []
+    assert "deleted, so that it does not pass for the episode" in caplog.text
+
+
+def test_quarantine_note_says_what_to_do_when_the_file_cannot_be_deleted_either(
+    tmp_path, monkeypatch, caplog
+):
+    def refuse(path, **_):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    def refuse_unlink(self, missing_ok=False):
+        raise PermissionError(errno.EACCES, "Permission denied", str(self))
+
+    monkeypatch.setattr(media, "quarantine", refuse)
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    video = _write(tmp_path, "Heiress - Episode 01.mp4", b"x")
+    with caplog.at_level(logging.WARNING, logger="dramafetch.media"):
+        note = quarantine_note(video)
+    assert note == (
+        "could not rename or delete Heiress - Episode 01.mp4: Permission denied — delete it by "
+        "hand, or the next run skips the episode as already downloaded"
+    )
+    assert video.read_bytes() == b"x"  # still there, under the episode's name
+    assert "it would pass for the episode" in caplog.text

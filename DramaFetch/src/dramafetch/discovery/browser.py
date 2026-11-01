@@ -307,7 +307,7 @@ class PlaywrightDiscovery:
                 if _page_shows_challenge(page):
                     raise ChallengeError(
                         "TikTok is asking for a verification (captcha) instead of the series: "
-                        "run again with --headful and solve it in the window"
+                        "after the cooldown, run again with --headful and solve it in the window"
                     )
             if now >= deadline:
                 if options.cookies_file is None:

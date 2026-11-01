@@ -8,7 +8,9 @@ number of seconds). mutagen reads the index at the front of the file (``moov``) 
 when the samples behind it (``mdat``) stop early, so :func:`atom_problem` also walks the top-level
 atoms and reports one whose declared size runs past the end of the file. A file that fails is not
 deleted but renamed ``<name> (incomplete).<ext>`` (:func:`quarantine`): the bytes stay for
-inspection, the stem no longer matches the episode's, so a rerun downloads it again. Nothing here
+inspection, the stem no longer matches the episode's, so a rerun downloads it again — with one
+exception, a file the OS refuses to rename even after a few retries, which :func:`quarantine_note`
+deletes instead: left under the episode's name it would pass for the episode. Nothing here
 decodes video; ffmpeg is not needed. A locked episode served as a short preview is exactly what the
 duration check catches.
 """
@@ -16,6 +18,8 @@ duration check catches.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +35,11 @@ log = logging.getLogger(__name__)
 INCOMPLETE_MARK = " (incomplete)"
 #: Prefix of the message of an episode whose saved file failed the verification.
 INCOMPLETE_PREFIX = "download looks incomplete or wrong: "
+#: A rename the OS refuses — on Windows, a just-written file that an antivirus or an indexer still
+#: holds — is tried again this many times, :data:`RENAME_RETRY_DELAY_S` apart, before
+#: :func:`quarantine_note` gives up and deletes the file instead.
+RENAME_RETRIES = 2
+RENAME_RETRY_DELAY_S = 0.5
 #: Containers :func:`verify_video` judges; another suffix returns None (TikTok serves MP4 only).
 MP4_SUFFIXES = frozenset({".mp4", ".m4v", ".mov"})
 #: Duration tolerance: TikTok's ``duration`` is a whole number of seconds and the container's own
@@ -184,18 +193,71 @@ def atom_problem(path: Path) -> str | None:
     return None
 
 
-def quarantine(path: Path) -> Path:
+def quarantine(path: Path, *, sleep: Callable[[float], None] = time.sleep) -> Path:
     """Rename ``<stem>.<ext>`` to ``<stem> (incomplete).<ext>`` — ``<stem> (incomplete 2).<ext>``
     and so on when that name is taken, never overwriting anything — and return the new path. The
     stem no longer matches the episode's, so ``existing_episode_file`` ignores it and a rerun tries
-    the episode again, while the manifest records the failure with the reason."""
+    the episode again, while the manifest records the failure with the reason. A rename the OS
+    refuses is tried again :data:`RENAME_RETRIES` times, :data:`RENAME_RETRY_DELAY_S` apart
+    (``sleep`` is injectable: no test waits for real); the last ``OSError`` propagates."""
     attempt = 1
     while True:
         mark = INCOMPLETE_MARK if attempt == 1 else f" (incomplete {attempt})"
         target = path.with_name(f"{path.stem}{mark}{path.suffix}")
         if not target.exists():
-            return path.rename(target)
+            break
         attempt += 1
+    for _ in range(RENAME_RETRIES):
+        try:
+            return path.rename(target)
+        except OSError as exc:
+            log.debug("renaming %s refused (%s); trying again", path.name, exc.strerror)
+            sleep(RENAME_RETRY_DELAY_S)
+    return path.rename(target)
+
+
+def quarantine_note(path: Path, *, sleep: Callable[[float], None] = time.sleep) -> str:
+    """Move a file that failed :func:`verify_video` out of the episode's way and say what became
+    of it — the parenthesised end of the engines' FAILED message, after the reason:
+
+    * ``"kept as <stem> (incomplete).<ext>"`` — the normal case (:func:`quarantine`);
+    * ``"could not rename <name>: <OS error>; deleted, so that it does not pass for the
+      episode"`` — the OS refused the rename even after the retries, so the file was deleted: the
+      one case in which DramaFetch deletes a download, because a bad file left under the
+      episode's name would be taken for the episode (``existing_episode_file``) and the next run
+      would skip it as done;
+    * ``"could not rename or delete <name>: <OS error> — delete it by hand, or the next run skips
+      the episode as already downloaded"`` — not even that worked (a file another program holds
+      open, on Windows); the file is still there, under the episode's name.
+
+    Both failures are logged at WARNING. Never raises for an OS error.
+    """
+    try:
+        kept = quarantine(path, sleep=sleep)
+    except OSError as exc:
+        reason = exc.strerror or exc.__class__.__name__
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            log.warning(
+                "could not rename or delete %s (%s): it would pass for the episode",
+                path.name,
+                reason,
+            )
+            return (
+                f"could not rename or delete {path.name}: {reason} — delete it by hand, or the "
+                "next run skips the episode as already downloaded"
+            )
+        log.warning(
+            "could not rename %s (%s): deleted, so that it does not pass for the episode",
+            path.name,
+            reason,
+        )
+        return (
+            f"could not rename {path.name}: {reason}; deleted, so that it does not pass for the "
+            "episode"
+        )
+    return f"kept as {kept.name}"
 
 
 def _cut_short(kind: bytes, have: int, need: int | None) -> str:

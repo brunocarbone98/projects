@@ -12,9 +12,10 @@ anything. Cookie values are never logged; error messages are redacted just in ca
 Every file yt-dlp produces is verified before anything else happens to it
 (``dramafetch.media.verify_video``: an MP4 that parses, is not cut short, has an audio track and
 lasts about ``Episode.duration_s``) unless ``DownloadOptions.verify`` is off; a file that fails is
-renamed ``<name> (incomplete).<ext>`` (``media.quarantine``), the cover yt-dlp wrote is deleted and
-the episode is FAILED with ``"download looks incomplete or wrong: <reason> (kept as <name>)"`` —
-a rerun tries it again. Only then is the episode cover yt-dlp saved next to the video
+renamed ``<name> (incomplete).<ext>`` (``media.quarantine``; one the OS will not rename is deleted
+rather than left under the episode's name), the cover yt-dlp wrote is deleted and the episode is
+FAILED with ``"download looks incomplete or wrong: <reason> (kept as <name>)"`` — a rerun tries it
+again. Only then is the episode cover yt-dlp saved next to the video
 (``writethumbnail``) embedded into the MP4 as its cover art, kept as a file, or both, as
 ``DownloadOptions.thumbnail`` says (see :func:`_finish_cover` and ``dramafetch.thumbnails``);
 what became of it is appended to the DONE message and never changes the status.
@@ -34,7 +35,7 @@ from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.discovery.static import redact_tokens, safe_url
 from dramafetch.errors import ThumbnailError
 from dramafetch.manifest import episode_stem
-from dramafetch.media import INCOMPLETE_PREFIX, quarantine, verify_video
+from dramafetch.media import INCOMPLETE_PREFIX, quarantine_note, verify_video
 from dramafetch.models import DownloadOptions, DownloadResult, DownloadStatus, Episode
 from dramafetch.thumbnails import (
     COVER_SUFFIXES,
@@ -421,29 +422,21 @@ class YtDlpDownloader:
         file is renamed ``<name> (incomplete).<ext>`` (:func:`~dramafetch.media.quarantine`) so
         that a rerun tries the episode again, the cover yt-dlp wrote next to it is deleted (no
         cover is embedded into or kept for a bad download), and the message is
-        ``"download looks incomplete or wrong: <problem> (kept as <name>)"``. A file that cannot
-        be renamed is reported as such and left in place (logged at WARNING)."""
+        ``"download looks incomplete or wrong: <problem> (kept as <name>)"``. A file the OS will
+        not rename is deleted instead — never left under the episode's name, where the next run
+        would skip it as done — and the note says so (:func:`~dramafetch.media.quarantine_note`)."""
         sidecar = _written_cover(produced)
         if sidecar is not None:
             try:
                 sidecar.unlink()
             except OSError as exc:
                 log.debug("could not delete the cover %s: %s", sidecar.name, exc.strerror)
-        try:
-            kept = quarantine(produced)
-        except OSError as exc:
-            log.warning("could not quarantine %s: %s", produced.name, exc.strerror)
-            return DownloadResult(
-                episode=episode,
-                status=DownloadStatus.FAILED,
-                message=f"{INCOMPLETE_PREFIX}{problem} (could not rename {produced.name}: "
-                f"{exc.strerror or exc.__class__.__name__})",
-            )
-        log.debug("episode %s: %s; kept as %s", episode.number, problem, kept.name)
+        note = quarantine_note(produced)
+        log.debug("episode %s: %s (%s)", episode.number, problem, note)
         return DownloadResult(
             episode=episode,
             status=DownloadStatus.FAILED,
-            message=f"{INCOMPLETE_PREFIX}{problem} (kept as {kept.name})",
+            message=f"{INCOMPLETE_PREFIX}{problem} ({note})",
         )
 
     @staticmethod

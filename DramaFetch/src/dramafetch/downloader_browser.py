@@ -16,13 +16,16 @@ most :data:`MAX_GETS_PER_EPISODE` per episode (the engine paces the calls; this 
 retries on its own beyond the next listed URL), a stop at the first sign of blocking (HTTP 429, a
 captcha page), Chromium with its default flags, a Chrome user agent, nothing hidden and nothing
 bypassed. The renditions are tried in the order ``DownloadOptions.quality`` gives them
-(``catalog.play_url_candidates``). A body shorter than the announced ``Content-Length`` — or a
-transfer the server cut short, which Playwright reports as ``aborted`` — fails the episode at once
-(``FAILED``, "download looks incomplete or wrong: truncated body …"): a truncation is the network,
-not the URL, so no other mirror is tried and no list is refreshed. Every written video is then
-verified (``dramafetch.media.verify_video``, unless ``DownloadOptions.verify`` is off) BEFORE the
-cover step: a file that fails is renamed ``<name> (incomplete).mp4`` and the episode is FAILED, so
-a rerun tries it again and no cover is fetched for it. Once an episode's video is written and
+(``catalog.play_url_candidates``). A body shorter than the announced ``Content-Length`` (of an
+identity-encoded body: under ``gzip``/``br`` the header counts the encoded stream and the check is
+Node's) — or a transfer the server cut short, which Playwright reports as ``aborted`` — fails the
+episode at once (``FAILED``, "download looks incomplete or wrong: truncated body …"), whatever
+``DownloadOptions.verify`` says: a truncation is the network, not the URL, so no other mirror is
+tried and no list is refreshed, and nothing is written. Every written video is then verified
+(``dramafetch.media.verify_video``, unless ``DownloadOptions.verify`` is off) BEFORE the cover
+step: a file that fails is renamed ``<name> (incomplete).mp4`` (one the OS will not rename is
+deleted rather than left under the episode's name) and the episode is FAILED, so a rerun tries it
+again and no cover is fetched for it. Once an episode's video is written and
 verified, and only then, one more small request fetches its cover image (``Episode.cover_url``)
 unless ``DownloadOptions.thumbnail`` is ``none``; by default
 the cover goes INTO the MP4 as its cover art (``dramafetch.thumbnails.embed_cover``, never
@@ -57,7 +60,7 @@ from dramafetch.errors import (
     ThumbnailError,
 )
 from dramafetch.manifest import episode_stem
-from dramafetch.media import INCOMPLETE_PREFIX, quarantine, verify_video
+from dramafetch.media import INCOMPLETE_PREFIX, quarantine_note, verify_video
 from dramafetch.models import (
     DiscoveryOptions,
     DownloadOptions,
@@ -111,6 +114,11 @@ _MP4_MAGIC = b"ftyp"
 _ABORTED_RE = re.compile(
     r"\baborted\b|socket hang up|econnreset|content[- ]length mismatch|premature", re.IGNORECASE
 )
+#: ``Content-Encoding`` values under which ``Content-Length`` is the length of the body itself.
+#: Under any other (``gzip``, ``br``, ``deflate``) it is the encoded stream's, while Playwright's
+#: request API hands over the DECODED body, so the two are not compared (TikTok's video CDN serves
+#: identity-encoded MP4s; a transfer of an encoded body cut short still fails: Node reports it).
+_IDENTITY_ENCODINGS = frozenset({"", "identity"})
 
 
 @dataclass(frozen=True)
@@ -358,13 +366,13 @@ class BrowserDownloader:
             if options.verify:
                 failure = verify_video(target, episode.duration_s)
                 if failure is not None:
-                    kept = quarantine(target)
-                    log.debug("episode %s: %s; kept as %s", episode.number, failure, kept.name)
+                    note = quarantine_note(target)
+                    log.debug("episode %s: %s (%s)", episode.number, failure, note)
                     return (
                         DownloadResult(
                             episode=episode,
                             status=DownloadStatus.FAILED,
-                            message=f"{INCOMPLETE_PREFIX}{failure} (kept as {kept.name})",
+                            message=f"{INCOMPLETE_PREFIX}{failure} ({note})",
                         ),
                         None,
                     )
@@ -607,7 +615,12 @@ def _default_factory() -> Callable[[], Any]:
 
 
 def _content_length(headers: dict[str, str]) -> int | None:
-    """The numeric ``Content-Length`` a response announced, None when absent or not a number."""
+    """The numeric ``Content-Length`` a response announced for the body as handed over: None when
+    absent, not a number, or when a ``Content-Encoding`` other than identity transformed the body
+    (see :data:`_IDENTITY_ENCODINGS`: the header then counts the encoded stream, which Node checks
+    itself, while ``body()`` is the decoded one — the two cannot be compared)."""
+    if headers.get("content-encoding", "").strip().lower() not in _IDENTITY_ENCODINGS:
+        return None
     value = headers.get("content-length", "").strip()
     return int(value) if value.isdigit() else None
 

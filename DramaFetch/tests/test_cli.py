@@ -603,6 +603,20 @@ def test_discovery_errors_map_to_exit_codes(fake_discovery, capsys, error, code,
     assert hint in err
 
 
+def test_the_captcha_help_defers_the_headful_rerun_to_after_the_cooldown(fake_discovery, capsys):
+    """A captcha starts the 30-minute cooldown (engine.resolve records it), so the help must not
+    send the user straight back to TikTok: it names the cooldown, and the rerun it recommends —
+    `--headful` — is refused with exit 5 and no discovery call until the cooldown has ended."""
+    fake_discovery.error = ChallengeError("Verify to continue")
+    assert cli.main(["info", SERIES_URL]) == 4
+    err = capsys.readouterr().err
+    assert "30-minute cooldown" in err and "--headful" in err
+    assert active_cooldown() is not None
+    assert cli.main(["info", SERIES_URL, "--headful"]) == 5
+    assert "error: TikTok refused a request at " in capsys.readouterr().err
+    assert len(fake_discovery.calls) == 1  # the rerun made no request
+
+
 def _cjk_series():
     episode = Episode(
         number=1,

@@ -5,6 +5,7 @@ refresh, bad bodies, error sanitising, atomic writes and close()."""
 
 from __future__ import annotations
 
+import errno
 import sys
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 import pytest
 
 from dramafetch import downloader_browser, engine
+from dramafetch import media as media_module
 from dramafetch.discovery.browser import FETCH_JS
 from dramafetch.downloader import redact_secrets
 from dramafetch.downloader_browser import (
@@ -1569,6 +1571,68 @@ def test_a_video_far_shorter_than_the_list_says_is_quarantined_and_gets_no_cover
     # --no-verify accepts the same file (a debugging aid), and the cover follows as usual
     off = downloader.download(episode, _options(tmp_path / "off", verify=False))
     assert off.status is DownloadStatus.DONE and off.message == f"{SAVED} + cover embedded"
+
+
+def test_a_bad_file_the_os_will_not_rename_is_deleted_so_that_a_rerun_tries_again(
+    playwright, tmp_path, monkeypatch
+):
+    """The same rule as the yt-dlp engine's: a rename refused for good must not leave the bad file
+    under the episode's name, where the next run would skip it as `skipped-exists`; it is deleted,
+    the message says so, no cover is requested, and a rerun downloads the episode again."""
+
+    def refuse(path, **_):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(media_module, "quarantine", refuse)
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    episode = _episode(1, _item(1, ITEM_1, _url("ep1")), cover_url=COVER, duration_s=120)
+    downloader = _downloader(playwright)
+
+    result = downloader.download(episode, _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED and result.path is None
+    assert result.message == (
+        f"{INCOMPLETE_PREFIX}duration 3 s, expected 120 s (could not rename {STEM}.mp4: "
+        "Permission denied; deleted, so that it does not pass for the episode)"
+    )
+    assert not list(tmp_path.iterdir())
+    again = downloader.download(episode, _options(tmp_path))
+    assert again.status is DownloadStatus.FAILED  # tried again, not skipped-exists
+    assert playwright.request.urls == [_url("ep1"), _url("ep1")]  # and still no cover request
+
+
+def test_a_content_encoded_body_is_not_compared_with_the_announced_length(playwright, tmp_path):
+    """Playwright's request API hands over the DECODED body while `content-length` counts the
+    encoded stream, so under `Content-Encoding: gzip` (br, deflate) the two differ by design:
+    no truncation, the episode is DONE. `identity`, or no encoding at all, keeps the check."""
+    gzipped = FakeAPIResponse(
+        headers={"content-length": str(len(VIDEO) - 1000), "content-encoding": "gzip"}
+    )
+    playwright.request.answer(_url("gz"), gzipped)
+    downloader = _downloader(playwright)
+
+    result = downloader.download(
+        _episode(1, _item(1, ITEM_1, _url("gz"))), _options(tmp_path, thumbnail="none")
+    )
+
+    assert result.status is DownloadStatus.DONE and result.message == SAVED
+    assert (tmp_path / f"{STEM}.mp4").read_bytes() == VIDEO
+    content_length = downloader_browser._content_length
+    assert content_length({"content-length": "10", "content-encoding": "br"}) is None
+    assert content_length({"content-length": "10", "content-encoding": " Identity "}) == 10
+    assert content_length({"content-length": "10"}) == 10
+    identity = FakeAPIResponse(
+        headers={"content-length": str(len(VIDEO) + 1), "content-encoding": "identity"}
+    )
+    playwright.request.answer(_url("id"), identity)
+    short = downloader.download(
+        _episode(2, _item(2, "2", _url("id"))), _options(tmp_path, thumbnail="none")
+    )
+    assert short.status is DownloadStatus.FAILED
+    assert short.message == (
+        f"{INCOMPLETE_PREFIX}truncated body ({len(VIDEO)} of {len(VIDEO) + 1} bytes) "
+        f"from {CDN_HOST}"
+    )
 
 
 def test_a_body_that_is_not_an_mp4_is_quarantined_before_any_cover_request(playwright, tmp_path):

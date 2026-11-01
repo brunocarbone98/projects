@@ -88,8 +88,9 @@ LOGIN_HELP = (
     "and rerun with --cookies cookies.txt. Keep that file private; it expires."
 )
 CHALLENGE_HELP = (
-    "TikTok asked for a human check (captcha). Rerun with --headful to solve it in the browser "
-    "window, then try again; fresh cookies from the same browser help too."
+    "TikTok asked for a human check (captcha), which also starts the 30-minute cooldown "
+    "(`dramafetch doctor` shows until when). Once it has ended, rerun with --headful and solve "
+    "the check in the browser window; fresh cookies from the same browser help too."
 )
 LEGAL_NOTICE = (
     "DramaFetch is for personal, offline viewing of episodes that your own TikTok account can "
@@ -158,7 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = commands.add_parser(
         "doctor",
-        help="check Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg, cookies and mutagen",
+        help="check Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg, cookies, mutagen and "
+        "whether a TikTok cooldown is in force",
     )
     _add_cookies_flag(doctor)
     doctor.add_argument("--browser-channel", choices=("chrome", "msedge", "chromium"), default=None)

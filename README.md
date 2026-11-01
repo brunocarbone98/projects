@@ -105,7 +105,7 @@ DramaFetch — Python 3.11+; episode discovery needs Playwright's Chromium (`pla
 
 ```bash
 cd DramaFetch && python -m venv .venv && . .venv/bin/activate && pip install -e ".[impersonate,dev]"
-dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg, cookies (names only, never values), mutagen
+dramafetch doctor --cookies cookies.txt                 # Python, yt-dlp, curl_cffi, Playwright, browser, ffmpeg, cookies (names only, never values), mutagen, cooldown
 dramafetch download "https://www.tiktok.com/shortdrama/episode/<series id>/1" --cookies cookies.txt
 ```
 

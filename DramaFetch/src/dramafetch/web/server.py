@@ -159,8 +159,8 @@ LOGIN_HINT = (
     "restart the server: dramafetch serve --cookies cookies.txt"
 )
 CHALLENGE_HINT = (
-    "TikTok wants a human check: restart with --headful, solve it in the window that opens and "
-    "try again"
+    "TikTok wants a human check, which also starts the 30-minute cooldown: once it has ended, "
+    "restart with --headful, solve it in the window that opens and try again"
 )
 RATE_LIMIT_HINT = (
     "TikTok is rate-limiting this address: wait 30-60 minutes before resolving or downloading "

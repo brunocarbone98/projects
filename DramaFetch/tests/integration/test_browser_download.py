@@ -410,6 +410,26 @@ def test_a_truncated_transfer_fails_the_episode_without_a_retry_or_a_cover(
     assert not series_dir.exists() or list(series_dir.iterdir()) == []
 
 
+def test_a_gzip_encoded_body_is_not_mistaken_for_a_truncation(tmp_path: Path) -> None:
+    """`gzip_media`: the CDN compresses the body and announces the COMPRESSED size. Chromium's
+    request API hands DramaFetch the decoded bytes with the headers as sent, so comparing the two
+    would condemn every such episode as `truncated body (131072 of … bytes)`; the comparison is
+    for identity-encoded bodies only — the episode is DONE, the file is the CDN's MP4 byte for
+    byte, one request."""
+    with FakeTikTok(gzip_media=True) as server:
+        series = _series_from_server(server)
+        before = len(server.requests)
+        with BrowserDownloader() as downloader:
+            result = downloader.download(
+                series.episode(1), _options(server, tmp_path, thumbnail="none")
+            )
+        after = server.requests[before:]
+
+    assert result.status is DownloadStatus.DONE
+    _assert_video_file(result.path, EPISODE_1, ITEM_1, embedded=False)
+    assert [r.path for r in after] == [MEDIA_1]
+
+
 def test_a_video_far_shorter_than_announced_is_quarantined_and_a_rerun_tries_again(
     tmp_path: Path,
 ) -> None:

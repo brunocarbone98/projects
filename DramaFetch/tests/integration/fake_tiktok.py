@@ -36,7 +36,10 @@ Routes (all GET):
                                  preview looks like; the engines' verification must fail it.
                                  `truncate_media` announces the full `Content-Length` but sends
                                  only 60 % of the body (`TRUNCATE_RATIO`) and drops the
-                                 connection: a transfer cut short by the network.
+                                 connection: a transfer cut short by the network. `gzip_media`
+                                 serves the body `Content-Encoding: gzip` with the COMPRESSED
+                                 size as `Content-Length`: the client's decoded body is longer
+                                 than announced, which is no truncation.
   /cover/<item_id>.jpg           the fake image CDN. Every `https://p16-sign-sg.tiktokcdn.com/...`
                                  cover URL inside an item_list payload (`video.cover`,
                                  `originCover`, `dynamicCover`) is rewritten to
@@ -50,6 +53,7 @@ The request log keeps method, path and query plus three booleans; never headers 
 
 from __future__ import annotations
 
+import gzip
 import json
 import random
 import re
@@ -174,6 +178,8 @@ class FakeOptions:
     # Integrity failures (both make the engines fail the episode without a retry):
     truncate_media: bool = False  # Content-Length says all, the body stops at 60 %, then EOF
     short_media: bool = False  # lists keep the fixtures' 92 s durations; the CDN serves 3 s
+    # Not a failure: a gzip-encoded body whose Content-Length is the compressed size.
+    gzip_media: bool = False
 
     @property
     def page_scrolls(self) -> bool:
@@ -315,6 +321,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.FORBIDDEN, b"url expired", "text/plain")
         elif options.truncate_media:
             self._send_truncated(media_bytes(item_id, index), "video/mp4")
+        elif options.gzip_media:
+            self._send_gzipped(media_bytes(item_id, index), "video/mp4")
         else:
             self._send(HTTPStatus.OK, media_bytes(item_id, index), "video/mp4")
 
@@ -362,6 +370,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body[: int(len(body) * TRUNCATE_RATIO)])
         self.wfile.flush()
         self.close_connection = True
+
+    def _send_gzipped(self, body: bytes, content_type: str) -> None:
+        """The body `Content-Encoding: gzip`, with the compressed size as `Content-Length` — as
+        the HTTP spec has it. A browser's request API hands the client the decoded bytes while
+        the headers stay as sent, so the body is LONGER than announced: not a truncation."""
+        encoded = gzip.compress(body, compresslevel=6)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(encoded)
 
     def log_message(self, format: str, *args: Any) -> None:
         """Silence the default access log (it would echo request lines into the test output)."""

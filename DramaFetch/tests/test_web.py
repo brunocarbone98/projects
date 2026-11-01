@@ -460,6 +460,7 @@ def test_resolve_challenge_is_503_with_headful_hint(make_harness: Callable[..., 
     status, data = harness.request("POST", "/api/resolve", {"url": SERIES_URL})
     assert status == 503
     assert "--headful" in data["hint"]
+    assert "cooldown" in data["hint"]  # the rerun it recommends waits for the cooldown
 
 
 def test_resolve_rate_limited_is_429_with_a_wait_hint(make_harness: Callable[..., Harness]) -> None:

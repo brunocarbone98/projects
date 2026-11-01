@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from mutagen.mp4 import MP4
 
-from dramafetch import downloader as downloader_module
+from dramafetch import media as media_module
 from dramafetch.downloader import (
     BEST_FORMAT,
     BLOCKED_MESSAGE,
@@ -800,21 +800,29 @@ def test_a_short_video_fails_the_duration_check_unless_verification_is_off(tmp_p
     assert len(log) == 5
 
 
-def test_a_bad_file_that_cannot_be_renamed_is_reported_in_place(tmp_path, monkeypatch):
-    def refuse(path):
+def test_a_bad_file_the_os_will_not_rename_is_deleted_so_that_a_rerun_tries_again(
+    tmp_path, monkeypatch
+):
+    """A rename refused for good (on Windows, a file an antivirus still holds) must not leave the
+    bad file under the episode's name: `existing_episode_file` would take it for the episode and
+    the next run would skip it as done. It is deleted instead — the one case in which a download
+    is deleted —, the message says so, and the rerun downloads the episode again."""
+
+    def refuse(path, **_):
         raise OSError(errno.EACCES, "Permission denied", str(path))
 
-    monkeypatch.setattr(downloader_module, "quarantine", refuse)
-    factory, _ = make_factory(sidecar=None)
-    result = YtDlpDownloader(factory).download(
-        replace(EPISODE, duration_s=120), DownloadOptions(out_dir=tmp_path, thumbnail="none")
-    )
-    assert result.status is DownloadStatus.FAILED
+    monkeypatch.setattr(media_module, "quarantine", refuse)
+    factory, log = make_factory(sidecar=None)
+    options = DownloadOptions(out_dir=tmp_path, thumbnail="none")
+    result = YtDlpDownloader(factory).download(replace(EPISODE, duration_s=120), options)
+    assert result.status is DownloadStatus.FAILED and result.path is None
     assert result.message == (
         f"{INCOMPLETE_PREFIX}duration 3 s, expected 120 s (could not rename {STEM}.mp4: "
-        "Permission denied)"
+        "Permission denied; deleted, so that it does not pass for the episode)"
     )
-    assert _names(tmp_path) == [f"{STEM}.mp4"]  # left where it is, under its own name
+    assert _names(tmp_path) == []
+    again = YtDlpDownloader(factory).download(replace(EPISODE, duration_s=120), options)
+    assert again.status is DownloadStatus.FAILED and len(log) == 2  # tried again, not skipped
 
 
 def test_a_directory_in_the_way_of_the_working_copy_is_reported_never_raised(tmp_path):
