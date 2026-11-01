@@ -474,7 +474,10 @@ def test_usage_error_messages_say_what_to_do(capsys):
     assert cli.main(["download", SERIES_URL, "--thumbnail", "nope"]) == 2
     err = capsys.readouterr().err
     assert "--thumbnail: invalid choice: 'nope'" in err
-    assert "'embed', 'both', 'file', 'none'" in err
+    # argparse quotes the choices on some Python releases and not on others (3.12.15 prints
+    # "choose from embed, both, file, none"), so look for every mode, not the punctuation.
+    listed = err.split("choose from", 1)[1]
+    assert all(mode in listed for mode in ("embed", "both", "file", "none"))
 
 
 def test_parse_extractor_args():
