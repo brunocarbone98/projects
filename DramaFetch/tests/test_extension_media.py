@@ -9,10 +9,11 @@ mutagen's own corner cases and a seeded fuzz; `bodyProblem`, `imageKind`, `image
 `thumbnails.extract_cover`; the refusals of `embedCover` against `thumbnails.embed_cover`.
 
 The cover proof: a JPEG and a PNG embedded by the extension into every layout — `moov` before
-`mdat` (TikTok's faststart files) and after it, with and without `udta` / `meta` / `ilst`, with
-`co64` chunk offsets, over an existing cover — are read back by mutagen byte for byte with an
-unchanged duration, every chunk offset still points at the same sample bytes, and ffmpeg decodes
-every original stream to the same `framemd5` (the cover is one extra attached-picture stream).
+`mdat` (TikTok's faststart files) and after it, with and without `udta` / `meta` / `ilst`, a
+`udta` before the tracks (the offset tables move), `co64` chunk offsets, over an existing cover —
+are read back by mutagen byte for byte with an unchanged duration, every chunk offset still
+points at the same sample bytes, and ffmpeg decodes every original stream to the same `framemd5`
+(the cover is one extra attached-picture stream).
 
 The JavaScript runs in `node extension/tests/media_runner.js` (one process per test, every case
 on stdin). Only a missing `node` skips this module; only a missing ffmpeg (one that decodes
@@ -69,7 +70,7 @@ NODE = shutil.which("node")
 DURATIONS: tuple[int | None, ...] = (None, 0, 3, 6, 7, 120)
 #: The fixture's top-level atoms: ftyp (32 bytes), moov (3363), free (8), mdat (17128).
 MOOV_END = 32 + 3363
-#: Offsets inside the fixture (see `_layout_facts`, which checks every one of them).
+#: Offsets inside the fixture (`test_the_layout_facts_the_variants_rely_on` checks each).
 MVHD = 40
 AUDIO_TRAK = 1444
 AUDIO_HDLR = 1620
@@ -506,6 +507,9 @@ def test_wrong_durations_round_half_to_even_like_python(tmp_path: Path) -> None:
 
 
 def test_hostile_box_sizes_get_the_same_verdicts(tmp_path: Path) -> None:
+    """Sizes the format does not define, 64-bit sizes cut short or absurd, boxes past their
+    parent or the file, deep nesting: the same verdict — mutagen's own words — in both."""
+
     def size_at(offset: int, value: int) -> bytes:
         return _patched(TINY_MP4, offset, value.to_bytes(4, "big"))
 
@@ -534,13 +538,27 @@ def test_hostile_box_sizes_get_the_same_verdicts(tmp_path: Path) -> None:
         ("mdat past the end", size_at(MOOV_END + 8, 17_129)),
         ("free of size 7", size_at(MOOV_END, 7)),
         ("udta nested 300 deep", TINY_MP4 + _nested(300)),
-        ("udta nested 2000 deep", TINY_MP4 + _nested(2000)),
         ("a size of 0 inside a deep box", TINY_MP4 + _box(b"udta", _box(b"udta", b"\0\0\0\0free"))),
     ]
-    verdicts = _assert_parity(tmp_path, variants)
-    assert verdicts[0] == "not a valid MP4 (atom length can only be 0, 1 or 8 and higher)"
-    assert verdicts[5] == "not a valid MP4 (cannot fit 'int' into an offset-sized integer)"
-    assert verdicts[21] == "not a valid MP4 (maximum recursion depth exceeded)"
+    verdicts = dict(
+        zip([name for name, _ in variants], _assert_parity(tmp_path, variants), strict=True)
+    )
+    assert verdicts["top-level size 5"] == (
+        "not a valid MP4 (atom length can only be 0, 1 or 8 and higher)"
+    )
+    assert verdicts["64-bit size 2**64 - 1"] == (
+        "not a valid MP4 (cannot fit 'int' into an offset-sized integer)"
+    )
+    assert verdicts["udta nested 300 deep"] is None
+    # Atoms nested 2000 deep exhaust Python's recursion limit, which CPython words by version:
+    # 3.12+ "maximum recursion depth exceeded", 3.11 adds " while calling a Python object". The
+    # extension gives up at MAX_NESTING (400) levels with the 3.12+ words.
+    deep = _written(tmp_path / "deep.mp4", TINY_MP4 + _nested(2000))
+    python_verdict = verify_video(deep, 3)
+    assert python_verdict is not None
+    assert python_verdict.startswith("not a valid MP4 (maximum recursion depth exceeded")
+    (js_verdict,) = _values([{"op": "verify", "path": str(deep), "expected": 3}])
+    assert js_verdict == "not a valid MP4 (maximum recursion depth exceeded)"
 
 
 def test_mutagen_corner_cases_get_the_same_verdicts(tmp_path: Path) -> None:
@@ -704,9 +722,13 @@ def test_body_image_and_size_helpers_agree(tmp_path: Path) -> None:
             expected.append((name, content_type, "problem", image_problem(data, content_type)))
     sizes = [0, 1, 199, 1023, 1024, 1280, 1536, 2560, 3840, 1024 * 1024 - 1, 1024 * 1024]
     sizes += [1_310_720, 1_572_864, 5 * 1024 * 1024 + 1, 123_456_789, 2**40 + 2**36]
+    sizes += [2_621_440, 104_857_600, 3 * 1024 * 1024 + 52_429]
     for size in sizes:
         cases.append({"op": "formatSize", "size": size})
         expected.append(("size", str(size), "format", format_size(size)))
+        # the browser engine's DONE message: f"saved {name} ({len(body) / _MIB:.1f} MiB)"
+        cases.append({"op": "mebibytes", "size": size})
+        expected.append(("size", str(size), "MiB", f"{size / (1024 * 1024):.1f}"))
     mismatches = [
         (*key, have)
         for (*key, want), have in zip(expected, _values(cases), strict=True)
@@ -781,22 +803,58 @@ def _framemd5(path: Path) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line and not line.startswith("#software")]
 
 
-def _stream_lines(lines: list[str], index: int) -> list[str]:
-    header = f" {index}:"
-    return [
-        line
-        for line in lines
-        if (line.startswith("#") and header in line) or line.startswith(f"{index},")
-    ]
+def _decoded(lines: list[str]) -> tuple[list[tuple[str, ...]], list[tuple[int, str]]]:
+    """A framemd5 listing as the headers of its streams in index order (each line without the
+    stream index: `#dimensions: 160x120`) and its frames in decoding order, as `(stream index,
+    the line without the index)`."""
+    headers: dict[int, list[str]] = {}
+    frames: list[tuple[int, str]] = []
+    for line in lines:
+        if line.startswith("#"):
+            key, _, rest = line.partition(":")
+            name, _, index = key.rpartition(" ")
+            if index.isdigit():
+                headers.setdefault(int(index), []).append(f"{name}:{rest}")
+        else:
+            index, _, rest = line.partition(",")
+            frames.append((int(index), rest))
+    return [tuple(headers[index]) for index in sorted(headers)], frames
 
 
-def _streams(lines: list[str]) -> int:
-    return sum(1 for line in lines if line.startswith("#media_type "))
+def _assert_decodes_like(original: list[str], embedded: list[str], cover_size: str) -> None:
+    """The embedded file decodes to every stream of the original, frame for frame and in the
+    same interleaving, plus exactly one more stream: the cover, one picture of `cover_size`."""
+    streams, frames = _decoded(original)
+    embedded_streams, embedded_frames = _decoded(embedded)
+    extra = [index for index, header in enumerate(embedded_streams) if header not in streams]
+    assert len(extra) == 1 and len(embedded_streams) == len(streams) + 1
+    cover = extra[0]
+    assert "#media_type: video" in embedded_streams[cover]
+    assert f"#dimensions: {cover_size}" in embedded_streams[cover]
+    assert len([index for index, _ in embedded_frames if index == cover]) == 1
+    same = {
+        index: streams.index(header)
+        for index, header in enumerate(embedded_streams)
+        if index != cover
+    }
+    assert [(same[index], rest) for index, rest in embedded_frames if index != cover] == frames
+
+
+def _udta_first(data: bytes) -> bytes:
+    """The `moov`'s `udta` moved before its tracks (same size: no offset moves) — an edit there
+    moves the chunk offset tables themselves."""
+    moov, moov_size = child(data, b"moov")
+    children = list(boxes(data, moov + 8, moov + moov_size))
+    order = [box for kind in (b"mvhd", b"udta", b"trak") for box in children if box[2] == kind]
+    assert len(order) == len(children)
+    inner = b"".join(data[pos : pos + size] for pos, size, _ in order)
+    return data[: moov + 8] + inner + data[moov + moov_size :]
 
 
 def _layouts() -> list[tuple[str, bytes]]:
     return [
         ("faststart, existing ilst", TINY_MP4),
+        ("udta before the tracks", _udta_first(TINY_MP4)),
         ("moov after mdat", _moov_last(TINY_MP4)),
         ("no udta", _without_udta(TINY_MP4)),
         ("moov after mdat, no udta", _moov_last(_without_udta(TINY_MP4))),
@@ -878,8 +936,9 @@ def test_embedded_covers_read_back_in_every_layout(tmp_path: Path) -> None:
 
 def test_embedded_covers_decode_like_the_original_with_ffmpeg(tmp_path: Path) -> None:
     """`framemd5` of every stream of the original equals the embedded file's (audio and video
-    decode to the same frames: nothing moved out of sync); the cover is one more stream, the
-    last, a single picture of the image's size; ffmpeg decodes every file silently."""
+    decode to the same frames, interleaved the same way: nothing moved out of sync); the cover is
+    one more stream (an attached picture: one frame of the image's size); ffmpeg decodes every
+    file silently."""
     if _ffmpeg() is None:
         pytest.skip("no ffmpeg that decodes H.264 + AAC on PATH or in /opt/pw-browsers/ffmpeg-*/")
     jpeg = _real_jpeg(tmp_path, _png(64, 48))
@@ -890,18 +949,13 @@ def test_embedded_covers_decode_like_the_original_with_ffmpeg(tmp_path: Path) ->
     original = tmp_path / "original.mp4"
     original.write_bytes(TINY_MP4)
     reference = _framemd5(original)
-    assert _streams(reference) == 2
+    assert len(_decoded(reference)[0]) == 2
     for index, (layout, data) in enumerate(_layouts()):
         path = tmp_path / f"plain{index}.mp4"
         path.write_bytes(data)
         assert _framemd5(path) == reference, layout  # the layout itself plays like the fixture
-    for layout, image_name, _, out, _ in _embed_all(tmp_path, _layouts(), images):
-        lines = _framemd5(out)
-        assert _streams(lines) == 3, (layout, image_name)
-        cover = _stream_lines(lines, 2)
-        assert f"#dimensions 2: {dimensions[image_name]}" in cover, (layout, image_name)
-        assert len([line for line in cover if not line.startswith("#")]) == 1
-        assert [line for line in lines if line not in cover] == reference, (layout, image_name)
+    for _, image_name, _, out, _ in _embed_all(tmp_path, _layouts(), images):
+        _assert_decodes_like(reference, _framemd5(out), dimensions[image_name])
 
 
 def test_an_existing_cover_is_replaced(tmp_path: Path) -> None:
@@ -933,11 +987,8 @@ def test_an_existing_cover_is_replaced(tmp_path: Path) -> None:
     assert made[0][3].stat().st_size == jpeg_embedded.stat().st_size - len(jpeg) + len(png)
     if _ffmpeg() is not None:
         reference = _framemd5(tmp_path / "tiny.mp4")
-        for layout, _, _, out, _ in made:
-            lines = _framemd5(out)
-            assert [line for line in lines if line not in _stream_lines(lines, 2)] == reference, (
-                layout
-            )
+        for _, _, _, out, _ in made:
+            _assert_decodes_like(reference, _framemd5(out), "48x64")
 
 
 def test_co64_offsets_move_with_the_cover(tmp_path: Path) -> None:
