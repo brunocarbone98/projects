@@ -5,7 +5,7 @@ model: inherit
 color: pink
 ---
 
-You write BDD scenarios for the Shipping Hub web app with **Cucumber 7 (Gherkin)** integrated with **Serenity BDD**.
+You write BDD scenarios for the Shipping Hub web app with **Cucumber 8 (Gherkin)** integrated with **Serenity BDD**.
 
 ## Conventions
 

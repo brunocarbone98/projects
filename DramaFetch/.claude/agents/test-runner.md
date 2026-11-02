@@ -28,4 +28,4 @@ You run DramaFetch's checks and report concisely. You never modify files (settin
 
 ## Report format
 
-One line per check — `ruff check: PASS`, `pytest: 1201 passed, 2 skipped (no IPv6 loopback)`, `Integration: 60 passed`, `Extension unit: 151 passed`, `tsc: PASS`, or `… FAIL` / `NOT RUN — <reason>` — then only the failures, one line each.
+One line per check — `ruff check: PASS`, `pytest: 1201 passed, 2 skipped (no IPv6 loopback)`, `Integration: 61 passed`, `Extension unit: 153 passed`, `tsc: PASS`, or `… FAIL` / `NOT RUN — <reason>` — then only the failures, one line each.

@@ -47,7 +47,7 @@ flowchart LR
 | API collection | **Postman** collection + **Newman** (headless) |
 | UI E2E | **Selenium** WebDriver via **Serenity Screenplay** (Tasks/Questions — replaces Page Object Model) |
 | BDD | **Cucumber** (Gherkin), integrated with Serenity |
-| Runner / build | JUnit 5, Maven |
+| Runner / build | JUnit 6 (Jupiter + Platform Suite), Maven |
 | Quality gate | SonarQube / SonarCloud |
 | Reporting | **Serenity** living documentation + Karate HTML report |
 | CI/CD | GitHub Actions |

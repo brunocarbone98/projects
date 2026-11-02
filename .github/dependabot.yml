@@ -85,7 +85,7 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # SecureGate — Maven (pom.xml: Karate, Serenity, Selenium, Cucumber, JUnit 5).
+  # SecureGate — Maven (pom.xml: Karate, Serenity, Selenium, Cucumber, JUnit 6).
   - package-ecosystem: maven
     directory: /SecureGate
     schedule:

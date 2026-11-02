@@ -36,7 +36,7 @@
 - Flaky test seen once: re-run it once; if it passes, note it as flaky in the report (and in the PR body if there is one) — do not quarantine it.
 - Keep the PR under ~200 changed lines excluding lockfiles; if the fix is bigger, open an issue describing it instead.
 - Lockfiles only through the tooling (`pnpm install`, `./mvnw`); never hand-edit `pnpm-lock.yaml`.
-- Dependabot verdicts are comments, never merges: the merge gate (`.claude/shifts/merge-gate.md`) reads them and merges what passes its gate; a human merges the rest.
+- Dependabot verdicts are comments, never merges: the merge gate (`.claude/shifts/merge-gate.md`) runs its own checks and merges what passes its gate; a human merges the rest.
 
 ## Outputs
 
