@@ -83,6 +83,36 @@ test("Chrome-safe names: no tilde, no format or control character, no leading do
   assert.equal(episodeStem(episode(1, { seriesName: "~Love~" })), "Love - Episode 01");
 });
 
+test("Chrome-safe names are the names Chrome saves: no %, no lone surrogate, whole emoji kept", () => {
+  // what downloads.download makes of a name: UTF-8 (a lone surrogate turns into U+FFFD), then
+  // every "%" an "_" (Chromium's downloads_api.cc)
+  const saved = (/** @type {string} */ name) => new TextDecoder().decode(new TextEncoder().encode(name)).replaceAll("%", "_");
+  const names = [
+    chromeSafeFilename("100% Love"),
+    episodeStem(episode(1, { seriesName: "100% Love" })),
+    seriesFolder("100% Love", "7699393770256782388"),
+    episodeStem(episode(2), { nameFormat: "{series} 100% - Episode {number}" }),
+    chromeSafeFilename("Love Story \ud83d"), // a name cut in the middle of an emoji
+    chromeSafeFilename("\ude00Love"),
+    episodeStem(episode(3, { seriesName: "Heiress \ud83d" })),
+    chromeSafeFilename("Love \ud83d\ude00 Story"),
+    chromeSafeFilename("\ud83d\ud83d\ude00\ude00"),
+  ];
+  assert.deepEqual(names, [
+    "100 Love",
+    "100 Love - Episode 01",
+    "100 Love [7699393770256782388]",
+    "The Billionaire's Secret Heiress 100 - Episode 02",
+    "Love Story",
+    "Love",
+    "Heiress - Episode 03",
+    "Love \u{1f600} Story", // a valid surrogate pair stays
+    "\u{1f600}",
+  ]);
+  for (const name of names) assert.equal(saved(name), name);
+  assert.equal(saved("100% Love \ud83d"), "100_ Love \ufffd"); // what Chrome would have saved
+});
+
 test("the series folder is <name> [<id>], 60 characters at most, the id never cut", () => {
   assert.equal(seriesFolder("Paid Love Story", "7699393770256782388"), "Paid Love Story [7699393770256782388]");
   const folder = seriesFolder("N".repeat(200), "7699393770256782388");

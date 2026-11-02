@@ -393,7 +393,7 @@ function fakeFetch(routes, log) {
   );
 }
 
-/** @param {{fetch: typeof fetch, saved?: string[], thumbnail?: string}} options */
+/** @param {{fetch: typeof fetch, saved?: string[], thumbnail?: string, view?: DownloadsView}} options */
 function downloader(options) {
   /** @type {string[]} */
   const saved = options.saved ?? [];
@@ -404,7 +404,7 @@ function downloader(options) {
     nameFormat: "{series} - Episode {number}",
     includeLocked: false,
     hostPatterns: ["https://*.tiktok.com/*", "https://*.tiktokcdn.com/*"],
-    view: /** @type {never} */ ({ completedAt: () => null, remember() {} }),
+    view: options.view ?? /** @type {never} */ ({ completedAt: () => null, remember() {} }),
     rediscover: async () => {
       throw new Error("no rediscovery expected");
     },
@@ -659,6 +659,41 @@ test("the downloads view: a job's first look waits out Chrome's 10 s between two
   sleeps.length = 0;
   await quick.refresh();
   assert.deepEqual(sleeps, [0]);
+});
+
+test("the downloads view: Chrome's Windows paths, backslashes and all, match the episode's target", async () => {
+  // Chrome on Windows reports C:\Users\x\Downloads\DramaFetch\<folder>\<file>
+  const folder = `C:\\Users\\x\\Downloads\\DramaFetch\\Test Series [${SERIES_ID}]`;
+  const episode01 = `${folder}\\Test Series - Episode 01.mp4`;
+  const { api } = fakeDownloads(
+    [
+      item(1, episode01),
+      item(2, `${folder}\\Test Series - Episode 02 (1).mp4`), // uniquified by Chrome: another name
+      item(3, `C:\\Users\\x\\Downloads\\MyDramaFetch\\Test Series [${SERIES_ID}]\\Test Series - Episode 03.mp4`),
+    ],
+    () => 0,
+  );
+  const view = new DownloadsView({ api, sleep: async () => undefined, checks: { lastMs: Number.NEGATIVE_INFINITY } });
+  await view.refresh();
+  const target = (/** @type {number} */ n) => `DramaFetch/Test Series [${SERIES_ID}]/Test Series - Episode 0${n}.mp4`;
+  assert.equal(view.completedAt(target(1))?.filename, episode01);
+  assert.equal(view.completedAt(target(2)), null);
+  assert.equal(view.completedAt(target(3)), null); // "MyDramaFetch" is another folder
+  // the state records Chrome's own filename, so the recorded download is the file on disk
+  assert.equal(view.exists({ download_id: 1, path: episode01 }), true);
+
+  // the downloader's existing-file skip: no request, Chrome's Windows path in the row
+  /** @type {string[]} */
+  const log = [];
+  const subject = downloader({ fetch: fakeFetch({}, log), view });
+  const skipped = await subject.download(episode(1), CONTEXT);
+  assert.equal(skipped.status, "skipped-exists");
+  assert.equal(skipped.path, episode01);
+  assert.equal(skipped.message, "already exists: Test Series - Episode 01.mp4");
+  assert.equal(skipped.downloadId, 1);
+  assert.equal(subject.needsNetwork(episode(1), CONTEXT), false);
+  assert.equal(subject.needsNetwork(episode(2), CONTEXT), true);
+  assert.deepEqual(log, []);
 });
 
 test("a selection lists the series again, after the rest between jobs, and the fresh list decides", async () => {

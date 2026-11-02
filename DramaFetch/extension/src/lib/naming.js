@@ -9,7 +9,8 @@
  * folder {@link ROOT_FOLDER} inside Chrome's Downloads folder; a stem that would be longer
  * shortens its `{series}` part first, so `Episode NN` is never cut; and names are made acceptable
  * to Chrome's downloads API (`chromeSafe`: no `~`, no control or format character, no
- * noncharacter, no leading dot, none of the extra names Windows reserves). With
+ * noncharacter, no leading dot, none of the extra names Windows reserves) and are the very names
+ * it saves (no `%`, which Chrome turns into `_`; no lone UTF-16 surrogate). With
  * `{maxLen: 150, shortenSeries: false, chromeSafe: false}` {@link episodeStem} is
  * `manifest.episode_stem` exactly (`tests/test_extension_parity.py`).
  */
@@ -81,6 +82,18 @@ function withDeviceNameFixed(cleaned) {
 
 /** What Chrome's downloads API refuses anywhere in a name besides what safeFilename replaces. */
 const CHROME_REMOVED_RE = /[\p{Cf}\p{Noncharacter_Code_Point}\x80-\x84\x86-\x9f]/gu;
+/**
+ * What becomes a space, like `<>:"/\|?*`: `~` (Chrome refuses it) and `%`, which Chrome itself
+ * rewrites to `_` in every file name an extension passes (`DownloadsDownloadFunction::Run` in
+ * Chromium's `chrome/browser/extensions/api/downloads/downloads_api.cc`: "Strip "%" character
+ * as it affects environment variables"), so a name with `%` would never be the path it saves.
+ */
+const CHROME_SPACED_RE = /[~%]/g;
+/**
+ * A UTF-16 surrogate without its other half (a title cut in the middle of an emoji): Chrome takes
+ * the name as UTF-8, where it turns into U+FFFD, so it is dropped. ES2022 has no `toWellFormed`.
+ */
+const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 /** Names Windows reserves that the Python rule does not cover (Chrome refuses them too). */
 const CHROME_RESERVED_HEADS = new Set(["clock$"]);
 const CHROME_RESERVED_NAMES = new Set(["desktop.ini", "thumbs.db"]);
@@ -90,13 +103,15 @@ const CHROME_RESERVED_NAMES = new Set(["desktop.ini", "thumbs.db"]);
  * a path (`net::IsSafePortablePathComponent`): no `~` (it becomes a space), no format character
  * (zero-width joiners, bidi marks, the BOM), no C1 control, no noncharacter, no leading dot or
  * space, not `CLOCK$` / `desktop.ini` / `thumbs.db`; and at most `maxLen` UTF-16 units (what
- * Windows counts), never splitting a character.
+ * Windows counts), never splitting a character. So that the name is exactly the path Chrome saves
+ * at, also no `%` (a space too: Chrome would write `_`) and no lone surrogate (dropped).
  * @param {string} text
  * @param {number} [maxLen]
  * @returns {string}
  */
 export function chromeSafeFilename(text, maxLen = 80) {
-  let cleaned = safeFilename(text.replace(/~/g, " ").replace(CHROME_REMOVED_RE, ""), maxLen);
+  const chromeText = text.replace(LONE_SURROGATE_RE, "").replace(CHROME_SPACED_RE, " ");
+  let cleaned = safeFilename(chromeText.replace(CHROME_REMOVED_RE, ""), maxLen);
   cleaned = cleaned.replace(/^[. ]+/, "");
   if (maxLen > 0 && cleaned.length > maxLen) {
     const chars = Array.from(cleaned);
