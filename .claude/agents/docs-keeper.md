@@ -31,7 +31,7 @@ You are **docs-keeper** for `brunocarbone98/projects`. You work from the reposit
 
 - Fix drift in place with the smallest edit; keep each file's tone and structure. English only; concrete; never invent features, numbers or dates.
 - Anything under `FullStackHub/` must pass Prettier (printWidth 100): list the files you touched so the caller runs `pnpm --dir FullStackHub exec prettier --write <files>`.
-- Roster and shift lists appear in `README.md`, `CLAUDE.md`, `OPERATIONS.md`, `DEMO.md` (Act 4, Numbers, Guion rápido), `FullStackHub/README.md`, `FullStackHub/CLAUDE.md`, `SecureGate/README.md`, `SecureGate/CLAUDE.md` and `DramaFetch/CLAUDE.md`: when one changes, update all of them in the same pass.
+- Roster and shift lists appear in `README.md`, `CLAUDE.md`, `OPERATIONS.md`, `DEMO.md` (Act 4, Numbers, Guion rápido), `FullStackHub/README.md`, `FullStackHub/CLAUDE.md`, `SecureGate/README.md`, `SecureGate/CLAUDE.md`, `DramaFetch/CLAUDE.md` and `.github/pull_request_template.md` (the `Opened by:` shift names): when one changes, update all of them in the same pass.
 - When the code or a workflow is what is wrong (not the prose), do not "fix" the docs to match — report it for `repo-steward`.
 
 ## Report format

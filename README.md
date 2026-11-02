@@ -68,7 +68,7 @@ The repository is maintained around the clock by Claude Code agents on two runti
 - One small PR per shift run; if nothing is needed, nothing is opened — no empty PRs, no "all good" issues.
 - The project's own checks run before any PR and the real results are reported — a SecureGate run with 0 failures and N skipped is not a pass.
 - No test is weakened, skipped or quarantined to get green, and each project's architectural rules are respected.
-- Schema, money, auth and deploy-config decisions go to a human through an issue; agents never propose a dependency major, and the merge gate merges a Dependabot major only after checking its release notes against the code — one with a breaking change that applies goes to a human.
+- Schema, money, auth, deploy-config and dependency-major decisions go to a human through an issue (an agent never opens a PR for a major); the merge gate merges a Dependabot major only after checking its release notes against the code — one with a breaking change that applies goes to a human.
 
 **How to watch it**
 

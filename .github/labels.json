@@ -5,6 +5,6 @@
   { "name": "security", "color": "d93f0b", "description": "Security findings and fixes" },
   { "name": "maintenance", "color": "c5def5", "description": "Nightly maintenance failures, merge-gate reverts, DramaFetch decisions" },
   { "name": "bug", "color": "d73a4a", "description": "Something is broken" },
-  { "name": "in progress", "color": "d93f0b", "description": "Not finished: the merge gate leaves it open" },
+  { "name": "in progress", "color": "d93f0b", "description": "Not finished: the merge gate does not merge it" },
   { "name": "do-not-merge", "color": "b60205", "description": "The merge gate never merges it; a human decides" }
 ]
