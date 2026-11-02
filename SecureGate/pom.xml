@@ -15,11 +15,11 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>21</maven.compiler.release>
 
-    <!-- Test stack versions. JUnit is pinned to the version Serenity 5.3.10 is built on (JUnit 6),
-         whose platform Cucumber 7.34.2 also requires (DiscoveryIssueReporter). -->
+    <!-- Test stack versions. JUnit and Cucumber are pinned to the versions the Serenity release
+         below is built on (junit5.version and cucumber.version in serenity-core's root pom.xml). -->
     <junit.version>6.1.3</junit.version>
     <serenity.version>5.4.1</serenity.version>
-    <!-- Must match the Cucumber that Serenity 5.3.10 is built against (its SerenityReporter plugs
+    <!-- Must match the Cucumber that Serenity is built against (its SerenityReporter plugs
          into Cucumber's plugin SPI), otherwise the BDD reports break. -->
     <cucumber.version>8.0.4</cucumber.version>
     <karate.version>1.4.1</karate.version>
@@ -47,7 +47,7 @@
 
   <dependencyManagement>
     <dependencies>
-      <!-- Align every JUnit 5 artifact (Serenity, Karate and our runners all pull it in). -->
+      <!-- Align every JUnit 6 artifact (Serenity, Karate and our runners all pull it in). -->
       <dependency>
         <groupId>org.junit</groupId>
         <artifactId>junit-bom</artifactId>
@@ -76,7 +76,7 @@
   </dependencyManagement>
 
   <dependencies>
-    <!-- JUnit 5 (Jupiter + Platform Suite to host the Serenity/Cucumber acceptance suite). -->
+    <!-- JUnit 6 (Jupiter + Platform Suite to host the Serenity/Cucumber acceptance suite). -->
     <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
     <dependency><groupId>org.junit.platform</groupId><artifactId>junit-platform-suite</artifactId><scope>test</scope></dependency>
 

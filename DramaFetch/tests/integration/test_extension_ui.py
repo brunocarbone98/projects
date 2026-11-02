@@ -9,6 +9,9 @@ against the fake TikTok server:
 - the DramaFetch tab is never discardable while a job runs or waits, and is again once nothing
   does (after the queue, after a Stop) — `chrome.tabs` of the app page itself; a second,
   read-only DramaFetch tab never queues the popup's request, and stays discardable;
+- with no DramaFetch tab open, the popup's **Download this series** on a TikTok series tab opens
+  the DramaFetch tab, which lists that series (one listing) and downloads nothing yet — read
+  through `chrome.extension.getViews`, since Playwright never sees a tab the extension opens;
 - with Chrome's UI in Spanish (`LANGUAGE=es`: how Chrome on Linux picks its UI language), every
   outcome the fake offers reads in Spanish on screen — no English template word outside the data
   (series and file names, hosts, the payload's `key=value` hints) — while the history keeps the
@@ -366,6 +369,103 @@ def test_a_read_only_dramafetch_tab_queues_nothing_and_stays_discardable(tmp_pat
         assert second.locator("#app-status").get_attribute("data-finished") == "0"
         assert _discardable(second) is True
         ext.wait_for(lambda: _auto_discardable(ext) is True, 5, "the engine's tab stayed pinned")
+
+
+def test_the_popup_opens_the_dramafetch_tab_with_the_series_listed_when_none_is_open(
+    tmp_path: Path,
+) -> None:
+    """No DramaFetch tab open — a first click: on a TikTok series tab, the popup's **Download this
+    series** opens the DramaFetch tab (`app.html?load=<series id>`), which takes the engine and
+    lists that series — one listing, in a tab of its own that it closes again — and downloads
+    nothing until **Download all available** is pressed there."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        pages = f"chrome-extension://{ext.extension_id}/src/app"
+        series_tab = f"{server.base_url}/shortdrama/episode/{SERIES_ID}/3"
+        tiktok = ext.context.new_page()
+        tiktok.goto(series_tab)
+        # the user's own tab has listed its episodes: its requests are over before the count
+        ext.wait_for(lambda: tiktok.locator("#detail a.ep").count() > 0, 20, "no TikTok page")
+        popup = ext.context.new_page()
+        popup.goto(f"{pages}/popup.html")
+        ext.page.close()  # the harness's DramaFetch tab (the test settings are stored already)
+
+        def active_tabs() -> list[str]:
+            urls: list[str] = popup.evaluate(
+                "async () => (await chrome.tabs.query({active: true, currentWindow: true}))"
+                ".map((tab) => tab.url || '')"
+            )
+            return urls
+
+        tiktok.bring_to_front()  # the popup reads the active tab of its window: the series tab
+        ext.wait_for(lambda: active_tabs() == [series_tab], 10, "the series tab is not active")
+        popup.reload()
+        download = popup.locator("#popup-download")
+        ext.wait_for(download.is_visible, 10, "no Download this series on a series tab")
+        assert popup.locator("#popup-series").text_content() == f"Series {SERIES_ID}"
+        listed = len(server.series_page_requests)
+        lists = len(server.item_list_requests)
+        media = len(server.media_requests)
+        download.click()
+
+        # Playwright never sees the tabs the extension opens: an extension page reads that one
+        watcher = ext.context.new_page()
+        watcher.goto(f"{pages}/popup.html")
+
+        def app_tabs() -> list[dict[str, Any]]:
+            views: list[dict[str, Any]] = watcher.evaluate(
+                """() => chrome.extension.getViews({type: 'tab'})
+                  .filter((view) => view.location.pathname.endsWith('/app.html'))
+                  .map((view) => {
+                    const doc = view.document;
+                    const status = doc.querySelector('#app-status');
+                    return {
+                      search: view.location.search,
+                      state: status.dataset.state,
+                      finished: Number(status.dataset.finished || 0),
+                      engine: doc.querySelector('#duplicate-banner').hidden,
+                      links: doc.querySelector('#links').value,
+                      rows: [...doc.querySelectorAll('#episode-table tbody tr')]
+                        .map((row) => Number(row.dataset.number)),
+                    };
+                  })"""
+            )
+            return views
+
+        ext.wait_for(
+            lambda: [(tab["state"], tab["finished"]) for tab in app_tabs()] == [("idle", 1)],
+            60,
+            "the DramaFetch tab did not list the series",
+        )
+        (app,) = app_tabs()
+        assert popup.is_closed()  # the popup closed itself once the tab was asked for
+        assert app["engine"] is True  # it holds the engine: no "already open" banner
+        assert app["links"] == SERIES_ID  # what the popup handed over
+        assert app["search"] == ""  # `?load=` consumed: reloading the tab lists nothing again
+        assert app["rows"] == [1, 2, 3, 4, 5]
+        history: list[dict[str, Any]] = watcher.evaluate(
+            "async () => (await chrome.storage.local.get('history')).history ?? []"
+        )
+        assert [entry["kind"] for entry in history] == ["load"]
+        (series,) = history[0]["series"]
+        assert (series["series_id"], series["name"], series["episodes"]) == (
+            SERIES_ID,
+            SERIES_NAME,
+            5,
+        )
+        assert series["error"] is None
+        # one listing — the series page in a tab of its own, its first list page repeated, the
+        # second page — and nothing downloaded
+        assert len(server.series_page_requests) == listed + 1
+        assert len(server.item_list_requests) == lists + 3
+        assert len(server.media_requests) == media
+        assert ext.saved_files() == []
+        tabs: list[str] = watcher.evaluate(
+            "async () => (await chrome.tabs.query({}))"
+            ".map((tab) => tab.url || tab.pendingUrl || '')"
+        )
+        assert [url for url in tabs if url.endswith("/app.html")] == [f"{pages}/app.html"]
+        # the listing's own TikTok tab is closed again: only the user's tab is left
+        assert [url for url in tabs if url.startswith(server.base_url)] == [series_tab]
 
 
 def test_the_spanish_ui_shows_every_outcome_in_spanish(

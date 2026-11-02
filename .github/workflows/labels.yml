@@ -1,6 +1,6 @@
 name: Sync labels
 
-# Keeps the labels the agents rely on (agent, incident, dependencies, security, maintenance, bug)
+# Keeps the labels the agents rely on (agent, incident, dependencies, security, maintenance, bug, in progress, do-not-merge)
 # in sync with .github/labels.json. Idempotent: creates missing labels and updates the colour or
 # description of existing ones; it never deletes a label. Run it by hand from the Actions tab
 # (workflow_dispatch) the first time, then it runs whenever labels.json changes on main.

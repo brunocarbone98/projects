@@ -19,12 +19,8 @@ export default async function Image({
   params: Promise<{ locale: string; code: string }>;
 }) {
   const { locale, code } = await params;
-  let data = null;
-  try {
-    data = await fetchTracking(code);
-  } catch {
-    data = null;
-  }
+  // An unknown or unreachable code renders the generic card instead of failing the image.
+  const data = await fetchTracking(code).catch(() => null);
   const tStatus = await getTranslations({ locale, namespace: "Status" });
   const tOg = await getTranslations({ locale, namespace: "OgImage" });
   const eyebrow = data ? code : tOg("eyebrow");

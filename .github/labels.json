@@ -3,6 +3,8 @@
   { "name": "incident", "color": "b60205", "description": "Production incident opened by the Uptime patrol" },
   { "name": "dependencies", "color": "0366d6", "description": "Dependency updates (Dependabot, weekly security bumps)" },
   { "name": "security", "color": "d93f0b", "description": "Security findings and fixes" },
-  { "name": "maintenance", "color": "c5def5", "description": "Nightly maintenance" },
-  { "name": "bug", "color": "d73a4a", "description": "Something is broken" }
+  { "name": "maintenance", "color": "c5def5", "description": "Nightly maintenance failures, merge-gate reverts, DramaFetch decisions" },
+  { "name": "bug", "color": "d73a4a", "description": "Something is broken" },
+  { "name": "in progress", "color": "d93f0b", "description": "Not finished: the merge gate does not merge it" },
+  { "name": "do-not-merge", "color": "b60205", "description": "The merge gate never merges it; a human decides" }
 ]

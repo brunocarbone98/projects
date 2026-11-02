@@ -2,12 +2,12 @@
 
 Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../FullStackHub), live at <https://shipping-hub.up.railway.app/>). The full phased plan lives in `ROADMAP.md`: when starting a phase, read its corresponding section.
 
-**Current stack (modernized):** **Karate** for the API (Gherkin-native: tracking, quote, auth, shipments, wallet — `match` contracts + security negatives), **Serenity BDD + Screenplay** over **Selenium** for UI E2E (Actors performing Tasks / asking Questions — replaces the Page Object Model), **Cucumber/Gherkin** for the UI journeys (Serenity living documentation), and a **Postman/Newman** API collection. Java 21 (OOP), JUnit 5, Maven; **SonarQube** quality gate (token-gated). A GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) stands up the API + web + Chrome and runs everything on PRs touching `SecureGate/**` or `FullStackHub/**` and nightly at 06:00 UTC. **34 scenarios** (28 Karate API · 6 Serenity/Screenplay UI), plus an opt-in rate-limit check.
+**Current stack (modernized):** **Karate** for the API (Gherkin-native: tracking, quote, auth, shipments, wallet — `match` contracts + security negatives), **Serenity BDD + Screenplay** over **Selenium** for UI E2E (Actors performing Tasks / asking Questions — replaces the Page Object Model), **Cucumber/Gherkin** for the UI journeys (Serenity living documentation), and a **Postman/Newman** API collection. Java 21 (OOP), JUnit 6, Maven; **SonarQube** quality gate (token-gated). A GitHub Actions pipeline (`/.github/workflows/securegate-ci.yml`) stands up the API + web + Chrome and runs everything on PRs touching `SecureGate/**` or `FullStackHub/**` and nightly at 06:00 UTC. **34 scenarios** (28 Karate API · 6 Serenity/Screenplay UI), plus an opt-in rate-limit check.
 
 ## Structure
 
 - `src/test/resources/karate` — Karate API features (`*.feature`), `helpers/`, `data/` payloads; `src/test/resources/karate-config.js` holds env config + Java interop.
-- `src/test/java/.../api` — Karate JUnit 5 runners (`ApiKarateTest` parallel entrypoint; `ApiFeatureRunners` for the IDE).
+- `src/test/java/.../api` — Karate runners on JUnit 6 (`ApiKarateTest` parallel entrypoint; `ApiFeatureRunners` for the IDE, via `karate-junit5`'s `@Karate.Test`).
 - `src/test/java/.../ui/screenplay/{ui,tasks,questions}` — Screenplay components: `Target`s (UI), `Task`s (actions), `Question`s (assertions).
 - `src/test/java/.../ui/stepdefs` — Cucumber step definitions that drive Screenplay actors; `UiAcceptanceTest` is the Serenity/Cucumber runner.
 - `src/test/resources/features/ui` — Gherkin UI feature files (living documentation).
@@ -32,7 +32,7 @@ Automated **QA & security test suite for Shipping Hub** ([`../FullStackHub`](../
 
 - **Code language: English.** Identifiers, comments, commit messages — all in English.
 - **Conventional commits** in English, imperative mood: `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `ci:`.
-- Java 21; JUnit 5. **UI = Screenplay** (Actors/Tasks/Questions; no selectors in step definitions — they live in `screenplay/ui` `Target`s). Explicit waits only (never `Thread.sleep`).
+- Java 21; JUnit 6. **UI = Screenplay** (Actors/Tasks/Questions; no selectors in step definitions — they live in `screenplay/ui` `Target`s). Explicit waits only (never `Thread.sleep`).
 - **API = Karate**: one feature per resource; reuse `helpers/*.feature` (register/login) via `call`; assert status + body with `match` contracts; never log secrets or tokens.
 - Tests are deterministic and independent; data is created and cleaned up via the API.
 

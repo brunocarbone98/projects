@@ -16,6 +16,14 @@ updates:
       time: "04:00"
       timezone: America/Panama
     open-pull-requests-limit: 5
+    # Prisma 7 is a migration, not a bump: prisma.config.ts instead of the schema's datasource url,
+    # a driver adapter for PrismaClient, and the CLI and the client on the same major. The owner
+    # declined it (#43); a client-only bump (#72) broke `pnpm install`. Majors wait for that decision.
+    ignore:
+      - dependency-name: "prisma"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@prisma/client"
+        update-types: ["version-update:semver-major"]
     labels: [dependencies]
     commit-message:
       prefix: "chore(deps)"
@@ -77,7 +85,7 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # SecureGate — Maven (pom.xml: Karate, Serenity, Selenium, Cucumber, JUnit 5).
+  # SecureGate — Maven (pom.xml: Karate, Serenity, Selenium, Cucumber, JUnit 6).
   - package-ecosystem: maven
     directory: /SecureGate
     schedule:
