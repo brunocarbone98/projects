@@ -46,7 +46,7 @@ async function openApp(load) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Only the extension's own pages may ask: it has no content scripts and no externally_connectable.
+  // Only this extension's own code may ask (web pages cannot reach it: no externally_connectable).
   if (sender.id !== chrome.runtime.id) return false;
   if (!isRecord(message) || message["type"] !== "dramafetch:open") return false;
   const load = typeof message["load"] === "string" && message["load"] ? message["load"] : null;
