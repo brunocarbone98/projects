@@ -9,9 +9,10 @@ before launch, launches Chromium (`DRAMAFETCH_CHROMIUM` or
 `/opt/pw-browsers/chromium`) headless with `--disable-extensions-except` / `--load-extension`,
 resets Playwright's download interception with a CDP `Browser.setDownloadBehavior {"behavior":
 "default"}` (so `chrome.downloads` saves under the real relative names), opens the extension's
-app page and saves the test settings (the fake TikTok's base URL, pauses near 0) through the
-page's test-mode panel. `page.wait_for_function` with a string predicate is blocked by the
-extension page's CSP, so the harness polls from Python.
+app page under the id Chrome derives from the copy's path (`unpacked_extension_id`), waits until
+that page sees the extension's service worker activated and saves the test settings (the fake
+TikTok's base URL, pauses near 0) through the page's test-mode panel. `page.wait_for_function`
+with a string predicate is blocked by the extension page's CSP, so the harness polls from Python.
 
 Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
 `#download-available-button`, `#download-selected-button`, `#include-locked`, `#recheck`,
@@ -23,6 +24,8 @@ Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -59,6 +62,16 @@ TEST_PACING: dict[str, float] = {
 }
 POLL_S = 0.1
 JOB_TIMEOUT_S = 90.0
+#: How long the extension's service worker may take to be registered and activated.
+WORKER_TIMEOUT_S = 30.0
+#: What the app page sees of the extension's service worker — the active worker's script URL and
+#: state, or null: `navigator.serviceWorker` keeps it whether the worker runs or is idle-stopped.
+ACTIVE_WORKER_JS = """async () => {
+  const active = (await navigator.serviceWorker.getRegistration())?.active;
+  return active ? [active.scriptURL, active.state] : null;
+}"""
+#: An extension id is hex written with the letters a-p.
+_ID_ALPHABET = str.maketrans("0123456789abcdef", "abcdefghijklmnop")
 
 
 def make_test_copy(target: Path) -> Path:
@@ -78,6 +91,29 @@ def make_test_copy(target: Path) -> Path:
     manifest["host_permissions"] = [*manifest["host_permissions"], TEST_HOST_PERMISSION]
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return target
+
+
+def unpacked_extension_id(directory: Path) -> str:
+    """The id Chrome gives the unpacked extension loaded from `directory`: the first 16 bytes of a
+    SHA-256, in hex written with the letters a-p. A manifest `key` wins (`ComputeExtensionID`
+    hashes the decoded public key); otherwise `--load-extension` makes the path absolute
+    (`base::MakeAbsoluteFilePath`: `realpath()` on POSIX, `_wfullpath()` on Windows) and
+    `crx_file::id_util::GenerateIdForPath` hashes the path's native bytes (UTF-16-LE on Windows,
+    the drive letter upper-cased).
+
+    Known before the launch, so the harness never waits for Playwright's "serviceworker" event: the
+    sync API can dispatch that event between a read of `context.service_workers` and the moment
+    `wait_for_event` starts listening, and the wait then times out while the worker runs.
+    """
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    if isinstance(manifest.get("key"), str):
+        data = base64.b64decode(manifest["key"])
+    elif os.name == "nt":
+        path = os.path.abspath(directory)  # noqa: PTH100 - GetFullPathNameW, as _wfullpath()
+        data = (path[:1].upper() + path[1:] if path[1:2] == ":" else path).encode("utf-16-le")
+    else:
+        data = os.fsencode(directory.resolve())
+    return hashlib.sha256(data).hexdigest()[:32].translate(_ID_ALPHABET)
 
 
 class ExtensionHarness:
@@ -114,6 +150,7 @@ class ExtensionHarness:
     # -- lifecycle -----------------------------------------------------------------------------
 
     def __enter__(self) -> ExtensionHarness:
+        from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import sync_playwright
 
         self.downloads.mkdir(parents=True, exist_ok=True)
@@ -146,14 +183,26 @@ class ExtensionHarness:
                     f"--load-extension={self.extension_dir}",
                 ],
             )
-            workers = self._context.service_workers
-            worker = workers[0] if workers else self._context.wait_for_event("serviceworker")
-            self.extension_id = worker.url.split("/")[2]
+            # from the path, never from a "serviceworker" event (see `unpacked_extension_id`)
+            self.extension_id = unpacked_extension_id(self.extension_dir)
             page = self._context.new_page()
             cdp = self._context.new_cdp_session(page)
             cdp.send("Browser.setDownloadBehavior", {"behavior": "default"})
-            page.goto(self.app_url)
+            try:
+                page.goto(self.app_url)
+            except PlaywrightError as error:
+                if "ERR_BLOCKED_BY_CLIENT" not in error.message:
+                    raise  # a timeout or a crash, not a question of the id
+                # what Playwright saw tells a wrong id (another one listed) from no extension at all
+                seen = [worker.url for worker in self._context.service_workers]
+                reason = error.message.partition("\n")[0]  # the call log stays in the chain
+                raise AssertionError(
+                    f"the extension's app page did not open ({reason}): Chrome did not "
+                    f"load the extension from {self.extension_dir}, or gave it another id than "
+                    f"{self.extension_id}; service workers Playwright saw: {seen or 'none'}"
+                ) from error
             self._page = page
+            self._wait_for_active_worker()
             self.wait_for(
                 lambda: self.page.locator("#app-status").get_attribute("data-state") == "idle"
             )
@@ -198,6 +247,23 @@ class ExtensionHarness:
         while not predicate():
             if time.monotonic() > deadline:
                 raise AssertionError(message or "timed out waiting for the extension")
+            time.sleep(POLL_S)
+
+    def _wait_for_active_worker(self) -> None:
+        """Wait until the app page sees the extension's service worker registered and activated —
+        a state, kept while the worker sleeps, so it cannot be missed the way an event can. A
+        worker whose script throws never gets there (Playwright still lists it), and the scenario
+        fails here, saying what the page sees."""
+        manifest = json.loads((self.extension_dir / "manifest.json").read_text(encoding="utf-8"))
+        worker = manifest["background"]["service_worker"]
+        script = f"chrome-extension://{self.extension_id}/{worker}"
+        deadline = time.monotonic() + WORKER_TIMEOUT_S
+        while (active := self.page.evaluate(ACTIVE_WORKER_JS)) != [script, "activated"]:
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"the extension's service worker is not active after {WORKER_TIMEOUT_S:g} s: "
+                    f"expected {script} activated, the app page sees {active!r}"
+                )
             time.sleep(POLL_S)
 
     def storage(self, keys: str | list[str] | None = None) -> dict[str, Any]:
