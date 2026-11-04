@@ -2,8 +2,12 @@ import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import { errorHandler, notFoundHandler } from "./http/error-handler.js";
-import { docsHtml, openapiDocument } from "./openapi.js";
-import { authRouter } from "./routes/auth.routes.js";
+import { docsBootScriptHash, docsHtml, openapiDocument } from "./openapi.js";
+import {
+  createAuthRouter,
+  DEFAULT_AUTH_LIMITS,
+  type AuthRouterOptions,
+} from "./routes/auth.routes.js";
 import { createQuoteRouter } from "./routes/quote.routes.js";
 import { createTrackingRouter } from "./routes/tracking.routes.js";
 import { shipmentsRouter } from "./routes/shipments.routes.js";
@@ -15,13 +19,37 @@ export interface AppOptions {
   publicRateLimitMax?: number;
   /** Public-tracking rate-limit window in ms (default 60000). */
   publicRateLimitWindowMs?: number;
+  /** Login and registration limits (defaults: `DEFAULT_AUTH_LIMITS`). */
+  authRateLimits?: Partial<AuthRouterOptions>;
 }
+
+// The docs page loads the Scalar reference from jsDelivr and runs one inline script (allowed by its
+// hash); every other response is JSON under helmet's default policy.
+const docsCsp = helmet.contentSecurityPolicy({
+  useDefaults: false,
+  directives: {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'", docsBootScriptHash, "https://cdn.jsdelivr.net"],
+    styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net", "https://fonts.scalar.com"],
+    fontSrc: ["'self'", "data:", "https://cdn.jsdelivr.net", "https://fonts.scalar.com"],
+    imgSrc: ["'self'", "data:", "https:"],
+    connectSrc: ["'self'"],
+    workerSrc: ["'self'", "blob:"],
+    objectSrc: ["'none'"],
+    baseUri: ["'self'"],
+    frameAncestors: ["'none'"],
+  },
+});
 
 export function buildApp(options: AppOptions = {}): Express {
   const app = express();
 
+  // In production the Next.js server reaches the API over loopback (API_INTERNAL_URL) and forwards
+  // each visitor's address in X-Forwarded-For. Trusting loopback makes that address req.ip, so the rate
+  // limits apply per visitor; direct callers (local runs, CI) send no such header and keep their own.
+  app.set("trust proxy", "loopback");
   app.disable("x-powered-by");
-  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(helmet());
   app.use(cors({ origin: env.corsOrigins, credentials: true }));
   app.use(express.json({ limit: "100kb" }));
 
@@ -29,7 +57,7 @@ export function buildApp(options: AppOptions = {}): Express {
     res.json({ status: "ok", service: "api", time: new Date().toISOString() });
   });
 
-  app.use("/api/v1/auth", authRouter);
+  app.use("/api/v1/auth", createAuthRouter({ ...DEFAULT_AUTH_LIMITS, ...options.authRateLimits }));
   app.use("/api/v1/shipments", shipmentsRouter);
   app.use("/api/v1/wallet", walletRouter);
   app.use(
@@ -50,7 +78,7 @@ export function buildApp(options: AppOptions = {}): Express {
   app.get("/api/v1/openapi.json", (_req, res) => {
     res.json(openapiDocument);
   });
-  app.get("/api/v1/docs", (_req, res) => {
+  app.get("/api/v1/docs", docsCsp, (_req, res) => {
     res.type("html").send(docsHtml);
   });
 

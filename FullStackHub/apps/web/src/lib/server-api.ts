@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { ACCESS_COOKIE } from "@/lib/auth/cookies";
+import { forwardedFor } from "@/lib/client-ip";
 import { apiUrl } from "@/lib/config";
 
 export class ApiError extends Error {
@@ -36,6 +37,7 @@ export async function serverApi<T>(path: string, init: ServerApiInit = {}): Prom
       accept: "application/json",
       "content-type": "application/json",
       ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+      ...(await forwardedFor()),
       ...headers,
     },
   });

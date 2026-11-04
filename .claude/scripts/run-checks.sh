@@ -72,7 +72,7 @@ sum_typecheck() {
   if [[ "$2" -eq 0 ]]; then echo "${tasks:-tsc clean}"; else echo "${errs:-?} TypeScript error(s)"; fi
 }
 sum_vitest() {
-  # Turbo prefixes every line with the workspace name, e.g. "@shipping-hub/api:test:  Tests  27 passed (27)".
+  # Turbo prefixes every line with the workspace name, e.g. "@shipping-hub/api:test:  Tests  40 passed (40)".
   grep -oE '@shipping-hub/[a-z]+:test: +Tests +[0-9]+ [a-z]+( \| [0-9]+ [a-z]+)*' "$1" \
     | sed -E 's/@shipping-hub\/([a-z]+):test: +Tests +/\1: /; s/ +/ /g' | paste -sd ';' - | sed 's/;/; /g'
 }

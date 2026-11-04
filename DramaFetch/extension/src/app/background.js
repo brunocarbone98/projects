@@ -45,7 +45,9 @@ async function openApp(load) {
   await chrome.tabs.create({ url: load ? `${appUrl}?load=${encodeURIComponent(load)}` : appUrl });
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only this extension's own code may ask (web pages cannot reach it: no externally_connectable).
+  if (sender.id !== chrome.runtime.id) return false;
   if (!isRecord(message) || message["type"] !== "dramafetch:open") return false;
   const load = typeof message["load"] === "string" && message["load"] ? message["load"] : null;
   openApp(load).then(

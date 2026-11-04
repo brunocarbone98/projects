@@ -38,7 +38,7 @@ International parcel shipping & tracking platform (UPS/FedEx style) with a bilin
 2. `tracking_events` and `ledger_entries` are append-only: never UPDATE or DELETE them.
 3. Shipment state transitions are validated against the map in `packages/shared`; the API rejects invalid transitions (e.g. `DELIVERED → IN_TRANSIT`).
 4. Every money operation requires an `idempotency_key` and a transaction.
-5. Public endpoints (tracking) have rate limiting and require no auth.
+5. Public endpoints (tracking) have rate limiting and require no auth. Login and registration are rate-limited too, always per visitor (failed logins per account and in all, registrations), so no one can lock anyone else out; the web forwards the visitor's address (Railway's `X-Real-IP`), which the API trusts from loopback only.
 
 ## Subagents (`.claude/agents/`)
 

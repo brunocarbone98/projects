@@ -6,8 +6,9 @@ dotenv.config({ path: process.env.ENV_FILE ?? ".env" });
 
 const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1),
-  JWT_ACCESS_SECRET: z.string().min(8),
-  JWT_REFRESH_SECRET: z.string().min(8),
+  // HS256 keys: at least 32 characters (256 bits as hex is 64), e.g. `openssl rand -hex 32`.
+  JWT_ACCESS_SECRET: z.string().min(32, "must be at least 32 characters (openssl rand -hex 32)"),
+  JWT_REFRESH_SECRET: z.string().min(32, "must be at least 32 characters (openssl rand -hex 32)"),
   ACCESS_TOKEN_TTL: z.coerce.number().int().positive().default(900),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(7),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -19,7 +20,9 @@ const EnvSchema = z.object({
 
 const parsed = EnvSchema.safeParse(process.env);
 if (!parsed.success) {
-  console.error("Invalid environment configuration:", z.treeifyError(parsed.error));
+  // Readable in a deploy log: "✖ must be at least 32 characters … → at JWT_ACCESS_SECRET". Zod
+  // reports names and rules only, never a value.
+  console.error(`Invalid environment configuration:\n${z.prettifyError(parsed.error)}`);
   throw new Error("Invalid environment configuration");
 }
 

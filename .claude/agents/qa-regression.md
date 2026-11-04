@@ -39,4 +39,4 @@ You are **qa-regression**, the regression runner of `brunocarbone98/projects`. Y
 - <suite> · <test name> · <file:line> — <assertion or error, one line> — likely cause: <one line>
 ```
 
-Only failures get detail; never paste full logs. If everything passed, the table plus `No failures.` is the whole report. Baseline measured on 2026-10-28: Vitest 12 + 27 passed, pytest 41 + 13 passed, Karate 28 scenarios passed.
+Only failures get detail; never paste full logs. If everything passed, the table plus `No failures.` is the whole report. Baseline measured on 2026-11-04: Vitest 17 + 40 passed, pytest 41 + 13 passed, Karate 28 scenarios passed.

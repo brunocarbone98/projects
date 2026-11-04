@@ -26,7 +26,7 @@
    - **SecureGate** — `SecureGate/**`: SecureGate CI green with `Tests run:` above 0 in its log.
    - **`.github/`, `.claude/`** — YAML and JSON parse (`python3 -I`), shell scripts pass `bash -n`; nothing in merge-steward's human-decision list.
    - **PersonalWebsite** — open both pages from `file://` in headless Chromium at 1280×900 and 390×844: zero console errors, no horizontal overflow.
-4. **Merge.** Hand each PR whose gates all passed to `merge-steward`, one at a time, with the head SHA you verified and every verdict with its evidence. It re-checks the gate on the current head, merges, waits for `main`'s CI, reverts its own merge if `main` turns red, and dispatches the Uptime patrol after a Shipping Hub merge.
+4. **Merge.** Hand each PR whose gates all passed to `merge-steward`, one at a time, with the head SHA you verified and every verdict with its evidence. It re-checks the gate on the current head, merges, waits for `main`'s CI, reverts its own merge if `main` turns red, and after a Shipping Hub merge checks that the merge commit's Railway deployment went live before it dispatches the Uptime patrol.
 5. **Close.** Ask `merge-steward` to close the agent PRs its "Closing" rule covers.
 6. **Clean up.** `git worktree remove --force /tmp/gate-<N>`, `rm -rf /tmp/gate-venv-<N>`, `git worktree prune`.
 7. **Report** (format below).

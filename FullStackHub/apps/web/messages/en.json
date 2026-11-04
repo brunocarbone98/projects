@@ -248,6 +248,7 @@
       "invalid_credentials": "Invalid email or password.",
       "weak_password": "Password must be at least 8 characters.",
       "email_taken": "That email is already registered.",
+      "rate_limited": "Too many attempts. Please wait a few minutes and try again.",
       "unknown": "Something went wrong. Please try again."
     }
   },

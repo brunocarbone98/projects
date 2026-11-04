@@ -30,6 +30,25 @@ async function refreshTokens(refreshToken: string): Promise<AuthTokensDto | null
   }
 }
 
+// A browser can send several requests with the same expired session at once: a navigation and the
+// prefetches of the links in view. The API accepts a refresh token exactly once, so those requests
+// share one refresh, and one that arrives a moment later (sent before the new cookies came back)
+// gets the same new tokens instead of a trip to the login page.
+const REFRESH_REUSE_MS = 10_000;
+const refreshes = new Map<string, Promise<AuthTokensDto | null>>();
+
+function refreshOnce(refreshToken: string): Promise<AuthTokensDto | null> {
+  const pending = refreshes.get(refreshToken);
+  if (pending) return pending;
+  const refresh = refreshTokens(refreshToken).then((tokens) => {
+    if (tokens) setTimeout(() => refreshes.delete(refreshToken), REFRESH_REUSE_MS);
+    else refreshes.delete(refreshToken);
+    return tokens;
+  });
+  refreshes.set(refreshToken, refresh);
+  return refresh;
+}
+
 export default async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -41,7 +60,7 @@ export default async function middleware(req: NextRequest) {
 
     if (!valid) {
       const refreshToken = req.cookies.get(REFRESH_COOKIE)?.value;
-      const refreshed = refreshToken ? await refreshTokens(refreshToken) : null;
+      const refreshed = refreshToken ? await refreshOnce(refreshToken) : null;
       const refreshedClaims = refreshed ? decodeAccessToken(refreshed.accessToken) : null;
 
       // Only redirect-to-refresh when the new token is actually usable; otherwise

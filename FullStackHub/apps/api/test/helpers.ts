@@ -10,8 +10,15 @@ import { buildApp } from "../src/app.js";
 import { hashPassword } from "../src/auth/passwords.js";
 import { prisma } from "../src/prisma.js";
 
-// High rate limit so ordinary tests never trip it; the rate-limit test builds its own app.
-export const app: Express = buildApp({ publicRateLimitMax: 1000 });
+// High rate limits so ordinary tests never trip them; the rate-limit tests build their own app.
+export const app: Express = buildApp({
+  publicRateLimitMax: 1000,
+  authRateLimits: {
+    loginFailuresPerAccountPerClient: 1000,
+    loginFailuresPerClient: 1000,
+    registrationsPerClient: 1000,
+  },
+});
 
 export const api = () => supertest(app);
 

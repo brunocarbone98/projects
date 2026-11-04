@@ -34,8 +34,8 @@ Internet ─▶ web :$PORT (public)
 On the **app** service (not the database) → **Variables**, add just three:
 ```
 DATABASE_URL       = ${{Postgres.DATABASE_URL}}
-JWT_ACCESS_SECRET  = <a long random string>
-JWT_REFRESH_SECRET = <a different long random string>
+JWT_ACCESS_SECRET  = <a long random string, at least 32 characters>
+JWT_REFRESH_SECRET = <a different long random string, at least 32 characters>
 ```
 
 > **Get `DATABASE_URL` right — this is the #1 deploy gotcha.** `${{Postgres.…}}`
@@ -50,7 +50,8 @@ JWT_REFRESH_SECRET = <a different long random string>
 That's all — the internal URLs (web→api, api→pricing/labels) are hard-wired to
 `localhost` inside the image. (Optional: `PUBLIC_WEB_URL` / `CORS_ORIGINS` = your
 public domain, used for tracking links / CORS.) Generate the secrets with e.g.
-`openssl rand -hex 32`.
+`openssl rand -hex 32` (64 characters): the API refuses to start with a secret shorter than 32
+characters, and its boot log names the variable.
 
 ## 3. One port, one domain
 The container exposes the web on port **8080**. Service → Settings →
@@ -60,6 +61,10 @@ The container exposes the web on port **8080**. Service → Settings →
 ## 4. Deploy, migrate, seed
 - Railway builds the image and starts it. The container **runs `prisma migrate
   deploy` on boot**, so the schema is created automatically.
+- **Health check:** `railway.json` makes Railway wait for `GET /api/health` to answer `200`
+  — the web server and the API behind it both up — before a new deployment takes traffic
+  (up to 300 s). A release that cannot start (a missing variable, a short JWT secret, a failed
+  migration) never replaces the running one; its deploy log says why.
 - Load the demo data (22 customers, 60 shipments, wallet activity) once from your
   machine, using the database's **public** URL (Railway → your Postgres →
   Variables → `DATABASE_PUBLIC_URL`):
@@ -128,9 +133,21 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
 - **One container, several processes:** the web, API and Python services run
   together (the web is the public entrypoint, the rest stay on `localhost`). It's a
   pragmatic packaging for a portfolio — the code is still four separate apps. If
-  any process exits, the container restarts.
+  any process exits, the container restarts. Every process runs as the image's unprivileged
+  `node` user, never root.
+- **Rate limits per visitor:** the web reaches the API over `localhost` (Railway publishes only
+  the web's port), so the web forwards each visitor's address and the API trusts it from loopback only. The address is
+  the public one Railway's edge puts in `X-Real-IP` (Railway docs: Networking → Public Networking →
+  Specs & Limits → Request Headers); `X-Forwarded-For` is not read. Tracking and quotes are limited
+  per visitor; every 15 minutes a visitor gets 10 failed logins per account and 30 in all, and 10
+  registrations. Every limit counts per visitor, so nobody can lock anyone else out (the public demo
+  accounts included). The limits live in memory: a restart clears them. To check after a deploy:
+  the 11th wrong password in a row for one account answers "Too many attempts", and the right
+  password still signs in from another network (a phone on mobile data).
 - **Local dev is unchanged:** `docker compose up -d` (Postgres + the Python
-  services) and `pnpm dev` (web + api) — see `FullStackHub/README.md`.
+  services) and `pnpm dev` (web + api) — see `FullStackHub/README.md`. An `apps/api/.env`
+  copied before #74 needs the two `JWT_*` lines from `.env.example` again: the API now refuses
+  secrets shorter than 32 characters (SecureGate's `run-local-stack.ps1` updates them itself).
 - Railway is usage-based (a small trial credit, then pay-as-you-go); nothing sleeps.
 - **Notifications** (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see
   `FullStackHub/apps/api/.env.example`.

@@ -1,5 +1,6 @@
 // Hand-authored OpenAPI 3.1 description of the public + authenticated API.
 // Served as JSON at /api/v1/openapi.json and rendered at /api/v1/docs.
+import { createHash } from "node:crypto";
 import { SERVICE_LEVELS, SHIPMENT_STATUSES, USER_ROLES } from "@shipping-hub/shared";
 
 const ApiError = {
@@ -184,7 +185,11 @@ export const openapiDocument = {
             "application/json": { schema: { $ref: "#/components/schemas/RegisterInput" } },
           },
         },
-        responses: { "201": { description: "Created" }, "409": { description: "Email taken" } },
+        responses: {
+          "201": { description: "Created" },
+          "409": { description: "Email taken" },
+          "429": { description: "Too many registrations from this client" },
+        },
       },
     },
     "/auth/login": {
@@ -197,7 +202,11 @@ export const openapiDocument = {
             "application/json": { schema: { $ref: "#/components/schemas/LoginInput" } },
           },
         },
-        responses: { "200": { description: "OK" }, "401": { description: "Invalid credentials" } },
+        responses: {
+          "200": { description: "OK" },
+          "401": { description: "Invalid credentials" },
+          "429": { description: "Too many failed logins from this client" },
+        },
       },
     },
     "/auth/refresh": {
@@ -363,6 +372,17 @@ export const openapiDocument = {
   },
 } as const;
 
+const DOCS_BOOT_SCRIPT = `
+      fetch("/api/v1/openapi.json")
+        .then((r) => r.text())
+        .then((spec) => {
+          document.getElementById("api-reference").textContent = spec;
+        });
+    `;
+
+/** The CSP source that allows the docs page's one inline script: its SHA-256. */
+export const docsBootScriptHash = `'sha256-${createHash("sha256").update(DOCS_BOOT_SCRIPT).digest("base64")}'`;
+
 export const docsHtml = `<!doctype html>
 <html lang="en">
   <head>
@@ -372,13 +392,7 @@ export const docsHtml = `<!doctype html>
   </head>
   <body>
     <script id="api-reference" type="application/json"></script>
-    <script>
-      fetch("/api/v1/openapi.json")
-        .then((r) => r.text())
-        .then((spec) => {
-          document.getElementById("api-reference").textContent = spec;
-        });
-    </script>
+    <script>${DOCS_BOOT_SCRIPT}</script>
     <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
   </body>
 </html>`;

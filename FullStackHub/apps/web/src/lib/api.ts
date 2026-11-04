@@ -1,4 +1,5 @@
 import type { PublicTrackingDto } from "@shipping-hub/shared";
+import { forwardedFor } from "./client-ip";
 import { apiUrl } from "./config";
 
 /**
@@ -9,7 +10,7 @@ export async function fetchTracking(code: string): Promise<PublicTrackingDto | n
   const res = await fetch(`${apiUrl}/api/v1/tracking/${encodeURIComponent(code)}`, {
     // Tracking changes over time — always fetch fresh.
     cache: "no-store",
-    headers: { accept: "application/json" },
+    headers: { accept: "application/json", ...(await forwardedFor()) },
   });
 
   if (res.status === 404 || res.status === 400) return null;

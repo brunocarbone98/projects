@@ -45,8 +45,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://shipping:shipping@localhost:5432/shipping_hub?schema=public
-      JWT_ACCESS_SECRET: ci-access-secret-change-me
-      JWT_REFRESH_SECRET: ci-refresh-secret-change-me
+      JWT_ACCESS_SECRET: ci-access-secret-change-me-at-least-32-chars
+      JWT_REFRESH_SECRET: ci-refresh-secret-change-me-at-least-32-chars
       PORT: "4000"
       CORS_ORIGINS: http://localhost:3000
       PUBLIC_WEB_URL: http://localhost:3000

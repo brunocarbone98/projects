@@ -1,6 +1,7 @@
 "use server";
 
 import type { QuoteDto, QuoteRequestInput } from "@shipping-hub/shared";
+import { forwardedFor } from "@/lib/client-ip";
 import { apiUrl } from "@/lib/config";
 
 /** Live quote from the API (which calls the pricing microservice). */
@@ -8,7 +9,7 @@ export async function getQuoteAction(input: QuoteRequestInput): Promise<QuoteDto
   try {
     const res = await fetch(`${apiUrl}/api/v1/quote`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(await forwardedFor()) },
       body: JSON.stringify(input),
       cache: "no-store",
     });
