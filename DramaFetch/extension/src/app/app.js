@@ -1067,7 +1067,8 @@ async function main() {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && Object.hasOwn(changes, COOLDOWN_STORAGE_KEY)) void refreshCooldown();
   });
-  chrome.runtime.onMessage.addListener((message) => {
+  chrome.runtime.onMessage.addListener((message, sender) => {
+    if (sender.id !== chrome.runtime.id) return; // only the extension's own pages
     if (message !== null && typeof message === "object") {
       const record = /** @type {Record<string, unknown>} */ (message);
       if (record["type"] === "dramafetch:load" && typeof record["input"] === "string") loadFromOutside(record["input"]);
