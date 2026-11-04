@@ -12,7 +12,13 @@ import {
 } from "./cookies";
 
 export interface AuthFormState {
-  error?: "required" | "invalid_credentials" | "email_taken" | "weak_password" | "unknown";
+  error?:
+    | "required"
+    | "invalid_credentials"
+    | "email_taken"
+    | "weak_password"
+    | "rate_limited"
+    | "unknown";
 }
 
 async function persistTokens(tokens: AuthTokensDto): Promise<void> {
@@ -39,6 +45,7 @@ export async function login(
     await persistTokens(data.tokens);
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) return { error: "invalid_credentials" };
+    if (error instanceof ApiError && error.status === 429) return { error: "rate_limited" };
     return { error: "unknown" };
   }
   redirect(`/${locale}/app`);
@@ -65,6 +72,7 @@ export async function register(
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) return { error: "email_taken" };
     if (error instanceof ApiError && error.status === 400) return { error: "weak_password" };
+    if (error instanceof ApiError && error.status === 429) return { error: "rate_limited" };
     return { error: "unknown" };
   }
   redirect(`/${locale}/app`);
