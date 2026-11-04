@@ -77,7 +77,8 @@ stateless — they receive data, compute/generate, and return a result.
 
 - **1 — Transactional API**: JWT auth (access + rotating refresh tokens), roles
   (customer/courier/admin), shipment CRUD, append-only tracking events validated against a
-  **state machine**, public **rate-limited** tracking, zone pricing + business-day ETAs, OpenAPI docs.
+  **state machine**, public **rate-limited** tracking, rate-limited login and registration (per account
+  and per visitor), zone pricing + business-day ETAs, OpenAPI docs.
 - **2 — Public web**: bilingual landing, **SSR tracking** with a `ParcelDelivery` JSON-LD timeline,
   quote calculator, coverage, FAQ. Full SEO (dynamic metadata, OG + dynamic OG images, hreflang,
   sitemap, robots).
