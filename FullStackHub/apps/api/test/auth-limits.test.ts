@@ -2,11 +2,11 @@ import type { Express } from "express";
 import supertest from "supertest";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
-import type { AuthRouterOptions } from "../src/routes/auth.routes.js";
+import { DEFAULT_AUTH_LIMITS, type AuthRouterOptions } from "../src/routes/auth.routes.js";
 import { api, DEFAULT_PASSWORD, registerCustomer } from "./helpers.js";
 
 const RELAXED: AuthRouterOptions = {
-  loginFailuresPerAccount: 1000,
+  loginFailuresPerAccountPerClient: 1000,
   loginFailuresPerClient: 1000,
   registrationsPerClient: 1000,
   windowMs: 60_000,
@@ -33,34 +33,73 @@ function register(app: Express, email: string, visitor?: string) {
 }
 
 describe("login and registration limits", () => {
-  it("limits failed logins per account, from any client and in any letter case", async () => {
+  it("limits one client's failed logins to an account, in any letter case", async () => {
     await registerCustomer("victim@example.com");
-    const app = appWith({ loginFailuresPerAccount: 3 });
+    const app = appWith({ loginFailuresPerAccountPerClient: 3 });
 
     expect((await login(app, "victim@example.com", "wrong-1", "203.0.113.1")).status).toBe(401);
-    expect((await login(app, "VICTIM@example.com", "wrong-2", "203.0.113.2")).status).toBe(401);
-    expect((await login(app, "victim@example.com", "wrong-3")).status).toBe(401);
+    expect((await login(app, "VICTIM@example.com", "wrong-2", "203.0.113.1")).status).toBe(401);
+    expect((await login(app, "Victim@Example.COM", "wrong-3", "203.0.113.1")).status).toBe(401);
 
-    const blocked = await login(app, "victim@example.com", DEFAULT_PASSWORD, "203.0.113.4");
+    const blocked = await login(app, "victim@example.com", DEFAULT_PASSWORD, "203.0.113.1");
     expect(blocked.status).toBe(429);
     expect(blocked.body.error.code).toBe("RATE_LIMITED");
   });
 
+  it("never lets clients lock anyone else out of an account", async () => {
+    await registerCustomer("ana@example.com");
+    const app = appWith({ loginFailuresPerAccountPerClient: 2 });
+
+    for (const visitor of ["203.0.113.40", "203.0.113.41", "203.0.113.42"]) {
+      expect((await login(app, "ana@example.com", "wrong", visitor)).status).toBe(401);
+      expect((await login(app, "ana@example.com", "wrong", visitor)).status).toBe(401);
+      expect((await login(app, "ana@example.com", DEFAULT_PASSWORD, visitor)).status).toBe(429);
+    }
+    expect((await login(app, "ana@example.com", DEFAULT_PASSWORD, "198.51.100.43")).status).toBe(
+      200,
+    );
+  });
+
+  it("with the default limits, blocks a guessing client after 10 failures and no one else", async () => {
+    await registerCustomer("demo@example.com");
+    const app = buildApp({ publicRateLimitMax: 1000, authRateLimits: DEFAULT_AUTH_LIMITS });
+
+    for (let i = 0; i < DEFAULT_AUTH_LIMITS.loginFailuresPerAccountPerClient; i++) {
+      expect((await login(app, "demo@example.com", `wrong-${i}`, "203.0.113.30")).status).toBe(401);
+    }
+    expect((await login(app, "demo@example.com", DEFAULT_PASSWORD, "203.0.113.30")).status).toBe(
+      429,
+    );
+    expect((await login(app, "demo@example.com", DEFAULT_PASSWORD, "198.51.100.31")).status).toBe(
+      200,
+    );
+  });
+
   it("never counts a successful login", async () => {
     await registerCustomer("regular@example.com");
-    const app = appWith({ loginFailuresPerAccount: 2 });
+    const app = appWith({ loginFailuresPerAccountPerClient: 2, loginFailuresPerClient: 2 });
 
     for (let i = 0; i < 5; i++) {
-      expect((await login(app, "regular@example.com", DEFAULT_PASSWORD)).status).toBe(200);
+      expect(
+        (await login(app, "regular@example.com", DEFAULT_PASSWORD, "203.0.113.5")).status,
+      ).toBe(200);
     }
   });
 
   it("keeps each account's budget separate", async () => {
-    const app = appWith({ loginFailuresPerAccount: 1 });
+    const app = appWith({ loginFailuresPerAccountPerClient: 1 });
 
-    expect((await login(app, "a@example.com", "wrong")).status).toBe(401);
-    expect((await login(app, "b@example.com", "wrong")).status).toBe(401);
-    expect((await login(app, "a@example.com", "wrong")).status).toBe(429);
+    expect((await login(app, "a@example.com", "wrong", "203.0.113.6")).status).toBe(401);
+    expect((await login(app, "b@example.com", "wrong", "203.0.113.6")).status).toBe(401);
+    expect((await login(app, "a@example.com", "wrong", "203.0.113.6")).status).toBe(429);
+  });
+
+  it("counts every email longer than a valid one under a single key", async () => {
+    const app = appWith({ loginFailuresPerAccountPerClient: 1 });
+    const long = `${"x".repeat(254)}@example.com`;
+
+    expect((await login(app, `${long}-first`, "wrong", "203.0.113.12")).status).toBe(400);
+    expect((await login(app, `${long}-second`, "wrong", "203.0.113.12")).status).toBe(429);
   });
 
   it("limits failed logins per forwarded client across accounts", async () => {
@@ -81,13 +120,19 @@ describe("login and registration limits", () => {
     expect((await register(app, "r4@example.com", "198.51.100.10")).status).toBe(201);
   });
 
-  it("never applies a per-client limit to a caller on loopback with no forwarded address", async () => {
-    const app = appWith({ loginFailuresPerClient: 1, registrationsPerClient: 1 });
+  it("never limits a caller on loopback with no forwarded address", async () => {
+    await registerCustomer("local@example.com");
+    const app = appWith({
+      loginFailuresPerAccountPerClient: 1,
+      loginFailuresPerClient: 1,
+      registrationsPerClient: 1,
+    });
 
     for (const email of ["x1@example.com", "x2@example.com", "x3@example.com"]) {
-      expect((await login(app, email, "wrong")).status).toBe(401);
+      expect((await login(app, "local@example.com", "wrong")).status).toBe(401);
       expect((await register(app, email)).status).toBe(201);
     }
+    expect((await login(app, "local@example.com", DEFAULT_PASSWORD)).status).toBe(200);
   });
 
   it("keys the public rate limits by the forwarded visitor address", async () => {

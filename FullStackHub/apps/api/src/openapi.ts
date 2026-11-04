@@ -205,7 +205,7 @@ export const openapiDocument = {
         responses: {
           "200": { description: "OK" },
           "401": { description: "Invalid credentials" },
-          "429": { description: "Too many failed logins for this account or client" },
+          "429": { description: "Too many failed logins from this client" },
         },
       },
     },

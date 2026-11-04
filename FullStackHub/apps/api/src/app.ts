@@ -44,8 +44,8 @@ const docsCsp = helmet.contentSecurityPolicy({
 export function buildApp(options: AppOptions = {}): Express {
   const app = express();
 
-  // In production the API listens on localhost behind the Next.js server, which forwards each
-  // visitor's address in X-Forwarded-For. Trusting loopback makes that address req.ip, so the rate
+  // In production the Next.js server reaches the API over loopback (API_INTERNAL_URL) and forwards
+  // each visitor's address in X-Forwarded-For. Trusting loopback makes that address req.ip, so the rate
   // limits apply per visitor; direct callers (local runs, CI) send no such header and keep their own.
   app.set("trust proxy", "loopback");
   app.disable("x-powered-by");

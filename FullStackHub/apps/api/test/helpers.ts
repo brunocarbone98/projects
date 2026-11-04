@@ -14,7 +14,7 @@ import { prisma } from "../src/prisma.js";
 export const app: Express = buildApp({
   publicRateLimitMax: 1000,
   authRateLimits: {
-    loginFailuresPerAccount: 1000,
+    loginFailuresPerAccountPerClient: 1000,
     loginFailuresPerClient: 1000,
     registrationsPerClient: 1000,
   },

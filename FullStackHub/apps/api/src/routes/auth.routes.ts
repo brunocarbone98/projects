@@ -1,6 +1,6 @@
 import { LoginSchema, RefreshSchema, RegisterSchema } from "@shipping-hub/shared";
 import { Router, type Request } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth } from "../auth/middleware.js";
 import { unauthenticated } from "../http/errors.js";
 import { isLoopback, rateLimitedHandler } from "../http/rate-limit.js";
@@ -8,28 +8,37 @@ import { parseOrThrow } from "../http/validate.js";
 import * as authService from "../services/auth.service.js";
 
 export interface AuthRouterOptions {
-  /** Failed logins allowed per email address per window, from any client. */
-  loginFailuresPerAccount: number;
-  /** Failed logins allowed per client address per window, across accounts; loopback is exempt. */
+  /** Failed logins allowed per client address and email address per window. */
+  loginFailuresPerAccountPerClient: number;
+  /** Failed logins allowed per client address per window, across email addresses. */
   loginFailuresPerClient: number;
-  /** Registrations allowed per client address per window; loopback is exempt. */
+  /** Registrations allowed per client address per window. */
   registrationsPerClient: number;
   /** The window of the three limits, in milliseconds. */
   windowMs: number;
 }
 
 export const DEFAULT_AUTH_LIMITS: AuthRouterOptions = {
-  loginFailuresPerAccount: 10,
+  loginFailuresPerAccountPerClient: 10,
   loginFailuresPerClient: 30,
   registrationsPerClient: 10,
   windowMs: 15 * 60_000,
 };
 
-/** The login's email as one key, so "Ana@x" and "ana@x " share an account's budget. */
+/**
+ * The login's email as part of a key, so "Ana@x" and "ana@x " share an account's budget. It is read
+ * before validation, so its length is checked before any string operation: a valid email has at
+ * most 254 characters, and a substring of a longer value would keep the whole value (up to the
+ * 100 kB body limit) in the limiter's memory for the window. Longer values share one key.
+ */
 function accountKey(req: Request): string {
   const body: unknown = req.body;
   const email =
-    typeof body === "object" && body !== null && "email" in body && typeof body.email === "string"
+    typeof body === "object" &&
+    body !== null &&
+    "email" in body &&
+    typeof body.email === "string" &&
+    body.email.length <= 254
       ? body.email.trim().toLowerCase()
       : "";
   return `login:${email}`;
@@ -37,40 +46,40 @@ function accountKey(req: Request): string {
 
 export function createAuthRouter(options: AuthRouterOptions): Router {
   const router = Router();
+  // Every limit here counts per client, so no one can lock anyone else out of an account (the
+  // public demo accounts included); a client blocks only itself. A caller on loopback with no
+  // visitor address (local runs, CI, the web server when it has none to forward) is never limited:
+  // counting it would make one bucket for every visitor.
   const common = {
     windowMs: options.windowMs,
     standardHeaders: "draft-7",
     legacyHeaders: false,
     handler: rateLimitedHandler,
+    skip: (req: Request) => isLoopback(req.ip),
   } as const;
 
-  // Password guessing against one account, whatever the source: only failed attempts count, so a
-  // user who signs in is never slowed down.
-  const loginPerAccount = rateLimit({
+  // Login limits count failed attempts only, so a user who signs in is never slowed down.
+  // One client guessing one account's password:
+  const loginPerAccountPerClient = rateLimit({
     ...common,
-    limit: options.loginFailuresPerAccount,
+    limit: options.loginFailuresPerAccountPerClient,
     skipSuccessfulRequests: true,
-    keyGenerator: accountKey,
+    keyGenerator: (req) => `${accountKey(req)}|${ipKeyGenerator(req.ip ?? "")}`,
   });
-  // One client trying many accounts (credential stuffing).
+  // One client trying many accounts (credential stuffing):
   const loginPerClient = rateLimit({
     ...common,
     limit: options.loginFailuresPerClient,
     skipSuccessfulRequests: true,
-    skip: (req) => isLoopback(req.ip),
   });
-  const registerPerClient = rateLimit({
-    ...common,
-    limit: options.registrationsPerClient,
-    skip: (req) => isLoopback(req.ip),
-  });
+  const registerPerClient = rateLimit({ ...common, limit: options.registrationsPerClient });
 
   router.post("/register", registerPerClient, async (req, res) => {
     const input = parseOrThrow(RegisterSchema, req.body ?? {});
     res.status(201).json(await authService.register(input));
   });
 
-  router.post("/login", loginPerClient, loginPerAccount, async (req, res) => {
+  router.post("/login", loginPerClient, loginPerAccountPerClient, async (req, res) => {
     const input = parseOrThrow(LoginSchema, req.body ?? {});
     res.json(await authService.login(input));
   });
