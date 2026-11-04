@@ -135,12 +135,19 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   pragmatic packaging for a portfolio — the code is still four separate apps. If
   any process exits, the container restarts. Every process runs as the image's unprivileged
   `node` user, never root.
-- **Rate limits per visitor:** the API listens on `localhost` behind the web server, so the
-  web forwards each visitor's address (the right-most `X-Forwarded-For` entry Railway's proxy
-  sets) and the API trusts that header from loopback only. Tracking and quotes are limited per
-  visitor, and login and registration per account and per visitor.
+- **Rate limits per visitor:** the web reaches the API over `localhost` (Railway publishes only
+  the web's port), so the web forwards each visitor's address and the API trusts it from loopback only. The address is
+  the public one Railway's edge puts in `X-Real-IP` (Railway docs: Networking → Public Networking →
+  Specs & Limits → Request Headers); `X-Forwarded-For` is not read. Tracking and quotes are limited
+  per visitor; every 15 minutes a visitor gets 10 failed logins per account and 30 in all, and 10
+  registrations. Every limit counts per visitor, so nobody can lock anyone else out (the public demo
+  accounts included). The limits live in memory: a restart clears them. To check after a deploy:
+  the 11th wrong password in a row for one account answers "Too many attempts", and the right
+  password still signs in from another network (a phone on mobile data).
 - **Local dev is unchanged:** `docker compose up -d` (Postgres + the Python
-  services) and `pnpm dev` (web + api) — see `FullStackHub/README.md`.
+  services) and `pnpm dev` (web + api) — see `FullStackHub/README.md`. An `apps/api/.env`
+  copied before #74 needs the two `JWT_*` lines from `.env.example` again: the API now refuses
+  secrets shorter than 32 characters (SecureGate's `run-local-stack.ps1` updates them itself).
 - Railway is usage-based (a small trial credit, then pay-as-you-go); nothing sleeps.
 - **Notifications** (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see
   `FullStackHub/apps/api/.env.example`.

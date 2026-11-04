@@ -11,8 +11,8 @@ onlyBuiltDependencies:
 
 # Security overrides from the weekly review (#74). Each package is dev- or build-time only, and the
 # full checks pass with the fixed version; drop an entry once its parent depends on the fix itself.
-# (vite, vitest's optional peer, is pinned as a devDependency next to vitest instead: pnpm does not
-# apply overrides to peers.)
+# (vite, a required peer of vitest, is pinned instead as a devDependency next to vitest in apps/api
+# and packages/shared, so the floor sits where vitest is declared.)
 overrides:
   # Prisma 6's config loader still pins 7.1.5 (GHSA-ggr8-5vv4-36mx); it only calls deepmerge().
   deepmerge-ts: ^8.0.2

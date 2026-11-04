@@ -77,8 +77,8 @@ stateless — they receive data, compute/generate, and return a result.
 
 - **1 — Transactional API**: JWT auth (access + rotating refresh tokens), roles
   (customer/courier/admin), shipment CRUD, append-only tracking events validated against a
-  **state machine**, public **rate-limited** tracking, rate-limited login and registration (per account
-  and per visitor), zone pricing + business-day ETAs, OpenAPI docs.
+  **state machine**, public **rate-limited** tracking, rate-limited login and registration (per
+  visitor), zone pricing + business-day ETAs, OpenAPI docs.
 - **2 — Public web**: bilingual landing, **SSR tracking** with a `ParcelDelivery` JSON-LD timeline,
   quote calculator, coverage, FAQ. Full SEO (dynamic metadata, OG + dynamic OG images, hreflang,
   sitemap, robots).
@@ -102,14 +102,18 @@ pnpm install
 # 1. PostgreSQL (user/pass/db: shipping / shipping / shipping_hub)
 docker compose up -d
 
-# 2. Migrate + seed demo data (22 customers, 60 shipments across every state, with wallet activity)
+# 2. API settings. The API refuses to start with a JWT secret shorter than 32 characters,
+#    so refresh an older copy (or put `openssl rand -hex 32` values in it).
+cp apps/api/.env.example apps/api/.env
+
+# 3. Migrate + seed demo data (22 customers, 60 shipments across every state, with wallet activity)
 pnpm --filter @shipping-hub/api db:deploy
 pnpm --filter @shipping-hub/api db:seed
 
-# 3. Run web (http://localhost:3000) + api (http://localhost:4000)
+# 4. Run web (http://localhost:3000) + api (http://localhost:4000)
 pnpm dev
 
-# 4. (optional) the Python services
+# 5. (optional) the Python services
 cd services/pricing && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && uvicorn main:app --port 8001
 cd services/labels  && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt && uvicorn main:app --port 8002
 ```
