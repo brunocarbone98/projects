@@ -15,7 +15,7 @@
 ## Steps
 
 1. **Collect (read-only).** For the last 24 hours: the runs of Uptime patrol, CI and SecureGate CI (status, conclusion, failing step, decisive log lines); open issues labelled `incident`, `maintenance` or `security`; check states of open PRs. Delegate the log reading to the `sre-patrol` subagent when the data is large.
-2. **Everything green and no incident open?** Stop. Report `No action needed.` — no issue, no comment, no PR.
+2. **Everything green, production observed and no incident open?** Stop. Report `No action needed.` — no issue, no comment, no PR. An Uptime patrol run whose summary says **Unobserved** (`healthy=unknown`: every probe answered by Railway's edge browser check, rows `🛡️ challenged`) ends green without having seen the app: when the window holds no observed run, production was not seen — report its line as `UNOBSERVED` with the time of the last observed run, never `OK` and never `No action needed.`, and stop there too (no issue, no comment, no PR: whether Railway lets monitors through is the owner's decision, `DEPLOY.md` → Monitoring & incidents).
 3. **An incident issue is open.** Read its latest probe table and the failing Uptime patrol run. Decide:
    - **In-repo cause** (a wrong URL or expectation in `uptime-patrol.yml`, a config error in `start.sh`, `Dockerfile` or `railway.json`, a broken sitemap or route in `FullStackHub/apps/web`): branch `agents/sre-patrol/<date>` from `main`, fix it, run the relevant checks (`.claude/scripts/run-checks.sh` for FullStackHub changes; `python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" <workflow>` for workflows), open the PR `fix(agents): <what>` with label `agent`, the PR template filled and `Opened by: sre-patrol`. Comment once on the incident issue with the PR link.
    - **Hosting cause** (Railway container down or restarting, every probe timing out or 5xx, database unreachable → `DATABASE_URL`): comment **once** on the incident issue with the diagnosis and the human action (Railway → service → Deployments → Restart; verify the `DATABASE_URL` reference resolves to a `postgresql://` value; read the deploy logs) — only if no earlier comment already says the same. One diagnosis per distinct cause; never spam.
@@ -26,7 +26,7 @@
 
 - Evidence first: quote the log line, run URL or probe row behind every claim.
 - A SecureGate run with `tests="0"`, or one where every scenario was skipped, is an infrastructure problem (the stack did not come up) — not a test failure and not a pass.
-- One red run followed by a green one is transient: mention it, change nothing.
+- One red run on `main` followed by a green run of the same workflow on `main` is transient: mention it, change nothing. A red run with no later run on `main` is not transient: step 4 applies.
 - GitHub runs `schedule` triggers best-effort: Uptime patrol and the SecureGate nightly regularly start hours late or are skipped — a few patrol runs a day is normal. Late or missing scheduled runs are not a failure: no issue, no PR; give the time of the last scheduled run in the report. The one scheduling problem worth a line in the report is a workflow GitHub has **disabled** (`disabled_inactivity` in `actions_list`, a banner in the Actions tab) — a human clicks Enable.
 - Never fix a red check by weakening a probe, test or lint rule. Never touch money, state-machine or auth code, the schema or the deploy config to "make it green" — open an issue.
 - At most one PR per run and at most one new comment per issue per run. Only the merge gate merges; a human merges what it escalates.
@@ -50,7 +50,7 @@
 
 ## Final report (short bullets)
 
-- Status: `SEV1` production down / `SEV2` CI or SecureGate CI red on main / `SEV3` flaky or degraded / `OK` — one line each for Uptime patrol, CI and SecureGate CI (last conclusion + time).
+- Status: `SEV1` production down / `SEV2` CI or SecureGate CI red on main / `SEV3` flaky or degraded / `UNOBSERVED` production not seen (Uptime patrol answered by Railway's edge browser check) / `OK` — one line each for Uptime patrol, CI and SecureGate CI (last conclusion + time).
 - Incident: open or none; comment posted yes/no (link).
 - PR: title + link, or `none`.
 - Issues: created/updated + links, or `none`.

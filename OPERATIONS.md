@@ -82,7 +82,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 
 - **Trigger:** cloud scheduled task `Autonomous maintenance · SRE patrol`, cron `28 */6 * * *` (UTC), resuming the shift's standing session (the checkout is synced to the default branch first).
 - **Runtime:** Claude Code cloud. It normally needs only the GitHub API (reachable from the cloud); it starts a local stack (`.claude/scripts/local-api.sh`, then `cd SecureGate && ./mvnw -q -B verify`) only to reproduce a SecureGate CI failure before proposing a fix.
-- **Steps:** (1) through the GitHub API/MCP, read the last 24 hours of *Uptime patrol*, *CI* and *SecureGate CI* runs and any open `incident`, `maintenance` or `security` issues; (2) if everything is green and no incident is open, stop and report "no action"; (3) if an incident is open, read the failing probe output — when the cause is in-repo (a bad workflow, a bad URL, configuration in `start.sh`/`Dockerfile`) branch `agents/sre-patrol/<date>` and open a fix PR; when it is the hosting (Railway down, the database) comment once on the incident issue with the diagnosis and the human action needed (restart, check `DATABASE_URL`), and do not spam; (4) if CI or SecureGate CI failed on `main`, diagnose from the logs — a fix PR when it is a flaky or broken test or workflow, otherwise open or update one issue; (5) report.
+- **Steps:** (1) through the GitHub API/MCP, read the last 24 hours of *Uptime patrol*, *CI* and *SecureGate CI* runs and any open `incident`, `maintenance` or `security` issues; (2) if everything is green, the Uptime patrol observed the app and no incident is open, stop and report "no action" (a window of Unobserved patrol runs is reported as `UNOBSERVED`, never OK); (3) if an incident is open, read the failing probe output — when the cause is in-repo (a bad workflow, a bad URL, configuration in `start.sh`/`Dockerfile`) branch `agents/sre-patrol/<date>` and open a fix PR; when it is the hosting (Railway down, the database) comment once on the incident issue with the diagnosis and the human action needed (restart, check `DATABASE_URL`), and do not spam; (4) if CI or SecureGate CI failed on `main`, diagnose from the logs — a fix PR when it is a flaky or broken test or workflow, otherwise open or update one issue; (5) report.
 - **Outputs:** a short bullet report in the session; at most one PR (`fix(agents): …`, label `agent`), one comment or one issue per run.
 - **Expected cost/duration:** the cheapest shift — read-only API calls, a few minutes when everything is green; four runs a day.
 
@@ -242,7 +242,7 @@ Verified behaviour behind rule 7: with no Shipping Hub reachable, `./mvnw -q ver
 | What changed upstream for DramaFetch — known vulnerabilities and newer releases of its dependencies, yt-dlp's TikTok changelog entries and extractor changes, Chrome Stable | `.claude/scripts/dramafetch-watch.sh` from the repository root: the Markdown report the nightly and weekly shifts start from (read-only, primary sources only, never TikTok; an unreachable source is listed, not fatal) |
 | Badges | the top of `README.md`: CI, SecureGate CI, Uptime patrol, Claude on-call |
 
-Rules of thumb when auditing: a PR without the `agent` label and a filled `Opened by:` line was not opened by a shift; many comments on an incident issue mean Uptime patrol kept failing (one comment per failing run) — look for the SRE patrol diagnosis among them; a shift session that produced neither a PR nor an issue should end with a "no action" report.
+Rules of thumb when auditing: a PR without the `agent` label and a filled `Opened by:` line was not opened by a shift; many comments on an incident issue mean Uptime patrol kept failing (one comment per failing run) — look for the SRE patrol diagnosis among them; a shift session that produced neither a PR nor an issue should end with a "no action" report (or, for the SRE patrol, an `UNOBSERVED` one when Railway's edge kept the monitor from seeing the app).
 
 ## 8. Incident flow
 
@@ -258,8 +258,8 @@ If an incident is open during a demo, it is the demo: the issue, the SRE patrol 
 ("Checking your browser…") instead of the app, the probe reports `🛡️ challenged` and the run ends
 as **Unobserved** (`healthy=unknown`): the job ends green with a warning annotation and touches no
 incident, because the app's state is simply not known; only a confirmed failure turns the badge red. The SRE patrol treats it as a
-monitoring gap, not as an outage: it verifies the app another way when it can and reports the
-gap; the human decision is whether Railway should let automated monitors through.
+monitoring gap, not as an outage, and reports production as `UNOBSERVED`, never OK; the human
+decision is whether Railway should let automated monitors through.
 
 **After a merge by the merge gate.** When `main`'s CI turns red after a merge the gate made, the gate reverts it at once — a revert PR on `agents/merge-gate/<date>-revert-<N>`, merged once its own CI is green — and opens `🚦 Merge gate reverted #<N>: <date>` with the failing job; it merges nothing else in that run. After a Shipping Hub merge it also dispatches the Uptime patrol; an incident then follows the steps above.
 
