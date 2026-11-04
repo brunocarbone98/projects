@@ -55,17 +55,20 @@ export async function login(input: { email: string; password: string }): Promise
 /** Rotating refresh: the presented token is revoked and a fresh pair is issued. */
 export async function refresh(input: { refreshToken: string }): Promise<AuthTokensDto> {
   const tokenHash = hashRefreshToken(input.refreshToken);
-  const stored = await prisma.refreshToken.findUnique({
-    where: { tokenHash },
-    include: { user: true },
+  const now = new Date();
+  // One conditional UPDATE revokes the token, so two concurrent requests with the same token cannot
+  // both get a new pair: only the request whose update still found it live goes on.
+  const revoked = await prisma.refreshToken.updateMany({
+    where: { tokenHash, revokedAt: null, expiresAt: { gt: now } },
+    data: { revokedAt: now },
   });
-  if (!stored || stored.revokedAt || stored.expiresAt.getTime() < Date.now()) {
+  const stored =
+    revoked.count === 1
+      ? await prisma.refreshToken.findUnique({ where: { tokenHash }, include: { user: true } })
+      : null;
+  if (!stored) {
     throw new AppError(401, "INVALID_TOKEN", "Refresh token is invalid or expired");
   }
-  await prisma.refreshToken.update({
-    where: { id: stored.id },
-    data: { revokedAt: new Date() },
-  });
   return issueTokens(stored.user);
 }
 
