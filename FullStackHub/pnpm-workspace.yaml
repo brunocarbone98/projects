@@ -8,3 +8,17 @@ onlyBuiltDependencies:
   - esbuild
   - prisma
   - sharp
+
+# Security overrides from the weekly review (#74). Each package is dev- or build-time only, and the
+# full checks pass with the fixed version; drop an entry once its parent depends on the fix itself.
+# (vite, vitest's optional peer, is pinned as a devDependency next to vitest instead: pnpm does not
+# apply overrides to peers.)
+overrides:
+  # Prisma 6's config loader still pins 7.1.5 (GHSA-ggr8-5vv4-36mx); it only calls deepmerge().
+  deepmerge-ts: ^8.0.2
+  # ESLint 10.14, @eslint/config-array and typescript-eslint still pin minimatch 10
+  # (GHSA-g3hv-75wg-m249). Scoped to those three, which only call new Minimatch(pattern,
+  # { dot, flipNegate }), .match() and minimatch(path, pattern), all unchanged in 11.
+  "eslint>minimatch": ^11.0.1
+  "@eslint/config-array>minimatch": ^11.0.1
+  "@typescript-eslint/typescript-estree>minimatch": ^11.0.1
