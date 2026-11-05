@@ -466,8 +466,11 @@ def test_i_captcha_after_the_first_page_stops_and_starts_the_cooldown(tmp_path: 
     page): the extension's own fetch of the second page is refused while the page shows no wall
     yet, so it scrolls; the page's own scroll request is refused too and the page shows the wall;
     the quiet scroll round sees it — `captcha`, the cooldown, the next series not started, and
-    not one download from the partial list. Four list requests in all: the page's first one, the
-    extension's replay of it, its second-page fetch and the page's scroll request."""
+    not one download from the partial list. The list requests: the page's first one, the
+    extension's replay of it, its second-page fetch and the page's scroll request — plus, when
+    the observer saw that scroll request complete before the round looked for the page's own
+    URLs, one re-fetch of that URL (refused the same way; the fallback re-fetches each of the
+    page's URLs once, as always): four or five, never a download."""
     with (
         FakeTikTok(challenge_after_first_page=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
@@ -479,12 +482,9 @@ def test_i_captcha_after_the_first_page_stops_and_starts_the_cooldown(tmp_path: 
         assert second["error"] == f"not started: batch stopped in {SERIES_ID} (captcha)"
         cooldown = ext.cooldown()
         assert cooldown is not None and cooldown["source"] == "discovery"
-        assert [(r.query["cursor"], r.from_scroll) for r in server.item_list_requests] == [
-            ("0", False),
-            ("0", False),
-            ("3", False),
-            ("3", True),
-        ]
+        requests = [(r.query["cursor"], r.from_scroll) for r in server.item_list_requests]
+        assert requests[:4] == [("0", False), ("0", False), ("3", False), ("3", True)]
+        assert requests[4:] in ([], [("3", False)])  # the page's own URL re-fetched once, at most
         assert not server.media_requests and len(server.series_page_requests) == 1
         assert not any(url.startswith(server.base_url) for url in ext.tab_urls())
 
