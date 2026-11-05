@@ -226,6 +226,10 @@
     "message": "Cargar lista acepta una sola serie; usa Descargar todo para varias.",
     "description": "Input error."
   },
+  "loadAlreadyQueued": {
+    "message": "Esa serie ya se está listando; espera al trabajo en curso.",
+    "description": "Input error."
+  },
   "jobLoad": {
     "message": "Listar la serie $id$",
     "description": "Queue label.",

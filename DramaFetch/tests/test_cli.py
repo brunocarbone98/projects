@@ -492,11 +492,11 @@ def test_usage_error_messages_say_what_to_do(capsys):
 
 def test_parse_extractor_args():
     parsed = cli.parse_extractor_args(
-        ["tiktok:api_hostname=api22.tiktokv.com;app_name=x,y", "foo=http://h/p", "generic:a=1"]
+        ["tiktok:example=api22.tiktokv.com;app_name=x,y", "foo=http://h/p", "generic:a=1"]
     )
     assert parsed == {
         "tiktok": {
-            "api_hostname": ["api22.tiktokv.com"],
+            "example": ["api22.tiktokv.com"],
             "app_name": ["x", "y"],
             "foo": ["http://h/p"],
         },
@@ -508,6 +508,14 @@ def test_parse_extractor_args():
     for bad in ["", "tiktok:", "=v", "tiktok:=v", "tiktok:novalue"]:
         with pytest.raises(ValueError, match="extractor-args"):
             cli.parse_extractor_args([bad])
+    # the keys that switch yt-dlp to TikTok's mobile API as an invented device are refused (Scope)
+    assert cli.REFUSED_EXTRACTOR_ARGS == ("app_info", "device_id", "api_hostname")
+    for refused in ["app_info=7351144126450059040", "tiktok:device_id=1", "TikTok:API_HOSTNAME=h"]:
+        with pytest.raises(
+            ValueError, match="is refused: it makes yt-dlp call TikTok's mobile API"
+        ):
+            cli.parse_extractor_args([refused])
+    assert cli.parse_extractor_args(["generic:app_info=1"]) == {"generic": {"app_info": ["1"]}}
 
 
 # --------------------------------------------------------------------------- info
@@ -865,7 +873,7 @@ def test_download_dry_run_and_flags_reach_the_downloader(
             "--cookies-from-browser",
             "firefox",
             "--extractor-args",
-            "tiktok:api_hostname=h",
+            "tiktok:example=h",
             "--retries",
             "1",
             "--delay-min",
@@ -890,7 +898,7 @@ def test_download_dry_run_and_flags_reach_the_downloader(
     assert options.impersonate is False
     assert options.cookies_file == Path("c.txt")
     assert options.cookies_from_browser == "firefox"
-    assert options.extractor_args == {"tiktok": {"api_hostname": ["h"]}}
+    assert options.extractor_args == {"tiktok": {"example": ["h"]}}
     assert options.retries == 1
     assert options.delay_min_s == options.delay_max_s == 0.5
     target = tmp_path / f"{NAME} [{SERIES_ID}]"
@@ -1644,8 +1652,26 @@ def test_doctor_says_impersonation_is_off_when_yt_dlp_cannot_use_curl_cffi(monke
     line = next(x for x in capsys.readouterr().out.splitlines() if " curl_cffi: " in x)
     assert line == (
         "– curl_cffi: installed, but this yt-dlp does not support its version: "  # noqa: RUF001
-        "impersonation off (pip install -U 'yt-dlp[curl-cffi]' installs one it supports)"
+        "impersonation off — the default engine would send Python's own TLS fingerprint under a "
+        "Chrome user agent (pip install -U 'yt-dlp[curl-cffi]' installs one it supports, or use "
+        "--engine browser)"
     )
+
+
+def test_doctor_names_the_impersonation_target_when_it_is_on(monkeypatch, capsys):
+    """The resolved target (`chrome-152:windows-10`, say) is what a refused first run can be matched
+    against in yt-dlp's tracker; without yt-dlp's private listing the line simply omits it."""
+    monkeypatch.setattr(cli, "resolved_impersonate_target", lambda: "chrome-152:windows-10")
+    assert cli.main(["doctor"]) == 0
+    line = next(x for x in capsys.readouterr().out.splitlines() if " curl_cffi: " in x)
+    assert line == (
+        "✓ curl_cffi: importable: yt-dlp impersonates Chrome's TLS fingerprint "
+        "as chrome-152:windows-10"
+    )
+    monkeypatch.setattr(cli, "resolved_impersonate_target", lambda: None)
+    assert cli.main(["doctor"]) == 0
+    line = next(x for x in capsys.readouterr().out.splitlines() if " curl_cffi: " in x)
+    assert line == "✓ curl_cffi: importable: yt-dlp impersonates Chrome's TLS fingerprint"
 
 
 def test_doctor_without_mutagen_says_covers_stay_files(monkeypatch, capsys):
@@ -2245,3 +2271,23 @@ def test_the_include_locked_help_says_tiktok_decides(capsys):
     help_text = " ".join(capsys.readouterr().out.split())
     assert "--include-locked" in help_text
     assert "TikTok decides; nothing is unlocked" in help_text
+
+
+def test_download_warns_once_when_impersonation_is_off(
+    fake_discovery, fake_downloader, tmp_path, capsys, monkeypatch
+):
+    """Without a curl_cffi this yt-dlp can use, the default engine presents Python's TLS stack
+    under a Chrome user agent: one stderr warning before the run — none with --no-impersonate or
+    for a dry run, and none when impersonation is on."""
+    fast = ["--out", str(tmp_path), "--delay-min", "0", "--delay-max", "0"]
+    monkeypatch.setattr(cli, "impersonate_target", lambda: None)
+    assert cli.main(["download", SERIES_URL, *fast]) == 0
+    err = capsys.readouterr().err
+    assert err.count("warning: yt-dlp cannot impersonate Chrome's TLS fingerprint here") == 1
+    assert "see `dramafetch doctor`" in err and "--engine browser avoids that" in err
+    for extra in (["--no-impersonate"], ["--dry-run"]):
+        assert cli.main(["download", SERIES_URL, *fast, "--overwrite", *extra]) == 0
+        assert "cannot impersonate" not in capsys.readouterr().err
+    monkeypatch.setattr(cli, "impersonate_target", lambda: object())
+    assert cli.main(["download", SERIES_URL, *fast, "--overwrite"]) == 0
+    assert "cannot impersonate" not in capsys.readouterr().err

@@ -25,6 +25,7 @@ import random
 import shutil
 import socket
 import struct
+import sys
 import threading
 import time
 import tracemalloc
@@ -2971,3 +2972,37 @@ def test_the_report_of_a_selection_says_how_complete_the_series_is(harness: Harn
     assert report["complete"] is True
     assert (report["done"], report["on_disk"], report["locked"]) == (1, 3, 1)
     assert report["line"] == "complete: 4 of 5 (1 downloaded, 3 already on disk) — 1 locked (5)"
+
+
+def test_the_port_is_taken_exclusively_on_windows(monkeypatch):
+    """Two `dramafetch serve` on one port would share the page's connections (two workers, two
+    downloads at once from one session): SO_REUSEADDR stays only where it cannot do that (POSIX,
+    for a quick restart), and on Windows the socket is bound exclusively, so the second one fails
+    at once with "address already in use"."""
+    assert web_server.DramaFetchServer.allow_reuse_address is (sys.platform != "win32")
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert web_server.exclusive_address_option() is None
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(socket, "SO_EXCLUSIVEADDRUSE", 0xFFFB, raising=False)
+    assert web_server.exclusive_address_option() == 0xFFFB
+    monkeypatch.delattr(socket, "SO_EXCLUSIVEADDRUSE", raising=False)
+    assert web_server.exclusive_address_option() is None
+
+    class Sock:
+        def __init__(self) -> None:
+            self.options: list[tuple[object, ...]] = []
+
+        def setsockopt(self, *option: object) -> None:
+            self.options.append(option)
+
+    bound: list[str] = []
+    monkeypatch.setattr(
+        web_server.ThreadingHTTPServer, "server_bind", lambda self: bound.append("bind")
+    )
+    server = web_server.DramaFetchServer.__new__(web_server.DramaFetchServer)
+    server.socket = Sock()  # type: ignore[assignment]
+    server.server_bind()  # no option: nothing set, the base bind still runs
+    assert server.socket.options == [] and bound == ["bind"]
+    monkeypatch.setattr(socket, "SO_EXCLUSIVEADDRUSE", 0xFFFB, raising=False)
+    server.server_bind()
+    assert server.socket.options == [(socket.SOL_SOCKET, 0xFFFB, 1)] and bound == ["bind", "bind"]

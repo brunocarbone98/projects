@@ -40,12 +40,17 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import re
 import sys
+import tempfile
+import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from dramafetch.cooldown import state_dir
 from dramafetch.discovery.cookies import cookie_file_problems
 from dramafetch.discovery.static import redact_tokens, safe_url
 from dramafetch.errors import ThumbnailError
@@ -108,13 +113,19 @@ YTDLP_CHALLENGE_MARKERS = ("solving js challenge", "with challenge cookie")
 #: cooldown starts with this reason).
 CHALLENGE_STOPPED_MESSAGE = (
     "blocked (verification): TikTok answered the video page with a JS challenge, which "
-    "DramaFetch does not solve; wait 30-60 minutes before trying again"
+    "DramaFetch does not solve; wait 30-60 minutes, then try --engine browser, which loads "
+    "no video page"
 )
 #: Extensions yt-dlp's ``writethumbnail`` can give the cover — always the cover URL's own:
 #: ``.jpeg`` for TikTok's ``cover``/``originCover``, ``.image`` for its ``dynamicCover`` URLs
 #: (``…~tplv-tiktokx-origin.image``), written only when the preferred covers fail; a URL without
 #: an extension would get ``.jpg``. See :func:`_written_cover`.
 WRITTEN_COVER_SUFFIXES = (*COVER_SUFFIXES, ".image")
+#: yt-dlp's private copies of the cookies file (see :class:`YtDlpDownloader`) are deleted when
+#: the run closes; one a killed process left behind is swept by the next run once it is this old
+#: (two days: no run lasts that long, and another DramaFetch may still be using a younger one).
+COOKIES_COPY_PREFIX = "yt-dlp-cookies-"
+STALE_COOKIES_COPY_S = 2 * 24 * 3600
 
 _PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
 #: Extensions that count as "the episode's video" when looking for an existing file. The cover
@@ -182,6 +193,31 @@ def impersonate_target() -> Any | None:
     except Exception:
         return None
     return target
+
+
+def resolved_impersonate_target() -> str | None:
+    """The impersonation target yt-dlp resolves ``chrome`` to with the installed curl_cffi —
+    ``chrome-152:windows-10``, say: what its request handler answers for the same question
+    (``ImpersonateRequestHandler._resolve_target``, the first supported target that matches,
+    private API: None when it is not there) —, or None when impersonation is off. For
+    ``doctor`` only: what a refused first run can be matched against in yt-dlp's tracker."""
+    target = impersonate_target()
+    if target is None:
+        return None
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as probe:
+            director = getattr(probe, "_request_director", None)
+            handlers = list(getattr(director, "handlers", {}).values())
+            for handler in handlers:
+                resolve = getattr(handler, "_resolve_target", None)
+                resolved = resolve(target) if callable(resolve) else None
+                if resolved is not None:
+                    return str(resolved)
+    except Exception:
+        return None
+    return None
 
 
 def format_for(quality: str) -> str:
@@ -461,6 +497,23 @@ def _rename_cover(sidecar: Path, target: Path) -> Path:
         return sidecar
 
 
+def _sweep_stale_copies(directory: Path, *, now: float | None = None) -> None:
+    """Delete the cookies copies a killed run left in ``directory`` once they are
+    :data:`STALE_COOKIES_COPY_S` old (a younger one may belong to another DramaFetch still
+    running); never raises."""
+    moment = time.time() if now is None else now
+    try:
+        copies = list(directory.glob(f"{COOKIES_COPY_PREFIX}*.txt"))
+    except OSError:
+        return
+    for copy in copies:
+        try:
+            if moment - copy.stat().st_mtime >= STALE_COOKIES_COPY_S:
+                copy.unlink()
+        except OSError:
+            continue
+
+
 def _default_ydl_factory(params: dict[str, Any]) -> Any:
     import yt_dlp  # lazy: importing yt-dlp is slow and tests never need it
 
@@ -505,10 +558,61 @@ class YtDlpChallengeGuard:
 
 
 class YtDlpDownloader:
-    """Downloads one episode with yt-dlp; ``ydl_factory`` is injectable for tests."""
+    """Downloads one episode with yt-dlp; ``ydl_factory`` is injectable for tests.
+
+    yt-dlp saves its cookie jar back into its ``cookiefile`` every time a ``YoutubeDL`` closes —
+    once per episode here: the user's export would be rewritten in place (its header, the
+    ``#HttpOnly_`` markers, its modification time, every cookie TikTok set for yt-dlp's client).
+    So yt-dlp gets a private copy (:meth:`_private_cookies`), made in the state directory on
+    the first episode, carried through the whole run — the cookies TikTok sets along the way
+    stay with yt-dlp, like a browser session — and deleted by :meth:`close`. The user's file is
+    read only, the way the discovery and the browser engine read it.
+    """
 
     def __init__(self, ydl_factory: Callable[[dict[str, Any]], Any] | None = None) -> None:
         self._ydl_factory = ydl_factory or _default_ydl_factory
+        self._cookies_copy: tuple[Path, Path] | None = None  # (the user's file, yt-dlp's copy)
+
+    def close(self) -> None:
+        """Delete yt-dlp's private copy of the cookies file, if one was made (see the class)."""
+        if self._cookies_copy is None:
+            return
+        _source, copy = self._cookies_copy
+        self._cookies_copy = None
+        try:
+            copy.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning("could not delete yt-dlp's cookies copy %s: %s", copy.name, exc)
+
+    def _private_cookies(self, source: Path) -> Path:
+        """yt-dlp's own copy of ``source`` for this run (made once; a run with another cookies
+        file gets a new one), or ``source`` itself — with a WARNING — when the state directory
+        cannot take the copy: a download beats a pristine export, and yt-dlp then updates the
+        file in place as before."""
+        if self._cookies_copy is not None and self._cookies_copy[0] == source:
+            return self._cookies_copy[1]
+        self.close()
+        try:
+            directory = state_dir()
+            directory.mkdir(parents=True, exist_ok=True)
+            _sweep_stale_copies(directory)
+            data = source.read_bytes()
+            handle, name = tempfile.mkstemp(
+                prefix=COOKIES_COPY_PREFIX, suffix=".txt", dir=directory
+            )
+            os.close(handle)  # mkstemp: created 0600, for this user only
+            Path(name).write_bytes(data)
+        except OSError as exc:
+            log.warning(
+                "could not copy %s for yt-dlp (%s): yt-dlp updates the file in place",
+                source.name,
+                exc.__class__.__name__,
+            )
+            return source
+        self._cookies_copy = (source, Path(name))
+        return Path(name)
 
     def build_options(
         self, episode: Episode, options: DownloadOptions, outtmpl: str
@@ -527,6 +631,9 @@ class YtDlpDownloader:
         set: yt-dlp keeps dropping the formats it knows to be DRM-protected (its default), and
         DramaFetch never asks for media it could not play without decrypting it. ``logger`` is a
         new :class:`YtDlpChallengeGuard`: yt-dlp never solves TikTok's JS challenge for DramaFetch.
+        ``continuedl`` is off: an interrupted episode starts over instead of appending the bytes
+        of another run's rendition to a stale ``.part`` (one more partial transfer, never one
+        more request). ``cookiefile`` is the private copy :meth:`download` hands over.
         """
         del episode  # the caller already folded the episode into outtmpl
         params: dict[str, Any] = {
@@ -550,6 +657,12 @@ class YtDlpDownloader:
             "windowsfilenames": sys.platform == "win32",
             "overwrites": options.overwrite,
             "sleep_interval_requests": 1,
+            # Never resume a stale `<name>.mp4.part` by byte offset: yt-dlp would append the tail
+            # of whatever rendition THIS run selects to the head of the one the interrupted run
+            # had started (a Range request; nothing compares the two files), and a longer such
+            # file passes the integrity check — a corrupt episode saved as done. A fresh start
+            # costs the partial bytes again, never one more request.
+            "continuedl": False,
         }
         if options.thumbnails:
             params["writethumbnail"] = True
@@ -597,7 +710,13 @@ class YtDlpDownloader:
         problem = cookies_file_problem(options.cookies_file)
         if problem is not None:
             return DownloadResult(episode=episode, status=DownloadStatus.FAILED, message=problem)
-        params = self.build_options(episode, options, output_template(out_dir, episode, options))
+        params = self.build_options(
+            episode,
+            options
+            if options.cookies_file is None
+            else replace(options, cookies_file=self._private_cookies(options.cookies_file)),
+            output_template(out_dir, episode, options),
+        )
         guard = params.get("logger")
         challenged = DownloadResult(
             episode=episode, status=DownloadStatus.FAILED_BLOCKED, message=CHALLENGE_STOPPED_MESSAGE

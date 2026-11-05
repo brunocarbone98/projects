@@ -44,6 +44,19 @@ Fetch = Callable[[str, dict[str, str]], tuple[str, str]]
 
 STATIC_TIMEOUT_S = 20.0
 DEFAULT_CHROME_MAJOR = "153"
+#: The Playwright channel both Chromium launch sites use when neither ``--browser-path`` nor
+#: ``--browser-channel`` is given: the full Chromium build, in its new headless mode. Without a
+#: channel, Playwright 1.49 and later start ``chromium-headless-shell`` for a headless launch — a
+#: build that announces itself as ``HeadlessChrome`` in ``Sec-CH-UA`` and
+#: ``navigator.userAgentData`` whatever user agent the context sets, which defeats the one user
+#: agent measure the Scope allows. Default flags all the same: ``navigator.webdriver`` stays true.
+DEFAULT_BROWSER_CHANNEL = "chromium"
+#: The request headers curl_cffi's Chrome impersonation sets itself (next to the client hints
+#: and ``Sec-Fetch-*``): when it is used, DramaFetch's own values are left out so that the
+#: headers agree with the TLS fingerprint and the hints — ``User-Agent: Chrome/153`` next to
+#: ``sec-ch-ua: "Google Chrome";v="152"`` is the kind of contradiction a bot score counts.
+#: ``Cookie`` is always DramaFetch's; the urllib fallback has no such set and keeps them all.
+IMPERSONATED_HEADERS = frozenset({"user-agent", "accept", "accept-language"})
 RATE_LIMIT_MESSAGE = (
     "TikTok is rate-limiting this address (HTTP 429): wait 30-60 minutes before trying again"
 )
@@ -148,7 +161,8 @@ def default_fetch(url: str, headers: dict[str, str]) -> tuple[str, str]:
     installed, plain urllib otherwise. Returns `(final_url, body)`; HTTP errors become
     `DiscoveryError` (429: `RateLimitedError`). The `Cookie` header is for TikTok only, so a
     redirect that leaves the site of `url` (or drops from https to http) is refused, not
-    followed."""
+    followed. With curl_cffi the headers in :data:`IMPERSONATED_HEADERS` are its own (the
+    impersonated Chrome's), never DramaFetch's: one consistent client."""
     try:
         from curl_cffi import requests as curl_requests
     except ImportError:
@@ -156,7 +170,7 @@ def default_fetch(url: str, headers: dict[str, str]) -> tuple[str, str]:
     try:
         response = curl_requests.get(
             url,
-            headers=headers,
+            headers={k: v for k, v in headers.items() if k.lower() not in IMPERSONATED_HEADERS},
             impersonate="chrome",
             timeout=STATIC_TIMEOUT_S,
             allow_redirects=True,

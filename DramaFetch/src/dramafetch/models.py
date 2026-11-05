@@ -175,7 +175,7 @@ class DiscoveryOptions:
     """How to reach TikTok while resolving a series."""
 
     cookies_file: Path | None = None  # Netscape cookies.txt exported from a logged-in browser
-    browser_channel: str | None = None  # "chrome" / "msedge" / None (Playwright's bundled Chromium)
+    browser_channel: str | None = None  # "chrome" / "msedge" / "chromium"; None: the full Chromium
     executable_path: Path | None = None  # explicit browser binary (CI, sandboxes)
     headful: bool = False  # show the window (lets a human pass a captcha or log in)
     base_url: str = TIKTOK_BASE_URL  # overridden by tests to point at the fake TikTok
@@ -215,7 +215,9 @@ class DownloadOptions:
     # URLs the episode list already carries, inside one browser session of its own — fewer
     # requests).
     engine: str = "yt-dlp"
-    browser_channel: str | None = None  # browser engine: Playwright channel ("chrome", ...)
+    browser_channel: str | None = (
+        None  # browser engine: "chrome" / "msedge" / "chromium"; None: Chromium
+    )
     browser_executable: Path | None = None  # browser engine: explicit Chromium binary
     browser_headful: bool = False
     base_url: str = TIKTOK_BASE_URL  # browser engine refreshes expired play URLs from here (tests)

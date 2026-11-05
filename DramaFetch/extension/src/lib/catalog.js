@@ -41,6 +41,12 @@ export const NO_PLAY_ADDRESS = "no play address";
 export const UNKNOWN_CODEC = "unknown";
 /** Height part of a label when neither the `GearName` nor `video.ratio` tells it. */
 export const UNKNOWN_HEIGHT = "?p";
+/**
+ * The path TikTok's video-only HEVC streams end with (`catalog.VIDEO_ONLY_PATH_SUFFIX`): no audio
+ * track (yt-dlp marks every such format `acodec: none`, yt-dlp/yt-dlp#16622 and #17372), so never
+ * a candidate, whatever the quality mode — the saved file could only be quarantined.
+ */
+export const VIDEO_ONLY_PATH_SUFFIX = "/media-video-hvc1/";
 
 /**
  * @typedef {"free" | "unlocked" | "locked"} Access
@@ -903,7 +909,7 @@ export function renditions(item) {
   const found = [];
   for (const entry of bitrateInfo) {
     if (!isDict(entry)) continue;
-    const urls = playUrls(get(entry, "PlayAddr"), 0);
+    const urls = playUrls(get(entry, "PlayAddr"), 0).filter((url) => !isVideoOnlyUrl(url));
     if (urls.length === 0) continue;
     const codec = codecName(get(entry, "CodecType"));
     const height = gearHeightOf(get(entry, "GearName")) ?? ratioHeight;
@@ -963,7 +969,7 @@ export function playUrlCandidates(item, quality = "compatible") {
   /** @type {string[]} */
   const ordered = [];
   for (const rendition of orderedRenditions(item, quality)) ordered.push(...rendition.urlList);
-  ordered.push(...playUrls(get(video, "playAddr"), 0));
+  ordered.push(...playUrls(get(video, "playAddr"), 0).filter((url) => !isVideoOnlyUrl(url)));
   return [...new Set(ordered)];
 }
 
@@ -989,6 +995,25 @@ function ratioHeightOf(value) {
 
 /**
  * The http(s) URLs of a play address: a string, a list of them or a dict with `UrlList`.
+ * @param {unknown} value
+ * @param {number} depth
+ * @returns {string[]}
+ */
+/**
+ * True for a play URL whose path ends with {@link VIDEO_ONLY_PATH_SUFFIX}: one of TikTok's HEVC
+ * streams without an audio track, never a candidate (`catalog.is_video_only_url`). The path is
+ * the URL up to its first `?` or `#`.
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function isVideoOnlyUrl(url) {
+  const path = url.split("#", 1)[0].split("?", 1)[0];
+  return path.endsWith(VIDEO_ONLY_PATH_SUFFIX);
+}
+
+/**
+ * The http(s) URLs of a play address: a string, a list of them or a dict with a `UrlList`
+ * (`catalog._play_urls`), depth-limited.
  * @param {unknown} value
  * @param {number} depth
  * @returns {string[]}

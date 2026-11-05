@@ -13,14 +13,17 @@
  * - it fetches each list page with `chrome.scripting.executeScript({world: "MAIN"})` running
  *   {@link fetchInPage} — the page's own `fetch`, so the session's cookies and TikTok's own
  *   request handling apply exactly as for the page; the extension never reads a cookie. It cannot
- *   read the bodies of the page's own requests, so the first page costs one repeated request;
+ *   read the bodies of the page's own requests, so the first page costs one repeated request —
+ *   the page's own item_list URL replayed byte for byte, since TikTok signs the whole query;
  * - it pauses `pageDelayS` × uniform(1.0, 2.0) — 0.8–1.6 s — before EVERY page fetch, the first
  *   included; it falls back to scrolling the list ({@link scrollInPage}, DOM scrolling in the
  *   ISOLATED world) and re-fetching, once each, the exact item_list URLs the page requested;
  * - it stops at a login redirect, a captcha page ({@link looksLikeChallenge}, the page text read
- *   in the ISOLATED world) or an HTTP 429, and closes the tab it opened on every path — also when
- *   the DramaFetch tab goes away mid-listing: the tab is recorded ({@link DISCOVERY_TAB_KEY}) for
- *   the background worker and the next DramaFetch page to close.
+ *   in the ISOLATED world — while the first list is awaited, and again whenever a later page
+ *   brings no list or a scroll round loads nothing: a wall TikTok raises mid-list stops the
+ *   discovery too) or an HTTP 429, and closes the tab it opened on every path — also when the
+ *   DramaFetch tab goes away mid-listing: the tab is recorded ({@link DISCOVERY_TAB_KEY}) for the
+ *   background worker and the next DramaFetch page to close.
  *
  * Nothing here patches, wraps or overrides anything in TikTok's page, unlocks anything or sends
  * anything back: the payload is parsed by `lib/catalog.js` exactly as the Python code parses it.
@@ -657,6 +660,25 @@ export async function discoverSeries(ref, options = {}) {
     return payload;
   };
 
+  /**
+   * `_page_shows_challenge`: stop when the tab shows TikTok's verification wall — while the first
+   * list is awaited, and again whenever the pagination stalls after it (a list fetch that brought
+   * no list, a scroll round that loaded nothing): a captcha TikTok raises after the first page
+   * stops the discovery like one met before it, and the caller records the cooldown. A page text
+   * that cannot be read (the tab is navigating or gone) is no challenge.
+   * @param {number} tab
+   * @returns {Promise<void>}
+   */
+  const stopIfChallenged = async (tab) => {
+    let text = "";
+    try {
+      text = await browser.pageText(tab);
+    } catch {
+      text = "";
+    }
+    if (looksLikeChallenge(text)) throw new ChallengeError(CHALLENGE_MESSAGE);
+  };
+
   /** @param {number} tab */
   const scrollForMore = async (tab) => {
     let quiet = 0;
@@ -681,23 +703,37 @@ export async function discoverSeries(ref, options = {}) {
         const payload = await fetchListPage(tab, url);
         if (payload !== null) added += capture.ingest(payload).added;
       }
-      quiet = added > 0 ? 0 : quiet + 1;
+      if (added > 0) {
+        quiet = 0;
+      } else {
+        quiet += 1;
+        await stopIfChallenged(tab); // nothing loaded: the wall may stand where the list was
+      }
     }
   };
 
-  /** @param {number} tab @param {string} template */
+  /**
+   * `browser._paginate`, plus the extension's one extra request first: the page's own item_list
+   * request replayed byte for byte — the template itself, its `cursor` and `count` included —
+   * because TikTok signs the whole query (`X-Bogus`, `_signature`, `msToken`, …) and a `cursor` or
+   * `count` the page did not ask for would no longer match that signature. Python reads that first
+   * response off the wire; the extension cannot, so it repeats the exact request. Only the pages
+   * after it are the template with the next `cursor` and the extension's `count`.
+   * @param {number} tab
+   * @param {string} template
+   */
   const paginate = async (tab, template) => {
-    const firstUrl = withQueryParams(template, { cursor: "0", count: String(pageCount) });
     await pause();
-    const first = await fetchListPage(tab, firstUrl);
+    const first = await fetchListPage(tab, template);
     if (first === null) {
+      await stopIfChallenged(tab); // no list: the wall may stand where the series was
       capture.warnings.push(FIRST_PAGE_WARNING);
       await scrollForMore(tab);
       return;
     }
     let current = capture.ingest(first).page;
-    /** @type {string} */
-    let previousCursor = "0";
+    /** @type {string} the cursor of the page fetched last: the template's own ("0" without one) */
+    let previousCursor = queryParam(template, "cursor") ?? "0";
     while (current.hasMore) {
       if (capture.pages.length >= maxPages) {
         capture.warnings.push(maxPagesWarning(maxPages));
@@ -713,6 +749,7 @@ export async function discoverSeries(ref, options = {}) {
       await pause();
       const payload = await fetchListPage(tab, nextUrl);
       if (payload === null) {
+        await stopIfChallenged(tab); // no list: the wall may stand where the series was
         capture.warnings.push(NO_LIST_WARNING);
         await scrollForMore(tab);
         return;
@@ -753,13 +790,7 @@ export async function discoverSeries(ref, options = {}) {
       const now = clock();
       if (now >= nextChallengeCheck) {
         nextChallengeCheck = now + CHALLENGE_CHECK_INTERVAL_S;
-        let text = "";
-        try {
-          text = await browser.pageText(tab);
-        } catch {
-          text = ""; // navigating: look again next round
-        }
-        if (looksLikeChallenge(text)) throw new ChallengeError(CHALLENGE_MESSAGE);
+        await stopIfChallenged(tab); // navigating: looked at again next round
       }
       if (!activated && now - started >= (options.activateAfterS ?? ACTIVATE_AFTER_S)) {
         activated = true;

@@ -405,7 +405,8 @@ def test_one_lazy_browser_and_one_context_serve_the_whole_run(playwright, tmp_pa
     assert "args" not in playwright.launch_kwargs
     user_agent = playwright.browser.context_kwargs["user_agent"]
     assert "Chrome/153.0.0.0" in user_agent and "Headless" not in user_agent
-    assert playwright.browser.context_kwargs["locale"] == "en-US"
+    # no `locale`: Chromium keeps the machine's own, as the user's Chrome does
+    assert "locale" not in playwright.browser.context_kwargs
     assert playwright.browser.context_kwargs["viewport"] == {"width": 1280, "height": 900}
     assert playwright.context.add_cookies_calls == 0  # no cookies file given
 

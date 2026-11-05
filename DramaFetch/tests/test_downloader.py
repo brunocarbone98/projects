@@ -7,7 +7,10 @@ import base64
 import errno
 import hashlib
 import json
+import logging
+import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -166,6 +169,8 @@ def test_build_options_full(tmp_path):
     assert params["windowsfilenames"] is (sys.platform == "win32")
     assert params["overwrites"] is True
     assert params["sleep_interval_requests"] == 1
+    # never resume a stale .part by byte offset: another rendition's tail would be appended
+    assert params["continuedl"] is False
     assert params["writethumbnail"] is True  # the cover lands next to the video, by default
     assert params["extractor_args"] == {
         "tiktok": {"api_hostname": ["api22-normal-c-useast2a.tiktokv.com"]}
@@ -574,7 +579,8 @@ def test_malformed_cookies_file_is_refused_before_yt_dlp_runs(tmp_path):
         EPISODE, DownloadOptions(out_dir=tmp_path, cookies_file=cookies)
     )
     assert result.status is DownloadStatus.DONE
-    assert log[0]["params"]["cookiefile"] == str(cookies)
+    copy = Path(log[0]["params"]["cookiefile"])  # yt-dlp's private copy, never the export itself
+    assert copy != cookies and copy.read_bytes() == cookies.read_bytes()
 
 
 def test_sanitize_error_keeps_harmless_mentions_of_cookies():
@@ -1402,3 +1408,86 @@ def test_the_challenge_guard_keeps_yt_dlp_quiet_and_stops_only_at_the_challenge(
     second = downloader.build_options(EPISODE, OPTIONS, "o.%(ext)s")["logger"]
     assert isinstance(first, YtDlpChallengeGuard) and first is not second  # one per run
     assert all(marker == marker.lower() for marker in YTDLP_CHALLENGE_MARKERS)
+
+
+def test_yt_dlp_gets_a_private_copy_of_the_cookies_file(tmp_path, monkeypatch, caplog):
+    """yt-dlp saves its jar back into `cookiefile` whenever a YoutubeDL closes — once per episode —
+    so it works on a copy in the state directory: the user's export keeps its bytes and its
+    modification time (the `#HttpOnly_` markers too), the one copy carries the whole run and
+    `close()` deletes it. A state directory that cannot take the copy costs a WARNING, never the
+    download: yt-dlp then gets the export itself, as before."""
+    from dataclasses import replace
+
+    from dramafetch import downloader as downloader_module
+    from dramafetch.cooldown import state_dir
+
+    export = tmp_path / "cookies.txt"
+    export.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.tiktok.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tSECRET_SESSION_1\n",
+        encoding="utf-8",
+    )
+    before = (export.read_bytes(), export.stat().st_mtime_ns)
+    # copies a killed run left behind: a two-day-old one is swept, a younger one is left alone
+    stale = state_dir() / "yt-dlp-cookies-stale.txt"
+    fresh = state_dir() / "yt-dlp-cookies-fresh.txt"
+    stale.write_text("old", encoding="utf-8")
+    fresh.write_text("young", encoding="utf-8")
+    two_days_ago = time.time() - 2 * 24 * 3600 - 60
+    os.utime(stale, (two_days_ago, two_days_ago))
+    copies_seen: list[Path] = []
+
+    class SavingYdl(FakeYdl):
+        def __exit__(self, *exc_info):
+            # what yt-dlp's close() does to its cookiefile: rewrite it, header and all
+            Path(self.params["cookiefile"]).write_text("# rewritten by yt-dlp\n", encoding="utf-8")
+            return False
+
+    log: list[dict] = []
+
+    def factory(params):
+        copies_seen.append(Path(params["cookiefile"]))
+        return SavingYdl(params, log)
+
+    downloader = YtDlpDownloader(factory)
+    options = DownloadOptions(out_dir=tmp_path / "out", cookies_file=export, thumbnail="none")
+    assert downloader.download(EPISODE, options).status is DownloadStatus.DONE
+    (copy,) = copies_seen
+    assert copy != export and copy.parent == state_dir()  # tests: tmp_path, never ~/.dramafetch
+    assert not stale.exists() and fresh.exists()
+    fresh.unlink()
+    assert copy.name.startswith("yt-dlp-cookies-") and copy.suffix == ".txt"
+    assert copy.read_text(encoding="utf-8") == "# rewritten by yt-dlp\n"  # yt-dlp wrote the COPY
+    assert (export.read_bytes(), export.stat().st_mtime_ns) == before  # the export is untouched
+    second = replace(EPISODE, number=EPISODE.number + 1, item_id="7000000000000000002", title="two")
+    assert downloader.download(second, options).status is DownloadStatus.DONE
+    assert copies_seen == [copy, copy]  # one copy carries the run: TikTok's cookies stay with it
+    downloader.close()
+    assert not copy.exists()
+    downloader.close()  # idempotent
+    # another export in the same downloader: a fresh copy of that file
+    other = tmp_path / "other-cookies.txt"
+    other.write_bytes(export.read_bytes())
+    third = replace(
+        EPISODE, number=EPISODE.number + 2, item_id="7000000000000000003", title="three"
+    )
+    assert (
+        downloader.download(third, replace(options, cookies_file=other)).status
+        is DownloadStatus.DONE
+    )
+    assert copies_seen[-1] != copy and copies_seen[-1].exists()
+    downloader.close()
+    assert not copies_seen[-1].exists()
+    # the state directory cannot take the copy (here: a file stands in its place)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(downloader_module, "state_dir", lambda: blocker)
+    fourth = replace(
+        EPISODE, number=EPISODE.number + 3, item_id="7000000000000000004", title="four"
+    )
+    with caplog.at_level(logging.WARNING, logger="dramafetch.downloader"):
+        assert downloader.download(fourth, options).status is DownloadStatus.DONE
+    assert copies_seen[-1] == export  # yt-dlp got the export itself
+    assert "could not copy cookies.txt for yt-dlp" in caplog.text
+    assert "SECRET" not in caplog.text
+    downloader.close()  # nothing to delete

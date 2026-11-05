@@ -90,6 +90,7 @@ import random
 import re
 import shutil
 import socket
+import sys
 import threading
 import time
 import unicodedata
@@ -550,11 +551,31 @@ def series_to_dict(series: Series, out_dir: Path) -> dict[str, Any]:
     }
 
 
+def exclusive_address_option() -> int | None:
+    """``SO_EXCLUSIVEADDRUSE`` on Windows — the one socket option there that refuses a second
+    listener on the port, whatever ``SO_REUSEADDR`` another process set —, None elsewhere."""
+    if sys.platform != "win32":
+        return None
+    option = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+    return int(option) if isinstance(option, int) else None
+
+
 class DramaFetchServer(ThreadingHTTPServer):
     """``ThreadingHTTPServer`` carrying the fixed configuration every request handler needs."""
 
     daemon_threads = True
-    allow_reuse_address = True
+    # SO_REUSEADDR lets a restart rebind a port whose last connections are still in TIME_WAIT on
+    # POSIX. On Windows it lets a SECOND `serve` bind the same port while the first one listens,
+    # and the page's connections then land on either process — two workers, two downloads at once
+    # from one session. There the port is taken exclusively instead (`server_bind`), so a second
+    # `dramafetch serve` fails at once with "address already in use".
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        option = exclusive_address_option()
+        if option is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, option, 1)
+        super().server_bind()
 
     def __init__(
         self,

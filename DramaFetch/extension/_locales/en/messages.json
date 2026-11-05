@@ -226,6 +226,10 @@
     "message": "Load list takes one series; use Download all for several.",
     "description": "Input error."
   },
+  "loadAlreadyQueued": {
+    "message": "That series is already being listed; wait for the running job.",
+    "description": "Input error."
+  },
   "jobLoad": {
     "message": "List series $id$",
     "description": "Queue label.",

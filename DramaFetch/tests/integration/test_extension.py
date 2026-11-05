@@ -193,7 +193,9 @@ def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path, tools
     # requests: one page load, the page's list request, the extension's two pages and the detail
     assert len(server.series_page_requests) == 1
     assert [r.query["cursor"] for r in server.item_list_requests] == ["0", "0", "3"]
-    assert [r.query["count"] for r in server.item_list_requests[1:]] == ["30", "30"]
+    # the first page is the page's own request replayed byte for byte (its count=10, so TikTok's
+    # signature parameters still match their query); only the later pages ask for 30
+    assert [r.query["count"] for r in server.item_list_requests[1:]] == ["10", "30"]
     assert not any(r.with_referer for r in server.item_list_requests)  # the page's own requests
     assert len(server.media_requests) == 4 and all(r.with_referer for r in server.media_requests)
     assert len(_downloader_covers(server)) == 4
@@ -456,6 +458,34 @@ def test_i_captcha_stops_and_starts_the_cooldown(tmp_path: Path) -> None:
         assert cooldown is not None and cooldown["source"] == "discovery"
         assert not server.item_list_requests and not server.media_requests
         assert len(server.series_page_requests) == 1
+        assert not any(url.startswith(server.base_url) for url in ext.tab_urls())
+
+
+def test_i_captcha_after_the_first_page_stops_and_starts_the_cooldown(tmp_path: Path) -> None:
+    """TikTok's wall raised AFTER the first list page (every later page answered with the captcha
+    page): the extension's own fetch of the second page is refused while the page shows no wall
+    yet, so it scrolls; the page's own scroll request is refused too and the page shows the wall;
+    the quiet scroll round sees it — `captcha`, the cooldown, the next series not started, and
+    not one download from the partial list. The list requests: the page's first one, the
+    extension's replay of it, its second-page fetch and the page's scroll request — plus, when
+    the observer saw that scroll request complete before the round looked for the page's own
+    URLs, one re-fetch of that URL (refused the same way; the fallback re-fetches each of the
+    page's URLs once, as always): four or five, never a download."""
+    with (
+        FakeTikTok(challenge_after_first_page=True) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        entry = ext.download_all(f"{MAIN_LINK}\n{SECOND_LINK}")
+        main, second = entry["series"]
+        assert main["error_kind"] == "captcha"
+        assert str(main["error"]).startswith("TikTok is asking for a verification (captcha)")
+        assert second["error"] == f"not started: batch stopped in {SERIES_ID} (captcha)"
+        cooldown = ext.cooldown()
+        assert cooldown is not None and cooldown["source"] == "discovery"
+        requests = [(r.query["cursor"], r.from_scroll) for r in server.item_list_requests]
+        assert requests[:4] == [("0", False), ("0", False), ("3", False), ("3", True)]
+        assert requests[4:] in ([], [("3", False)])  # the page's own URL re-fetched once, at most
+        assert not server.media_requests and len(server.series_page_requests) == 1
         assert not any(url.startswith(server.base_url) for url in ext.tab_urls())
 
 
