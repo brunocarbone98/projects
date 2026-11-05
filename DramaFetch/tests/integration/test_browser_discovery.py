@@ -147,6 +147,22 @@ class TestWithChromium:
         with FakeTikTok(challenge=True) as server, pytest.raises(ChallengeError, match="--headful"):
             PlaywrightDiscovery().discover(SeriesRef(SERIES_ID), _options(server))
 
+    def test_a_captcha_after_the_first_page_stops_the_discovery(self) -> None:
+        """TikTok's wall raised AFTER the first list page — every later page answered with the
+        captcha page — is a refusal like one met before it, never a partial list to download
+        from: our one in-page fetch is refused (the page shows no wall yet, so DramaFetch scrolls),
+        the page's own scroll request is refused too and the page shows the wall, and the quiet
+        scroll round that follows sees it and stops. Three list requests in all."""
+        with FakeTikTok(challenge_after_first_page=True) as server:
+            with pytest.raises(ChallengeError, match="--headful"):
+                PlaywrightDiscovery().discover(SeriesRef(SERIES_ID), _options(server))
+            requests = server.item_list_requests
+        assert [(r.query["cursor"], r.from_scroll) for r in requests] == [
+            ("0", False),
+            ("3", False),
+            ("3", True),
+        ]
+
     def test_falls_back_to_scrolling_when_the_in_page_fetch_is_refused(self) -> None:
         with FakeTikTok(lazy=True) as server:
             series = PlaywrightDiscovery().discover(SeriesRef(SERIES_ID), _options(server))
@@ -334,7 +350,8 @@ def test_timeout_without_cookies_is_login_required_and_the_browser_is_closed() -
     )
     user_agent = browser.context_kwargs["user_agent"]
     assert "Chrome/150.0.0.0" in user_agent and "Headless" not in user_agent
-    assert browser.context_kwargs["locale"] == "en-US"
+    # no `locale`: Chromium keeps the machine's own, as the user's Chrome does
+    assert "locale" not in browser.context_kwargs
     assert browser.context_kwargs["viewport"] == {"width": 1280, "height": 900}
 
 

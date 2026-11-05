@@ -12,6 +12,7 @@ import pytest
 
 from dramafetch.catalog import (
     NO_PLAY_ADDRESS,
+    VIDEO_ONLY_PATH_SUFFIX,
     PagePayload,
     Rendition,
     access_of,
@@ -22,6 +23,7 @@ from dramafetch.catalog import (
     episode_from_item,
     find_item_lists,
     is_drm_key,
+    is_video_only_url,
     key_words,
     lock_hints,
     merge_episodes,
@@ -549,6 +551,47 @@ def test_best_quality_orders_every_rendition_by_bitrate_across_codecs():
     ):
         play_url_candidates(item, "ultra")
     assert QUALITY_MODES == ("compatible", "best")
+
+
+def test_video_only_hevc_streams_are_never_candidates():
+    """TikTok's `/media-video-hvc1/` streams carry no audio track (yt-dlp marks every such format
+    `acodec: none`, yt-dlp/yt-dlp#16622 and #17372, and its `best` never takes one): `--quality
+    best` must not pick one either — the saved file could only be quarantined as `no audio
+    track`, three of them a stop — so such URLs leave the renditions and the candidates."""
+    hvc1 = "https://v16-webapp-prime.tiktok.com/video/tos/x/media-video-hvc1/?a=1988&expire=1"
+    item = {
+        "video": {
+            "playAddr": {"UrlList": ["https://c/play", "https://c/x/media-video-hvc1/"]},
+            "bitrateInfo": [
+                _entry("bytevc1", 3_000_000, hvc1, "https://c/mirror/media-video-hvc1/#f"),
+                _entry("bytevc1", 2_500_000, "https://c/hevc-with-audio", hvc1),
+                _entry("h264", 1_000_000, "https://c/h264"),
+            ],
+        }
+    }
+    assert [r.url_list for r in renditions(item)] == [
+        ["https://c/hevc-with-audio"],
+        ["https://c/h264"],
+    ]
+    assert choose_rendition(item, "best").url_list == ["https://c/hevc-with-audio"]
+    assert play_url_candidates(item, "best") == [
+        "https://c/hevc-with-audio",
+        "https://c/h264",
+        "https://c/play",
+    ]
+    assert play_url_candidates(item) == [
+        "https://c/h264",
+        "https://c/hevc-with-audio",
+        "https://c/play",
+    ]
+    assert choose_rendition(item).label == "?p h264"  # compatible: the top H.264, as before
+    assert VIDEO_ONLY_PATH_SUFFIX == "/media-video-hvc1/"
+    assert is_video_only_url(hvc1) and is_video_only_url("https://c/media-video-hvc1/#frag")
+    assert is_video_only_url("HTTPS://C/a/media-video-hvc1/?q=1#f")
+    assert not is_video_only_url("https://c/media-video-hvc1")  # no trailing slash: not the path
+    assert not is_video_only_url("https://c/?p=/media-video-hvc1/")  # the query is not the path
+    assert not is_video_only_url("https://c/media-video-hvc1/x/")
+    assert not is_video_only_url("")
 
 
 def test_renditions_labels_codecs_and_the_quality_hint(item_list_pages):

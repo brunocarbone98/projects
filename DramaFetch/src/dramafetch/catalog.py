@@ -28,7 +28,9 @@ TikTok facts this module encodes (verified October 2026):
   Each ``bitrateInfo`` entry is one rendition — ``CodecType`` (``h264``, ``h265`` or ``bytevc1``,
   TikTok's name for its H.265 streams), ``Bitrate`` in bit/s, ``GearName`` such as
   ``normal_720_0`` or ``adapt_lower_1080_1`` (the height is in the name; ``video.ratio`` like
-  ``720p`` describes the main one) and the URLs. :func:`renditions` reads them,
+  ``720p`` describes the main one) and the URLs. A URL whose path ends in ``/media-video-hvc1/``
+  is one of TikTok's video-only HEVC streams (no audio track: yt-dlp marks them ``acodec: none``)
+  and is never a candidate (:data:`VIDEO_ONLY_PATH_SUFFIX`). :func:`renditions` reads them,
   :func:`choose_rendition` picks one per quality mode, :func:`play_url_candidates` orders the
   URLs and :func:`url_expiry` reads the expiry; the browser download engine fetches them directly
   instead of loading each episode's page.
@@ -747,6 +749,11 @@ _H264_CODEC_RE = re.compile(r"h\.?264|avc", re.IGNORECASE)
 _H265_CODEC_RE = re.compile(r"h\.?265|hevc|hvc1|hev1", re.IGNORECASE)
 _URL_LIST_KEYS = ("UrlList", "urlList", "url_list")
 _MAX_URL_LIST_DEPTH = 3
+#: The path TikTok's video-only HEVC streams end with. Those renditions carry no audio track —
+#: yt-dlp marks every such format ``acodec: none`` (yt-dlp/yt-dlp#16622, #17372) and its ``best``
+#: never takes one — so DramaFetch never requests them either, whatever ``--quality`` says: the
+#: saved file could only be quarantined as ``no audio track``, three of them a stop.
+VIDEO_ONLY_PATH_SUFFIX = "/media-video-hvc1/"
 #: The height inside a ``GearName`` such as ``normal_720_0`` or ``adapt_lower_1080_1``: the only
 #: run of three or four digits (the trailing ``_0``/``_1`` is one digit).
 _GEAR_HEIGHT_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")
@@ -798,7 +805,8 @@ def renditions(item: dict[str, Any]) -> list[Rendition]:
     """Every ``video.bitrateInfo`` entry with at least one http(s) play URL, in payload order;
     never raises on junk. A bare ``video.playAddr`` is not a rendition: its codec and bitrate are
     unknown (:func:`play_url_candidates` still appends it last). The item may be wrapped in
-    ``{"itemStruct": {...}}``."""
+    ``{"itemStruct": {...}}``. A URL of a video-only HEVC stream (:func:`is_video_only_url`) is
+    left out, and an entry with no other URL is no rendition."""
     video = _field(item, "video") if isinstance(item, dict) else None
     if not isinstance(video, dict):
         return []
@@ -810,7 +818,7 @@ def renditions(item: dict[str, Any]) -> list[Rendition]:
     for entry in bitrate_info:
         if not isinstance(entry, dict):
             continue
-        urls = _play_urls(entry.get("PlayAddr"), 0)
+        urls = [url for url in _play_urls(entry.get("PlayAddr"), 0) if not is_video_only_url(url)]
         if not urls:
             continue
         codec = codec_name(entry.get("CodecType"))
@@ -862,7 +870,9 @@ def play_url_candidates(item: dict[str, Any], quality: str = "compatible") -> li
     ordered: list[str] = []
     for rendition in ordered_renditions(item, quality):
         ordered.extend(rendition.url_list)
-    ordered.extend(_play_urls(video.get("playAddr"), 0))
+    ordered.extend(
+        url for url in _play_urls(video.get("playAddr"), 0) if not is_video_only_url(url)
+    )
     return list(dict.fromkeys(ordered))
 
 
@@ -895,6 +905,14 @@ def _play_urls(value: Any, depth: int) -> list[str]:
         url = value.strip()
         return [url] if url.lower().startswith(("http://", "https://")) else []
     return []
+
+
+def is_video_only_url(url: str) -> bool:
+    """True for a play URL whose path ends with :data:`VIDEO_ONLY_PATH_SUFFIX`: one of TikTok's
+    HEVC streams without an audio track, never a candidate. The path is the URL up to its first
+    ``?`` or ``#`` (what yt-dlp's ``urlparse(url).path.endswith`` sees for these URLs)."""
+    path = url.split("#", 1)[0].split("?", 1)[0]
+    return path.endswith(VIDEO_ONLY_PATH_SUFFIX)
 
 
 def url_expiry(url: str) -> int | None:

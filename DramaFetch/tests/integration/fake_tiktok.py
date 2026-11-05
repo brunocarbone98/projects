@@ -25,7 +25,10 @@ Routes (all GET):
                                  handler (header `X-Requested-By: scroll`); `lazy_empty` answers
                                  DramaFetch's own pagination fetch with a well-formed EMPTY page
                                  instead; `slow_pagination_s` delays that fetch (until shutdown at
-                                 the latest); `rate_limit_pagination` answers it with HTTP 429
+                                 the latest); `rate_limit_pagination` answers it with HTTP 429;
+                                 `challenge_after_first_page` answers every later page — ours and
+                                 the page's scroll handler's — with the captcha page, and the
+                                 page then shows the wall
   /api/drama/detail/             the series name and total (per `dramaID`; the main series' for
                                  any id it does not know)
   /login                         a login page
@@ -212,7 +215,17 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     const u = '/api/drama/episode/item_list/?dramaID=' + seriesId + '&cursor=' + state.cursor
       + '&count=10&aid=1988&app_language=en&X-Bogus=fake';
     const r = await fetch(u, { credentials: 'include', headers });
-    const j = await r.json();
+    let j;
+    try {
+      j = await r.json();
+    } catch (e) {
+      // TikTok's web app raises its verification wall when its own list request is refused
+      document.body.innerHTML = '<h1>Verify to continue</h1>'
+        + '<p>Drag the puzzle piece into place.</p>';
+      state.hasMore = false;
+      state.busy = false;
+      return;
+    }
     render(listOf(j));
     state.cursor = j.cursor;
     state.hasMore = !!j.hasMore;
@@ -254,6 +267,10 @@ class FakeOptions:
     # the page's scroll handler); with `lazy` or `lazy_empty` the page's scroll handler serves the
     # real later pages, as TikTok's own web app does.
     lazy_empty: bool = False  # a well-formed but empty page: {"itemList": [], "hasMore": false}
+    # TikTok raises its verification wall AFTER the first list page: every later item_list request
+    # — DramaFetch's own fetch and the page's scroll handler alike — is answered with the captcha
+    # page, and the page's own script then shows the wall, as TikTok's web app does.
+    challenge_after_first_page: bool = False
     slow_pagination_s: float = 0.0  # hold the answer this long (released early at shutdown)
     rate_limit_pagination: bool = False  # HTTP 429 with a JSON body
     # The fake CDN (browser download engine).
@@ -289,7 +306,7 @@ class FakeOptions:
 
     @property
     def page_scrolls(self) -> bool:
-        return self.lazy or self.lazy_empty
+        return self.lazy or self.lazy_empty or self.challenge_after_first_page
 
 
 @dataclass(frozen=True)
@@ -399,10 +416,13 @@ class _Handler(BaseHTTPRequestHandler):
                 page = page.replace("__LAZY__", "true" if options.page_scrolls else "false")
                 self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
         elif path == "/api/drama/episode/item_list/":
-            ours = (query.get("cursor", "0") or "0") != "0" and not from_scroll
+            later_page = (query.get("cursor", "0") or "0") != "0"
+            ours = later_page and not from_scroll
             if ours and options.slow_pagination_s > 0:
                 server.release.wait(options.slow_pagination_s)
-            if ours and options.rate_limit_pagination:
+            if later_page and options.challenge_after_first_page:
+                self._send(HTTPStatus.OK, CHALLENGE_PAGE.encode(), "text/html; charset=utf-8")
+            elif ours and options.rate_limit_pagination:
                 self._send(
                     HTTPStatus.TOO_MANY_REQUESTS,
                     b'{"statusCode": 429, "statusMsg": "too many requests"}',

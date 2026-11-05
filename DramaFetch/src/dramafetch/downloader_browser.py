@@ -54,7 +54,11 @@ from urllib.parse import urlsplit
 from dramafetch.catalog import access_of, play_url_candidates, url_expiry
 from dramafetch.discovery.browser import VIEWPORT, PlaywrightDiscovery
 from dramafetch.discovery.cookies import load_netscape_cookies
-from dramafetch.discovery.static import chrome_user_agent, cookie_domain_filter
+from dramafetch.discovery.static import (
+    DEFAULT_BROWSER_CHANNEL,
+    chrome_user_agent,
+    cookie_domain_filter,
+)
 from dramafetch.downloader import (
     existing_episode_file,
     existing_file_result,
@@ -609,13 +613,12 @@ class BrowserDownloader:
             kwargs: dict[str, Any] = {"headless": not options.browser_headful}
             if options.browser_executable is not None:
                 kwargs["executable_path"] = str(options.browser_executable)
-            elif options.browser_channel:
-                kwargs["channel"] = options.browser_channel
+            else:  # the full browser, never the headless shell (DEFAULT_BROWSER_CHANNEL)
+                kwargs["channel"] = options.browser_channel or DEFAULT_BROWSER_CHANNEL
             browser: Browser = playwright.chromium.launch(**kwargs)
             stack.callback(browser.close)
-            context = browser.new_context(
+            context = browser.new_context(  # no `locale`: the machine's own, like the discovery
                 user_agent=chrome_user_agent(browser.version),
-                locale="en-US",
                 viewport=VIEWPORT,
             )
             stack.callback(context.close)

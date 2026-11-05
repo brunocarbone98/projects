@@ -1,7 +1,8 @@
 // @ts-check
-// Unit tests of src/app (the engine, the discovery and the downloader) over fakes: no browser, no
-// network, no real sleep. The integration scenarios (tests/integration/test_extension.py) drive the
-// same code in a real Chromium against the fake TikTok server.
+// Unit tests of src/app (the engine, the discovery, the downloader and, at the end, the page itself
+// over a fake document) over fakes: no browser, no network, no real sleep. The integration scenarios
+// (tests/integration/test_extension.py) drive the same code in a real Chromium against the fake
+// TikTok server.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -352,7 +353,7 @@ test("discovery: every page fetched from inside the page, a pause before each, t
   assert.equal(found.name, "Fake Drama");
   assert.equal(found.totalHint, 2);
   assert.deepEqual(fetched, [
-    "https://www.tiktok.com/api/drama/episode/item_list/?dramaID=1&cursor=0&count=30&sig=s",
+    "https://www.tiktok.com/api/drama/episode/item_list/?dramaID=1&cursor=0&count=10&sig=s", // the page's own request, byte for byte
     "https://www.tiktok.com/api/drama/episode/item_list/?dramaID=1&cursor=1&count=30&sig=s",
     "https://www.tiktok.com/api/drama/detail/?dramaID=1&sig=s",
   ]);
@@ -898,4 +899,263 @@ test("the app tab is never discarded while a job runs or waits, discardable agai
   refuse = true; // the tab is gone: noted, never thrown
   await keeper.keep(5, true);
   assert.equal(errors.length, 1);
+});
+
+// ------------------------------------------------------------------------------ the page (app.js)
+
+/**
+ * One element of app.html, as far as app.js reads or writes it: text, class, flags, value, the
+ * `data-*` set, attributes, the children appended (`textContent = ""` drops them, as in the DOM),
+ * the parts `querySelector` hands out (one per selector, kept) and the listeners added, by event
+ * type, for the test to fire.
+ */
+class FakeElement {
+  /** @param {string} tag */
+  constructor(tag) {
+    this.tagName = tag.toUpperCase();
+    this.className = "";
+    this.title = "";
+    this.hidden = false;
+    this.disabled = false;
+    this.checked = false;
+    this.value = "";
+    this.lang = "";
+    this.text = "";
+    /** @type {Record<string, string | undefined>} */
+    this.dataset = {};
+    /** @type {Map<string, string>} */
+    this.attributes = new Map();
+    /** @type {FakeElement[]} */
+    this.children = [];
+    /** @type {Map<string, FakeElement>} */
+    this.parts = new Map();
+    /** @type {Map<string, ((event: unknown) => unknown)[]>} */
+    this.listeners = new Map();
+  }
+  get textContent() {
+    return this.text;
+  }
+  /** @param {string | null} value */
+  set textContent(value) {
+    this.text = value ?? "";
+    this.children = [];
+  }
+  /** @param {string} name @param {string} value */
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+  /** @param {string} name @returns {string | null} */
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+  /** @param {...(FakeElement | string)} nodes */
+  append(...nodes) {
+    for (const node of nodes) if (node instanceof FakeElement) this.children.push(node);
+  }
+  /** @param {...(FakeElement | string)} nodes */
+  replaceChildren(...nodes) {
+    this.children = [];
+    this.append(...nodes);
+  }
+  /** @param {string} selector @returns {FakeElement} */
+  querySelector(selector) {
+    let part = this.parts.get(selector);
+    if (part === undefined) {
+      part = new FakeElement(selector);
+      this.parts.set(selector, part);
+    }
+    return part;
+  }
+  /** @returns {FakeElement[]} */
+  querySelectorAll() {
+    return [];
+  }
+  /** @param {string} type @param {(event: unknown) => unknown} listener */
+  addEventListener(type, listener) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+  /** @param {string} type */
+  fire(type) {
+    for (const listener of this.listeners.get(type) ?? []) listener({ preventDefault: () => undefined });
+  }
+}
+
+/**
+ * @typedef {{message: string, placeholders?: Record<string, {content: string}>}} CatalogEntry
+ */
+
+/**
+ * app.js loaded over a fake document and a fake `chrome` (the English messages, an empty storage,
+ * the engine lock free): `main()` runs on import and is awaited to its end. `hold()` then makes the
+ * next job's first `chrome.tabs.getCurrent` never answer, so that the job stays running and makes
+ * no request to anything; `message()` is a runtime message from this extension's own popup;
+ * `restore()` removes the fakes again.
+ */
+async function fakePage() {
+  /** @type {Record<string, CatalogEntry>} */
+  const catalog = JSON.parse(readFileSync(new URL("../_locales/en/messages.json", import.meta.url), "utf8"));
+  /** @type {Record<string, unknown>} */
+  const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+  /** @type {Map<string, FakeElement>} */
+  const elements = new Map();
+  /** @param {string} id @returns {FakeElement} */
+  const element = (id) => {
+    let found = elements.get(id);
+    if (found === undefined) {
+      found = new FakeElement("div");
+      elements.set(id, found);
+    }
+    return found;
+  };
+  /** @type {Map<string, unknown>} chrome.storage.local */
+  const local = new Map();
+  /** @type {((message: unknown, sender: {id: string}) => void)[]} */
+  const messageListeners = [];
+  let holding = false;
+  const chrome = {
+    runtime: {
+      id: "dramafetch-test-id",
+      getManifest: () => manifest,
+      onMessage: {
+        /** @param {(message: unknown, sender: {id: string}) => void} listener */
+        addListener: (listener) => void messageListeners.push(listener),
+      },
+    },
+    i18n: {
+      getUILanguage: () => "en-US",
+      /** @param {string} key @param {string[]} [substitutions] */
+      getMessage: (key, substitutions = []) => {
+        const entry = catalog[key];
+        if (entry === undefined) return "";
+        return entry.message.replace(/\$([A-Za-z0-9_]+)\$/g, (_match, name) => {
+          const known = Object.entries(entry.placeholders ?? {}).find(([placeholder]) => placeholder.toLowerCase() === String(name).toLowerCase());
+          return known === undefined ? "" : (substitutions[Number(known[1].content.slice(1)) - 1] ?? "");
+        });
+      },
+    },
+    storage: {
+      local: {
+        /** @param {string | string[]} keys */
+        get: async (keys) => {
+          /** @type {Record<string, unknown>} */
+          const found = {};
+          for (const key of Array.isArray(keys) ? keys : [keys]) if (local.has(key)) found[key] = local.get(key);
+          return found;
+        },
+        /** @param {Record<string, unknown>} items */
+        set: async (items) => {
+          for (const [key, value] of Object.entries(items)) local.set(key, value);
+        },
+        /** @param {string} key */
+        remove: async (key) => void local.delete(key),
+      },
+      session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined },
+      onChanged: { addListener: () => undefined },
+    },
+    tabs: {
+      getCurrent: () => (holding ? new Promise(() => undefined) : Promise.resolve({ id: 1, windowId: 10 })),
+      update: async () => undefined,
+    },
+  };
+  const document = {
+    documentElement: new FakeElement("html"),
+    body: new FakeElement("body"),
+    getElementById: element,
+    /** @returns {FakeElement[]} */
+    querySelectorAll: () => [],
+    /** @param {string} tag */
+    createElement: (tag) => new FakeElement(tag),
+  };
+  const navigatorBefore = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const setIntervalBefore = globalThis.setInterval;
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      locks: {
+        /** @param {string} name @param {object} _options @param {(lock: {name: string} | null) => unknown} callback */
+        request: (name, _options, callback) => Promise.resolve(callback({ name })),
+      },
+    },
+  });
+  Object.assign(globalThis, {
+    document,
+    chrome,
+    location: { search: "", pathname: "/src/app/app.html" },
+    MutationObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    setInterval: () => 0, // the page's one-second tick: never armed, so that the test process can exit
+  });
+  const restore = () => {
+    for (const name of ["document", "chrome", "location", "MutationObserver"]) Reflect.deleteProperty(globalThis, name);
+    Object.assign(globalThis, { setInterval: setIntervalBefore });
+    if (navigatorBefore !== undefined) Object.defineProperty(globalThis, "navigator", navigatorBefore);
+  };
+  /** @returns {Promise<void>} one macrotask turn: what the page awaited meanwhile has run */
+  const turn = () => new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    await import("../src/app/app.js");
+    for (let turns = 0; turns < 200 && element("app-status").dataset["state"] !== "idle"; turns += 1) await turn();
+    assert.equal(element("app-status").dataset["state"], "idle", "the page did not finish loading");
+    assert.ok(element("load-button").listeners.has("click"), "Load list is wired");
+  } catch (error) {
+    restore();
+    throw error;
+  }
+  return {
+    element,
+    catalog,
+    turn,
+    restore,
+    hold: () => {
+      holding = true;
+    },
+    /** @param {unknown} message */
+    message: (message) => {
+      for (const listener of messageListeners) listener(message, { id: chrome.runtime.id });
+    },
+  };
+}
+
+test("the page: a second Load list for a series being listed, or waiting to be, is refused with loadAlreadyQueued and queues nothing", async () => {
+  const page = await fakePage();
+  try {
+    const { element } = page;
+    const refused = String(page.catalog["loadAlreadyQueued"]?.message);
+    const other = "7699393770256782399";
+    const links = element("links");
+    const status = element("input-status");
+    const load = () => element("load-button").fire("click");
+    const queued = () => element("queue-list").children.map((item) => item.textContent);
+    page.hold(); // the job's `tabs.getCurrent` never answers: it runs, and makes no request
+    links.value = `https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/1`;
+    load();
+    await page.turn();
+    assert.equal(element("app-status").dataset["state"], "running");
+    assert.equal(element("progress-current").textContent, `List series ${SERIES_ID}`);
+    assert.equal(element("queue-card").hidden, true); // it left the queue when it started
+    // the same series again, from the box and from the popup ("Download this series", another episode's link)
+    load();
+    assert.equal(status.textContent, refused);
+    assert.equal(status.className, "status error");
+    assert.deepEqual(queued(), []);
+    status.textContent = "";
+    page.message({ type: "dramafetch:load", input: `https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/3` });
+    assert.equal(status.textContent, refused);
+    assert.deepEqual(queued(), []);
+    assert.equal(element("app-status").dataset["state"], "running");
+    // another series waits in the queue: a second request for it is refused the same way
+    links.value = `https://www.tiktok.com/shortdrama/episode/${other}/1`;
+    load();
+    assert.notEqual(status.textContent, refused);
+    assert.equal(element("queue-card").hidden, false);
+    assert.deepEqual(queued(), [`List series ${other}`]);
+    load();
+    assert.equal(status.textContent, refused);
+    assert.equal(status.className, "status error");
+    assert.deepEqual(queued(), [`List series ${other}`]);
+  } finally {
+    page.restore();
+  }
 });

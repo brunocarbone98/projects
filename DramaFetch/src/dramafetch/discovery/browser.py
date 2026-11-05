@@ -36,6 +36,7 @@ from dramafetch.catalog import (
 )
 from dramafetch.discovery.cookies import load_netscape_cookies
 from dramafetch.discovery.static import (
+    DEFAULT_BROWSER_CHANNEL,
     chrome_user_agent,
     cookie_domain_filter,
     is_login_url,
@@ -67,6 +68,14 @@ CHALLENGE_CHECK_INTERVAL_S = 2.0
 DETAIL_GRACE_S = 2.0
 SCROLL_ROUNDS_WITHOUT_NEWS = 4
 SCROLL_WHEEL_PX = 1500
+#: The ``ChallengeError`` of a captcha met while the list is resolved — before the first page,
+#: during the in-page pagination or during the scroll fallback alike: a captcha is a refusal
+#: (a stop and the cooldown), never a partial list to download from, and DramaFetch never solves
+#: it (the extension's ``CHALLENGE_MESSAGE`` names its own way out instead of ``--headful``).
+CHALLENGE_MESSAGE = (
+    "TikTok is asking for a verification (captcha) instead of the series: "
+    "after the cooldown, run again with --headful and solve it in the window"
+)
 #: The pause before the next episode-list page (an in-page fetch or a scroll round) is
 #: ``DiscoveryOptions.page_delay_s`` times a factor drawn uniformly from this range, so paging
 #: never ticks like a metronome: with the default 0.8 s that is 0.8-1.6 s. ``page_delay_s`` (and
@@ -248,17 +257,20 @@ class PlaywrightDiscovery:
         kwargs: dict[str, Any] = {"headless": not options.headful}
         if options.executable_path is not None:
             kwargs["executable_path"] = str(options.executable_path)
-        elif options.browser_channel:
-            kwargs["channel"] = options.browser_channel
+        else:
+            # The full browser by default, never Playwright's headless shell (see
+            # DEFAULT_BROWSER_CHANNEL); `chrome` / `msedge` launch the installed browser.
+            kwargs["channel"] = options.browser_channel or DEFAULT_BROWSER_CHANNEL
         browser: Browser = playwright.chromium.launch(**kwargs)
         return browser
 
     def _new_context(
         self, browser: Browser, options: DiscoveryOptions, capture: _Capture
     ) -> BrowserContext:
+        # No `locale`: Chromium keeps the machine's own, as the user's Chrome does (a forced
+        # en-US gave an `Accept-Language: en-US` no real Chrome sends).
         context = browser.new_context(
             user_agent=chrome_user_agent(browser.version),
-            locale="en-US",
             viewport=VIEWPORT,
         )
         if options.cookies_file is None:
@@ -305,10 +317,7 @@ class PlaywrightDiscovery:
             if now >= next_challenge_check:
                 next_challenge_check = now + CHALLENGE_CHECK_INTERVAL_S
                 if _page_shows_challenge(page):
-                    raise ChallengeError(
-                        "TikTok is asking for a verification (captcha) instead of the series: "
-                        "after the cooldown, run again with --headful and solve it in the window"
-                    )
+                    raise ChallengeError(CHALLENGE_MESSAGE)
             if now >= deadline:
                 if options.cookies_file is None:
                     raise LoginRequiredError(
@@ -342,6 +351,7 @@ class PlaywrightDiscovery:
             self._page_pause(page, options)
             payload = self._fetch_in_page(page, next_url, options.timeout_s)
             if payload is None:
+                self._stop_if_challenged(page)  # a wall already up is a refusal, not a fallback
                 capture.warnings.append(
                     "in-page pagination fetch returned no episode list; scrolled the page instead"
                 )
@@ -395,7 +405,22 @@ class PlaywrightDiscovery:
                 log.debug("scrolling failed: %s", _one_line(exc))
                 return
             self._page_pause(page, options)
-            quiet_rounds = 0 if capture.drain() > 0 else quiet_rounds + 1
+            if capture.drain() > 0:
+                quiet_rounds = 0
+                continue
+            quiet_rounds += 1
+            # A round that loaded nothing may be the verification wall the page raises when ITS
+            # own list request is refused: a captcha is a refusal (stop, cooldown), never a
+            # partial list to download from.
+            self._stop_if_challenged(page)
+
+    @staticmethod
+    def _stop_if_challenged(page: Page) -> None:
+        """Raise ``ChallengeError`` when the page shows TikTok's verification wall — asked after an
+        in-page fetch returned nothing usable and after every scroll round that loaded nothing,
+        so a captcha met after the first page stops the run like one met before it."""
+        if _page_shows_challenge(page):
+            raise ChallengeError(CHALLENGE_MESSAGE)
 
     def _page_pause(self, page: Page, options: DiscoveryOptions) -> None:
         """Wait before asking for the next episode-list page: ``page_delay_s`` times a random

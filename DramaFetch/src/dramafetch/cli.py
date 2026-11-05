@@ -48,7 +48,12 @@ from typing import Any
 from dramafetch import __version__, engine
 from dramafetch.cooldown import cooldown_message, cooldown_summary
 from dramafetch.discovery.cookies import cookie_file_problems
-from dramafetch.downloader import MAX_RETRIES, curl_cffi_available, impersonate_target
+from dramafetch.downloader import (
+    MAX_RETRIES,
+    curl_cffi_available,
+    impersonate_target,
+    resolved_impersonate_target,
+)
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -355,8 +360,9 @@ def _add_download_flags(parser: argparse.ArgumentParser, *, series: bool) -> Non
         metavar="KEY=VAL",
         action="append",
         default=None,
-        help="yt-dlp extractor args, e.g. tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com "
-        "(the tiktok: prefix is the default; repeatable)",
+        help="yt-dlp extractor args as IE:key=value[;key2=value2] (the tiktok: prefix is the "
+        "default; repeatable). tiktok:app_info, device_id and api_hostname are refused: they make "
+        "yt-dlp pose as the TikTok mobile app on an invented device",
     )
 
 
@@ -422,10 +428,19 @@ def _add_pacing_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+#: TikTok extractor arguments DramaFetch refuses: each one switches yt-dlp from the episode's web
+#: page to TikTok's mobile API, which the extractor calls as an invented Android device (random
+#: device and install ids, a Pixel identity, an app user agent, a retry loop over app versions) —
+#: a fingerprint DramaFetch never presents (Scope: the Chrome user agent and curl_cffi's Chrome
+#: TLS fingerprint are its only two measures).
+REFUSED_EXTRACTOR_ARGS = ("app_info", "device_id", "api_hostname")
+
+
 def parse_extractor_args(values: list[str]) -> dict[str, dict[str, list[str]]]:
     """``["tiktok:a=1;b=x,y", "c=2"]`` -> ``{"tiktok": {"a": ["1"], "b": ["x", "y"], "c": ["2"]}}``.
 
-    Accepts yt-dlp's ``IE:key=val;key2=val2`` syntax and bare ``key=val`` (extractor ``tiktok``).
+    Accepts yt-dlp's ``IE:key=val;key2=val2`` syntax and bare ``key=val`` (extractor ``tiktok``);
+    a ``tiktok`` key in :data:`REFUSED_EXTRACTOR_ARGS` is a ValueError (a usage error).
     """
     result: dict[str, dict[str, list[str]]] = {}
     for raw in values:
@@ -449,7 +464,13 @@ def parse_extractor_args(values: list[str]) -> dict[str, dict[str, list[str]]]:
                 raise ValueError(
                     f"invalid --extractor-args {raw!r}: expected IE:key=value[;key2=value2]"
                 )
-            values_for_key = result.setdefault(ie_key, {}).setdefault(name.strip(), [])
+            key = name.strip()
+            if ie_key == "tiktok" and key.lower() in REFUSED_EXTRACTOR_ARGS:
+                raise ValueError(
+                    f"--extractor-args tiktok:{key} is refused: it makes yt-dlp call TikTok's "
+                    "mobile API as an invented Android device, which DramaFetch never presents"
+                )
+            values_for_key = result.setdefault(ie_key, {}).setdefault(key, [])
             values_for_key.extend(part for part in value.split(",") if part != "")
     return result
 
@@ -735,6 +756,23 @@ def _cmd_info(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _warn_without_impersonation(options: DownloadOptions) -> None:
+    """One stderr line before a yt-dlp-engine run whose impersonation is off although it was not
+    declined (``--no-impersonate``): without a curl_cffi this yt-dlp can use, the default engine
+    sends Python's own TLS fingerprint under a Chrome user agent, which TikTok tells apart.
+    Nothing is refused — the user decides —, and a dry run makes no request."""
+    if options.engine != "yt-dlp" or not options.impersonate or options.dry_run:
+        return
+    if impersonate_target() is not None:
+        return
+    _stderr(
+        "warning: yt-dlp cannot impersonate Chrome's TLS fingerprint here (curl_cffi missing or "
+        "in a version this yt-dlp does not support: see `dramafetch doctor`), so the default "
+        "engine presents Python's own TLS stack under a Chrome user agent; --engine browser "
+        "avoids that"
+    )
+
+
 def _cmd_download(args: argparse.Namespace) -> int:
     refs: list[SeriesRef] = args.series_refs  # every input parsed by _validate, duplicates gone
     for note in args.series_notes:
@@ -743,6 +781,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
     # Even --dry-run resolves the episode lists, so the cooldown applies to it too.
     if (refused := _refused_by_cooldown()) is not None:
         return refused
+    _warn_without_impersonation(options)
     pacing = engine.PacingState()  # one run: the long break spans every series of the batch
     printer = _SeriesPrinter(options, args.episodes, total=len(refs), pacing=pacing)
     runs = engine.run_batch(
@@ -773,6 +812,7 @@ def _cmd_video(args: argparse.Namespace) -> int:
     # A dry run needs no network, so it is the one command the cooldown leaves alone.
     if not options.dry_run and (refused := _refused_by_cooldown()) is not None:
         return refused
+    _warn_without_impersonation(options)
     episode = Episode(
         number=0, item_id=ref.item_id, title=ref.item_id, series_id="", author=ref.author
     )
@@ -1276,17 +1316,23 @@ def _check_curl_cffi() -> DoctorCheck:
         return DoctorCheck(
             "curl_cffi",
             "skip",
-            "not installed: impersonation off (optional: pip install 'dramafetch[impersonate]')",
+            "not installed: impersonation off — the default engine would send Python's own TLS "
+            "fingerprint under a Chrome user agent, which TikTok tells apart (pip install "
+            "'dramafetch[impersonate]', or use --engine browser)",
         )
     if impersonate_target() is None:
         return DoctorCheck(
             "curl_cffi",
             "skip",
-            "installed, but this yt-dlp does not support its version: impersonation off "
-            "(pip install -U 'yt-dlp[curl-cffi]' installs one it supports)",
+            "installed, but this yt-dlp does not support its version: impersonation off — the "
+            "default engine would send Python's own TLS fingerprint under a Chrome user agent "
+            "(pip install -U 'yt-dlp[curl-cffi]' installs one it supports, or use --engine "
+            "browser)",
         )
+    resolved = resolved_impersonate_target()
+    target = f" as {resolved}" if resolved else ""
     return DoctorCheck(
-        "curl_cffi", "ok", "importable: yt-dlp impersonates Chrome's TLS fingerprint"
+        "curl_cffi", "ok", f"importable: yt-dlp impersonates Chrome's TLS fingerprint{target}"
     )
 
 
@@ -1326,7 +1372,12 @@ def _check_browser(browser_channel: str | None, browser_path: Path | None) -> Do
             f"Playwright could not start ({exc.__class__.__name__}); {BROWSER_INSTALL_HINT}",
         )
     if executable.exists():
-        return DoctorCheck("browser", "ok", f"Playwright Chromium at {executable}")
+        return DoctorCheck(
+            "browser",
+            "ok",
+            f"Playwright Chromium at {executable} (the full browser, launched headless; "
+            "--browser-channel chrome uses your Chrome instead)",
+        )
     return DoctorCheck(
         "browser", "fail", f"Playwright Chromium missing ({executable}); {BROWSER_INSTALL_HINT}"
     )

@@ -473,6 +473,9 @@ FUZZ_SCALARS = (
 PLAY_URLS = (
     "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc/?a=1988&expire=1761200000",
     "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/abc-1080/?a=1988&expire=1761200001",
+    # a video-only HEVC stream: never a candidate (`catalog.is_video_only_url`)
+    "https://v16-webapp-prime.tiktok.com/video/tos/useast2a/hevc/media-video-hvc1/?expire=1761200002",
+    "https://v16.tiktokcdn.com/media-video-hvc1/#x",
     "http://v19.tiktokcdn.com/x/?expire=5",
     " https://v16.tiktokcdn-us.com/y/ ",
     "HTTPS://V16.TIKTOKCDN.COM/UPPER/",
@@ -698,6 +701,7 @@ def test_the_shared_texts_and_constants_are_the_python_ones() -> None:
         "catalog.NO_PLAY_ADDRESS": catalog.NO_PLAY_ADDRESS,
         "catalog.UNKNOWN_CODEC": catalog.UNKNOWN_CODEC,
         "catalog.UNKNOWN_HEIGHT": catalog.UNKNOWN_HEIGHT,
+        "catalog.VIDEO_ONLY_PATH_SUFFIX": catalog.VIDEO_ONLY_PATH_SUFFIX,
         "naming.NAME_PLACEHOLDERS": list(manifest.NAME_PLACEHOLDERS),
         "naming.MAX_STEM_LEN": manifest.MAX_STEM_LEN,
         "pacing.PACE": engine.PACE,

@@ -804,6 +804,20 @@ function parsedLinks() {
   return { refs: parsed.refs, notes: parsed.notes };
 }
 
+/**
+ * Whether a **Load list** job for `seriesId` is running or waiting: a second click, or the popup's
+ * "Download this series" for a series already being listed, must not queue the same listing twice
+ * (two discoveries of one series, one after the other, for nothing).
+ * @param {string} seriesId
+ * @returns {boolean}
+ */
+function loadPending(seriesId) {
+  /** @param {Job} job */
+  const listsIt = (job) => job.kind === "load" && job.refs[0]?.seriesId === seriesId;
+  return (app.running !== null && listsIt(app.running)) || app.queue.some(listsIt);
+}
+
+/** **Load list**, also reached through {@link loadFromOutside}: one listing per series at a time. */
 function onLoad() {
   const parsed = parsedLinks();
   if (parsed === null) return;
@@ -812,6 +826,10 @@ function onLoad() {
     return;
   }
   const ref = /** @type {SeriesRef} */ (parsed.refs[0]);
+  if (loadPending(ref.seriesId)) {
+    setStatus($("input-status"), t("loadAlreadyQueued"), "error");
+    return;
+  }
   enqueue({ kind: "load", label: t("jobLoad", ref.seriesId), refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false });
 }
 

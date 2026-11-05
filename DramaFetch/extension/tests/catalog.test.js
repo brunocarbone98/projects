@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import {
   NO_PLAY_ADDRESS,
+  VIDEO_ONLY_PATH_SUFFIX,
   accessOf,
   catalogWarnings,
   chooseRendition,
@@ -15,6 +16,7 @@ import {
   findItemLists,
   isDrmKey,
   isLocked,
+  isVideoOnlyUrl,
   keyWords,
   makeEpisode,
   mergeEpisodes,
@@ -190,6 +192,32 @@ test("renditions, the quality modes and the play URL order", () => {
   assert.throws(() => playUrlCandidates(entry, "fast"), /unknown quality 'fast': expected one of compatible, best/);
   assert.equal(codecName("AVC1"), "h264");
   assert.equal(codecName(undefined), "unknown");
+});
+
+test("video-only HEVC streams (/media-video-hvc1/) are never candidates, whatever the quality", () => {
+  const hvc1 = "https://v16-webapp-prime.tiktok.com/video/tos/x/media-video-hvc1/?a=1988&expire=1";
+  const item = {
+    video: {
+      playAddr: { UrlList: ["https://c/play", "https://c/x/media-video-hvc1/"] },
+      bitrateInfo: [
+        { CodecType: "bytevc1", Bitrate: 3000000, PlayAddr: { UrlList: [hvc1, "https://c/mirror/media-video-hvc1/#f"] } },
+        { CodecType: "bytevc1", Bitrate: 2500000, PlayAddr: { UrlList: ["https://c/hevc-with-audio", hvc1] } },
+        { CodecType: "h264", Bitrate: 1000000, PlayAddr: { UrlList: ["https://c/h264"] } },
+      ],
+    },
+  };
+  assert.deepEqual(
+    renditions(item).map((rendition) => rendition.urlList),
+    [["https://c/hevc-with-audio"], ["https://c/h264"]],
+  );
+  assert.deepEqual(chooseRendition(item, "best")?.urlList, ["https://c/hevc-with-audio"]);
+  assert.deepEqual(playUrlCandidates(item, "best"), ["https://c/hevc-with-audio", "https://c/h264", "https://c/play"]);
+  assert.deepEqual(playUrlCandidates(item), ["https://c/h264", "https://c/hevc-with-audio", "https://c/play"]);
+  assert.equal(VIDEO_ONLY_PATH_SUFFIX, "/media-video-hvc1/");
+  assert.ok(isVideoOnlyUrl(hvc1) && isVideoOnlyUrl("https://c/media-video-hvc1/#frag"));
+  assert.ok(isVideoOnlyUrl("HTTPS://C/a/media-video-hvc1/?q=1#f"));
+  assert.ok(!isVideoOnlyUrl("https://c/media-video-hvc1") && !isVideoOnlyUrl("https://c/?p=/media-video-hvc1/"));
+  assert.ok(!isVideoOnlyUrl("https://c/media-video-hvc1/x/") && !isVideoOnlyUrl(""));
 });
 
 test("urlExpiry reads the expire parameter as Python's parse_qs does", () => {

@@ -21,6 +21,7 @@ from dramafetch.discovery import (
 from dramafetch.discovery.browser import _with_query_params
 from dramafetch.discovery.static import (
     DEFAULT_CHROME_MAJOR,
+    IMPERSONATED_HEADERS,
     PARTIAL_WARNING,
     RATE_LIMIT_MESSAGE,
     _urllib_fetch,
@@ -255,12 +256,14 @@ class _LocalServer:
         self.routes = routes
         self.cookies_seen: list[str | None] = []
         self.paths_seen: list[str] = []
+        self.headers_seen: list[dict[str, str]] = []  # lower-cased names; test-only values
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 outer.paths_seen.append(self.path)
                 outer.cookies_seen.append(self.headers.get("Cookie"))
+                outer.headers_seen.append({k.lower(): v for k, v in self.headers.items()})
                 route = outer.routes.get(self.path.split("?")[0], _Route(404, b"not found"))
                 self.send_response(route.status)
                 if route.location:
@@ -327,6 +330,33 @@ def test_http_429_is_a_rate_limited_error(real_fetch: Any) -> None:
         with pytest.raises(DiscoveryError, match="HTTP 404") as info:
             real_fetch(f"http://127.0.0.1:{server.port}/nope", {"User-Agent": "x"})
     assert not isinstance(info.value, RateLimitedError)
+
+
+def test_default_fetch_lets_curl_cffi_send_its_own_chrome_headers() -> None:
+    """With curl_cffi the impersonated Chrome's User-Agent, Accept and Accept-Language go out, not
+    DramaFetch's (`IMPERSONATED_HEADERS`): one client whose headers, client hints and TLS
+    fingerprint agree (a Chrome/153 user agent next to `sec-ch-ua: …v="152"` would not). The
+    Cookie header is still DramaFetch's. The urllib fallback keeps every header it is given."""
+    pytest.importorskip("curl_cffi")
+    ours = {
+        "User-Agent": "Mozilla/5.0 Chrome/999.0.0.0",
+        "Accept": "text/x-dramafetch",
+        "Accept-Language": "xx-XX",
+        "Cookie": "sessionid=v",
+    }
+    with _LocalServer({"/page": _Route(200, b"<p>ok</p>")}) as server:
+        default_fetch(f"http://127.0.0.1:{server.port}/page", dict(ours))
+        _urllib_fetch(f"http://127.0.0.1:{server.port}/page", dict(ours))
+    curl, urllib = server.headers_seen
+    assert "Chrome/999" not in curl["user-agent"] and "Chrome/" in curl["user-agent"]
+    assert "Headless" not in curl["user-agent"]
+    assert curl["accept"] != "text/x-dramafetch" and "text/html" in curl["accept"]
+    assert curl.get("accept-language", "") not in ("", "xx-XX")
+    assert "chrom" in curl.get("sec-ch-ua", "").lower()  # the profile's own client hints
+    assert urllib["user-agent"] == "Mozilla/5.0 Chrome/999.0.0.0"
+    assert urllib["accept"] == "text/x-dramafetch" and urllib["accept-language"] == "xx-XX"
+    assert server.cookies_seen == ["sessionid=v", "sessionid=v"]
+    assert frozenset({"user-agent", "accept", "accept-language"}) == IMPERSONATED_HEADERS
 
 
 def test_ensure_same_site_rules() -> None:
