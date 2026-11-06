@@ -219,6 +219,28 @@
       }
     }
   },
+  "reportButton": {
+    "message": "Guardar el informe",
+    "description": "Button: save the report of the episodes the last job did not download (again, or when the setting is off)."
+  },
+  "reportSaved": {
+    "message": "Informe guardado: $file$",
+    "description": "The report of the episodes that did not download was saved (its file name).",
+    "placeholders": {
+      "file": {
+        "content": "$1"
+      }
+    }
+  },
+  "reportNotSaved": {
+    "message": "No se pudo guardar el informe: $reason$",
+    "description": "The report could not be saved (Chrome's reason).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
   "queueHeading": {
     "message": "En espera",
     "description": "Heading of the queue card."
@@ -438,6 +460,14 @@
   "settingRestMax": {
     "message": "Descanso largo, máximo (s)",
     "description": "Setting label."
+  },
+  "settingReport": {
+    "message": "Guardar un informe de los episodios que no se descargaron",
+    "description": "Setting label (a checkbox)."
+  },
+  "settingReportHint": {
+    "message": "Un archivo JSON en Downloads/DramaFetch/reports: por cada episodio que no se descargó, su estado, mensaje, causa probable, las peticiones hechas (servidores, códigos HTTP, tamaños) y la entrada de la lista que TikTok sirvió a tu sesión; nunca tus cookies.",
+    "description": "Hint under the report setting."
   },
   "settingsHint": {
     "message": "Los nombres de archivo pueden usar {series}, {number}, {n}, {title} y {id}. Las pausas solo pueden alargarse respecto de las predeterminadas (4–9 s entre episodios, 60–120 s cada 10): más rápido nunca es seguro frente a TikTok.",

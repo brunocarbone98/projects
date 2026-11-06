@@ -219,6 +219,28 @@
       }
     }
   },
+  "reportButton": {
+    "message": "Save the report",
+    "description": "Button: save the report of the episodes the last job did not download (again, or when the setting is off)."
+  },
+  "reportSaved": {
+    "message": "Report saved: $file$",
+    "description": "The report of the episodes that did not download was saved (its file name).",
+    "placeholders": {
+      "file": {
+        "content": "$1"
+      }
+    }
+  },
+  "reportNotSaved": {
+    "message": "The report could not be saved: $reason$",
+    "description": "The report could not be saved (Chrome's reason).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
   "queueHeading": {
     "message": "Waiting",
     "description": "Heading of the queue card."
@@ -438,6 +460,14 @@
   "settingRestMax": {
     "message": "Longer rest, at most (s)",
     "description": "Setting label."
+  },
+  "settingReport": {
+    "message": "Save a report of the episodes that did not download",
+    "description": "Setting label (a checkbox)."
+  },
+  "settingReportHint": {
+    "message": "A JSON file in Downloads/DramaFetch/reports: for each episode that did not download, its status, message, probable cause, the requests made (hosts, HTTP statuses, sizes) and the list entry TikTok served to your session — never your cookies.",
+    "description": "Hint under the report setting."
   },
   "settingsHint": {
     "message": "File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.",

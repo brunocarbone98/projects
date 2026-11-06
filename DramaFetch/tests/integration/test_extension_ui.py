@@ -69,6 +69,11 @@ assert _MARGIN is not None, "COVER_MARGIN_PX is not in src/app/downloader.js"
 COVER_MARGIN_PX = int(_MARGIN.group(1))
 #: Rows this close to the edge of the watched area are neither asserted in nor out.
 EDGE_PX = 4
+#: The "did not download" report's file name (`Informe guardado: <Series> - did not download
+#: 2026-11-06 1930.json`), ` (1)` and up when a minute saw several.
+_REPORT_FILE_RE = re.compile(
+    r"[^\n:]+ - did not download \d{4}-\d{2}-\d{2} \d{4}(?: \(\d+\))?\.json"
+)
 #: A width at which the page's layout no longer depends on the window (`main` is 980 px at most).
 WIDE_PX = 1100
 #: The English template words no Spanish text may keep outside its data.
@@ -188,7 +193,7 @@ def _discardable(page: Page) -> bool:
 
 def _without_data(text: str) -> str:
     """`text` without its data: the series' names, file names, hosts, the payload's hints."""
-    out = text
+    out = _REPORT_FILE_RE.sub(" ", text)  # first: the report's file name starts with a series' name
     for name in (SERIES_NAME, SECOND_SERIES_NAME, THIRD_SERIES_NAME):
         out = out.replace(name, " ")
     out = re.sub(r" - Episode \d+(?: \(\d+\))?\.mp4", " ", out)  # the default file names
@@ -240,12 +245,15 @@ def _run(ext: ExtensionHarness, links: str, *, watch_pauses: bool = False) -> li
 
 def _engine_texts(ext: ExtensionHarness) -> list[str]:
     """Every engine text the page shows now: the result rows, the rows of the episodes the job did
-    not download (with their heading and the retry button), the report lines, the batch table, the
-    status line, the cooldown banner."""
+    not download (with their heading, the retry and report buttons and the report's line), the
+    report lines, the batch table, the status line, the cooldown banner."""
     texts = _texts(ext, "#result-table tbody tr")
     texts += _texts(ext, "#failed-table tbody tr")
     if ext.page.locator("#failed-block").is_visible():
         texts += _texts(ext, "#failed-heading") + _texts(ext, "#retry-button")
+        texts += _texts(ext, "#report-button")
+        if ext.page.locator("#failed-report").is_visible():
+            texts += _texts(ext, "#failed-report")
     texts += _texts(ext, "#report-lines li")
     texts += _texts(ext, "#batch-table tbody tr")
     texts += _titles(ext, "#batch-table")  # its tooltips too (the badges' titles are status codes)
@@ -480,8 +488,9 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
     """Chrome in Spanish: done, an episode found encrypted, a locked one, the series rest, episodes
     already on disk, the remembered DRM verdict, the complete skip with its hint, the list's
     warnings and hints, a 429 with its stop, cooldown and not-started series, the episodes a job
-    did not download shown apart with their retry button, the history — all on screen in Spanish,
-    the status codes in the badges' titles; the stored texts stay English."""
+    did not download shown apart with their retry button, the report of them saved (its line and
+    button), the report setting, the history — all on screen in Spanish, the status codes in the
+    badges' titles; the stored texts stay English."""
     monkeypatch.setenv("LANGUAGE", "es")  # Chrome on Linux takes its UI language from it
     drm = frozenset({(SERIES_ID, 2)})
     settings = {"restMinS": 1.5, "restMaxS": 2}  # the series rest long enough to be read
@@ -520,6 +529,15 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         assert (
             page.locator(f"#result-table {failed_row}").count() == 0
         )  # the second series' E02 stays
+        # the report of it, saved at the job's end (the setting is on by default), in Spanish
+        report_line = page.locator("#failed-report")
+        ext.wait_for(report_line.is_visible, 10, "no report line")
+        assert report_line.inner_text().startswith("Informe guardado: ")
+        assert report_line.inner_text().endswith(".json")
+        assert page.locator("#report-button").inner_text() == "Guardar el informe"
+        assert page.locator("label[for=setting-report]").text_content() == (
+            "Guardar un informe de los episodios que no se descargaron"
+        )
         entry = ext.history()[0]  # the stored texts: the engine's English
         main, _second = entry["series"]
         rows = {row["number"]: row for row in main["rows"]}

@@ -308,7 +308,8 @@ def test_a_chain_that_leaves_the_covered_hosts_is_refused(tmp_path: Path) -> Non
             assert rows[number]["message"].endswith("(a redirect from 127.0.0.1, not followed)")
         assert rows[4]["message"].startswith("stopped: 3 consecutive failures (last: ")
         assert ext.page.locator("#episode-table img.cover").count() == 0
-        assert ext.saved_files() == []
+        # no video: only the report of the failures (saved by default; test_extension's test_q)
+        assert [path for path in ext.saved_files() if path.suffix != ".json"] == []
     assert server.hop_requests and not server.elsewhere_requests
     for record in _own_requests(server):
         assert record.origin is None and record.with_referer, record.path
