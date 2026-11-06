@@ -11,8 +11,10 @@
 
 import { isLocked } from "../lib/catalog.js";
 import { COOLDOWN_STORAGE_KEY, activeCooldown, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
+import { buildReport, hasFailures, reportFilename, reportJson, reportStem } from "../lib/diagnosis.js";
 import { displayText, statusLabel } from "../lib/display.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
+import { fileBaseName } from "../lib/naming.js";
 import {
   PAGE_DELAY_S,
   PacingState,
@@ -27,7 +29,7 @@ import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib
 import { doneEntries, readState } from "../lib/state.js";
 import { parseSeriesList } from "../lib/urls.js";
 import { closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
-import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine } from "./downloader.js";
+import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
 import { initPageRedirects } from "./redirects.js";
 import { StopRequested, checkCooldown, episodeContext, resolve, restBetweenJobs, runBatch, runSelectionJob } from "./engine.js";
 import { displayLabels, displayLanguage, localize, t } from "./i18n.js";
@@ -75,6 +77,17 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @typedef {object} JobRecord What a finished job leaves in the history.
  * @property {{kind: string, seconds: number, text: string}[]} pauses
  *
+ * @typedef {object} JobOutcome How a job ended, as its history entry records it ({@link reportJobEnd}).
+ * @property {string} startedAt
+ * @property {string} finishedAt
+ * @property {string | null} error
+ * @property {string | null} stopped
+ * @property {number} refreshes
+ * @property {{kind: string, seconds: number, text: string}[]} pauses
+ *
+ * @typedef {import("../lib/diagnosis.js").EpisodeTrace} EpisodeTrace
+ * @typedef {import("../lib/diagnosis.js").SeriesInput} SeriesInput
+ *
  * @typedef {object} FailedRow An episode of a finished job that did not download ({@link failedRows}).
  * @property {string} seriesId
  * @property {string | null} name the series' stored name, when the job learnt it
@@ -99,6 +112,8 @@ const app = {
   loaded: null,
   /** @type {RetryTarget[] | null} the last finished job's episodes that did not download (the progress card's retry button) */
   failed: null,
+  /** @type {{report: Record<string, unknown>, stem: string} | null} the last finished job's "did not download" report (**Save the report**) */
+  lastReport: null,
   /** @type {Job[]} */
   queue: [],
   /** @type {Job | null} */
@@ -485,6 +500,11 @@ function startProgress(job) {
   /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody")).textContent = "";
   $("failed-heading").textContent = "";
   app.failed = null;
+  const report = $("failed-report"); // the last job's report line: this job's report comes at its end
+  report.hidden = true;
+  report.textContent = "";
+  app.lastReport = null;
+  updateButtons(); // `#report-button` disabled while no report exists
   $("progress-activity").textContent = "";
   $("progress-current").textContent = job.label;
   clearPause();
@@ -673,6 +693,120 @@ export function renderFailed(seriesRecords) {
   updateButtons();
 }
 
+// ------------------------------------------------------- the "did not download" report
+
+/**
+ * What the report reads of one series of the job: the run's rows with their episodes and traces,
+ * and the list's size and access counts when the series was listed.
+ * @param {SeriesRun} run
+ * @param {(episode: Episode) => EpisodeTrace | null} traceOf
+ * @returns {SeriesInput}
+ */
+function seriesInput(run, traceOf) {
+  const episodes = run.series?.episodes ?? null;
+  /** @type {{free: number, unlocked: number, locked: number} | null} */
+  let access = null;
+  if (episodes !== null) {
+    access = { free: 0, unlocked: 0, locked: 0 };
+    for (const episode of episodes) access[episode.access] += 1;
+  }
+  return {
+    seriesId: run.ref.seriesId,
+    name: run.report.name || run.series?.name || null,
+    line: run.error !== null ? null : reportLine(run.report),
+    status: batchStatus({ ...run, errorKind: run.errorKind }),
+    error: run.error,
+    stop: run.stop,
+    contacted: run.contacted,
+    listed: episodes?.length ?? null,
+    access,
+    episodes: run.results.map((result) => ({
+      number: result.episode.number,
+      itemId: result.episode.itemId,
+      title: result.episode.title,
+      durationS: result.episode.durationS,
+      access: result.episode.access,
+      paid: result.episode.paid,
+      drm: result.episode.drm,
+      lockHints: result.episode.lockHints,
+      qualityHint: result.episode.qualityHint,
+      raw: result.episode.raw,
+      status: result.status,
+      message: result.message,
+      path: result.path ?? null,
+      trace: traceOf(result.episode),
+    })),
+  };
+}
+
+/**
+ * The job ended: the report of the episodes it did not download (`lib/diagnosis`), from the runs
+ * it produced and the downloader's traces — kept in `app.lastReport` for **Save the report** when
+ * at least one episode failed, and saved at once under `DramaFetch/reports/` when the `report`
+ * setting is on. A listing, a job that produced no run (it threw before, or the cooldown refused
+ * it) or a job in which nothing failed leaves no report. Never throws: the save must not break the
+ * job's end. (Exported for the unit tests, which cannot run a job.)
+ * @param {Pick<Job, "kind" | "label">} job
+ * @param {JobOutcome} outcome
+ * @param {readonly SeriesRun[] | null} runs the `SeriesRun`s the job produced, in order
+ * @param {(episode: Episode) => EpisodeTrace | null} traceOf the downloader's traces
+ * @returns {Promise<void>}
+ */
+export async function reportJobEnd(job, outcome, runs, traceOf) {
+  app.lastReport = null;
+  try {
+    if (job.kind !== "load" && runs !== null) {
+      const series = runs.map((run) => seriesInput(run, traceOf));
+      if (hasFailures(series)) {
+        const generatedAt = new Date();
+        const report = buildReport({
+          generatedAt: generatedAt.toISOString(),
+          extensionVersion: chrome.runtime.getManifest().version,
+          userAgent: navigator.userAgent,
+          language: shown.lang ?? "en",
+          testMode: app.testMode,
+          job: { kind: job.kind, label: job.label, ...outcome },
+          series,
+        });
+        app.lastReport = { report, stem: reportStem(series, generatedAt) };
+      }
+    }
+  } catch (error) {
+    console.warn(error); // `#failed-block` may be hidden when the job had no failed row: keep the reason
+    showReportOutcome(t("reportNotSaved", [oneLine(error)]), true);
+  }
+  updateButtons();
+  if (app.lastReport !== null && app.settings.report) await saveReport();
+}
+
+/**
+ * Save `app.lastReport` as `DramaFetch/reports/<stem>.json` (never overwriting: `uniquify`) and
+ * say so in `#failed-report` — the file's name as Chrome saved it, or why it could not. Never
+ * throws.
+ * @returns {Promise<void>}
+ */
+async function saveReport() {
+  const pending = app.lastReport;
+  if (pending === null) return;
+  try {
+    const saved = await saveFile(reportJson(pending.report), "application/json", reportFilename(pending.stem));
+    showReportOutcome(t("reportSaved", [fileBaseName(saved.filename)]), false);
+  } catch (error) {
+    showReportOutcome(t("reportNotSaved", [oneLine(error)]), true);
+  }
+}
+
+/**
+ * @param {string} text
+ * @param {boolean} failed
+ */
+function showReportOutcome(text, failed) {
+  const line = $("failed-report");
+  line.hidden = false;
+  line.className = failed ? "meta error" : "meta";
+  line.textContent = text;
+}
+
 // ------------------------------------------------------------------------ the job queue
 
 function renderAppStatus() {
@@ -791,6 +925,8 @@ async function runJob(job) {
   let stop = null;
   /** @type {SeriesRun | null} the series that stopped it, when one did */
   let stopping = null;
+  /** @type {SeriesRun[] | null} the runs the job produced (none when it threw before producing them) */
+  let runs = null;
   try {
     const cooldown = await checkCooldown(engine); // the gate, before the job's first request
     if (cooldown !== null) {
@@ -803,7 +939,7 @@ async function runJob(job) {
       stop = await runLoad(job, engine, entry);
     } else if (job.kind === "batch") {
       const lastContactAt = app.lastContactAt; // the previous job's: this one's own come later
-      const runs = await runBatch(engine, job.refs, {
+      runs = await runBatch(engine, job.refs, {
         beforeFirstNetwork: () => restBetweenJobs(engine, { lastContactAt, batchJob: true }),
       });
       entry["series"] = runs.map(runToHistory);
@@ -816,6 +952,7 @@ async function runJob(job) {
         lastContactAt: app.lastContactAt,
       });
       if (run.series !== null) app.loaded = { series: run.series, resolvedAt: now() };
+      runs = [run];
       renderReportLine(run);
       renderBatchTable([run]);
       entry["series"] = [runToHistory(run)];
@@ -847,6 +984,20 @@ async function runJob(job) {
     await appendHistory(entry);
     $("progress-activity").textContent = "";
     renderFailed(Array.isArray(entry["series"]) ? entry["series"] : []); // what did not download, apart, with its retry
+    // and the report of it (nothing goes into the history entry: its 1 MiB cap)
+    await reportJobEnd(
+      job,
+      {
+        startedAt,
+        finishedAt: String(entry["finished_at"]),
+        error: typeof entry["error"] === "string" ? entry["error"] : null,
+        stopped: stop,
+        refreshes: engine.downloader.refreshes,
+        pauses: jobRecord.pauses,
+      },
+      runs,
+      (episode) => engine.downloader.traceOf(episode),
+    );
   }
 }
 
@@ -1012,6 +1163,7 @@ function updateButtons() {
   const retry = button("retry-button");
   retry.disabled = blocked || app.failed === null || spentRetries.has(retry);
   for (const historyButton of historyRetryButtons) historyButton.disabled = blocked || spentRetries.has(historyButton);
+  button("report-button").disabled = app.lastReport === null; // a save, no request: the cooldown does not matter
 }
 
 /**
@@ -1159,6 +1311,7 @@ function fillSettings() {
   input("setting-rest-every").value = String(settings.restEvery);
   input("setting-rest-min").value = String(settings.restMinS);
   input("setting-rest-max").value = String(settings.restMaxS);
+  input("setting-report").checked = settings.report;
   const pacing = effectivePacing();
   $("pacing-line").textContent = `${shownText(describePacing(pacing))}; ${shownText(describeBatchPacing(pacing))}`;
 }
@@ -1177,6 +1330,7 @@ async function onSaveSettings(event) {
     restEvery: Number(input("setting-rest-every").value),
     restMinS: Number(input("setting-rest-min").value),
     restMaxS: Number(input("setting-rest-max").value),
+    report: input("setting-report").checked,
   };
   try {
     await saveSettings(settings);
@@ -1318,6 +1472,7 @@ async function main() {
   button("retry-button").addEventListener("click", () => {
     if (app.failed !== null) startRetry(app.failed, button("retry-button"));
   });
+  button("report-button").addEventListener("click", () => void saveReport()); // again, or with the setting off
   input("select-all").addEventListener("change", () => {
     for (const box of episodeBoxes()) box.checked = input("select-all").checked;
     updateSelection();

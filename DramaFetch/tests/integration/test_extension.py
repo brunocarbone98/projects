@@ -12,6 +12,7 @@ nowhere.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -58,6 +59,13 @@ SECOND_LINK = f"https://www.tiktok.com/shortdrama/episode/{SECOND_SERIES_ID}/2"
 THIRD_LINK = THIRD_SERIES_ID  # a bare series id is a series too
 MAIN_FOLDER = Path("DramaFetch") / f"{SERIES_NAME} [{SERIES_ID}]"
 MAIN_ITEMS = {n: f"769940000000000000{n}" for n in range(1, 6)}
+REPORTS_FOLDER = Path("DramaFetch") / "reports"
+#: `<series name> - did not download YYYY-MM-DD HHMM.json` — and ` (1)` before `.json` when a
+#: second report lands in the same minute (`conflictAction: "uniquify"`).
+_REPORT_NAME_RE = re.compile(
+    rf"^{re.escape(SERIES_NAME)} - did not download \d{{4}}-\d{{2}}-\d{{2}} \d{{4}}"
+    r"(?: \(\d+\))?\.json$"
+)
 THIRD = dict(enumerate(THIRD_ITEMS, start=1))
 MEDIA_RATE_LIMIT = (
     "rate limited (HTTP 429) by the video server: wait 30-60 minutes before trying again"
@@ -97,6 +105,17 @@ def _downloader_covers(server: FakeTikTok, item_id: str | None = None) -> list[A
 
 def _episode_file(ext: ExtensionHarness, number: int) -> Path:
     return ext.downloads / MAIN_FOLDER / f"{SERIES_NAME} - Episode {number:02d}.mp4"
+
+
+def _report_files(ext: ExtensionHarness) -> list[Path]:
+    """The "did not download" reports saved so far (`DramaFetch/reports/*.json`), relative to the
+    download directory, sorted: a run with a failed episode saves one by default."""
+    return [path for path in ext.saved_files() if path.parent == REPORTS_FOLDER]
+
+
+def _videos(ext: ExtensionHarness) -> list[Path]:
+    """Every saved file but the reports: the episodes (and any cover sidecar)."""
+    return [path for path in ext.saved_files() if path.parent != REPORTS_FOLDER]
 
 
 def _ffmpeg() -> str | None:
@@ -427,7 +446,7 @@ def test_g_truncated_transfer_fails_without_a_second_mirror(tmp_path: Path) -> N
         assert rows[5]["status"] == "skipped-locked"
         assert [len(_media_of(server, MAIN_ITEMS[n])) for n in (1, 2, 3, 4)] == [1, 1, 1, 0]
         assert not _downloader_covers(server)
-        assert ext.saved_files() == []
+        assert _videos(ext) == []  # only the report of the failures (test_q)
         assert entry["stopped"] == "3 consecutive failures"
 
 
@@ -537,7 +556,7 @@ def test_j_a_redirect_is_never_followed(tmp_path: Path) -> None:
         assert rows[1]["message"].endswith("(a redirect from 127.0.0.1, not followed)")
         assert rows[4]["message"].startswith("stopped: 3 consecutive failures (last: ")
         assert ext.page.locator("#episode-table img.cover").count() == 0
-        assert ext.saved_files() == []
+        assert _videos(ext) == []  # only the report of the failures (test_q)
         assert len(server.cover_requests) == 5  # each thumbnail asked for once; no cover GET
     assert server.media_requests and not server.elsewhere_requests
 
@@ -748,7 +767,7 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
         assert rows[1]["message"].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
         assert rows[2]["message"] == DRM_MESSAGE
         assert rows[4]["message"].startswith("stopped: 3 consecutive failures (last: ")
-        assert ext.saved_files() == []
+        assert _videos(ext) == []  # the report of the failures is saved by default: test_q
         assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [1, 1, 1, 0, 0]
 
         page = ext.page
@@ -795,7 +814,7 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
         assert entry["stopped"] == "3 consecutive failures"
         assert len(server.series_page_requests) == pages + 1  # listed again, right before
         assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [2, 1, 2, 1, 0]
-        assert ext.saved_files() == []
+        assert _videos(ext) == []
         assert page.locator("#failed-block").is_visible()
         assert _table_rows(page, "#failed-table") == [
             ("1", "failed"),
@@ -810,3 +829,123 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
         assert history.first.locator(".retry-line span").text_content() == (
             "Did not download: E01, E03, E04"
         )
+
+
+def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Path) -> None:
+    """The same failing run as test_p (**Download all**: a batch, so the locked episode has a row
+    too), with a session cookie set: at its end exactly one report is saved as
+    `DramaFetch/reports/<Series> - did not download <date time>.json` — a JSON document with the
+    job, the series, every episode that did not download (the failed ones and the locked one)
+    with its probable cause and the attempts the downloader made (hosts, HTTP statuses, sizes;
+    never a query string), the raw list item TikTok served, no reference row (nothing downloaded)
+    — and never the cookie's value nor its name; the page says so, and the **Save the report**
+    button is enabled. With the setting turned off the retry (a selection job) saves no report;
+    the button then saves the retry's one."""
+    drm = frozenset({(SERIES_ID, 2)})
+    with (
+        FakeTikTok(truncate_media=True, drm_media=drm) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        ext.add_session_cookie(SESSION_VALUE)  # so that the privacy check means something
+        entry = ext.download_all(MAIN_LINK)
+        (series,) = entry["series"]
+        assert _statuses(series) == [
+            "failed",
+            "failed-unavailable",
+            "failed",
+            "failed",
+            "skipped-locked",
+        ]
+        assert server.item_list_requests[-1].logged_in  # the session reached the fake TikTok
+        page = ext.page
+        line = page.locator("#failed-report")
+        ext.wait_for(lambda: len(_report_files(ext)) == 1, 20, "the report was not saved")
+        (report_path,) = _report_files(ext)
+        assert _REPORT_NAME_RE.match(report_path.name), report_path.name
+        assert "(" not in report_path.name  # the first report: no uniquify suffix
+        assert _videos(ext) == []
+        text = (ext.downloads / report_path).read_text(encoding="utf-8")
+        assert SESSION_VALUE not in text and "sessionid" not in text
+        report = json.loads(text)
+        assert report["dramafetch_report"] == 1
+        assert report["test_mode"] is True
+        assert report["job"]["kind"] == "batch" and report["job"]["label"]
+        assert report["job"]["stopped"] == "3 consecutive failures"
+        (reported,) = report["series"]
+        assert reported["series_id"] == SERIES_ID and reported["name"] == SERIES_NAME
+        assert reported["listed"] == 5
+        assert reported["access_counts"] == {"free": 4, "unlocked": 0, "locked": 1}
+        assert reported["reference"] is None  # nothing downloaded to compare with
+        rows = {row["number"]: row for row in reported["not_downloaded"]}
+        assert [row["number"] for row in reported["not_downloaded"]] == [1, 2, 3, 4, 5]
+        assert [rows[n]["status"] for n in range(1, 6)] == _statuses(series)
+        assert len(report["summary"]) == 5
+        assert report["summary"][0].startswith(f"E01 failed — {INCOMPLETE_PREFIX}truncated body (")
+        assert " — probable cause: the transfer was cut short (" in report["summary"][0]
+
+        # E01: one truncated transfer — Chromium's network stack checks the Content-Length itself
+        # and drops the transfer (`ERR_CONTENT_LENGTH_MISMATCH`) before the body reaches the page,
+        # so no byte count: the announced size, the host, never the signed query
+        (attempt,) = rows[1]["attempts"]
+        assert rows[1]["attempted"] is True
+        assert attempt["requested"] is True and attempt["http_status"] == 200
+        assert attempt["content_length"] == 128 * 1024 and attempt["received_bytes"] is None
+        assert attempt["outcome"] == "truncated body (the transfer was cut short)"
+        assert attempt["content_type"] == "video/mp4" and attempt["redirect_hops"] == 0
+        assert "?" not in attempt["url"] and attempt["host"] == "127.0.0.1"
+        assert attempt["url"].startswith(f"{server.base_url}/cdn/{MAIN_ITEMS[1]}/")
+        assert rows[1]["message"].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
+        assert rows[1]["probable_cause"].startswith("the transfer was cut short (")
+        assert rows[1]["raw"]["id"] == MAIN_ITEMS[1]
+        # E02: the encrypted body, refused at once
+        (attempt,) = rows[2]["attempts"]
+        assert attempt["outcome"] == "encrypted (DRM)" and attempt["http_status"] == 200
+        assert rows[2]["message"] == DRM_MESSAGE
+        assert rows[2]["probable_cause"].startswith("encrypted media (DRM)")
+        # E04: the stop came first — nothing asked
+        assert rows[4]["status"] == "failed"
+        assert rows[4]["message"].startswith("stopped: ")
+        assert rows[4]["attempts"] == [] and rows[4]["attempted"] is False
+        assert rows[4]["probable_cause"].startswith("not attempted")
+        # E05: locked in the list, never attempted, its list item as served
+        assert rows[5]["status"] == "skipped-locked" and rows[5]["attempted"] is False
+        assert rows[5]["attempts"] == [] and rows[5]["access"] == "locked"
+        assert rows[5]["lock_hints"] and rows[5]["raw"]["id"] == MAIN_ITEMS[5]
+        assert rows[5]["probable_cause"].startswith("listed as locked for this session: ")
+        # the page: the file's name, the button
+        assert line.is_visible()
+        assert line.text_content() == f"Report saved: {report_path.name}"
+        report_button = page.locator("#report-button")
+        assert report_button.is_visible() and report_button.is_enabled()
+        assert report_button.text_content() == "Save the report"
+
+        # the setting off: the retry saves no report, the button saves the retry's
+        page.click("#settings-card > summary")
+        assert page.locator("#setting-report").is_checked()  # on by default
+        page.uncheck("#setting-report")
+        page.click("#settings-save")
+        ext.wait_for(
+            lambda: page.locator("#settings-status").text_content() == "Settings saved.",
+            10,
+            "the settings were not saved",
+        )
+        assert ext.storage("settings")["settings"]["report"] is False
+        retry = ext._run("#retry-button", 90)
+        assert retry["kind"] == "selection" and retry["stopped"] == "3 consecutive failures"
+        assert len(_report_files(ext)) == 1  # no new report
+        assert line.is_hidden()  # this job's line: nothing was saved
+        assert report_button.is_enabled()
+        report_button.click()
+        ext.wait_for(lambda: len(_report_files(ext)) == 2, 20, "the report was not saved")
+        second = [path for path in _report_files(ext) if path != report_path]
+        (second_path,) = second
+        assert _REPORT_NAME_RE.match(second_path.name), second_path.name
+        assert line.is_visible()
+        assert line.text_content() == f"Report saved: {second_path.name}"
+        retried = json.loads((ext.downloads / second_path).read_text(encoding="utf-8"))
+        assert [row["number"] for row in retried["series"][0]["not_downloaded"]] == [1, 2, 3, 4]
+        assert retried["series"][0]["not_downloaded"][1]["status"] == "skipped-locked"
+        assert retried["job"]["kind"] == "selection"
+        assert retried["job"]["label"] == f"Retry 4 of {SERIES_NAME}"
+        assert SESSION_VALUE not in json.dumps(retried) and "sessionid" not in json.dumps(retried)
+        assert ext.saved_files() == sorted([report_path, second_path])  # still no video

@@ -2,9 +2,10 @@
 // Unit tests of the extension's own network behaviour, over fakes (no browser, no network, no real
 // sleep): the request-header rule (Referer set, Origin removed) and its domains, the redirects of
 // the extension's own requests (src/app/redirects.js: learnt from onBeforeRedirect, followed only
-// the safe way), and the in-run re-discovery's parity with `downloader_browser._refresh` /
-// `_cache_spent`. The integration scenarios (tests/integration/test_extension_network.py) drive the
-// same code in a real Chromium against the fake TikTok server.
+// the safe way), the in-run re-discovery's parity with `downloader_browser._refresh` /
+// `_cache_spent`, and what the downloader records of each re-discovery for the report. The
+// integration scenarios (tests/integration/test_extension_network.py) drive the same code in a real
+// Chromium against the fake TikTok server.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -738,6 +739,61 @@ test("a re-discovery that failed is not tried again for that series in the run",
   assert.equal(calls, 1);
   assert.equal(subject.refreshes, 1);
   assert.deepEqual(log, ["https://v1.tiktok.com/3.mp4"]);
+});
+
+test("the traces record every re-discovery as decided: adopted, locked, not listed, failed, refused — the cached list's answers too", async () => {
+  const clock = 2_000_000_000;
+  const expired = (/** @type {number} */ n) => `https://v16.tiktok.com/old/${n}.mp4?expire=${clock - 100}`;
+  const lister = relister([
+    new Map([
+      [1, [`https://v16.tiktok.com/a/1.mp4?expire=${clock + 600}`, `https://v16.tiktok.com/b/1.mp4?expire=${clock + 600}`]],
+      [2, []], // listed without a play URL: locked
+      // 3: not in the fresh list at all
+    ]),
+  ]);
+  const fetchFn = /** @type {typeof fetch} */ (async () => videoResponse());
+  const { subject } = downloader({ fetch: fetchFn, redirects: null, rediscover: lister.rediscover, now: () => clock, thumbnail: "none" });
+  /** @param {import("../src/lib/catalog.js").Episode} ep */
+  const refreshes = (ep) => /** @type {import("../src/lib/diagnosis.js").EpisodeTrace} */ (subject.traceOf(ep)).refreshes;
+  /** @param {import("../src/lib/catalog.js").Episode} ep */
+  const attempts = (ep) => /** @type {import("../src/lib/diagnosis.js").EpisodeTrace} */ (subject.traceOf(ep)).attempts;
+  // the expired URL is never requested, so the trace holds no attempt for it; the fresh list is adopted
+  const first = episode(1, [expired(1)]);
+  assert.equal((await subject.download(first, CONTEXT)).status, "done");
+  assert.deepEqual(refreshes(first), [{ outcome: "adopted", fresh_list: true, access: "free", hints: [], listed_url_count: 2 }]);
+  assert.deepEqual(
+    attempts(first).map((attempt) => [attempt.url, attempt.url_expiry, attempt.outcome]),
+    [["https://v16.tiktok.com/a/1.mp4", clock + 600, "saved"]],
+  );
+  // the cached list answers the next two: a locked entry (its hints, its URL count), an episode it lacks
+  const locked = episode(2, [expired(2)]);
+  assert.equal((await subject.download(locked, CONTEXT)).status, "failed-unavailable");
+  assert.deepEqual(refreshes(locked), [{ outcome: "locked", fresh_list: false, access: "locked", hints: ["no play address"], listed_url_count: 0 }]);
+  assert.deepEqual(attempts(locked), []);
+  const missing = episode(3, [expired(3)]);
+  assert.equal((await subject.download(missing, CONTEXT)).status, "failed-unavailable");
+  assert.deepEqual(refreshes(missing), [{ outcome: "not listed", fresh_list: false, access: null, hints: null, listed_url_count: null }]);
+  assert.equal(lister.calls(), 1);
+  // a re-discovery that throws is `failed`; the next one for the series is `refused` without a request
+  const failing = downloader({
+    fetch: fetchFn,
+    redirects: null,
+    rediscover: async () => {
+      throw new DiscoveryError("no episode list within 45 s");
+    },
+    now: () => clock,
+    thumbnail: "none",
+  }).subject;
+  const broken = episode(4, [expired(4)]);
+  assert.equal((await failing.download(broken, CONTEXT)).status, "failed");
+  assert.deepEqual(/** @type {import("../src/lib/diagnosis.js").EpisodeTrace} */ (failing.traceOf(broken)).refreshes, [
+    { outcome: "failed", fresh_list: true, access: null, hints: null, listed_url_count: null },
+  ]);
+  const after = episode(5, [expired(5)]);
+  assert.equal((await failing.download(after, CONTEXT)).message, `${UNAVAILABLE_MESSAGE} (no play url, even in a fresh episode list)`);
+  assert.deepEqual(/** @type {import("../src/lib/diagnosis.js").EpisodeTrace} */ (failing.traceOf(after)).refreshes, [
+    { outcome: "refused", fresh_list: false, access: null, hints: null, listed_url_count: null },
+  ]);
 });
 
 test("URLs on hosts the manifest does not cover count in the budget, never requested: Python's fresh-list condition", async () => {

@@ -8,9 +8,10 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { makeEpisode } from "../src/lib/catalog.js";
+import { CUT_SHORT_CAUSE_PREFIX, DRM_CAUSE, LOCKED_CAUSE_PREFIX, NOT_ATTEMPTED_CAUSE } from "../src/lib/diagnosis.js";
 import { DRM_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
 import { PacingState, pacingOptions } from "../src/lib/pacing.js";
-import { completeSkip } from "../src/lib/report.js";
+import { completeSkip, seriesReport } from "../src/lib/report.js";
 import { donePath, markComplete, missingFiles, newState, record } from "../src/lib/state.js";
 import {
   ChallengeError,
@@ -25,7 +26,16 @@ import {
   queryParam,
   withQueryParams,
 } from "../src/app/discovery.js";
-import { CoverLoader, DownloadsView, Downloader, contentLength, sanitizeError } from "../src/app/downloader.js";
+import {
+  ATTEMPT_ENCRYPTED,
+  ATTEMPT_NOT_REQUESTED,
+  ATTEMPT_SAVED,
+  CoverLoader,
+  DownloadsView,
+  Downloader,
+  contentLength,
+  sanitizeError,
+} from "../src/app/downloader.js";
 import { downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
 
@@ -526,6 +536,95 @@ test("download: a video far shorter than listed is never saved", async () => {
   assert.deepEqual(saved, []);
 });
 
+test("the traces record every candidate as decided: query stripped, sizes, status, outcome; never requested when the host is not covered", async () => {
+  const signed = (/** @type {string} */ host, /** @type {string} */ path) => `https://${host}/${path}?expire=1900000000&X-Bogus=abc&_signature=def&msToken=ghi`;
+  const urls = [signed("v1.tiktok.com", "a.mp4"), signed("v2.tiktok.com", "b.mp4")];
+  /** @type {string[]} */
+  const log = [];
+  // a 404 then a good URL: two attempts, `HTTP 404` and `saved`
+  const subject = downloader({
+    fetch: fakeFetch(
+      {
+        "https://v1.tiktok.com/": () => new Response("gone", { status: 404, headers: { "content-type": "text/plain", "content-length": "4" } }),
+        "https://v2.tiktok.com/": () => new Response(video(), { headers: { "content-type": "video/mp4", "content-length": String(128 * 1024) } }),
+        "https://p16-sign-sg.tiktokcdn.com/": () => new Response(COVER, { headers: { "content-type": "image/jpeg" } }),
+      },
+      log,
+    ),
+  });
+  const first = episode(1, { urls });
+  assert.equal(subject.traceOf(first), null); // nothing recorded before the download
+  const result = await subject.download(first, CONTEXT);
+  assert.equal(result.status, "done");
+  const trace = subject.traceOf(first);
+  assert.ok(trace !== null);
+  assert.deepEqual(trace.refreshes, []);
+  assert.deepEqual(trace.attempts, [
+    {
+      url: "https://v1.tiktok.com/a.mp4",
+      host: "v1.tiktok.com",
+      url_expiry: 1900000000,
+      requested: true,
+      redirect_hops: 0,
+      http_status: 404,
+      content_type: "text/plain",
+      content_length: 4,
+      received_bytes: null,
+      outcome: "HTTP 404",
+    },
+    {
+      url: "https://v2.tiktok.com/b.mp4",
+      host: "v2.tiktok.com",
+      url_expiry: 1900000000,
+      requested: true,
+      redirect_hops: 0,
+      http_status: 200,
+      content_type: "video/mp4",
+      content_length: 128 * 1024,
+      received_bytes: 128 * 1024,
+      outcome: ATTEMPT_SAVED,
+    },
+  ]);
+  // never the query: TikTok signs it
+  assert.ok(trace.attempts.every((attempt) => !attempt.url.includes("?") && !JSON.stringify(attempt).includes("X-Bogus")));
+  assert.deepEqual(log, [...urls, "https://p16-sign-sg.tiktokcdn.com/c/1.jpeg"]); // the same requests as ever
+  // a host the manifest does not cover: counted, never requested; a truncated body: the bytes that came
+  log.length = 0;
+  const short = () => new Response(video().subarray(0, 100_000), { headers: { "content-type": "video/mp4", "content-length": String(128 * 1024) } });
+  const cut = downloader({ fetch: fakeFetch({ "https://v": short }, log) });
+  const second = episode(2, { urls: ["https://evil.example.com/a.mp4?sig=x", ...urls] });
+  const truncated = await cut.download(second, CONTEXT);
+  assert.equal(truncated.status, "failed");
+  const attempts = /** @type {import("../src/lib/diagnosis.js").EpisodeTrace} */ (cut.traceOf(second)).attempts;
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(
+    attempts.map((attempt) => [attempt.url, attempt.requested, attempt.http_status, attempt.content_length, attempt.received_bytes, attempt.outcome]),
+    [
+      ["https://evil.example.com/a.mp4", false, null, null, null, ATTEMPT_NOT_REQUESTED],
+      ["https://v1.tiktok.com/a.mp4", true, 200, 128 * 1024, 100_000, `truncated body (100000 of ${128 * 1024} bytes)`],
+    ],
+  );
+  assert.ok(/** @type {number} */ (attempts[1]?.received_bytes) < /** @type {number} */ (attempts[1]?.content_length));
+  assert.deepEqual(log, [urls[0]]);
+  // an encrypted body
+  const encrypted = video();
+  const text = new TextDecoder("latin1").decode(encrypted);
+  encrypted.set([0x65, 0x6e, 0x63, 0x76], text.indexOf("avc1", text.indexOf("stsd")));
+  const drm = downloader({ fetch: fakeFetch({ "https://v": () => new Response(encrypted.slice(), { headers: { "content-type": "video/mp4" } }) }, []) });
+  const third = episode(3, { urls });
+  assert.equal((await drm.download(third, CONTEXT)).message, DRM_MESSAGE);
+  assert.deepEqual(
+    /** @type {import("../src/lib/diagnosis.js").EpisodeTrace} */ (drm.traceOf(third)).attempts.map((attempt) => [attempt.received_bytes, attempt.outcome]),
+    [[128 * 1024, ATTEMPT_ENCRYPTED]],
+  );
+  // a download starts its episode's trace afresh; a locked skip leaves an empty one
+  assert.equal((await drm.download(third, CONTEXT)).status, "failed-unavailable");
+  assert.equal(/** @type {import("../src/lib/diagnosis.js").EpisodeTrace} */ (drm.traceOf(third)).attempts.length, 1);
+  const locked = episode(4, { locked: true });
+  assert.equal((await drm.download(locked, CONTEXT)).status, "skipped-locked");
+  assert.deepEqual(drm.traceOf(locked), { attempts: [], refreshes: [] });
+});
+
 test("Content-Length counts only for identity-encoded bodies; messages carry no URL query or token", () => {
   const headers = (/** @type {Record<string, string>} */ values) => new Headers(values);
   assert.equal(contentLength(headers({ "content-length": "12" })), 12);
@@ -994,8 +1093,9 @@ let pages = 0;
  * to its end; `module` is that instance's exports. `hold()` then makes the next job's first
  * `chrome.tabs.getCurrent` never answer, so that the job stays running and makes no request to
  * anything; `message()` is a runtime message from this extension's own popup; `local` is the
- * storage and `storageChanged(key)` tells the page a key of it changed; `restore()` removes the
- * fakes again.
+ * storage and `storageChanged(key)` tells the page a key of it changed; `downloads` is every file
+ * the page saved through `chrome.downloads` (a fake that completes each at once); `restore()`
+ * removes the fakes again.
  * @param {{storage?: Record<string, unknown>}} [options]
  */
 async function fakePage(options = {}) {
@@ -1020,8 +1120,26 @@ async function fakePage(options = {}) {
   const changeListeners = [];
   /** @type {((message: unknown, sender: {id: string}) => void)[]} */
   const messageListeners = [];
+  /** @type {{filename: string, conflictAction: string | undefined, text: string}[]} every file the page saved through chrome.downloads, its bytes as text */
+  const downloads = [];
   let holding = false;
   const chrome = {
+    downloads: {
+      // the blob is read NOW: the page revokes its URL once the download has completed
+      /** @param {{url: string, filename: string, conflictAction?: string}} options */
+      download: async (options) => {
+        const text = await (await fetch(options.url)).text();
+        downloads.push({ filename: options.filename, conflictAction: options.conflictAction, text });
+        return downloads.length;
+      },
+      /** @param {{id?: number}} query */
+      search: async (query) => {
+        const saved = query.id === undefined ? undefined : downloads[query.id - 1];
+        if (saved === undefined) return [];
+        return [{ id: query.id, filename: `/home/me/Downloads/${saved.filename}`, state: "complete", exists: true }];
+      },
+      onChanged: { addListener: () => undefined, removeListener: () => undefined },
+    },
     runtime: {
       id: "dramafetch-test-id",
       getManifest: () => manifest,
@@ -1083,6 +1201,7 @@ async function fakePage(options = {}) {
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: {
+      userAgent: "FakeChrome/1",
       locks: {
         /** @param {string} name @param {object} _options @param {(lock: {name: string} | null) => unknown} callback */
         request: (name, _options, callback) => Promise.resolve(callback({ name })),
@@ -1126,6 +1245,7 @@ async function fakePage(options = {}) {
     turn,
     restore,
     local,
+    downloads,
     /**
      * `chrome.storage.local` changed `key` (the page reads it again): the cooldown ending, say.
      * @param {string} key
@@ -1460,6 +1580,205 @@ test("the page: at a job's end the failure rows leave the result table for the f
     assert.equal(element("failed-block").hidden, true);
     assert.equal(element("retry-button").disabled, true);
     assert.deepEqual(failed.children, []);
+  } finally {
+    page.restore();
+  }
+});
+
+/**
+ * A finished series run as the engine hands it to the page, over `results` (its series listed:
+ * every result's episode, plus `extra` episodes the run never reached).
+ * @param {string} seriesId
+ * @param {string | null} name
+ * @param {import("../src/lib/report.js").DownloadResult[]} results
+ * @returns {import("../src/app/engine.js").SeriesRun}
+ */
+function finishedRun(seriesId, name, results) {
+  /** @type {import("../src/lib/catalog.js").Series} */
+  const listed = { ...series(results.map((result) => result.episode), name ?? "", seriesId), name };
+  return {
+    ref: { kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId },
+    series: listed,
+    results,
+    report: seriesReport(listed, results, { name }),
+    error: null,
+    stop: false,
+    exitCode: 0,
+    errorKind: null,
+    contacted: true,
+  };
+}
+
+/** @type {import("../src/app/app.js").JobOutcome} */
+const OUTCOME = {
+  startedAt: "2026-11-06T19:00:00.000Z",
+  finishedAt: "2026-11-06T19:30:00.000Z",
+  error: null,
+  stopped: null,
+  refreshes: 0,
+  pauses: [{ kind: "pace", seconds: 5, text: "pause 5 s" }],
+};
+
+/** The traces the fake downloader hands the report: the truncated one's for E02, none for the rest. */
+const TRACES = {
+  /** @param {import("../src/lib/catalog.js").Episode} ep */
+  of: (ep) =>
+    ep.number === 2
+      ? {
+          attempts: [
+            {
+              url: "https://v16-webapp-prime.tiktok.com/v/2.mp4",
+              host: "v16-webapp-prime.tiktok.com",
+              url_expiry: 99999999999,
+              requested: true,
+              redirect_hops: 0,
+              http_status: 200,
+              content_type: "video/mp4",
+              content_length: 131072,
+              received_bytes: 100000,
+              outcome: "truncated body (100000 of 131072 bytes)",
+            },
+          ],
+          refreshes: [],
+        }
+      : { attempts: [], refreshes: [] },
+};
+
+/** The rows of the report tests' run: a done episode, a truncated one, a locked one, one the stop left. */
+function reportRows() {
+  const truncated = "download looks incomplete or wrong: truncated body (100000 of 131072 bytes) from v16-webapp-prime.tiktok.com";
+  const lockedEpisode = episode(3, { locked: true });
+  lockedEpisode.lockHints = ["isLocked=True", "no play address"];
+  return [
+    { episode: episode(1), status: /** @type {const} */ ("done"), path: "/home/me/Downloads/DramaFetch/E1.mp4", message: "saved E1.mp4 (0.1 MiB)", downloadId: 1 },
+    { episode: episode(2), status: /** @type {const} */ ("failed"), path: null, message: truncated },
+    { episode: lockedEpisode, status: /** @type {const} */ ("skipped-locked"), path: null, message: "looks locked: isLocked=True; no play address" },
+    { episode: episode(4), status: /** @type {const} */ ("failed"), path: null, message: "stopped: three failures in a row" },
+  ];
+}
+
+test("the page: at a job's end with failures the report is saved once under DramaFetch/reports, named and parseable; nothing for a listing or a clean job", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module, downloads } = page;
+    assert.equal(element("setting-report").checked, true); // the setting, on by default
+    assert.equal(element("report-button").disabled, true);
+    const before = new Date();
+    await module.reportJobEnd({ kind: "selection", label: "4 episodes of Test Series" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", reportRows())], TRACES.of);
+    assert.equal(downloads.length, 1);
+    const [saved] = downloads;
+    assert.ok(saved !== undefined);
+    assert.match(saved.filename, /^DramaFetch\/reports\/Test Series - did not download \d{4}-\d{2}-\d{2} \d{4}\.json$/);
+    const stamp = saved.filename.slice("DramaFetch/reports/Test Series - did not download ".length, -".json".length);
+    const two = (/** @type {number} */ n) => String(n).padStart(2, "0");
+    assert.equal(stamp, `${before.getFullYear()}-${two(before.getMonth() + 1)}-${two(before.getDate())} ${two(before.getHours())}${two(before.getMinutes())}`);
+    assert.equal(saved.conflictAction, "uniquify");
+    assert.equal(element("failed-report").hidden, false);
+    assert.equal(element("failed-report").textContent, `Report saved: ${saved.filename.slice("DramaFetch/reports/".length)}`);
+    assert.equal(element("failed-report").className, "meta");
+    assert.equal(element("report-button").disabled, false);
+    const report = JSON.parse(saved.text);
+    assert.equal(report.dramafetch_report, 1);
+    assert.equal(report.extension_version, JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8")).version);
+    assert.deepEqual(report.browser, { user_agent: "FakeChrome/1", language: "en" });
+    assert.equal(report.test_mode, false);
+    assert.deepEqual(report.job, {
+      kind: "selection",
+      label: "4 episodes of Test Series",
+      started_at: OUTCOME.startedAt,
+      finished_at: OUTCOME.finishedAt,
+      error: null,
+      stopped: null,
+      refreshes: 0,
+      pauses: OUTCOME.pauses,
+    });
+    assert.equal(report.series.length, 1);
+    const [run] = report.series;
+    assert.equal(run.series_id, SERIES_ID);
+    assert.equal(run.name, "Test Series");
+    assert.equal(run.listed, 4);
+    assert.deepEqual(run.access_counts, { free: 3, unlocked: 0, locked: 1 });
+    assert.equal(run.status, "incomplete");
+    assert.equal(typeof run.line, "string");
+    assert.deepEqual(
+      run.not_downloaded.map((/** @type {Record<string, unknown>} */ row) => [row["number"], row["status"], row["attempted"]]),
+      [
+        [2, "failed", true],
+        [3, "skipped-locked", false],
+        [4, "failed", false],
+      ],
+    );
+    const [truncated, locked, stopped] = run.not_downloaded;
+    assert.ok(String(truncated.probable_cause).startsWith(CUT_SHORT_CAUSE_PREFIX));
+    assert.equal(truncated.attempts.length, 1);
+    assert.equal(truncated.attempts[0].received_bytes, 100000);
+    assert.ok(String(locked.probable_cause).startsWith(`${LOCKED_CAUSE_PREFIX}isLocked=True; no play address`));
+    assert.deepEqual(locked.raw, { id: "item3", video: { playAddr: "" } }); // the list entry as served
+    assert.ok(String(stopped.probable_cause).startsWith(NOT_ATTEMPTED_CAUSE));
+    assert.equal(run.reference.number, 1);
+    assert.equal(run.reference.status, "done");
+    assert.equal(report.summary.length, 3);
+    // the signed links live in the raw items only: no attempt keeps its query, and outside `raw` no signed link remains
+    const attempts = run.not_downloaded.flatMap((/** @type {{attempts: Record<string, unknown>[]}} */ row) => row.attempts);
+    assert.equal(attempts.length, 1);
+    assert.ok(attempts.every((/** @type {Record<string, unknown>} */ attempt) => !String(attempt.url).includes("?") && !JSON.stringify(attempt).includes("expire=")));
+    assert.ok(!JSON.stringify(report, (key, value) => (key === "raw" ? undefined : value)).includes("?expire="));
+    assert.ok(!saved.text.includes("sessionid"));
+    // the manual button saves it again (a second file: uniquify is Chrome's)
+    element("report-button").fire("click");
+    for (let turns = 0; turns < 20 && downloads.length < 2; turns += 1) await page.turn();
+    assert.equal(downloads.length, 2);
+    assert.equal(downloads[1]?.filename, saved.filename);
+    assert.deepEqual(JSON.parse(/** @type {string} */ (downloads[1]?.text)), report);
+    // a listing never has a report, nor a job that produced no run; the button goes back to disabled
+    await module.reportJobEnd({ kind: "load", label: "List series" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", reportRows())], TRACES.of);
+    await module.reportJobEnd({ kind: "batch", label: "2 series" }, OUTCOME, null, TRACES.of);
+    assert.equal(downloads.length, 2);
+    assert.equal(element("report-button").disabled, true);
+    // a job in which nothing failed: no report (a locked skip alone is no failure)
+    const clean = reportRows().filter((row) => row.status !== "failed");
+    await module.reportJobEnd({ kind: "selection", label: "clean" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", clean)], TRACES.of);
+    assert.equal(downloads.length, 2);
+    assert.equal(element("report-button").disabled, true);
+    // several series: the file is named after their count
+    await module.reportJobEnd(
+      { kind: "batch", label: "2 series" },
+      OUTCOME,
+      [finishedRun(SERIES_ID, "Test Series", reportRows()), finishedRun(OTHER_ID, null, [{ episode: episode(1, { seriesId: OTHER_ID }), status: "done", path: "/x", message: "saved" }])],
+      TRACES.of,
+    );
+    assert.equal(downloads.length, 3);
+    assert.match(/** @type {string} */ (downloads[2]?.filename), /^DramaFetch\/reports\/2 series - did not download /);
+    assert.equal(JSON.parse(/** @type {string} */ (downloads[2]?.text)).summary[0].startsWith("Test Series: E02 failed — "), true);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: with the report setting off nothing is saved at a job's end, and Save the report saves it once on demand", async () => {
+  const page = await fakePage({ storage: { settings: { report: false } } });
+  try {
+    const { element, module, downloads } = page;
+    assert.equal(element("setting-report").checked, false);
+    await module.reportJobEnd({ kind: "selection", label: "4 episodes" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", reportRows())], TRACES.of);
+    assert.deepEqual(downloads, []);
+    assert.equal(element("failed-report").textContent, ""); // (hidden in the page's HTML: the fake element has no default)
+    assert.equal(element("report-button").disabled, false);
+    element("report-button").fire("click");
+    for (let turns = 0; turns < 20 && downloads.length < 1; turns += 1) await page.turn();
+    assert.equal(downloads.length, 1);
+    assert.match(/** @type {string} */ (downloads[0]?.filename), /^DramaFetch\/reports\/Test Series - did not download /);
+    assert.equal(element("failed-report").hidden, false);
+    assert.ok(String(element("failed-report").textContent).startsWith("Report saved: Test Series - did not download "));
+    // a save Chrome refuses only shows why, as an error line
+    const api = /** @type {{download: () => Promise<number>}} */ (/** @type {unknown} */ (globalThis.chrome.downloads));
+    api.download = async () => {
+      throw new Error("FILE_FAILED");
+    };
+    element("report-button").fire("click");
+    await page.turn();
+    assert.equal(element("failed-report").textContent, "The report could not be saved: FILE_FAILED");
+    assert.equal(element("failed-report").className, "meta error");
   } finally {
     page.restore();
   }

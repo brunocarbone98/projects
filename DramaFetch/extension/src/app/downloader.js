@@ -28,6 +28,12 @@
  * never retried), the cover embedded into the MP4 in memory (`lib/mp4.embedCover`) and/or kept as a
  * file, and the save through `chrome.downloads` under `DramaFetch/<series folder>/<stem>.mp4`.
  * Messages carry host names only — never a signed URL, never a cookie.
+ *
+ * Every decision above is also RECORDED, for the "did not download" report (`lib/diagnosis.js`):
+ * one {@link AttemptRecord} per candidate URL (query stripped; host, status, sizes, outcome) and one
+ * {@link RefreshRecord} per in-run re-discovery, in the episode's {@link EpisodeTrace}
+ * ({@link Downloader.traceOf}). Recording only: the same requests, the same order, the same
+ * decisions and messages as without it.
  */
 
 import { accessOf, playUrlCandidates, urlExpiry } from "../lib/catalog.js";
@@ -96,7 +102,34 @@ export const TIKTOK_DOMAINS = Object.freeze([
 ]);
 const MAX_MESSAGE_LEN = 300;
 
+// The outcomes of an AttemptRecord (`lib/diagnosis.js` reads them; the report shows them as they are).
+/** The URL's host is outside the manifest's permissions: counted in the budget, never requested. */
+export const ATTEMPT_NOT_REQUESTED = "not requested: host not covered";
+/** A redirect the extension may not follow; `redirect refused: <reason>`. */
+export const ATTEMPT_REDIRECT_REFUSED_PREFIX = "redirect refused: ";
+/** The request threw; `no response: <reason>`. */
+export const ATTEMPT_NO_RESPONSE_PREFIX = "no response: ";
+/** A status other than 200; `HTTP <status>`. */
+export const ATTEMPT_HTTP_PREFIX = "HTTP ";
+/** HTTP 429: the run stops. */
+export const ATTEMPT_RATE_LIMITED = "HTTP 429 (rate limited)";
+/** The body shorter or longer than announced, or cut off; `truncated body (<detail>)`. */
+export const ATTEMPT_TRUNCATED_PREFIX = "truncated body (";
+/** The body is no MP4; `not a video: <problem>`. */
+export const ATTEMPT_NOT_VIDEO_PREFIX = "not a video: ";
+/** Encrypted tracks: nothing saved. */
+export const ATTEMPT_ENCRYPTED = "encrypted (DRM)";
+/** The integrity check refused the body; `verify failed: <reason>`. */
+export const ATTEMPT_VERIFY_FAILED_PREFIX = "verify failed: ";
+/** The video passed every check and Chrome saved it. */
+export const ATTEMPT_SAVED = "saved";
+/** The video passed every check and the save failed; `not saved: <message>`. */
+export const ATTEMPT_NOT_SAVED_PREFIX = "not saved: ";
+
 /**
+ * @typedef {import("../lib/diagnosis.js").AttemptRecord} AttemptRecord
+ * @typedef {import("../lib/diagnosis.js").RefreshRecord} RefreshRecord
+ * @typedef {import("../lib/diagnosis.js").EpisodeTrace} EpisodeTrace
  * @typedef {import("../lib/catalog.js").Episode} Episode
  * @typedef {import("../lib/catalog.js").Series} Series
  * @typedef {import("../lib/report.js").DownloadResult} DownloadResult
@@ -218,6 +251,28 @@ export function sanitizeError(text) {
 export function oneLine(error) {
   if (error instanceof Error) return sanitizeError(error.message || error.name);
   return sanitizeError(String(error));
+}
+
+/**
+ * A fresh {@link AttemptRecord} of a candidate URL, nothing known yet: the URL with its query
+ * stripped (TikTok signs the query — `X-Bogus`, `_signature`, `msToken`, …: never in a report),
+ * its host and its `expire`.
+ * @param {string} url
+ * @returns {AttemptRecord}
+ */
+export function attemptRecord(url) {
+  return {
+    url: url.replace(/[?#].*$/s, ""),
+    host: hostOf(url),
+    url_expiry: urlExpiry(url),
+    requested: false,
+    redirect_hops: null,
+    http_status: null,
+    content_type: null,
+    content_length: null,
+    received_bytes: null,
+    outcome: "",
+  };
 }
 
 /** A transfer that stopped before its end: the body is incomplete. */
@@ -609,6 +664,34 @@ export class Downloader {
     this.failedRefreshes = new Set();
     /** in-run re-discoveries made so far */
     this.refreshes = 0;
+    /** @type {Map<string, EpisodeTrace>} `<series id>:<number>` → what this run recorded of the episode */
+    this.traces = new Map();
+  }
+
+  /**
+   * What this run recorded of an episode's download (the attempts, the re-discoveries), or null
+   * before its download began. One Downloader lives for one job, so a retry in a later job starts
+   * clean.
+   * @param {Episode} episode
+   * @returns {EpisodeTrace | null}
+   */
+  traceOf(episode) {
+    return this.traces.get(traceKey(episode)) ?? null;
+  }
+
+  /**
+   * The episode's trace, started when missing (the recording never changes what is decided).
+   * @param {Episode} episode
+   * @returns {EpisodeTrace}
+   */
+  trace(episode) {
+    const key = traceKey(episode);
+    let trace = this.traces.get(key);
+    if (trace === undefined) {
+      trace = { attempts: [], refreshes: [] };
+      this.traces.set(key, trace);
+    }
+    return trace;
   }
 
   /**
@@ -669,6 +752,7 @@ export class Downloader {
    * @returns {Promise<DownloadResult>}
    */
   async download(episode, context) {
+    this.traces.set(traceKey(episode), { attempts: [], refreshes: [] }); // a fresh trace per download
     if (episode.access === "locked" && !this.config.includeLocked) return lockedResult(episode);
     const existing = this.existingResult(episode, context);
     if (existing !== null) return existing;
@@ -747,31 +831,39 @@ export class Downloader {
   async tryCandidates(episode, context, candidates, tried) {
     /** @type {Attempt | null} */
     let last = null;
+    const trace = this.trace(episode);
     for (const url of candidates) {
       if (tried.size >= MAX_GETS_PER_EPISODE) break;
       const host = hostOf(url);
       tried.add(url); // the hops of its redirects are no further candidates
+      const record = attemptRecord(url); // what the report will say of this URL: filled as decided
+      trace.attempts.push(record);
       if (!hostCovered(url, this.config.hostPatterns)) {
         // never requested, yet counted like Python's `tried` (which requests every candidate):
         // the budget, the fresh-list condition and `cacheSpent` see the same set
         last = { reason: `${host} is not a host this extension may contact`, unavailable: true };
+        record.outcome = ATTEMPT_NOT_REQUESTED;
         continue;
       }
       this.config.onStatus?.(`E${String(episode.number).padStart(2, "0")}: ${host}`);
+      record.requested = true;
       /** @type {Response} */
       let response;
       try {
-        ({ response } = await fetchFollowing(url, {
+        let hops;
+        ({ response, hops } = await fetchFollowing(url, {
           fetch: this.fetch,
           init: { credentials: "include", cache: "no-store", redirect: "manual", headers: { Accept: "*/*" } },
           redirects: this.redirects,
           allowed: (target) => this.redirectAllowed(target),
         }));
+        record.redirect_hops = hops;
       } catch (error) {
         if (error instanceof RedirectRefused && error.kind === "target") {
           // a redirect to a target the extension may not request counts like a denied URL: the
           // next candidate (this URL is spent)
           last = { reason: error.message, unavailable: true };
+          record.outcome = `${ATTEMPT_REDIRECT_REFUSED_PREFIX}${error.message}`;
           continue;
         }
         // a redirect loop, more than MAX_REDIRECTS hops, or a fetch that threw: where Playwright's
@@ -780,16 +872,25 @@ export class Downloader {
           reason: error instanceof RedirectRefused ? error.message : `no response (${oneLine(error)}) from ${host}`,
           unavailable: false,
         };
+        record.outcome =
+          error instanceof RedirectRefused
+            ? `${ATTEMPT_REDIRECT_REFUSED_PREFIX}${error.message}`
+            : `${ATTEMPT_NO_RESPONSE_PREFIX}${oneLine(error)}`;
         break;
       }
       const status = response.status;
+      record.http_status = status;
+      record.content_type = response.headers.get("content-type");
+      record.content_length = contentLength(response.headers);
       if (status === 429) {
         await response.body?.cancel().catch(() => undefined);
+        record.outcome = ATTEMPT_RATE_LIMITED;
         return { result: failure(episode, FAILED_RATE_LIMITED, MEDIA_RATE_LIMIT_MESSAGE), last: null };
       }
       if (status !== 200) {
         await response.body?.cancel().catch(() => undefined);
         last = { reason: `HTTP ${status} from ${host}`, unavailable: DENIED_STATUSES.has(status) };
+        record.outcome = `${ATTEMPT_HTTP_PREFIX}${status}`;
         if (DENIED_STATUSES.has(status)) continue;
         break; // the server failing, not this URL: no next mirror, no fresh list
       }
@@ -801,26 +902,38 @@ export class Downloader {
         body = await readBody(response, { idleMs: this.config.idleMs });
       } catch {
         last = { reason: `truncated body (the transfer was cut short) from ${host}`, unavailable: false, incomplete: true };
+        record.outcome = `${ATTEMPT_TRUNCATED_PREFIX}the transfer was cut short)`;
         break; // the network, not this URL: no next mirror, no fresh list
       }
+      record.received_bytes = body.length;
       if (announced !== null && announced !== body.length) {
         last = {
           reason: `truncated body (${body.length} of ${announced} bytes) from ${host}`,
           unavailable: false,
           incomplete: true,
         };
+        record.outcome = `${ATTEMPT_TRUNCATED_PREFIX}${body.length} of ${announced} bytes)`;
         break;
       }
       const problem = bodyProblem(body, contentType);
       if (problem !== null) {
         last = { reason: `${problem} from ${host}`, unavailable: true };
+        record.outcome = `${ATTEMPT_NOT_VIDEO_PREFIX}${problem}`;
         continue;
       }
       const encrypted = drmProblem(body); // always: DramaFetch never keeps encrypted media
-      if (encrypted !== null) return { result: failure(episode, FAILED_UNAVAILABLE, encrypted), last: null };
+      if (encrypted !== null) {
+        record.outcome = ATTEMPT_ENCRYPTED;
+        return { result: failure(episode, FAILED_UNAVAILABLE, encrypted), last: null };
+      }
       const invalid = verifyVideo(body, episode.durationS); // always on: a bad file is never saved
-      if (invalid !== null) return { result: failure(episode, FAILED, `${INCOMPLETE_PREFIX}${invalid}`), last: null };
-      return { result: await this.keep(episode, context, body), last: null };
+      if (invalid !== null) {
+        record.outcome = `${ATTEMPT_VERIFY_FAILED_PREFIX}${invalid}`;
+        return { result: failure(episode, FAILED, `${INCOMPLETE_PREFIX}${invalid}`), last: null };
+      }
+      const kept = await this.keep(episode, context, body);
+      record.outcome = kept.status === DONE ? ATTEMPT_SAVED : `${ATTEMPT_NOT_SAVED_PREFIX}${kept.message}`;
+      return { result: kept, last: null };
     }
     return { result: null, last };
   }
@@ -962,10 +1075,17 @@ export class Downloader {
    * @returns {Promise<DownloadResult | null>}
    */
   async refresh(episode, stale) {
+    /** what the report will say of this re-discovery: filled as decided */
+    const record = refreshRecord();
+    this.trace(episode).refreshes.push(record);
     let fresh = this.freshItems.get(episode.seriesId);
     if (fresh === undefined || this.cacheSpent(fresh.get(episode.itemId) ?? null, stale)) {
-      if (this.failedRefreshes.has(episode.seriesId)) return null; // it failed once in this run: not again
+      if (this.failedRefreshes.has(episode.seriesId)) {
+        record.outcome = "refused";
+        return null; // it failed once in this run: not again
+      }
       this.refreshes += 1;
+      record.fresh_list = true;
       this.config.onStatus?.(`E${String(episode.number).padStart(2, "0")}: fresh episode list`);
       let series;
       try {
@@ -977,6 +1097,7 @@ export class Downloader {
         });
       } catch (error) {
         this.failedRefreshes.add(episode.seriesId);
+        record.outcome = "failed";
         throw error;
       }
       fresh = new Map();
@@ -984,16 +1105,24 @@ export class Downloader {
       this.freshItems.set(episode.seriesId, fresh);
     }
     const cached = fresh.get(episode.itemId);
-    if (cached === undefined) return null;
+    if (cached === undefined) {
+      record.outcome = "not listed";
+      return null;
+    }
     const { access, drm, hints } = accessOf(cached);
+    record.access = access;
+    record.hints = [...hints];
+    record.listed_url_count = playUrlCandidates(cached, this.config.quality).length;
     if (access === "locked" && !this.config.includeLocked) {
       const listed = hints.join("; ") || "locked";
       const message = drm
         ? `${DRM_MARK} (in a fresh episode list: ${listed}): DramaFetch does not decrypt it`
         : `${UNAVAILABLE_MESSAGE} (locked in a fresh episode list: ${listed})`;
+      record.outcome = "locked";
       return failure(episode, FAILED_UNAVAILABLE, message);
     }
     episode.raw = cached;
+    record.outcome = "adopted";
     return null;
   }
 
@@ -1022,6 +1151,23 @@ export class Downloader {
  */
 function failure(episode, status, message) {
   return { episode, status, path: null, message };
+}
+
+/**
+ * The key of an episode's trace: `<series id>:<number>`.
+ * @param {Episode} episode
+ * @returns {string}
+ */
+function traceKey(episode) {
+  return `${episode.seriesId}:${episode.number}`;
+}
+
+/**
+ * A fresh {@link RefreshRecord}, nothing decided yet.
+ * @returns {RefreshRecord}
+ */
+function refreshRecord() {
+  return { outcome: "refused", fresh_list: false, access: null, hints: null, listed_url_count: null };
 }
 
 // ---------------------------------------------------------------- the list's thumbnails

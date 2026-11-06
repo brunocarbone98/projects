@@ -96,7 +96,9 @@
       <h3 id="failed-heading"></h3>
       <div class="buttons">
         <button type="button" id="retry-button" class="retry"></button>
+        <button type="button" id="report-button" data-i18n="reportButton">Save the report</button>
       </div>
+      <p id="failed-report" class="meta" hidden></p>
       <div class="table-wrap">
         <table id="failed-table">
           <thead>
@@ -168,7 +170,10 @@
         <input type="number" id="setting-rest-min" min="0" max="86400" step="1">
         <label for="setting-rest-max" data-i18n="settingRestMax">Longer rest, at most (s)</label>
         <input type="number" id="setting-rest-max" min="0" max="86400" step="1">
+        <label for="setting-report" data-i18n="settingReport">Save a report of the episodes that did not download</label>
+        <input type="checkbox" id="setting-report">
       </div>
+      <p class="hint" data-i18n="settingReportHint">A JSON file in Downloads/DramaFetch/reports: for each episode that did not download, its status, message, probable cause, the requests made (hosts, HTTP statuses, sizes) and the list entry TikTok served to your session — never your cookies.</p>
       <p class="hint" data-i18n="settingsHint">File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.</p>
       <div class="buttons">
         <button type="submit" id="settings-save" data-i18n="saveSettings">Save settings</button>

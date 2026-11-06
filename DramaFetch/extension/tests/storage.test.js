@@ -5,7 +5,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { HISTORY_KEY, HISTORY_LIMIT, HISTORY_MAX_BYTES, appendHistory, trimHistory } from "../src/app/storage.js";
+import {
+  DEFAULT_SETTINGS,
+  HISTORY_KEY,
+  HISTORY_LIMIT,
+  HISTORY_MAX_BYTES,
+  appendHistory,
+  normalizeSettings,
+  settingsProblem,
+  trimHistory,
+} from "../src/app/storage.js";
 
 /**
  * A finished run of about `bytes` bytes of JSON.
@@ -82,4 +91,15 @@ test("a storage that refuses the history (the quota) gets the run alone, else no
     /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]).map((entry) => entry["id"]),
     [5],
   );
+});
+
+test("the report switch: on by default, a stored non-boolean falls back to it, and it must be a boolean to save", () => {
+  assert.equal(DEFAULT_SETTINGS.report, true);
+  assert.equal(normalizeSettings({ report: false }, false).report, false);
+  assert.equal(normalizeSettings({ report: "yes" }, false).report, true); // not a boolean: dropped, the default stays
+  assert.equal(normalizeSettings({ report: 0 }, false).report, true);
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, report: false }, false), null);
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, report: /** @type {never} */ ("x") }, false), "the report switch must be on or off");
+  // checked before the pacing: a bad switch is named even when the pauses are bad too
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, report: /** @type {never} */ (1), delayMinS: 0 }, false), "the report switch must be on or off");
 });
