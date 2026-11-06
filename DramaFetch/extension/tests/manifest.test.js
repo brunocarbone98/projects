@@ -53,6 +53,21 @@ test("a Manifest V3 extension named from _locales, English by default", () => {
   assert.match(String(manifest["version"]), /^\d+\.\d+\.\d+$/);
 });
 
+test("one version for the whole of DramaFetch: the manifest, package.json, pyproject.toml and the package", () => {
+  // the owner reads the version in chrome://extensions and in the tab's header: every user-visible change
+  // bumps it (CHANGELOG.md), and the Python tool ships the same number
+  const version = String(manifest["version"]);
+  /** @type {Record<string, unknown>} */
+  const pkg = JSON.parse(readFileSync(file("package.json"), "utf8"));
+  assert.equal(pkg["version"], version);
+  const pyproject = readFileSync(file("../pyproject.toml"), "utf8");
+  assert.equal(/^version = "([^"]+)"$/m.exec(pyproject)?.[1], version);
+  const init = readFileSync(file("../src/dramafetch/__init__.py"), "utf8");
+  assert.equal(/^__version__ = "([^"]+)"$/m.exec(init)?.[1], version);
+  const changelog = readFileSync(file("../CHANGELOG.md"), "utf8");
+  assert.ok(changelog.includes(`## ${version} `), `CHANGELOG.md has no entry for ${version}`);
+});
+
 test("exactly the permissions the README justifies: no cookies, no debugger, no blocking", () => {
   assert.deepEqual([...(/** @type {string[]} */ (manifest["permissions"]))].sort(), [...PERMISSIONS].sort());
   for (const key of ["optional_permissions", "optional_host_permissions", "content_scripts", "externally_connectable", "web_accessible_resources", "key", "update_url"]) {

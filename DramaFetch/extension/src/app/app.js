@@ -1444,6 +1444,7 @@ function translateActivity() {
 
 async function main() {
   localize();
+  $("version").textContent = chrome.runtime.getManifest().version; // which build is loaded, as chrome://extensions names it
   shown.lang = displayLanguage();
   shown.labels = displayLabels();
   translateActivity();

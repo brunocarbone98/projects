@@ -49,7 +49,7 @@ Per-project instructions: `FullStackHub/CLAUDE.md`, `SecureGate/CLAUDE.md` and `
 
 1. The relevant checks above ran and are green, with real output or counts in the PR. A SecureGate run whose `target/surefire-reports/*.xml` says `tests="0"` did not run — say so. For `DramaFetch/`, green means `ruff check`, `ruff format --check`, `mypy` and `pytest` all pass (plus `pytest -m integration` when a Chromium is available), and so does `cd DramaFetch/extension && node --test && npx -y -p typescript@5.9.3 tsc -p jsconfig.json`.
 2. Prettier left no diff under `FullStackHub/`; no lint rule loosened, no test skipped, no `any` added.
-3. Documentation that states what you changed — README, the CLAUDE.md files, `OPERATIONS.md`, counts, commands, links — is updated in the same PR.
+3. Documentation that states what you changed — README, the CLAUDE.md files, `OPERATIONS.md`, counts, commands, links — is updated in the same PR; a DramaFetch change users can see also bumps its version and adds a `DramaFetch/CHANGELOG.md` entry (`DramaFetch/CLAUDE.md` → Conventions).
 4. The PR follows `.github/pull_request_template.md`: Summary · Changes · How I verified · Risks & rollback · `Opened by:`.
 5. Nothing secret in the diff, the logs or the PR body.
 
