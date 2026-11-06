@@ -281,7 +281,7 @@ def test_the_report_names_what_needs_attention_and_cites_every_source(tmp_path: 
         raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
 
     installed = {
-        "dramafetch": "0.1.0",
+        "dramafetch": "1.2.0",
         "yt-dlp": "2026.10.26",
         "playwright": "1.64.1",
         "mutagen": "1.48.1",

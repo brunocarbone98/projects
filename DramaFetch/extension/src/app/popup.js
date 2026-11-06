@@ -25,6 +25,7 @@ async function open(load) {
 
 async function main() {
   localize();
+  /** @type {HTMLElement} */ (document.getElementById("popup-version")).textContent = chrome.runtime.getManifest().version;
   const test = await loadTestSettings();
   const base = test.baseUrl ?? TIKTOK_BASE_URL;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

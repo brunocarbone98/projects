@@ -229,7 +229,7 @@ const runs = () => [
 /** @returns {import("../src/lib/diagnosis.js").ReportInput} */
 const input = (series = runs()) => ({
   generatedAt: "2026-11-06T19:30:00.000Z",
-  extensionVersion: "0.1.0",
+  extensionVersion: "1.2.0",
   userAgent: "Mozilla/5.0 Chrome/142",
   language: "es",
   testMode: false,
@@ -261,7 +261,7 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
   ]);
   assert.equal(report["dramafetch_report"], REPORT_VERSION);
   assert.equal(report["generated_at"], "2026-11-06T19:30:00.000Z");
-  assert.equal(report["extension_version"], "0.1.0");
+  assert.equal(report["extension_version"], "1.2.0");
   assert.deepEqual(report["browser"], { user_agent: "Mozilla/5.0 Chrome/142", language: "es" });
   assert.equal(report["test_mode"], false);
   assert.equal(report["what_this_is"], WHAT_THIS_IS);
