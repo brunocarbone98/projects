@@ -984,14 +984,21 @@ class FakeElement {
  * @typedef {{message: string, placeholders?: Record<string, {content: string}>}} CatalogEntry
  */
 
+/** How many instances of app.js the tests have loaded: each gets a module URL of its own. */
+let pages = 0;
+
 /**
- * app.js loaded over a fake document and a fake `chrome` (the English messages, an empty storage,
- * the engine lock free): `main()` runs on import and is awaited to its end. `hold()` then makes the
- * next job's first `chrome.tabs.getCurrent` never answer, so that the job stays running and makes
- * no request to anything; `message()` is a runtime message from this extension's own popup;
- * `restore()` removes the fakes again.
+ * app.js loaded over a fake document and a fake `chrome` (the English messages, the storage seeded
+ * with `options.storage` — a history, a cooldown — else empty, the engine lock free): a FRESH
+ * instance each time (a module URL of its own, so `main()` runs again, over these fakes), awaited
+ * to its end; `module` is that instance's exports. `hold()` then makes the next job's first
+ * `chrome.tabs.getCurrent` never answer, so that the job stays running and makes no request to
+ * anything; `message()` is a runtime message from this extension's own popup; `local` is the
+ * storage and `storageChanged(key)` tells the page a key of it changed; `restore()` removes the
+ * fakes again.
+ * @param {{storage?: Record<string, unknown>}} [options]
  */
-async function fakePage() {
+async function fakePage(options = {}) {
   /** @type {Record<string, CatalogEntry>} */
   const catalog = JSON.parse(readFileSync(new URL("../_locales/en/messages.json", import.meta.url), "utf8"));
   /** @type {Record<string, unknown>} */
@@ -1008,7 +1015,9 @@ async function fakePage() {
     return found;
   };
   /** @type {Map<string, unknown>} chrome.storage.local */
-  const local = new Map();
+  const local = new Map(Object.entries(options.storage ?? {}));
+  /** @type {((changes: Record<string, unknown>, area: string) => void)[]} */
+  const changeListeners = [];
   /** @type {((message: unknown, sender: {id: string}) => void)[]} */
   const messageListeners = [];
   let holding = false;
@@ -1050,7 +1059,10 @@ async function fakePage() {
         remove: async (key) => void local.delete(key),
       },
       session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined },
-      onChanged: { addListener: () => undefined },
+      onChanged: {
+        /** @param {(changes: Record<string, unknown>, area: string) => void} listener */
+        addListener: (listener) => void changeListeners.push(listener),
+      },
     },
     tabs: {
       getCurrent: () => (holding ? new Promise(() => undefined) : Promise.resolve({ id: 1, windowId: 10 })),
@@ -1094,8 +1106,12 @@ async function fakePage() {
   };
   /** @returns {Promise<void>} one macrotask turn: what the page awaited meanwhile has run */
   const turn = () => new Promise((resolve) => setTimeout(resolve, 0));
+  /** @type {typeof import("../src/app/app.js")} */
+  let module;
   try {
-    await import("../src/app/app.js");
+    const url = new URL("../src/app/app.js", import.meta.url);
+    url.search = `?page=${(pages += 1)}`; // a fresh instance: main() runs again, over these fakes
+    module = await import(url.href);
     for (let turns = 0; turns < 200 && element("app-status").dataset["state"] !== "idle"; turns += 1) await turn();
     assert.equal(element("app-status").dataset["state"], "idle", "the page did not finish loading");
     assert.ok(element("load-button").listeners.has("click"), "Load list is wired");
@@ -1104,10 +1120,19 @@ async function fakePage() {
     throw error;
   }
   return {
+    module,
     element,
     catalog,
     turn,
     restore,
+    local,
+    /**
+     * `chrome.storage.local` changed `key` (the page reads it again): the cooldown ending, say.
+     * @param {string} key
+     */
+    storageChanged: (key) => {
+      for (const listener of changeListeners) listener({ [key]: {} }, "local");
+    },
     hold: () => {
       holding = true;
     },
@@ -1155,6 +1180,286 @@ test("the page: a second Load list for a series being listed, or waiting to be, 
     assert.equal(status.textContent, refused);
     assert.equal(status.className, "status error");
     assert.deepEqual(queued(), [`List series ${other}`]);
+  } finally {
+    page.restore();
+  }
+});
+
+// ------------------------------------------------------- the episodes that did not download
+
+/** The fake TikTok's second series, as the page tests name it. */
+const OTHER_ID = "7699393770256782399";
+/** A row's message when a 429 stopped the run before it. */
+const STOPPED_BY_429 = `stopped: episode 2 failed-rate-limited: ${MEDIA_RATE_LIMIT_MESSAGE}`;
+/** The report line every fake record carries (the history shows it as it is). */
+const RECORD_LINE = "incomplete: 1 of 2 (1 downloaded) — 1 failed (2)";
+
+/**
+ * A finished job's per-series record as `runToHistory` stores it, its rows from `[number, status,
+ * message?]` (the message defaults to `<status> <number>`); `rows: null` leaves the rows out, as
+ * a listing's record has none.
+ * @param {string} seriesId
+ * @param {string | null} name
+ * @param {[number, string, string?][] | null} rows
+ * @returns {Record<string, unknown>}
+ */
+function seriesRecord(seriesId, name, rows) {
+  /** @type {Record<string, unknown>} */
+  const record = { series_id: seriesId, name, status: "incomplete", error: null, error_kind: null, stop: false, contacted: true, line: RECORD_LINE, report: {} };
+  if (rows !== null) {
+    record["rows"] = rows.map(([number, status, message]) => ({ number, status, message: message ?? `${status} ${number}`, path: null, download_id: null }));
+  }
+  return record;
+}
+
+/**
+ * A history entry of a finished job over `series`.
+ * @param {string} kind
+ * @param {string} label
+ * @param {Record<string, unknown>[]} series
+ * @returns {Record<string, unknown>}
+ */
+function historyEntry(kind, label, series) {
+  return { id: 1, kind, label, started_at: "2026-11-05T10:00:00.000Z", finished_at: "2026-11-05T10:05:00.000Z", error: null, stopped: null, refreshes: 0, pauses: [], series };
+}
+
+/**
+ * @param {FakeElement} item a history entry's `<li>`
+ * @returns {{line: FakeElement, retry: FakeElement} | null} its “did not download” line and retry button
+ */
+function retryLineOf(item) {
+  const line = item.children.find((child) => child.className === "retry-line");
+  const retry = line?.children.find((child) => child.tagName === "BUTTON");
+  return line !== undefined && retry !== undefined ? { line, retry } : null;
+}
+
+/**
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ * @returns {string[]} the labels waiting in the queue card
+ */
+const queuedLabels = (page) => page.element("queue-list").children.map((item) => item.textContent ?? "");
+
+/**
+ * A result-table row as `renderResult` makes it (its `data-*` set).
+ * @param {string} seriesId
+ * @param {number} number
+ * @param {string} status
+ * @returns {FakeElement}
+ */
+function resultRow(seriesId, number, status) {
+  const row = new FakeElement("tr");
+  row.setAttribute("data-key", `${seriesId}:${number}`);
+  row.setAttribute("data-series-id", seriesId);
+  row.setAttribute("data-number", String(number));
+  row.setAttribute("data-status", status);
+  return row;
+}
+
+test("retryTargets: every failure row of every series, stopped ones included, ascending and de-duplicated; nothing for done, skipped, dry-run or rowless records", async () => {
+  const page = await fakePage();
+  try {
+    const { retryTargets, retryJobs } = page.module;
+    const records = [
+      seriesRecord(SERIES_ID, "One", [
+        [1, "done"],
+        [2, "failed-unavailable", DRM_MESSAGE],
+        [3, "skipped-exists"],
+        [4, "failed"],
+        [5, "skipped-locked"],
+        [7, "failed-rate-limited", STOPPED_BY_429],
+        [6, "failed-rate-limited", MEDIA_RATE_LIMIT_MESSAGE],
+        [4, "failed", "the row written last"],
+        [8, "dry-run"],
+      ]),
+      seriesRecord(OTHER_ID, "Two", [[2, "done"], [1, "failed-blocked"]]),
+      seriesRecord("7699393770256782388", null, []), // a failed resolve, or a series the batch never started
+      { series_id: "7699393770256782377", name: "Four", error: null, episodes: 3 }, // a listing
+      seriesRecord("7699393770256782366", "Five", [[1, "done"], [2, "skipped-exists"], [3, "skipped-locked"]]),
+      null,
+    ];
+    const targets = retryTargets(records);
+    assert.deepEqual(targets, [
+      { seriesId: SERIES_ID, name: "One", numbers: [2, 4, 6, 7] },
+      { seriesId: OTHER_ID, name: "Two", numbers: [1] },
+    ]);
+    assert.equal(targets.reduce((count, target) => count + target.numbers.length, 0), 5);
+    // what the retry queues: one selection job per series, in order, exactly those numbers, nothing else asked
+    const ref = (/** @type {string} */ seriesId) => ({ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId });
+    assert.deepEqual(retryJobs(targets), [
+      { kind: "selection", label: "Retry 4 of One", refs: [ref(SERIES_ID)], series: null, numbers: [2, 4, 6, 7], includeLocked: false, recheck: false },
+      { kind: "selection", label: "Retry 1 of Two", refs: [ref(OTHER_ID)], series: null, numbers: [1], includeLocked: false, recheck: false },
+    ]);
+    // a series the job never learnt the name of goes by its id
+    assert.equal(retryJobs(retryTargets([seriesRecord(OTHER_ID, null, [[3, "failed"]])]))[0]?.label, `Retry 1 of ${OTHER_ID}`);
+    assert.deepEqual(retryTargets([]), []);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: a past run's episodes that did not download get their line and a retry button; a click queues one selection job per series, none for a series without failures", async () => {
+  const failures = historyEntry("batch", "3 series", [
+    seriesRecord(SERIES_ID, "One", [
+      [1, "done"],
+      [2, "failed-rate-limited", MEDIA_RATE_LIMIT_MESSAGE],
+      [4, "failed-rate-limited", STOPPED_BY_429],
+      [3, "failed-rate-limited", STOPPED_BY_429],
+    ]),
+    seriesRecord(OTHER_ID, "Two", [[1, "failed"], [2, "done"]]),
+    seriesRecord("7699393770256782388", "Three", [[1, "done"], [2, "skipped-locked"]]),
+  ]);
+  const clean = historyEntry("selection", "3 episodes of One", [seriesRecord(SERIES_ID, "One", [[1, "done"], [2, "skipped-exists"], [3, "skipped-locked"]])]);
+  const page = await fakePage({ storage: { history: [failures, clean] } });
+  try {
+    const { element } = page;
+    const [first, second] = element("history-list").children;
+    assert.ok(first !== undefined && second !== undefined, "both entries are listed");
+    const found = retryLineOf(first);
+    assert.ok(found, "the entry with failures has its line and button");
+    const { line, retry } = found;
+    assert.equal(line.children[0]?.textContent, "Did not download: One: E02, E03, E04; Two: E01");
+    assert.equal(retry.textContent, "Retry the episodes that did not download (4)");
+    assert.equal(retry.disabled, false);
+    // the entry's lines stay as they were, above it
+    assert.ok(String(first.children[0]?.textContent).endsWith(" — 3 series"));
+    assert.deepEqual(
+      first.children.slice(1, -1).map((child) => child.textContent),
+      ["One", "Two", "Three"].map((name) => `${name}: ${RECORD_LINE}`),
+    );
+    assert.equal(retryLineOf(second), null); // nothing to retry: neither the line nor the button
+    assert.deepEqual(
+      second.children.slice(1).map((child) => child.textContent),
+      [`One: ${RECORD_LINE}`],
+    );
+    // the click: one selection job per series with failures, in the series' order; the button spent
+    page.hold();
+    retry.fire("click");
+    await page.turn();
+    assert.equal(retry.disabled, true);
+    assert.equal(element("app-status").dataset["state"], "running");
+    assert.equal(element("progress-current").textContent, "Retry 3 of One");
+    assert.deepEqual(queuedLabels(page), ["Retry 1 of Two"]);
+    retry.fire("click"); // spent until the next job ends: a second click queues nothing
+    await page.turn();
+    assert.deepEqual(queuedLabels(page), ["Retry 1 of Two"]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: the retry buttons obey the cooldown like every download button — disabled while it is in force, back when it ends", async () => {
+  const now = Date.now() / 1000;
+  const failures = historyEntry("selection", "2 episodes of One", [seriesRecord(SERIES_ID, "One", [[1, "done"], [2, "failed"]])]);
+  const cooldown = { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now };
+  const page = await fakePage({ storage: { history: [failures], cooldown } });
+  try {
+    const { element, module } = page;
+    assert.equal(element("cooldown-banner").hidden, false);
+    assert.equal(element("download-all-button").disabled, true);
+    const found = retryLineOf(/** @type {FakeElement} */ (element("history-list").children[0]));
+    assert.ok(found, "the entry has its button");
+    assert.equal(found.retry.disabled, true);
+    // the progress card's too: a job that ended under the cooldown (a 429 stop records one)
+    module.renderFailed([
+      seriesRecord(SERIES_ID, "One", [
+        [1, "failed-rate-limited", MEDIA_RATE_LIMIT_MESSAGE],
+        [2, "failed-rate-limited", STOPPED_BY_429],
+      ]),
+    ]);
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("retry-button").disabled, true);
+    found.retry.fire("click"); // a disabled button cannot be clicked in a browser; the handler refuses all the same
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.equal(element("app-status").dataset["state"], "idle");
+    assert.deepEqual(queuedLabels(page), []);
+    // the cooldown ends (lifted in storage: the clock, another DramaFetch page): the buttons come back
+    page.local.delete("cooldown");
+    page.storageChanged("cooldown");
+    await page.turn();
+    assert.equal(element("cooldown-banner").hidden, true);
+    assert.equal(element("download-all-button").disabled, false);
+    assert.equal(found.retry.disabled, false);
+    assert.equal(element("retry-button").disabled, false);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: at a job's end the failure rows leave the result table for the failed block, their count in the heading, the retry button under it", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const results = element("result-table").querySelector("tbody");
+    const header = new FakeElement("tr"); // the series' header row, as onStart adds it
+    header.className = "series-row";
+    header.setAttribute("data-series-id", SERIES_ID);
+    results.append(
+      header,
+      resultRow(SERIES_ID, 1, "done"),
+      resultRow(SERIES_ID, 2, "failed-unavailable"),
+      resultRow(SERIES_ID, 3, "skipped-exists"),
+      resultRow(SERIES_ID, 4, "failed"),
+      resultRow(SERIES_ID, 5, "skipped-locked"),
+      resultRow(OTHER_ID, 1, "failed-rate-limited"),
+    );
+    const incomplete = "download looks incomplete or wrong: truncated body (100000 of 131072 bytes) from v16.tiktok.com";
+    module.renderFailed([
+      seriesRecord(SERIES_ID, "One", [
+        [1, "done"],
+        [2, "failed-unavailable", DRM_MESSAGE],
+        [3, "skipped-exists"],
+        [4, "failed", incomplete],
+        [5, "skipped-locked"],
+      ]),
+      seriesRecord(OTHER_ID, null, [[1, "failed-rate-limited", STOPPED_BY_429]]),
+    ]);
+    const keys = (/** @type {FakeElement} */ row) => [row.getAttribute("data-series-id"), row.getAttribute("data-number"), row.getAttribute("data-status")];
+    // the result table keeps the header and what completed
+    assert.deepEqual(results.children.map(keys), [
+      [SERIES_ID, null, null],
+      [SERIES_ID, "1", "done"],
+      [SERIES_ID, "3", "skipped-exists"],
+      [SERIES_ID, "5", "skipped-locked"],
+    ]);
+    const failed = element("failed-table").querySelector("tbody");
+    assert.deepEqual(failed.children.map(keys), [
+      [SERIES_ID, "2", "failed-unavailable"],
+      [SERIES_ID, "4", "failed"],
+      [OTHER_ID, "1", "failed-rate-limited"],
+    ]);
+    // series (the stored name, else the id), E-number, the same status badge, the message as shown
+    assert.deepEqual(
+      failed.children.map((row) => row.children.map((cell) => cell.children[0]?.textContent ?? cell.textContent)),
+      [
+        ["One", "E02", "unavailable", DRM_MESSAGE],
+        ["One", "E04", "failed", incomplete],
+        [OTHER_ID, "E01", "stopped", STOPPED_BY_429],
+      ],
+    );
+    assert.deepEqual(
+      failed.children.map((row) => row.children[2]?.children[0]?.getAttribute("data-status")),
+      ["failed-unavailable", "failed", "failed-rate-limited"],
+    );
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-heading").textContent, "Did not download (3)");
+    assert.equal(element("retry-button").textContent, "Retry the episodes that did not download (3)");
+    assert.equal(element("retry-button").disabled, false);
+    // the button: one selection job per series; the block hidden and emptied as the first one starts
+    page.hold();
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.equal(element("retry-button").disabled, true);
+    assert.equal(element("progress-current").textContent, "Retry 2 of One");
+    assert.deepEqual(queuedLabels(page), [`Retry 1 of ${OTHER_ID}`]);
+    assert.equal(element("failed-block").hidden, true);
+    assert.deepEqual(failed.children, []);
+    assert.equal(element("failed-heading").textContent, "");
+    // a job in which nothing failed: the block stays hidden, the button disabled
+    module.renderFailed([seriesRecord(SERIES_ID, "One", [[1, "done"], [2, "skipped-exists"]])]);
+    assert.equal(element("failed-block").hidden, true);
+    assert.equal(element("retry-button").disabled, true);
+    assert.deepEqual(failed.children, []);
   } finally {
     page.restore();
   }

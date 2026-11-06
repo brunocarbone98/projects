@@ -239,9 +239,13 @@ def _run(ext: ExtensionHarness, links: str, *, watch_pauses: bool = False) -> li
 
 
 def _engine_texts(ext: ExtensionHarness) -> list[str]:
-    """Every engine text the page shows now: the result rows, the report lines, the batch table,
-    the status line, the cooldown banner."""
+    """Every engine text the page shows now: the result rows, the rows of the episodes the job did
+    not download (with their heading and the retry button), the report lines, the batch table, the
+    status line, the cooldown banner."""
     texts = _texts(ext, "#result-table tbody tr")
+    texts += _texts(ext, "#failed-table tbody tr")
+    if ext.page.locator("#failed-block").is_visible():
+        texts += _texts(ext, "#failed-heading") + _texts(ext, "#retry-button")
     texts += _texts(ext, "#report-lines li")
     texts += _texts(ext, "#batch-table tbody tr")
     texts += _titles(ext, "#batch-table")  # its tooltips too (the badges' titles are status codes)
@@ -252,10 +256,12 @@ def _engine_texts(ext: ExtensionHarness) -> list[str]:
 
 
 def _badges(ext: ExtensionHarness) -> dict[int, tuple[str, str, str]]:
-    """The result rows by episode number: `(label, the code in its title, message)`; the rows of
-    the last series of the table win."""
+    """The result rows by episode number — the result table's and the failed block's, where the
+    episodes a job did not download go: `(label, the code in its title, message)`; the rows of the
+    last series win."""
     rows: list[list[str]] = ext.page.evaluate(
-        """() => [...document.querySelectorAll('#result-table tbody tr[data-number]')].map((r) => [
+        """() => [...document.querySelectorAll(
+          '#result-table tbody tr[data-number], #failed-table tbody tr[data-number]')].map((r) => [
           r.dataset.number, r.querySelector('.badge').textContent,
           r.querySelector('.badge').title, r.querySelector('td.message').textContent])"""
     )
@@ -473,8 +479,9 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
 ) -> None:
     """Chrome in Spanish: done, an episode found encrypted, a locked one, the series rest, episodes
     already on disk, the remembered DRM verdict, the complete skip with its hint, the list's
-    warnings and hints, a 429 with its stop, cooldown and not-started series, the history — all
-    on screen in Spanish, the status codes in the badges' titles; the stored texts stay English."""
+    warnings and hints, a 429 with its stop, cooldown and not-started series, the episodes a job
+    did not download shown apart with their retry button, the history — all on screen in Spanish,
+    the status codes in the badges' titles; the stored texts stay English."""
     monkeypatch.setenv("LANGUAGE", "es")  # Chrome on Linux takes its UI language from it
     drm = frozenset({(SERIES_ID, 2)})
     settings = {"restMinS": 1.5, "restMaxS": 2}  # the series rest long enough to be read
@@ -499,6 +506,20 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         assert any(text.startswith(f"{SERIES_NAME}: incompleta: ") for text in texts)
         assert any(text.startswith(f"{SECOND_SERIES_NAME}: completa: 3 de 3") for text in texts)
         seen += texts
+        # the encrypted episode is the one the job did not download: apart, under its heading,
+        # with the retry button; the result table keeps the rest
+        assert page.locator("#failed-heading").inner_text() == "No se descargaron (1)"
+        assert page.locator("#retry-button").inner_text() == (
+            "Reintentar los episodios que no se descargaron (1)"
+        )
+        assert badges[2][1] == "failed-unavailable"
+        assert "protegido con DRM (pistas cifradas)" in badges[2][2]
+        failed_row = f"tbody tr[data-series-id='{SERIES_ID}'][data-number='2']"
+        assert page.locator("#failed-table tbody tr").count() == 1
+        assert page.locator(f"#failed-table {failed_row}").count() == 1
+        assert (
+            page.locator(f"#result-table {failed_row}").count() == 0
+        )  # the second series' E02 stays
         entry = ext.history()[0]  # the stored texts: the engine's English
         main, _second = entry["series"]
         rows = {row["number"]: row for row in main["rows"]}
@@ -547,6 +568,7 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
             assert badges[1][:2] == ("limitado por TikTok", "failed-rate-limited")
             assert badges[2][:2] == ("detenido", "failed-rate-limited")
             assert badges[2][2].startswith("detenido: episodio 1 (limitado por TikTok): ")
+            assert page.locator("#failed-heading").inner_text() == "No se descargaron (2)"
             texts = _engine_texts(ext)
             assert any("no iniciada" in text for text in texts)
             banner = page.locator("#cooldown-text").inner_text()
@@ -560,5 +582,13 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         page.click("#history-card > summary")
         history = _texts(ext, "#history-list > li")
         assert len(history) == 5  # three batches, a listing, the batch the 429 stopped
+        assert _texts(ext, "#history-list .retry-line span") == [
+            f"No se descargaron: {THIRD_SERIES_NAME}: E01, E02",  # the batch the 429 stopped
+            f"No se descargaron: {SERIES_NAME}: E02",  # the first batch
+        ]
+        assert _texts(ext, "#history-list .retry-line button") == [
+            "Reintentar los episodios que no se descargaron (2)",
+            "Reintentar los episodios que no se descargaron (1)",
+        ]
         seen += history
         _assert_spanish(seen)

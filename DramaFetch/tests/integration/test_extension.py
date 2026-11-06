@@ -41,6 +41,8 @@ from .fake_tiktok import (
 )
 
 if TYPE_CHECKING:
+    from playwright.sync_api import Page
+
     from conftest import Tools
 
 pytestmark = [
@@ -708,3 +710,103 @@ def test_o_a_download_id_chrome_hands_out_again_is_not_the_episode(tmp_path: Pat
             assert [path.name for path in ext.saved_files() if path.suffix == ".mp4"] == [
                 f"{SERIES_NAME} - Episode {n:02d}.mp4" for n in range(1, 5)
             ]
+
+
+def _table_rows(page: Page, table: str) -> list[tuple[str, str]]:
+    """The episode rows of a progress-card table as (number, status), in order — never a series'
+    header row, which carries no number."""
+    rows = page.locator(f"{table} tbody tr[data-number]")
+    return [
+        (str(row.get_attribute("data-number")), str(row.get_attribute("data-status")))
+        for row in rows.all()
+    ]
+
+
+def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_path: Path) -> None:
+    """A run whose downloads fail — transfers cut short (`download looks incomplete or wrong`), an
+    encrypted episode, then the stop after three failures in a row — shows the episodes that did
+    not download apart from the ones that completed, with their count and a retry button, and so
+    does its history entry. The retry is one selection job over exactly those episodes (never the
+    locked one): a fresh resolve, the state's DRM memory respected (episode 2 skipped without a
+    request), the others requested once more and failing again; nothing saved; the block then
+    shows what failed again, the result table keeping only the skip."""
+    drm = frozenset({(SERIES_ID, 2)})
+    with (
+        FakeTikTok(truncate_media=True, drm_media=drm) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        first = ext.download_all(MAIN_LINK)
+        (series,) = first["series"]
+        assert _statuses(series) == [
+            "failed",
+            "failed-unavailable",
+            "failed",
+            "failed",
+            "skipped-locked",
+        ]
+        rows = _rows(series)
+        assert rows[1]["message"].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
+        assert rows[2]["message"] == DRM_MESSAGE
+        assert rows[4]["message"].startswith("stopped: 3 consecutive failures (last: ")
+        assert ext.saved_files() == []
+        assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [1, 1, 1, 0, 0]
+
+        page = ext.page
+        assert page.locator("#failed-block").is_visible()
+        assert _table_rows(page, "#failed-table") == [
+            ("1", "failed"),
+            ("2", "failed-unavailable"),
+            ("3", "failed"),
+            ("4", "failed"),
+        ]
+        assert _table_rows(page, "#result-table") == [("5", "skipped-locked")]
+        failed_rows = page.locator("#failed-table tbody tr")
+        cells = failed_rows.first.locator("td")
+        assert cells.nth(0).text_content() == SERIES_NAME
+        assert cells.nth(1).text_content() == "E01"
+        assert cells.nth(2).locator(".badge").get_attribute("data-status") == "failed"
+        assert failed_rows.nth(1).locator(".badge").text_content() == "unavailable"
+        assert failed_rows.nth(3).locator(".badge").text_content() == "stopped"
+        assert page.locator("#failed-heading").text_content() == "Did not download (4)"
+        retry = page.locator("#retry-button")
+        assert retry.is_visible() and retry.is_enabled()
+        assert retry.text_content() == "Retry the episodes that did not download (4)"
+        history = page.locator("#history-list li")
+        ext.wait_for(lambda: history.count() == 1, 10, "the run is not in the history yet")
+        assert history.first.locator(".retry-line span").text_content() == (
+            "Did not download: E01, E02, E03, E04"
+        )
+        assert history.first.locator("button.retry").text_content() == (
+            "Retry the episodes that did not download (4)"
+        )
+
+        pages = len(server.series_page_requests)
+        entry = ext._run("#retry-button", 90)
+        assert entry["kind"] == "selection" and entry["label"] == f"Retry 4 of {SERIES_NAME}"
+        (retried,) = entry["series"]
+        assert [(row["number"], row["status"]) for row in retried["rows"]] == [
+            (1, "failed"),
+            (2, "skipped-locked"),
+            (3, "failed"),
+            (4, "failed"),
+        ]
+        assert _rows(retried)[2]["message"] == DRM_REMEMBERED_MESSAGE
+        assert _rows(retried)[4]["message"].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
+        assert entry["stopped"] == "3 consecutive failures"
+        assert len(server.series_page_requests) == pages + 1  # listed again, right before
+        assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [2, 1, 2, 1, 0]
+        assert ext.saved_files() == []
+        assert page.locator("#failed-block").is_visible()
+        assert _table_rows(page, "#failed-table") == [
+            ("1", "failed"),
+            ("3", "failed"),
+            ("4", "failed"),
+        ]
+        assert _table_rows(page, "#result-table") == [("2", "skipped-locked")]
+        assert page.locator("#failed-heading").text_content() == "Did not download (3)"
+        assert retry.is_enabled()
+        assert retry.text_content() == "Retry the episodes that did not download (3)"
+        ext.wait_for(lambda: history.count() == 2, 10, "the retry is not in the history yet")
+        assert history.first.locator(".retry-line span").text_content() == (
+            "Did not download: E01, E03, E04"
+        )

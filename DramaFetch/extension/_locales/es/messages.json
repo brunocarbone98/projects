@@ -201,6 +201,24 @@
     "message": "Detener",
     "description": "Button: stop the run at the next pause."
   },
+  "failedHeading": {
+    "message": "No se descargaron ($count$)",
+    "description": "Heading of the progress card's block of the episodes a job did not download (their count).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "retryButton": {
+    "message": "Reintentar los episodios que no se descargaron ($count$)",
+    "description": "Button: download the episodes that did not download again, one job per series.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
   "queueHeading": {
     "message": "En espera",
     "description": "Heading of the queue card."
@@ -260,6 +278,18 @@
   "jobSelection": {
     "message": "$count$ episodios de $name$",
     "description": "Queue label.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "name": {
+        "content": "$2"
+      }
+    }
+  },
+  "jobRetry": {
+    "message": "Reintento: $count$ de $name$",
+    "description": "Queue label of a retry.",
     "placeholders": {
       "count": {
         "content": "$1"
@@ -437,6 +467,15 @@
   "historyHeading": {
     "message": "Ejecuciones anteriores",
     "description": "Heading of the history card."
+  },
+  "historyFailed": {
+    "message": "No se descargaron: $episodes$",
+    "description": "History line: a past run's episodes that did not download (E02, E07; per series when the run had several).",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
   },
   "testHeading": {
     "message": "Modo de prueba",

@@ -18,7 +18,8 @@ Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
 `#download-available-button`, `#download-selected-button`, `#include-locked`, `#recheck`,
 `#app-status` (`data-state` idle|running, `data-finished` = finished jobs), `#test-settings`,
 `#test-settings-save`, `#test-settings-status`, `#cooldown-banner`, `#result-table`,
-`#report-lines`, `#batch-table`. Storage keys it reads: `history` (most recent run first),
+`#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`, `#failed-table`,
+`#retry-button`, `#history-list`. Storage keys it reads: `history` (most recent run first),
 `cooldown`, `series:<id>`, `pacing`. A cookie value is never printed, logged or asserted on.
 """
 

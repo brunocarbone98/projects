@@ -2,9 +2,11 @@
 /**
  * The DramaFetch tab: the text box (one link or id per line, the CLI's `--from-file` rules), the
  * episode list of one series (**Load list**), the jobs — one at a time, FIFO, the web job
- * manager's rules — and their progress, the cooldown banner, the settings, the history of the last
- * 20 runs, and (only in the test harness' copy) the test settings. The engine runs here while the
- * tab is open; one tab per browser holds it (a Web Lock), a second one stays read-only.
+ * manager's rules — and their progress (the episodes a job did not download shown apart from the
+ * ones that completed, with the button that queues them again), the cooldown banner, the settings,
+ * the history of the last 20 runs — each past run's failures retryable the same way —, and (only
+ * in the test harness' copy) the test settings. The engine runs here while the tab is open; one
+ * tab per browser holds it (a Web Lock), a second one stays read-only.
  */
 
 import { isLocked } from "../lib/catalog.js";
@@ -72,6 +74,18 @@ const ENGINE_LOCK = "dramafetch-engine";
  *
  * @typedef {object} JobRecord What a finished job leaves in the history.
  * @property {{kind: string, seconds: number, text: string}[]} pauses
+ *
+ * @typedef {object} FailedRow An episode of a finished job that did not download ({@link failedRows}).
+ * @property {string} seriesId
+ * @property {string | null} name the series' stored name, when the job learnt it
+ * @property {number} number
+ * @property {string} status a `failed-*` status
+ * @property {string} message
+ *
+ * @typedef {object} RetryTarget What a retry queues for one series ({@link retryTargets}).
+ * @property {string} seriesId
+ * @property {string | null} name the series' stored name, when the job learnt it
+ * @property {number[]} numbers the episodes that did not download, ascending, de-duplicated
  */
 
 const app = {
@@ -83,6 +97,8 @@ const app = {
   testSettings: {},
   /** @type {{series: Series, resolvedAt: number} | null} */
   loaded: null,
+  /** @type {RetryTarget[] | null} the last finished job's episodes that did not download (the progress card's retry button) */
+  failed: null,
   /** @type {Job[]} */
   queue: [],
   /** @type {Job | null} */
@@ -124,6 +140,19 @@ function shownText(text) {
 
 /** Keeps Chrome from discarding this tab while a job runs or waits (Memory Saver would end the run). */
 const keeper = new TabKeeper();
+
+/**
+ * The history's retry buttons as rendered last: `updateButtons` applies the download buttons' rule
+ * to them (no engine in this tab, a cooldown in force) and lifts it when the cooldown ends.
+ * @type {Set<HTMLButtonElement>}
+ */
+const historyRetryButtons = new Set();
+/**
+ * The retry buttons already clicked: disabled until the next job ends, when the progress card and
+ * the history are rendered again, their buttons new.
+ * @type {WeakSet<HTMLButtonElement>}
+ */
+const spentRetries = new WeakSet();
 
 // ------------------------------------------------------------------------ DOM helpers
 
@@ -183,6 +212,15 @@ function duration(seconds) {
   if (seconds === null || seconds <= 0) return "–";
   const whole = Math.round(seconds);
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/**
+ * `E01`: an episode number as the progress rows and the history show it.
+ * @param {number} number
+ * @returns {string}
+ */
+function episodeLabel(number) {
+  return `E${String(number).padStart(2, "0")}`;
 }
 
 // ------------------------------------------------------------------- effective options
@@ -397,7 +435,7 @@ function renderResult(result) {
     "tr",
     { attrs: { "data-key": key, "data-series-id": result.episode.seriesId, "data-number": String(result.episode.number), "data-status": result.status } },
     [
-      el("td", { text: `E${String(result.episode.number).padStart(2, "0")}` }),
+      el("td", { text: episodeLabel(result.episode.number) }),
       el("td", {}, [statusBadge(result.status, result.message)]),
       el("td", { className: "message", text: shownText(result.message) }),
     ],
@@ -443,9 +481,196 @@ function startProgress(job) {
   /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody")).textContent = "";
   $("report-lines").textContent = "";
   $("batch-table").hidden = true;
+  $("failed-block").hidden = true; // the last job's episodes that did not download; this job's come at its end
+  /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody")).textContent = "";
+  $("failed-heading").textContent = "";
+  app.failed = null;
   $("progress-activity").textContent = "";
   $("progress-current").textContent = job.label;
   clearPause();
+}
+
+// ------------------------------------------------- the episodes that did not download
+
+/**
+ * Whether a row's status is a failure: every `failed-*` status of `lib/messages.STATUSES` — the
+ * rows a stop left `stopped: …` keep one too. Done, skipped and dry-run rows are not.
+ * @param {unknown} status
+ * @returns {status is string}
+ */
+function isFailure(status) {
+  return typeof status === "string" && status.startsWith("failed");
+}
+
+/**
+ * The rows of a finished job's per-series records (`entry.series`, {@link runToHistory}) whose
+ * episode did not download: in the order of the series, each series' ascending, one per episode
+ * (the last row written for it). A record without rows — a failed resolve, a series the batch
+ * never started, a listing — contributes nothing. Stored data: anything malformed is skipped.
+ * @param {readonly unknown[]} seriesRecords
+ * @returns {FailedRow[]}
+ */
+function failedRows(seriesRecords) {
+  /** @type {Map<string, {name: string | null, rows: Map<number, FailedRow>}>} */
+  const bySeries = new Map();
+  for (const item of seriesRecords) {
+    if (item === null || typeof item !== "object") continue;
+    const record = /** @type {Record<string, unknown>} */ (item);
+    const seriesId = record["series_id"];
+    const stored = record["rows"];
+    if (typeof seriesId !== "string" || seriesId === "" || !Array.isArray(stored)) continue;
+    for (const raw of stored) {
+      if (raw === null || typeof raw !== "object") continue;
+      const row = /** @type {Record<string, unknown>} */ (raw);
+      const status = row["status"];
+      const number = row["number"];
+      if (!isFailure(status) || typeof number !== "number" || !Number.isInteger(number)) continue;
+      let series = bySeries.get(seriesId);
+      if (series === undefined) {
+        series = { name: typeof record["name"] === "string" && record["name"] !== "" ? record["name"] : null, rows: new Map() };
+        bySeries.set(seriesId, series);
+      }
+      series.rows.set(number, { seriesId, name: series.name, number, status, message: typeof row["message"] === "string" ? row["message"] : "" });
+    }
+  }
+  return [...bySeries.values()].flatMap((series) => [...series.rows.values()].sort((a, b) => a.number - b.number));
+}
+
+/**
+ * @param {readonly FailedRow[]} rows
+ * @returns {RetryTarget[]} one per series, in the rows' order
+ */
+function targetsOf(rows) {
+  /** @type {Map<string, RetryTarget>} */
+  const targets = new Map();
+  for (const row of rows) {
+    let target = targets.get(row.seriesId);
+    if (target === undefined) {
+      target = { seriesId: row.seriesId, name: row.name, numbers: [] };
+      targets.set(row.seriesId, target);
+    }
+    target.numbers.push(row.number);
+  }
+  return [...targets.values()];
+}
+
+/**
+ * What a retry queues for the records of a finished job: the series with at least one episode
+ * that did not download, in the order of the series, each with those episodes' numbers,
+ * ascending and de-duplicated. (Exported for the unit tests, which cannot run a job.)
+ * @param {readonly unknown[]} seriesRecords
+ * @returns {RetryTarget[]}
+ */
+export function retryTargets(seriesRecords) {
+  return targetsOf(failedRows(seriesRecords));
+}
+
+/**
+ * The jobs a retry queues: one selection job per series, in the order of the series, over exactly
+ * that series' episodes that did not download — what pasting the link and **Download selected**
+ * with those numbers does ({@link runSelectionJob}: the cooldown gate, the rest between jobs, a
+ * fresh resolve, then the downloads; an episode meanwhile on disk is skipped), the locked ones
+ * not asked for.
+ * @param {readonly RetryTarget[]} targets
+ * @returns {Omit<Job, "id">[]}
+ */
+export function retryJobs(targets) {
+  /** @type {Omit<Job, "id">[]} */
+  const jobs = [];
+  for (const target of targets) {
+    const seriesId = target.seriesId;
+    jobs.push({
+      kind: "selection",
+      label: t("jobRetry", [target.numbers.length, target.name ?? seriesId]),
+      refs: [{ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId }],
+      series: null,
+      numbers: [...target.numbers],
+      includeLocked: false,
+      recheck: false,
+    });
+  }
+  return jobs;
+}
+
+/**
+ * `E02, E07` (one series), or `<name>: E02, E07` series after series when `named`.
+ * @param {readonly RetryTarget[]} targets
+ * @param {boolean} named
+ * @returns {string}
+ */
+function failedEpisodesText(targets, named) {
+  return targets
+    .map((target) => {
+      const episodes = target.numbers.map(episodeLabel).join(", ");
+      return named ? `${target.name ?? target.seriesId}: ${episodes}` : episodes;
+    })
+    .join("; ");
+}
+
+/**
+ * Queue the retry of `targets` and spend `source`, the button that asked for it, until the next
+ * job ends (the progress card and the history are rendered again then, their buttons new). The
+ * gate of every download button holds: never from a read-only tab, never during a cooldown.
+ * @param {readonly RetryTarget[]} targets
+ * @param {HTMLButtonElement} source
+ */
+function startRetry(targets, source) {
+  if (!app.owner || app.cooldown !== null || spentRetries.has(source)) return;
+  source.disabled = true;
+  spentRetries.add(source);
+  for (const job of retryJobs(targets)) enqueue(job);
+}
+
+/**
+ * A past run's retry button: the progress card's text and behaviour, over that run's stored rows.
+ * @param {readonly RetryTarget[]} targets
+ * @returns {HTMLButtonElement}
+ */
+function historyRetryButton(targets) {
+  const count = targets.reduce((sum, target) => sum + target.numbers.length, 0);
+  const retry = /** @type {HTMLButtonElement} */ (el("button", { className: "retry", text: t("retryButton", [count]), attrs: { type: "button" } }));
+  retry.addEventListener("click", () => startRetry(targets, retry));
+  historyRetryButtons.add(retry);
+  return retry;
+}
+
+/**
+ * The job ended: its episodes that did not download, shown apart from the ones that completed.
+ * Every failure row — a `failed-*` status, the rows a stop left `stopped: …` included — leaves
+ * `#result-table` for `#failed-table`, under a heading with their count and the button that
+ * queues them again ({@link retryJobs}); the result table keeps what completed (done, skipped,
+ * dry run). Nothing failed, or nothing was downloaded (a listing, a job the cooldown refused):
+ * the block stays hidden. (Exported for the unit tests, which cannot run a job.)
+ * @param {readonly unknown[]} seriesRecords the job's per-series records ({@link runToHistory})
+ */
+export function renderFailed(seriesRecords) {
+  const rows = failedRows(seriesRecords);
+  const retry = button("retry-button");
+  const body = /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody"));
+  body.textContent = "";
+  spentRetries.delete(retry);
+  app.failed = rows.length > 0 ? targetsOf(rows) : null;
+  $("failed-block").hidden = rows.length === 0;
+  if (rows.length > 0) {
+    const leaving = new Set(rows.map((row) => `${row.seriesId}:${row.number}`));
+    const results = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
+    results.replaceChildren(
+      ...[...results.children].filter((row) => !leaving.has(`${row.getAttribute("data-series-id")}:${row.getAttribute("data-number")}`)),
+    );
+    for (const row of rows) {
+      body.append(
+        el("tr", { attrs: { "data-series-id": row.seriesId, "data-number": String(row.number), "data-status": row.status } }, [
+          el("td", { text: row.name ?? row.seriesId }),
+          el("td", { text: episodeLabel(row.number) }),
+          el("td", {}, [statusBadge(row.status, row.message)]),
+          el("td", { className: "message", text: shownText(row.message) }),
+        ]),
+      );
+    }
+    $("failed-heading").textContent = t("failedHeading", [rows.length]);
+    retry.textContent = t("retryButton", [rows.length]);
+  }
+  updateButtons();
 }
 
 // ------------------------------------------------------------------------ the job queue
@@ -621,6 +846,7 @@ async function runJob(job) {
     else if (stop !== null) await cancelQueue(`not started: batch stopped in ${job.label} (${stop})`);
     await appendHistory(entry);
     $("progress-activity").textContent = "";
+    renderFailed(Array.isArray(entry["series"]) ? entry["series"] : []); // what did not download, apart, with its retry
   }
 }
 
@@ -782,6 +1008,10 @@ function updateButtons() {
   const available = loaded ? app.loaded?.series.episodes.some((episode) => !isLocked(episode)) : false;
   button("download-available-button").disabled = blocked || !available;
   button("download-selected-button").disabled = blocked || !episodeBoxes().some((box) => box.checked);
+  // the retry buttons: the same rule, and a clicked one stays disabled until the next job ends
+  const retry = button("retry-button");
+  retry.disabled = blocked || app.failed === null || spentRetries.has(retry);
+  for (const historyButton of historyRetryButtons) historyButton.disabled = blocked || spentRetries.has(historyButton);
 }
 
 /**
@@ -968,9 +1198,11 @@ async function onResetSettings() {
 // ---------------------------------------------------------------------------- history
 
 async function renderHistory() {
+  const entries = await readHistory();
   const list = $("history-list");
   list.textContent = "";
-  for (const entry of await readHistory()) {
+  historyRetryButtons.clear();
+  for (const entry of entries) {
     const finished = typeof entry["finished_at"] === "string" ? new Date(entry["finished_at"]).toLocaleString() : "";
     const item = el("li", {}, [el("strong", { text: `${finished} — ${String(entry["label"] ?? "")}` })]);
     if (typeof entry["error"] === "string") item.append(el("div", { className: "meta", text: shownText(entry["error"]) }));
@@ -986,8 +1218,16 @@ async function renderHistory() {
       else line = "";
       item.append(el("div", { text: `${String(record["name"] ?? record["series_id"] ?? "")}: ${line}` }));
     }
+    // the episodes that did not download, and the button that queues them again (one selection job
+    // per series): a run from yesterday can be retried too
+    const targets = retryTargets(series);
+    if (targets.length > 0) {
+      const episodes = failedEpisodesText(targets, series.length > 1);
+      item.append(el("div", { className: "retry-line" }, [el("span", { text: t("historyFailed", [episodes]) }), " ", historyRetryButton(targets)]));
+    }
     list.append(item);
   }
+  updateButtons();
 }
 
 // ---------------------------------------------------------------------------- test mode
@@ -1075,6 +1315,9 @@ async function main() {
   button("download-available-button").addEventListener("click", onDownloadAvailable);
   button("download-selected-button").addEventListener("click", onDownloadSelected);
   button("stop-button").addEventListener("click", onStop);
+  button("retry-button").addEventListener("click", () => {
+    if (app.failed !== null) startRetry(app.failed, button("retry-button"));
+  });
   input("select-all").addEventListener("change", () => {
     for (const box of episodeBoxes()) box.checked = input("select-all").checked;
     updateSelection();
