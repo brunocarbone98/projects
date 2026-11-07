@@ -72,12 +72,14 @@ def _node_installed(tools: Tools) -> None:
 SERIES_ID = "7699393770256782354"
 SECOND_SERIES_ID = "7699393770256782399"
 PAID_SERIES_ID = "7699393770256782388"
+LIMITED_FREE_SERIES_ID = "7699393770256782366"
 FIXTURE_PAGES = (
     ("item_list_page1.json", SERIES_ID),
     ("item_list_page2.json", SERIES_ID),
     ("item_list_series2.json", SECOND_SERIES_ID),
     ("item_list_series3_logged_in.json", PAID_SERIES_ID),
     ("item_list_series3_logged_out.json", PAID_SERIES_ID),
+    ("item_list_series4_limited_free.json", LIMITED_FREE_SERIES_ID),
 )
 #: How many generated items the access fuzz corpus holds (the spec asks for at least 2,000).
 FUZZ_ITEMS = 3000
@@ -317,11 +319,14 @@ FUZZ_KEYS = (
     "needUnlock",
     "needBuy",
     "needPurchase",
+    "paywall",
+    # no clue since 2026-11-06 (set on fully served episodes of a free series with conditions)
     "preview",
     "isPreview",
+    "IsPreview",
+    "PreviewType",
     "trial",
     "isTrial",
-    "paywall",
     "showPaywall",
     "lockStatus",
     "lock_status",
@@ -336,10 +341,14 @@ FUZZ_KEYS = (
     "pay_status",
     "purchaseStatus",
     "purchase_status",
-    # pricing
+    # pricing — and FREE (truthy), minus the intro teaser flag, which says nothing
     "isFree",
     "free",
     "freeEpisode",
+    "isLimitedFree",
+    "limitedFree",
+    "IsFreeIntro",
+    "is_free_intro",
     "unlockPrice",
     "price",
     "coin",
@@ -537,6 +546,13 @@ def fuzz_container(rng: random.Random, depth: int) -> Any:
     return [fuzz_container(rng, depth + 1) for _ in range(rng.randint(0, 3))]
 
 
+#: ``catalog.MAX_EXACT_INT`` (2**53 - 1, kept by both front ends) and the junk above it: 2**53 and,
+#: as digit strings — a Python int JavaScript cannot hold exactly would not survive the JSON round
+#: trip of the raw items —, 41 digits and 400 digits (``Infinity`` once ``Number`` parses them);
+#: ``tests/test_catalog.py`` covers the int forms (``10**40``, ``int("1" * 400)``).
+HUGE_INTS: list[Any] = [2**53 - 1, 2**53, str(10**40), "1" * 400]
+
+
 def fuzz_rendition(rng: random.Random) -> Any:
     if rng.random() < 0.05:
         return rng.choice(["x", None, 3, []])
@@ -552,6 +568,23 @@ def fuzz_rendition(rng: random.Random) -> Any:
     roll = rng.random()
     if roll < 0.7:
         entry["PlayAddr"] = {"UrlList": [rng.choice(PLAY_URLS) for _ in range(rng.randint(0, 3))]}
+        if rng.random() < 0.6:
+            entry["PlayAddr"]["DataSize"] = rng.choice(
+                [
+                    9676471,
+                    4609304,
+                    "9676471",
+                    "4609304",
+                    131072,
+                    0,
+                    -1,
+                    2.5,
+                    True,
+                    None,
+                    "x",
+                    *HUGE_INTS,
+                ]
+            )
     elif roll < 0.8:
         entry["PlayAddr"] = rng.choice(PLAY_URLS)
     elif roll < 0.85:
@@ -585,13 +618,55 @@ def fuzz_video(rng: random.Random, *, clues: bool = True) -> Any:
         video["ratio"] = rng.choice(RATIOS)
     if rng.random() < 0.6:
         video["duration"] = rng.choice(
-            [3, 92, -1, 0, "3", " 88 ", "\u0663", "\u00b2", 2.5, None, True]
+            [
+                3,
+                92,
+                106,
+                106,
+                135,
+                -1,
+                0,
+                "3",
+                " 88 ",
+                "106",
+                "\u0663",
+                "\u00b2",
+                2.5,
+                None,
+                *HUGE_INTS,
+            ]
+        )
+    if rng.random() < 0.5:
+        video["size"] = rng.choice(
+            [9676471, 131072, "9676471", " 4609304 ", 0, -1, 2.5, True, None, "x", *HUGE_INTS]
         )
     if rng.random() < 0.5:
         video[rng.choice(["originCover", "cover", "dynamicCover"])] = rng.choice(COVERS)
     for _ in range(rng.randint(0, 3) if clues else 0):
         video[rng.choice(FUZZ_KEYS)] = fuzz_scalar(rng)
     return video
+
+
+def fuzz_music(rng: random.Random) -> Any:
+    """The item's ``music`` block (the SHORT-HEADER rule reads ``duration`` and ``original``):
+    durations that are ints, floats, strings or None, ``original`` a bool, an int or missing."""
+    if rng.random() < 0.1:
+        return rng.choice([None, "x", [], 5, {}])
+    music: dict[str, Any] = {"id": "7699400000000000501"}
+    if rng.random() < 0.9:
+        music["duration"] = rng.choice(
+            [69, 70, 71, 77, 3, 2, 92, 106, 69.0, 69.5, 2.5, 0, -1, "69", " 69 ", "x", None, True]
+        )
+    if rng.random() < 0.5:
+        music["shoot_duration"] = rng.choice([69, 3, "69", None])
+    roll = rng.random()
+    if roll < 0.6:
+        music["original"] = rng.choice([True, False, True])
+    elif roll < 0.85:
+        music["original"] = rng.choice([1, 0, "true", "false", None])
+    if rng.random() < 0.1:
+        music[rng.choice(FUZZ_KEYS)] = fuzz_scalar(rng)  # never scanned: not a clue
+    return music
 
 
 def fuzz_item(rng: random.Random) -> dict[str, Any]:
@@ -619,6 +694,11 @@ def fuzz_item(rng: random.Random) -> dict[str, Any]:
             drama["dramaName"] = rng.choice(["Love Story", "  ", None, "\u00dc name", 7])
         for _ in range(0 if clean else rng.randint(0, 4)):
             drama[rng.choice(FUZZ_KEYS)] = fuzz_container(rng, 1)
+        if (
+            not clean and rng.random() < 0.12
+        ):  # the real shape: free with conditions, sold otherwise
+            drama["isLimitedFree"] = rng.choice([True, 1, "true", True])
+            drama[rng.choice(["unlockPrice", "coinPrice", "isPaid"])] = rng.choice([30, 10, "30"])
         if not clean and rng.random() < 0.3:
             drama["DramaVideoData"].update(
                 {rng.choice(FUZZ_KEYS): fuzz_scalar(rng) for _ in range(rng.randint(1, 3))}
@@ -626,6 +706,8 @@ def fuzz_item(rng: random.Random) -> dict[str, Any]:
         item["dramaInfo"] = drama if rng.random() < 0.95 else rng.choice(["x", [drama], None])
     if rng.random() < 0.9:
         item["video"] = fuzz_video(rng, clues=not clean)
+    if rng.random() < 0.6:
+        item["music"] = fuzz_music(rng)
     if rng.random() < 0.3:
         item["desc"] = rng.choice(["Episode desc", "  ", "", None, "\u00e9t\u00e9 | Ep 2"])
     if rng.random() < 0.2:
@@ -699,6 +781,9 @@ def test_the_shared_texts_and_constants_are_the_python_ones() -> None:
         "messages.OK_STATUSES": sorted(status.value for status in DownloadStatus if status.ok),
         "catalog.MAX_DEPTH": catalog.MAX_DEPTH,
         "catalog.NO_PLAY_ADDRESS": catalog.NO_PLAY_ADDRESS,
+        "catalog.SHORT_HEADER_HINT_PREFIX": catalog.SHORT_HEADER_HINT_PREFIX,
+        "messages.SHORT_SERVED_PREFIX": models.SHORT_SERVED_PREFIX,
+        "messages.SHORT_MARK": models.SHORT_MARK,
         "catalog.UNKNOWN_CODEC": catalog.UNKNOWN_CODEC,
         "catalog.UNKNOWN_HEIGHT": catalog.UNKNOWN_HEIGHT,
         "catalog.VIDEO_ONLY_PATH_SUFFIX": catalog.VIDEO_ONLY_PATH_SUFFIX,
@@ -754,7 +839,7 @@ def js_access(value: dict[str, Any]) -> tuple[str, bool, bool, list[str]]:
 
 def test_access_of_matches_on_every_fixture_item() -> None:
     items = fixture_items()
-    assert len(items) == 38  # 19 items in the five fixture pages, as served and wrapped
+    assert len(items) == 44  # 22 items in the six fixture pages, as served and wrapped
     values = js_values([call("catalog.accessOf", item) for item in items])
     assert_same(
         [
@@ -780,7 +865,7 @@ def test_access_of_matches_on_a_seeded_fuzz_corpus_that_covers_every_clue_class(
     for item in corpus:
         for kind in clue_classes(item):
             classes[kind] = classes.get(kind, 0) + 1
-    for kind in ("drm", "entitled", "not-entitled", "viewer-lock", "ambiguous", "pricing"):
+    for kind in ("drm", "entitled", "not-entitled", "viewer-lock", "ambiguous", "pricing", "free"):
         assert classes.get(kind, 0) >= 25, (kind, classes)
     decisions = [python_access(item) for item in corpus]
     assert {access for access, _, _, _ in decisions} == {"free", "unlocked", "locked"}
@@ -788,6 +873,28 @@ def test_access_of_matches_on_a_seeded_fuzz_corpus_that_covers_every_clue_class(
     assert sum(1 for access, paid, _, _ in decisions if access == "unlocked" and paid) >= 25
     assert sum(1 for access, paid, _, _ in decisions if access == "locked" and paid) >= 25
     assert sum(1 for *_, hints in decisions if catalog.NO_PLAY_ADDRESS in hints) >= 25
+    windows = [
+        hint
+        for *_, hints in decisions
+        for hint in hints
+        if hint.startswith(catalog.SHORT_HEADER_HINT_PREFIX)
+    ]
+    assert len(windows) >= 25 and any("." in hint for hint in windows)  # ints and floats
+    assert sum(1 for access, paid, _, hints in decisions if access == "free" and paid) >= 20
+    assert sum(1 for *_, hints in decisions if "isLimitedFree=True" in hints) >= 10
+
+
+def test_listed_sizes_matches_on_every_fixture_item_and_on_the_fuzz_corpus() -> None:
+    items = [*fixture_items(), *fuzz_corpus()]
+    values = js_values([call("catalog.listedSizes", item) for item in items])
+    assert_same(
+        [
+            (index, list(catalog.listed_sizes(item)), value)
+            for index, (item, value) in enumerate(zip(items, values, strict=True))
+        ]
+    )
+    assert sum(1 for item in items if catalog.listed_sizes(item)) >= 100
+    assert sum(1 for item in items if len(catalog.listed_sizes(item)) >= 2) >= 25
 
 
 #: The spec's DRM key lists (the same as tests/test_catalog.py): "must be DRM" ...

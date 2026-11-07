@@ -3,7 +3,9 @@ TikTok's CDN inside one browser session (`pytest -m integration`; skipped withou
 the integrity checks against it: a transfer cut short, a video far shorter than announced, the
 quality modes, the cooldown a rate limit starts and the CLI's refusal under it; the paid third
 series with and without the session cookie (what THIS account unlocked downloads, what it did not
-is never requested), an encrypted episode refused and remembered, and a batch of all three."""
+is never requested), an encrypted episode refused and remembered, a batch of all three, and the
+fourth series, free with conditions: its short header read from the list alone, and a short-served
+file named for what it is."""
 
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from mutagen.mp4 import MP4
 
 from dramafetch import cli, engine
 from dramafetch.catalog import (
+    SHORT_HEADER_HINT_PREFIX,
     choose_rendition,
     merge_episodes,
     parse_item_list_payload,
@@ -31,11 +34,23 @@ from dramafetch.downloader import existing_episode_file
 from dramafetch.downloader_browser import BrowserDownloader
 from dramafetch.manifest import read_manifest
 from dramafetch.media import INCOMPLETE_PREFIX, drm_problem_in
-from dramafetch.models import DRM_MARK, DRM_MESSAGE, DownloadOptions, DownloadStatus, Series
+from dramafetch.models import (
+    DRM_MARK,
+    DRM_MESSAGE,
+    RECHECK_HINT_TAIL,
+    SHORT_MARK,
+    SHORT_SERVED_PREFIX,
+    DownloadOptions,
+    DownloadStatus,
+    Series,
+)
 from dramafetch.thumbnails import EMBED_SUFFIX, cover_sidecar, extract_cover
 
 from .fake_tiktok import (
     COVER_MIN_SIZE,
+    FOURTH_ITEMS,
+    FOURTH_SERIES_ID,
+    FOURTH_SERIES_NAME,
     JPEG_EOI,
     JPEG_SOI,
     MEDIA_SIZE,
@@ -44,6 +59,7 @@ from .fake_tiktok import (
     SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
+    SHORT_HEADER_LISTED_DURATION_S,
     THIRD_ITEMS,
     THIRD_SERIES_ID,
     THIRD_SERIES_NAME,
@@ -52,6 +68,7 @@ from .fake_tiktok import (
     cover_bytes,
     drm_media_bytes,
     media_bytes,
+    short_header_media_bytes,
 )
 
 CHROMIUM = Path(os.environ.get("DRAMAFETCH_CHROMIUM") or "/opt/pw-browsers/chromium")
@@ -445,7 +462,7 @@ def test_a_video_far_shorter_than_announced_is_quarantined_and_a_rerun_tries_aga
     tmp_path: Path,
 ) -> None:
     """`short_media`: the list says episode 1 lasts 92 s (the fixture's value) while the CDN serves
-    the 3-second file — a locked episode served as a preview looks exactly like this. The file is
+    the 3-second file — far shorter than the episode, its size unlisted. The file is
     kept as `… (incomplete).mp4` untouched (no cover embedded, none requested), the episode is
     FAILED with the reason, and a rerun does not take the quarantined file for the episode."""
     with FakeTikTok(short_media=True) as server:
@@ -963,3 +980,142 @@ def test_a_cli_batch_of_all_three_series_with_the_session_then_costs_nothing(
     assert _table_statuses(second_run.out) == ["skipped (complete)"] * 3
     assert "resting" not in second_run.err
     assert batch_sleeps == [1.0, 1.0]  # nothing more
+
+
+# ------------------------------------------- the free series with conditions, the short header
+
+FOURTH_FOLDER = f"{FOURTH_SERIES_NAME} [{FOURTH_SERIES_ID}]"
+#: What the fourth series' list alone says of episode 3 (`music.duration` 2 of a `video.duration`
+#: of 3): the SHORT-HEADER hint, no request made.
+WINDOW_HINT = f"{SHORT_HEADER_HINT_PREFIX}2 s of 3 s"
+
+
+def _fourth_name(number: int, mark: str | None = None) -> str:
+    """`Limited Free Drama - Episode 03.mp4`, or the quarantined `… 03 (short).mp4`."""
+    suffix = "" if mark is None else f" ({mark})"
+    return f"{FOURTH_SERIES_NAME} - Episode {number:02d}{suffix}.mp4"
+
+
+def _info_argv(server: FakeTikTok, out: Path) -> list[str]:
+    """`info` of the fourth series with the browser strategy against the fake."""
+    return [
+        "info",
+        FOURTH_SERIES_ID,
+        "--strategy",
+        "browser",
+        "--base-url",
+        server.base_url,
+        "--browser-path",
+        str(CHROMIUM),
+        "--page-count",
+        "10",
+        "--page-delay",
+        "0",
+        "--out",
+        str(out),
+    ]
+
+
+def test_a_free_series_with_conditions_is_free_and_a_short_served_file_is_named_never_altered(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fourth series, modeled on the owner's real payload of 2026-11-06: `isLimitedFree`
+    makes it free, `IsFreeIntro: false` / `IsPreview` / `PreviewType` say nothing, and episode 3's
+    `music.duration` (2 s of its 3 s) gives its short header away in the list itself. `info`
+    shows episodes 1-2 `free` and 3 `locked: plays 2 s of 3 s`; a download saves 1-2
+    (one media and one cover request each) and skips 3 without a request — the series is
+    complete, 1 locked. Then, with `--include-locked` and the CDN serving episode 3 as TikTok
+    served the owner's 7 (the WHOLE file by size, a header that plays 2 s of the 10 s the list
+    now announces): one request, `failed-unavailable` with the short-served message, the file
+    kept untouched as `… - Episode 03 (short).mp4`, no cover requested, the manifest remembering
+    nothing of it (the next list decides)."""
+    out = tmp_path / "out"
+    folder = out / FOURTH_FOLDER
+    with FakeTikTok() as server:
+        assert cli.main(_info_argv(server, out)) == 0
+        info = capsys.readouterr().out
+        assert cli.main(_download_argv(server, out, FOURTH_SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        media = _media_paths(server.requests)
+        requests = server.series_requests(FOURTH_SERIES_ID)
+
+    info_lines = info.splitlines()
+    assert info_lines[0] == (
+        f"Series: {FOURTH_SERIES_NAME} [{FOURTH_SERIES_ID}] — 3 episodes listed "
+        "(TikTok announces 3)"
+    )
+    status_of = {
+        int(line.split()[0]): line.split("  ")[-1]
+        for line in info_lines
+        if line.startswith(("   1  ", "   2  ", "   3  "))
+    }
+    assert status_of == {1: "free", 2: "free", 3: f"locked: {WINDOW_HINT}"}
+
+    lines = captured.out.splitlines()
+    for number, item in enumerate(FOURTH_ITEMS[:2], start=1):
+        name = _fourth_name(number)
+        _assert_video_file(folder / name, name, item, embedded=True)
+        assert _row(number, "done", f"{folder / name} + cover embedded") in lines
+    assert _row(3, "skipped-locked", f"looks locked: {WINDOW_HINT}") in lines
+    assert "complete: 2 of 3 (2 downloaded) — 1 locked (3)" in lines
+    assert media == [
+        path for item in FOURTH_ITEMS[:2] for path in (f"/cdn/{item}/0.mp4", f"/cover/{item}.jpg")
+    ]
+    assert not [r.path for r in requests if FOURTH_ITEMS[2] in r.path]  # episode 3: never asked
+    assert sorted(p.name for p in folder.iterdir()) == [
+        _fourth_name(1),
+        _fourth_name(2),
+        "dramafetch.json",
+    ]
+
+    third = FOURTH_ITEMS[2]
+    with FakeTikTok(short_header_media=frozenset({(FOURTH_SERIES_ID, 3)})) as server:
+        before = len(server.requests)
+        code = cli.main([*_download_argv(server, out, FOURTH_SERIES_ID), "--include-locked"])
+        captured = capsys.readouterr()
+        after = server.requests[before:]
+        before = len(server.requests)
+        assert cli.main(_download_argv(server, out, FOURTH_SERIES_ID)) == 0  # the next run
+        next_run = capsys.readouterr()
+        next_requests = server.requests[before:]
+
+    assert code == 2  # a failed episode
+    kept_name = _fourth_name(3, SHORT_MARK)
+    served = (
+        f"{SHORT_SERVED_PREFIX}the whole file came ({MEDIA_SIZE} bytes, as listed) but it "
+        f"plays 2 s of {SHORT_HEADER_LISTED_DURATION_S} s — if the TikTok app plays it whole, "
+        f"watch it there, then {RECHECK_HINT_TAIL}; if the app breaks at the same point, the "
+        "episode is defective on TikTok's side and no retry changes it"
+    )
+    lines = captured.out.splitlines()
+    assert _row(3, "failed-unavailable", f"{served} (kept as {kept_name})") in lines
+    for number in (1, 2):
+        assert _row(number, "skipped-exists", str(folder / _fourth_name(number))) in lines
+    assert "incomplete: 2 of 3 — 1 failed (3)" in lines
+    assert _media_paths(after) == [f"/cdn/{third}/0.mp4"]  # once; no cover for a short file
+    kept = folder / kept_name
+    assert kept.read_bytes() == short_header_media_bytes(
+        third, "0"
+    )  # as the CDN sent it, untouched
+    assert len(kept.read_bytes()) == MEDIA_SIZE
+    assert abs(MP4(kept).info.length - 2.0) < 0.2  # the header still says 2 s: never rewritten
+    assert extract_cover(kept) is None
+    assert sorted(p.name for p in folder.iterdir()) == [
+        _fourth_name(1),
+        _fourth_name(2),
+        kept_name,
+        "dramafetch.json",
+    ]
+
+    # no verdict remembered (the manifest keeps the row, as for any failure, never a DRM-like
+    # verdict): the next run lists the series again and the list's own short header locks
+    # episode 3 before any request — the owner watches it in the app, then `--recheck`
+    manifest = read_manifest(folder, FOURTH_SERIES_ID)
+    assert manifest is not None and not manifest.drm_protected(3)
+    assert manifest.entries[3].status == "skipped-locked" and manifest.complete_episodes == 2
+    again = next_run.out.splitlines()
+    assert any(r.path == "/api/drama/episode/item_list/" for r in next_requests)
+    window = f"{SHORT_HEADER_HINT_PREFIX}2 s of {SHORT_HEADER_LISTED_DURATION_S} s"
+    assert _row(3, "skipped-locked", f"looks locked: {window}") in again
+    assert "complete: 2 of 3 (2 already on disk) — 1 locked (3)" in again
+    assert _media_paths(next_requests) == []

@@ -6,4 +6,4 @@ series into its episode list (TikTok's web app does this through `/api/drama/epi
 episode to yt-dlp, `manifest` makes runs resumable, `cli` and `web` are the two front ends.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

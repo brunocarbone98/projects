@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 from dramafetch.catalog import (
+    MAX_EXACT_INT,
     NO_PLAY_ADDRESS,
+    SHORT_HEADER_HINT_PREFIX,
+    SHORT_HEADER_MIN_GAP_S,
+    SHORT_HEADER_RATIO,
     VIDEO_ONLY_PATH_SUFFIX,
     PagePayload,
     Rendition,
@@ -25,6 +29,7 @@ from dramafetch.catalog import (
     is_drm_key,
     is_video_only_url,
     key_words,
+    listed_sizes,
     lock_hints,
     merge_episodes,
     ordered_renditions,
@@ -184,8 +189,7 @@ def test_lock_hints_are_recursive_in_drama_info_shallow_in_video_and_ordered():
         "isLocked=True",
         "unlockPrice=30",
         "needPay=1",
-        "previewUrl=x",
-        "no play address",
+        "no play address",  # `previewUrl` in video: `preview` is no lock word since 2026-11-06
     )
     assert lock_hints(item) == lock_hints(copy.deepcopy(item))
 
@@ -808,6 +812,222 @@ def test_the_third_series_without_the_session_locks_the_paid_episode():
     assert catalog_warnings(episodes, 4) == ["2 episodes look locked"]
 
 
+LIMITED_FREE_SERIES_ID = "7699393770256782366"
+
+
+def _limited_free_page():
+    text = (FIXTURES / "item_list_series4_limited_free.json").read_text(encoding="utf-8")
+    return parse_item_list_payload(json.loads(text), LIMITED_FREE_SERIES_ID)
+
+
+def _music(duration, original=True, **more):
+    music = {"id": "7699400000000000501", "title": "original sound", "duration": duration, **more}
+    if original is not None:
+        music["original"] = original
+    return music
+
+
+def test_the_limited_free_series_as_the_owner_s_real_payload_reads(item_list_pages):
+    """The fixture is modeled on the real run of 2026-11-06: `isLimitedFree: true` on every item,
+    `IsFreeIntro: false`, `IsPreview` / `PreviewType` on fully served episodes — no clue, no hint —
+    and, on episode 3, a `music.duration` far shorter than `video.duration`: the short header
+    the list alone gives away, locked before any request."""
+    page = _limited_free_page()
+    assert (page.seen_items, page.skipped_items, page.has_more) == (3, 0, False)
+    episodes = page.episodes
+    assert [e.number for e in episodes] == [1, 2, 3]
+    assert [e.access for e in episodes] == ["free", "free", "locked"]
+    assert [e.paid for e in episodes] == [False, False, False]
+    assert not any(e.drm for e in episodes)
+    assert episodes[0].lock_hints == () and episodes[1].lock_hints == ()
+    assert episodes[2].lock_hints == (f"{SHORT_HEADER_HINT_PREFIX}2 s of 3 s",)
+    assert episodes[2].lock_hints == ("plays 2 s of 3 s",)
+    assert [e.duration_s for e in episodes] == [3, 3, 3]
+    assert [e.quality_hint for e in episodes] == ["540p h264"] * 3
+    assert all(play_url_candidates(e.raw) for e in episodes)  # every episode has play URLs
+    assert [e.series_name for e in episodes] == ["Limited Free Drama"] * 3
+    assert catalog_warnings(episodes, 3) == ["1 episode looks locked"]
+    # the raw items keep the fields that gave no clue, for diagnosis
+    data = episodes[0].raw["dramaInfo"]["DramaVideoData"]
+    assert (data["IsFreeIntro"], data["IsPreview"], data["PreviewType"]) == (False, True, 4)
+    assert episodes[0].raw["dramaInfo"]["isLimitedFree"] is True
+    # and the sizes the engines compare a saved file against
+    assert listed_sizes(episodes[0].raw) == (129700, 272300)
+    assert listed_sizes(episodes[2].raw) == (130800, 274400)
+
+
+@pytest.mark.parametrize(
+    ("item", "expected", "hints"),
+    [
+        # IsFreeIntro ("is this the free intro teaser") gives no clue, whatever its value
+        (_item({"IsFreeIntro": False}), ("free", False, False), ()),
+        (_item({"IsFreeIntro": True}), ("free", False, False), ()),
+        (_item({"is_free_intro": False, "unlockPrice": 30}), ("unlocked", True, False), None),
+        # a truthy free key is FREE: it beats a price (a sold series the payload calls free is free)
+        # and its hint is listed next to the price it beats
+        (
+            _item({"isLimitedFree": True, "unlockPrice": 30}),
+            ("free", True, False),
+            ("isLimitedFree=True", "unlockPrice=30"),
+        ),
+        (_item({"isFree": False, "isLimitedFree": True}), ("free", True, False), None),
+        (_item({"limitedFree": 1}), ("free", False, False), ()),
+        (_item(None, isLimitedFree="true"), ("free", False, False), ()),
+        # ... alone, a free flag says nothing about a price or a lock: no hint (as `isFree: true`)
+        (_item({"isLimitedFree": True}), ("free", False, False), ()),
+        # IsPreview / PreviewType / isTrial: no clue, no hint
+        (_item({"isPreview": True}), ("free", False, False), ()),
+        (_item({"IsPreview": False, "PreviewType": 1}), ("free", False, False), ()),
+        (_item({"isTrial": True, "trial": 1}), ("free", False, False), ()),
+        # a DRM negation is not a free flag either
+        (_item({"isDrmFree": True, "unlockPrice": 30}), ("unlocked", True, False), None),
+        # FREE does not beat a lock, a missing play address, an entitlement or DRM
+        (_item({"isLimitedFree": True, "isLocked": True}), ("locked", False, False), None),
+        (_item({"isLimitedFree": True}, video={}), ("locked", False, False), None),
+        (_item({"isLimitedFree": True, "isUnlocked": True}), ("unlocked", True, False), None),
+        (_item({"isLimitedFree": True, "drmType": "cenc"}), ("locked", False, True), None),
+    ],
+)
+def test_free_keys_intro_and_preview_flags(item, expected, hints):
+    access, paid, drm, found = access_of(item)
+    assert (access, paid, drm) == expected
+    if hints is not None:
+        assert found == hints
+
+
+def _windowed(video_duration, music_duration, original=True, **drama):
+    """An item with a play URL, `video.duration` and a `music` block."""
+    item = _item(drama or None, video={**PLAYABLE, "duration": video_duration})
+    item["music"] = _music(music_duration, original)
+    return item
+
+
+def test_the_short_header_rule_locks_before_any_request():
+    """The real tell (2026-11-06): `music.duration` (the episode's own sound) far shorter than
+    `video.duration` — 69 s of 106 s — on an item TikTok serves short."""
+    assert (SHORT_HEADER_RATIO, SHORT_HEADER_MIN_GAP_S) == (0.85, 1)
+    assert SHORT_HEADER_HINT_PREFIX == "plays "
+    assert access_of(_windowed(106, 69)) == (
+        "locked",
+        False,
+        False,
+        ("plays 69 s of 106 s",),
+    )
+    # the hint prints numbers like Python's str(): an int as it is, a float as it is
+    assert access_of(_windowed(106, 69.5))[3] == ("plays 69.5 s of 106 s",)
+    assert access_of(_windowed("106", 69))[3] == ("plays 69 s of 106 s",)  # digits
+    # a whole float prints as an int: the extension cannot tell 69.0 from 69 after JSON.parse
+    assert access_of(_windowed(106, 69.0))[3] == ("plays 69 s of 106 s",)
+    # `video.duration` is read up to MAX_EXACT_INT; a longer number is junk, never an OverflowError
+    assert access_of(_windowed(2**53 - 1, 69))[3] == (f"plays 69 s of {2**53 - 1} s",)
+    assert access_of(_windowed(2**53, 69)) == ("free", False, False, ())
+    assert access_of(_windowed(int("1" * 400), 69)) == ("free", False, False, ())
+    assert access_of(_windowed("1" * 400, 69)) == ("free", False, False, ())
+    assert access_of(_windowed(106, 10**400))[0] == "free"  # a huge sound: longer than the video
+    # the boundary: at most 85 % and at least 1 s shorter
+    assert access_of(_windowed(100, 85))[0] == "locked"
+    assert access_of(_windowed(100, 85.5))[0] == "free"
+    assert access_of(_windowed(3, 2))[0] == "locked"  # the fixture's E03: 2 of 3
+    assert access_of(_windowed(3, 2.5))[0] == "free"  # not 1 s apart
+    assert access_of(_windowed(1, 0.5))[0] == "free"
+    assert access_of(_windowed(69, 69)) == ("free", False, False, ())  # a full episode
+    # without `music.original` truthy, or without either duration, the rule never fires
+    assert access_of(_windowed(106, 69, original=False)) == ("free", False, False, ())
+    assert access_of(_windowed(106, 69, original=None)) == ("free", False, False, ())
+    assert access_of(_windowed(106, 69, original=0))[0] == "free"
+    assert access_of(_windowed(106, 69, original="false"))[0] == "free"
+    assert access_of(_windowed(106, "69"))[0] == "free"  # music.duration must be a number
+    assert access_of(_windowed(106, None))[0] == "free"
+    assert access_of(_windowed(106, True))[0] == "free"
+    assert access_of(_windowed(106, 0))[0] == "free"
+    assert access_of(_windowed(None, 69))[0] == "free"
+    assert access_of(_windowed(0, 69))[0] == "free"
+    assert access_of(_windowed(2.5, 1))[0] == "free"  # video.duration must be a whole number
+    no_music = _item(None, video={**PLAYABLE, "duration": 106})
+    assert access_of(no_music) == ("free", False, False, ())
+    no_music["music"] = "x"
+    assert access_of(no_music) == ("free", False, False, ())
+    # the item may be wrapped in itemStruct
+    wrapped = {"itemStruct": _windowed(106, 69)}
+    assert access_of(wrapped)[0] == "locked" and access_of(wrapped)[3][0].startswith("plays")
+
+
+def test_the_short_header_rule_in_the_decision_order():
+    # an entitlement beats a short header (the account is entitled; the downloader finds out)
+    assert access_of(_windowed(106, 69, isUnlocked=True)) == (
+        "unlocked",
+        True,
+        False,
+        ("isUnlocked=True", "plays 69 s of 106 s"),
+    )
+    # DRM beats everything
+    assert access_of(_windowed(106, 69, drmType="widevine"))[:3] == ("locked", False, True)
+    # a short header beats FREE and PRICING-with-a-play-URL
+    assert access_of(_windowed(106, 69, isLimitedFree=True))[0] == "locked"
+    assert access_of(_windowed(106, 69, isFree=False, unlockPrice=30)) == (
+        "locked",
+        True,
+        False,
+        ("isFree=false", "unlockPrice=30", "plays 69 s of 106 s"),
+    )
+    # the window hint comes before NO_PLAY_ADDRESS
+    item = _windowed(106, 69)
+    item["video"] = {"duration": 106}
+    assert access_of(item)[3] == ("plays 69 s of 106 s", NO_PLAY_ADDRESS)
+    # the real items of 2026-11-06, reduced to their fields: fully served and windowed
+    served = _windowed(69, 69, isLimitedFree=True)
+    served["dramaInfo"]["DramaVideoData"].update(
+        {"IsFreeIntro": False, "IsHighlight": False, "IsPreview": True, "PreviewType": 4}
+    )
+    assert access_of(served) == ("free", False, False, ())
+    windowed = _windowed(106, 69, isLimitedFree=True)
+    windowed["dramaInfo"]["DramaVideoData"].update({"IsFreeIntro": False, "PreviewType": 1})
+    assert access_of(windowed) == ("locked", False, False, ("plays 69 s of 106 s",))
+
+
+def test_listed_sizes_reads_video_size_and_every_data_size():
+    item = {
+        "id": "1",
+        "video": {
+            "size": 9676471,
+            "bitrateInfo": [
+                {"PlayAddr": {"DataSize": 9676471, "UrlList": ["https://v/x"]}},
+                {"PlayAddr": {"DataSize": "4609304"}},
+                {"PlayAddr": {"DataSize": " 4609304 "}},  # a digit string, stripped: the same
+                {"PlayAddr": {"DataSize": 0}},
+                {"PlayAddr": {"DataSize": -5}},
+                {"PlayAddr": {"DataSize": True}},
+                {"PlayAddr": {"DataSize": 2.5}},
+                {"PlayAddr": {"DataSize": 8.0}},  # a whole float: an int, as `_as_int` reads it
+                {"PlayAddr": {"DataSize": "x"}},
+                {"PlayAddr": {"DataSize": "٣"}},  # a digit of another script: 3, as int() reads it
+                {"PlayAddr": {"DataSize": None}},
+                {"PlayAddr": "https://v/y"},
+                {"PlayAddr": {}},
+                {},
+                "x",
+                None,
+            ],
+        },
+    }
+    assert listed_sizes(item) == (3, 8, 4609304, 9676471)
+    assert listed_sizes({"itemStruct": item}) == (3, 8, 4609304, 9676471)
+    assert listed_sizes({"id": "1", "video": {"size": "12"}}) == (12,)
+    assert listed_sizes({"id": "1", "video": {"size": True, "bitrateInfo": "x"}}) == ()
+    assert listed_sizes({"id": "1", "video": {"bitrateInfo": [{"PlayAddr": {"DataSize": 7}}]}}) == (
+        7,
+    )
+    for junk in ({}, {"video": None}, {"video": "x"}, {"video": {}}, {"video": []}, [], None, 5):
+        assert listed_sizes(junk) == ()
+    # an int both front ends read exactly is kept; anything above MAX_EXACT_INT (2**53 - 1) is junk
+    assert MAX_EXACT_INT == 2**53 - 1
+    assert listed_sizes({"video": {"size": 2**53 - 1}}) == (2**53 - 1,)
+    over = {"video": {"size": 2**53, "bitrateInfo": [{"PlayAddr": {"DataSize": 8}}]}}
+    assert listed_sizes(over) == (8,)
+    assert listed_sizes({"video": {"size": 10**40}}) == ()
+    assert listed_sizes({"video": {"size": "1" * 400}}) == ()  # the extension parses it as Infinity
+
+
 @pytest.mark.parametrize(
     ("item", "expected"),
     [
@@ -830,14 +1050,19 @@ def test_the_third_series_without_the_session_locks_the_paid_episode():
         (_item({"cost": -1}), ("free", False, False)),  # not a price
         # ... and without a play address: locked, whatever its price says
         (_item({"isFree": False, "unlockPrice": 30}, video={}), ("locked", True, False)),
-        # 3. a viewer lock wins over a play address (a preview or trial clip is not the episode)
+        # 3. a viewer lock wins over a play address
         (_item({"isLocked": True}), ("locked", False, False)),
         (_item({"is_locked": 1, "isFree": False}), ("locked", True, False)),
         (_item({"needPay": 1}), ("locked", False, False)),
         (_item({"need_unlock": "yes"}), ("locked", False, False)),
-        (_item({"isPreview": True}), ("locked", False, False)),
-        (_item({"trialClip": True}), ("locked", False, False)),
         (_item({"paywall": "on"}), ("locked", False, False)),
+        # ... but `preview` and `trial` keys are no lock since 2026-11-06: a real free series with
+        # conditions carries IsPreview=true / PreviewType on fully served episodes (no clue, no
+        # hint)
+        (_item({"isPreview": True}), ("free", False, False)),
+        (_item({"IsPreview": True, "PreviewType": 4}), ("free", False, False)),
+        (_item({"trialClip": True}), ("free", False, False)),
+        (_item({"isTrial": 1, "isFree": False}), ("unlocked", True, False)),
         (_item({"lockStatus": 1}), ("locked", False, False)),
         (_item({"payStatus": "need_pay"}), ("locked", False, False)),
         (_item({"unlockStatus": "UNPAID"}), ("locked", False, False)),
@@ -880,7 +1105,7 @@ def test_the_third_series_without_the_session_locks_the_paid_episode():
             ("free", False, False),
         ),
         # video is scanned at its top level only: its renditions' fields are not clues
-        (_item(None, video={**PLAYABLE, "isPreview": 1}), ("locked", False, False)),
+        (_item(None, video={**PLAYABLE, "isLocked": 1}), ("locked", False, False)),
         (
             _item(None, video={"bitrateInfo": [{"PlayAddr": {"isLocked": True}}]}),
             ("free", False, False),

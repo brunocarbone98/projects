@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { NO_PLAY_ADDRESS, catalogWarnings, makeEpisode } from "../src/lib/catalog.js";
+import { NO_PLAY_ADDRESS, SHORT_HEADER_HINT_PREFIX, catalogWarnings, makeEpisode } from "../src/lib/catalog.js";
 import { EXTENSION_LIFT_TEXT, cooldownMessage, cooldownStopReason, cooldownSummary, makeCooldown } from "../src/lib/cooldown.js";
 import { DEFAULT_LABELS, STATUS_LABELS, displayLanguageOf, displayText, statusLabel } from "../src/lib/display.js";
 import * as messages from "../src/lib/messages.js";
@@ -398,7 +398,7 @@ function cooldownTexts() {
 
 /** Every exported text of lib/messages.js (the URL, the default name format and a regex class aside). */
 function messageConstants() {
-  const notTexts = new Set(["TIKTOK_BASE_URL", "DEFAULT_NAME_FORMAT", "PY_SPACE"]);
+  const notTexts = new Set(["TIKTOK_BASE_URL", "DEFAULT_NAME_FORMAT", "PY_SPACE", "SHORT_MARK"]); // the mark names a file, never a text shown
   return Object.entries(messages)
     .filter(([name, value]) => typeof value === "string" && !notTexts.has(name))
     .map(([, value]) => /** @type {string} */ (value));
@@ -523,6 +523,8 @@ async function downloaderTexts() {
   const short = () => new Response(video().subarray(0, 100_000), { headers: { "content-type": "video/mp4", "content-length": String(128 * 1024) } });
   await run(downloader({ routes: { "https://v": short } }), episode(2, { urls }));
   await run(downloader({ routes: { [MEDIA]: mp4 } }), episode(2, { durationS: 92 }));
+  const listedSize = { ...episode(2, { durationS: 92 }), raw: { id: "item2", video: { playAddr: [`https://${MEDIA_HOST}/v/2.mp4`], size: 128 * 1024 } } };
+  await run(downloader({ routes: { [MEDIA]: mp4 } }), listedSize);
   const encrypted = video();
   const text = new TextDecoder("latin1").decode(encrypted);
   encrypted.set([0x65, 0x6e, 0x63, 0x76], text.indexOf("avc1", text.indexOf("stsd")));
@@ -754,6 +756,53 @@ test("the downloader's results read in Spanish: file and host names, sizes and l
   assert.equal(es(lockedResult(episode(5, { access: "locked" })).message), `parece bloqueado: ${HINTS.join("; ")}; sin dirección de reproducción`);
 });
 
+test("the short header's hint and the short-served message read in Spanish; the flag advice names the checkbox", async () => {
+  const hint = `${SHORT_HEADER_HINT_PREFIX}69 s of 106 s`;
+  assert.equal(es(hint), "reproduce 69 s de 106 s");
+  assert.equal(es("plays 69.5 s of 106 s"), "reproduce 69.5 s de 106 s");
+  assert.equal(en(hint), hint);
+  assertSpanish(hint);
+  const locked = lockedResult(episode(5, { access: "locked", hints: ["isLimitedFree=True", hint] })).message;
+  assert.equal(locked, "looks locked: isLimitedFree=True; plays 69 s of 106 s");
+  assert.equal(es(locked), "parece bloqueado: isLimitedFree=True; reproduce 69 s de 106 s");
+  assert.equal(es(`${messages.UNAVAILABLE_MESSAGE} (locked in a fresh episode list: ${hint})`), `${es(messages.UNAVAILABLE_MESSAGE)} (bloqueado en una lista de episodios nueva: reproduce 69 s de 106 s)`);
+  // the short-served message, as the downloader writes it: the numbers kept, the tail the checkbox
+  const served = messages.shortServedMessage(9676471, "70", "106");
+  const advice = `para revisarla de nuevo, marca “${ES_LABELS.recheck}”`;
+  assert.equal(
+    es(served),
+    "TikTok sirve este episodio recortado: llegó el archivo entero (9676471 bytes, como anuncia la lista) pero reproduce 70 s de 106 s — " +
+      `si la app de TikTok lo reproduce entero, míralo allí y luego ${advice}; si la app también se corta en el mismo punto, ` +
+      "el episodio está dañado en TikTok y ningún reintento lo cambia",
+  );
+  assert.equal(
+    en(served),
+    "TikTok serves this episode short: the whole file came (9676471 bytes, as listed) but it plays 70 s of 106 s — if the TikTok app " +
+      `plays it whole, watch it there, then tick “${EN_LABELS.recheck}” to look again; if the app breaks at the same point, the ` +
+      "episode is defective on TikTok's side and no retry changes it",
+  );
+  assertSpanish(served);
+  // the complete skip's advice is unchanged: the same words, capitalised after its question
+  assert.equal(es(messages.RECHECK_HINT), `¿desbloqueaste más en la app de TikTok desde entonces? Para revisarla de nuevo, marca “${ES_LABELS.recheck}”`);
+  assert.equal(es(messages.RECHECK_HINT_TAIL), advice);
+  assert.equal(en(messages.RECHECK_HINT_TAIL), `tick “${EN_LABELS.recheck}” to look again`);
+  // the Python engines' tail, should their message ever be shown: translated like the INCOMPLETE rule's reason
+  assert.equal(es(`${served} (kept as Zafiro Rojo - Capitulo 05 (short).mp4)`), `${es(served)} (conservado como Zafiro Rojo - Capitulo 05 (short).mp4)`);
+  // inside a stop reason
+  assert.equal(es(`3 consecutive failures (last: ${served})`), `3 fallos seguidos (el último: ${es(served)})`);
+  assert.equal(es(`episode 5 failed-unavailable: ${served}`), `episodio 5 (no disponible): ${es(served)}`);
+  // the downloader really writes it: the whole file by the list's size, a 3 s header where 92 s are listed
+  const texts = await downloaderTexts();
+  const written = texts.find((text) => text.startsWith(messages.SHORT_SERVED_PREFIX));
+  assert.equal(written, messages.shortServedMessage(128 * 1024, "3", "92"));
+  assert.equal(
+    es(/** @type {string} */ (written)),
+    `TikTok sirve este episodio recortado: llegó el archivo entero (${128 * 1024} bytes, como anuncia la lista) pero reproduce 3 s de 92 s — ` +
+      `si la app de TikTok lo reproduce entero, míralo allí y luego ${advice}; si la app también se corta en el mismo punto, ` +
+      "el episodio está dañado en TikTok y ningún reintento lo cambia",
+  );
+});
+
 test("the discovery's failures read in Spanish; the login advice stays the extension's own", async () => {
   const texts = await discoveryTexts();
   for (const text of texts) assertSpanish(text);
@@ -768,7 +817,7 @@ test("English stays English, but never names a command-line flag", () => {
   for (const text of corpus) {
     const english = en(text);
     for (const flag of ["--recheck", "--include-locked", "cookies.txt"]) assert.ok(!english.includes(flag), english);
-    if (!text.includes(messages.RECHECK_HINT) && !text.includes(messages.DRM_REMEMBERED_MESSAGE)) assert.equal(english, text);
+    if (!text.includes(messages.RECHECK_HINT_TAIL) && !text.includes(messages.DRM_REMEMBERED_MESSAGE)) assert.equal(english, text);
     assert.equal(displayText(text), english.split(EN_LABELS.recheck).join(DEFAULT_LABELS.en.recheck)); // the default language
   }
 });

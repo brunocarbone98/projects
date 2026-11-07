@@ -25,10 +25,29 @@ QUALITY_MODES = ("compatible", "best")
 RECHECK_AFTER_S = 24 * 3600
 #: ``Episode.access`` values — what THIS session may do with an episode, decided by
 #: ``catalog.access_of`` from the payload TikTok served to the user's own account: ``free`` (nothing
-#: says it is sold), ``unlocked`` (a paid episode this account may play: an entitlement flag, or a
-#: play address TikTok gave this session for a sold episode) and ``locked`` (a lock, preview or DRM
-#: flag, or no play address at all: listed and skipped, never unlocked).
+#: says it is sold, or a truthy ``free`` flag such as ``isLimitedFree`` says it is free — with
+#: conditions the field does not name), ``unlocked`` (a paid episode this account may play: an
+#: entitlement flag, or a play address TikTok gave this session for a sold episode) and ``locked``
+#: (a lock, paywall or DRM flag, a short header — ``music.duration`` far shorter than
+#: ``video.duration`` — or no play address at all: listed and skipped, never unlocked).
 ACCESS_MODES = ("free", "unlocked", "locked")
+#: The tail of ``engine.RECHECK_HINT`` (``unlocked more in the TikTok app since? --recheck looks
+#: again``): the short-served message carries it too, so the extension's display maps both to
+#: its own "look again" checkbox advice.
+RECHECK_HINT_TAIL = "--recheck looks again"
+#: Every short-served message starts with this (both engines, ``downloader.served_short``):
+#: TikTok answered the whole file by size — ``video.size`` / a ``PlayAddr.DataSize`` within 0.5 % —
+#: but its header plays less than the listed duration: a window for an episode the account has
+#: not unlocked, or a defective encode on TikTok's side (the owner's 7 episodes of 2026-11-06
+#: broke at the same point in the TikTok app and in TikTok's web player: no sound past it, a
+#: broken picture when seeking past it); the list cannot tell the two apart, so the message
+#: offers both readings. DramaFetch never rewrites that header: the file is kept as ``<stem>
+#: (short).mp4`` and the episode is FAILED_UNAVAILABLE.
+SHORT_SERVED_PREFIX = "TikTok serves this episode short: "
+#: The quarantine mark of such a file (``media.quarantine(path, mark=SHORT_MARK)``):
+#: ``<stem> (short).mp4``, ``(short 2)``, … — next to ``media.INCOMPLETE_MARK``'s
+#: ``(incomplete)``.
+SHORT_MARK = "short"
 #: Every DRM message starts with this: DramaFetch never decrypts and never keeps encrypted media.
 DRM_MARK = "protected by DRM"
 #: Why an encrypted download is deleted (``media.drm_problem``) or an episode is refused: the

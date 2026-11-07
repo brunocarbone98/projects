@@ -1,0 +1,311 @@
+{
+  "statusCode": 0,
+  "status_code": 0,
+  "cursor": 3,
+  "hasMore": false,
+  "itemList": [
+    {
+      "id": "7699400000000000401",
+      "desc": "Episode 1",
+      "createTime": 1761500001,
+      "author": {
+        "id": "6900000000000000003",
+        "uniqueId": "limitedfree_drama",
+        "nickname": "Limited Free Drama",
+        "shortDramaCreator": {
+          "isShortDramaCreator": true
+        }
+      },
+      "video": {
+        "id": "7699400000000000401",
+        "duration": 3,
+        "size": 272300,
+        "bitrate": 726189,
+        "ratio": "540p",
+        "definition": "540p",
+        "codecType": "h264",
+        "format": "mp4",
+        "width": 576,
+        "height": 1024,
+        "videoID": "v1c025g50000lfd10000000000000000",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oLFD1cover~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=lfd1a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oLFD1origin~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=lfd1b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD1h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD1&ply_type=2&policy=2&signature=lfd1h264sig&tk=tt_chain_token&btag=e00090000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 726189,
+            "BitrateFPS": 25,
+            "CodecType": "h264",
+            "Format": "mp4",
+            "GearName": "normal_540_0",
+            "QualityType": 20,
+            "PlayAddr": {
+              "DataSize": 272300,
+              "Uri": "v1c025g50000lfd10000000000000000",
+              "UrlKey": "v1c025g50000lfd10000000000000000_h264_540p_726189",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD1h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD1&ply_type=2&policy=2&signature=lfd1h264sig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 345913,
+            "BitrateFPS": 25,
+            "CodecType": "h265_hvc1",
+            "Format": "mp4",
+            "GearName": "adapt_540_1",
+            "QualityType": 28,
+            "PlayAddr": {
+              "DataSize": 129700,
+              "Uri": "v1c025g50000lfd10000000000000000",
+              "UrlKey": "v1c025g50000lfd10000000000000000_bytevc1_540p_345913",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD1hevcNaA3WG4IIgrfIABFwfGGLQZWOrtvqyu/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD1&ply_type=2&policy=2&signature=lfd1hevcsig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782366",
+        "dramaName": "Limited Free Drama",
+        "authorUID": "6900000000000000003",
+        "description": "A short drama free for a limited time: every episode watchable without a pass.",
+        "isLimitedFree": true,
+        "numVideos": 3,
+        "numWatched": "90511",
+        "totalDuration": "9",
+        "DramaVideoData": {
+          "EpisodeNumber": 1,
+          "IsFreeIntro": false,
+          "IsHighlight": false,
+          "IsPreview": true,
+          "LinkedEpisodeID": "0",
+          "PreviewType": 4
+        }
+      },
+      "music": {
+        "id": "7699400000000000501",
+        "title": "original sound - Limited Free Drama",
+        "authorName": "Limited Free Drama",
+        "duration": 3,
+        "shoot_duration": 3,
+        "original": true,
+        "isCopyrighted": false
+      },
+      "stats": {
+        "collectCount": 11,
+        "commentCount": 1,
+        "diggCount": 41,
+        "playCount": 901,
+        "shareCount": 1
+      }
+    },
+    {
+      "id": "7699400000000000402",
+      "desc": "Episode 2",
+      "createTime": 1761500002,
+      "author": {
+        "id": "6900000000000000003",
+        "uniqueId": "limitedfree_drama",
+        "nickname": "Limited Free Drama",
+        "shortDramaCreator": {
+          "isShortDramaCreator": true
+        }
+      },
+      "video": {
+        "id": "7699400000000000402",
+        "duration": 3,
+        "size": 277200,
+        "bitrate": 739244,
+        "ratio": "540p",
+        "definition": "540p",
+        "codecType": "h264",
+        "format": "mp4",
+        "width": 576,
+        "height": 1024,
+        "videoID": "v1c025g50000lfd20000000000000000",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oLFD2cover~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=lfd2a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oLFD2origin~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=lfd2b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD2h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD2&ply_type=2&policy=2&signature=lfd2h264sig&tk=tt_chain_token&btag=e00090000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 739244,
+            "BitrateFPS": 25,
+            "CodecType": "h264",
+            "Format": "mp4",
+            "GearName": "normal_540_0",
+            "QualityType": 20,
+            "PlayAddr": {
+              "DataSize": 277200,
+              "Uri": "v1c025g50000lfd20000000000000000",
+              "UrlKey": "v1c025g50000lfd20000000000000000_h264_540p_739244",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD2h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD2&ply_type=2&policy=2&signature=lfd2h264sig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 352030,
+            "BitrateFPS": 25,
+            "CodecType": "h265_hvc1",
+            "Format": "mp4",
+            "GearName": "adapt_540_1",
+            "QualityType": 28,
+            "PlayAddr": {
+              "DataSize": 132000,
+              "Uri": "v1c025g50000lfd20000000000000000",
+              "UrlKey": "v1c025g50000lfd20000000000000000_bytevc1_540p_352030",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD2hevcNaA3WG4IIgrfIABFwfGGLQZWOrtvqyu/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD2&ply_type=2&policy=2&signature=lfd2hevcsig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782366",
+        "dramaName": "Limited Free Drama",
+        "authorUID": "6900000000000000003",
+        "description": "A short drama free for a limited time: every episode watchable without a pass.",
+        "isLimitedFree": true,
+        "numVideos": 3,
+        "numWatched": "90511",
+        "totalDuration": "9",
+        "DramaVideoData": {
+          "EpisodeNumber": 2,
+          "IsFreeIntro": false,
+          "IsHighlight": false,
+          "IsPreview": true,
+          "LinkedEpisodeID": "0",
+          "PreviewType": 4
+        }
+      },
+      "music": {
+        "id": "7699400000000000502",
+        "title": "original sound - Limited Free Drama",
+        "authorName": "Limited Free Drama",
+        "duration": 3,
+        "shoot_duration": 3,
+        "original": true,
+        "isCopyrighted": false
+      },
+      "stats": {
+        "collectCount": 12,
+        "commentCount": 2,
+        "diggCount": 42,
+        "playCount": 902,
+        "shareCount": 2
+      }
+    },
+    {
+      "id": "7699400000000000403",
+      "desc": "Episode 3",
+      "createTime": 1761500003,
+      "author": {
+        "id": "6900000000000000003",
+        "uniqueId": "limitedfree_drama",
+        "nickname": "Limited Free Drama",
+        "shortDramaCreator": {
+          "isShortDramaCreator": true
+        }
+      },
+      "video": {
+        "id": "7699400000000000403",
+        "duration": 3,
+        "size": 274400,
+        "bitrate": 731660,
+        "ratio": "540p",
+        "definition": "540p",
+        "codecType": "h264",
+        "format": "mp4",
+        "width": 576,
+        "height": 1024,
+        "videoID": "v1c025g50000lfd30000000000000000",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oLFD3cover~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=lfd3a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oLFD3origin~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=lfd3b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD3h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD3&ply_type=2&policy=2&signature=lfd3h264sig&tk=tt_chain_token&btag=e00090000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 731660,
+            "BitrateFPS": 25,
+            "CodecType": "h264",
+            "Format": "mp4",
+            "GearName": "normal_540_0",
+            "QualityType": 20,
+            "PlayAddr": {
+              "DataSize": 274400,
+              "Uri": "v1c025g50000lfd30000000000000000",
+              "UrlKey": "v1c025g50000lfd30000000000000000_h264_540p_731660",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD3h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD3&ply_type=2&policy=2&signature=lfd3h264sig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 348700,
+            "BitrateFPS": 25,
+            "CodecType": "h265_hvc1",
+            "Format": "mp4",
+            "GearName": "adapt_540_1",
+            "QualityType": 28,
+            "PlayAddr": {
+              "DataSize": 130800,
+              "Uri": "v1c025g50000lfd30000000000000000",
+              "UrlKey": "v1c025g50000lfd30000000000000000_bytevc1_540p_348700",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oLFD3hevcNaA3WG4IIgrfIABFwfGGLQZWOrtvqyu/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026110607000000LFD3&ply_type=2&policy=2&signature=lfd3hevcsig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782366",
+        "dramaName": "Limited Free Drama",
+        "authorUID": "6900000000000000003",
+        "description": "A short drama free for a limited time: every episode watchable without a pass.",
+        "isLimitedFree": true,
+        "numVideos": 3,
+        "numWatched": "90511",
+        "totalDuration": "9",
+        "DramaVideoData": {
+          "EpisodeNumber": 3,
+          "IsFreeIntro": false,
+          "IsHighlight": false,
+          "IsPreview": false,
+          "LinkedEpisodeID": "0",
+          "PreviewType": 1
+        }
+      },
+      "music": {
+        "id": "7699400000000000503",
+        "title": "original sound - Limited Free Drama",
+        "authorName": "Limited Free Drama",
+        "duration": 2,
+        "shoot_duration": 2,
+        "original": true,
+        "isCopyrighted": false
+      },
+      "stats": {
+        "collectCount": 13,
+        "commentCount": 3,
+        "diggCount": 43,
+        "playCount": 903,
+        "shareCount": 3
+      }
+    }
+  ]
+}

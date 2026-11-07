@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import { makeEpisode } from "../src/lib/catalog.js";
 import { CUT_SHORT_CAUSE_PREFIX, DRM_CAUSE, LOCKED_CAUSE_PREFIX, NOT_ATTEMPTED_CAUSE } from "../src/lib/diagnosis.js";
-import { DRM_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
+import { DRM_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE, shortServedMessage } from "../src/lib/messages.js";
 import { PacingState, pacingOptions } from "../src/lib/pacing.js";
 import { completeSkip, seriesReport } from "../src/lib/report.js";
 import { donePath, markComplete, missingFiles, newState, record } from "../src/lib/state.js";
@@ -33,8 +33,10 @@ import {
   CoverLoader,
   DownloadsView,
   Downloader,
+  ATTEMPT_SHORT_HEADER_PREFIX,
   contentLength,
   sanitizeError,
+  servedShort,
 } from "../src/app/downloader.js";
 import { downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
@@ -534,6 +536,72 @@ test("download: a video far shorter than listed is never saved", async () => {
   assert.equal(result.status, "failed");
   assert.equal(result.message, "download looks incomplete or wrong: duration 3 s, expected 92 s");
   assert.deepEqual(saved, []);
+});
+
+test("download: the whole file by the list's size with a header that plays less is short-served — failed-unavailable, nothing saved", async () => {
+  const size = 128 * 1024; // what video() is
+  /** @param {number} listed the size the list announces */
+  const listed = (listed, dataSize = listed) => {
+    const ep = episode(1, { durationS: 92 });
+    ep.raw = { id: "item1", video: { playAddr: ep.raw?.["video"] && /** @type {Record<string, unknown>} */ (ep.raw["video"])["playAddr"], size: listed, bitrateInfo: [{ PlayAddr: { DataSize: dataSize } }] } };
+    return ep;
+  };
+  /** @type {string[]} */
+  const log = [];
+  /** @type {string[]} */
+  const saved = [];
+  const subject = downloader({
+    saved,
+    fetch: fakeFetch(
+      {
+        "https://v16": () => new Response(video(), { headers: { "content-type": "video/mp4", "content-length": String(size) } }),
+        "https://p16-sign-sg.tiktokcdn.com/": () => new Response(COVER, { headers: { "content-type": "image/jpeg" } }),
+      },
+      log,
+    ),
+  });
+  const ep = listed(size);
+  const result = await subject.download(ep, CONTEXT);
+  assert.equal(result.status, "failed-unavailable");
+  assert.equal(
+    result.message,
+    `TikTok serves this episode short: the whole file came (${size} bytes, as listed) but it plays 3 s of 92 s — if the TikTok app plays it whole, watch it there, then --recheck looks again; if the app breaks at the same point, the episode is defective on TikTok's side and no retry changes it`,
+  );
+  assert.equal(result.message, shortServedMessage(size, "3", "92"));
+  assert.deepEqual(saved, []);
+  assert.equal(log.length, 1); // one request: no other mirror, no fresh list, no cover
+  const trace = subject.traceOf(ep);
+  assert.equal(trace?.attempts.length, 1);
+  assert.equal(trace?.attempts[0]?.outcome, `${ATTEMPT_SHORT_HEADER_PREFIX}3 s of 92 s`);
+  assert.equal(trace?.attempts[0]?.received_bytes, size);
+  assert.equal(ATTEMPT_SHORT_HEADER_PREFIX, "plays ");
+  // within 0.5 % of a listed size (the H.264 rendition's DataSize counts too)
+  const close = await subject.download(listed(size + Math.floor(size * 0.004), 1), CONTEXT);
+  assert.equal(close.status, "failed-unavailable");
+  const byRendition = await subject.download(listed(1, size), CONTEXT);
+  assert.equal(byRendition.status, "failed-unavailable");
+  // an unlisted size: the old path — `download looks incomplete or wrong`, FAILED, nothing saved either
+  for (const other of [listed(size + Math.ceil(size * 0.006)), listed(1)]) {
+    const incomplete = await subject.download(other, CONTEXT);
+    assert.equal(incomplete.status, "failed");
+    assert.equal(incomplete.message, "download looks incomplete or wrong: duration 3 s, expected 92 s");
+    assert.equal(subject.traceOf(other)?.attempts[0]?.outcome, "verify failed: duration 3 s, expected 92 s");
+  }
+  const noSize = await subject.download(episode(1, { durationS: 92 }), CONTEXT);
+  assert.equal(noSize.status, "failed");
+  assert.deepEqual(saved, []);
+  // servedShort on its own: the reason must be the duration one, with a < e
+  assert.deepEqual(servedShort("duration 3 s, expected 92 s", size, [size]), { actual: "3", expected: "92" });
+  assert.equal(servedShort("duration 3 s, expected 92 s", size, []), null);
+  assert.equal(servedShort("duration 92 s, expected 3 s", size, [size]), null);
+  assert.equal(servedShort("no audio track", size, [size]), null);
+  assert.equal(servedShort("duration 2.5 s, expected 92 s", size, [size]), null); // whole seconds only, as media._DURATION_MISMATCH_RE
+  assert.equal(servedShort("duration 3 s, expected 92 s", 1000, [995]), null); // 5 > 0.5 % of 995 (4.975)
+  assert.deepEqual(servedShort("duration 3 s, expected 92 s", 1000, [996]), { actual: "3", expected: "92" }); // 4 <= 4.98
+  assert.deepEqual(servedShort("duration 3 s, expected 92 s", 1000, [990, 1000]), { actual: "3", expected: "92" });
+  assert.deepEqual(servedShort("duration 3 s, expected 92 s", 1004, [1000]), { actual: "3", expected: "92" });
+  assert.equal(servedShort("duration 3 s, expected 92 s", size, [Infinity]), null); // never `Infinity <= Infinity`
+  assert.equal(servedShort("duration 3 s, expected 92 s", size, [NaN, -Infinity]), null);
 });
 
 test("the traces record every candidate as decided: query stripped, sizes, status, outcome; never requested when the host is not covered", async () => {
@@ -1717,6 +1785,18 @@ test("the page: at a job's end with failures the report is saved once under Dram
     assert.ok(String(stopped.probable_cause).startsWith(NOT_ATTEMPTED_CAUSE));
     assert.equal(run.reference.number, 1);
     assert.equal(run.reference.status, "done");
+    // the digest of every LISTED episode (the fake run's list is its results' episodes), from their raw items
+    assert.deepEqual(
+      run.episodes_digest.map((/** @type {Record<string, unknown>} */ entry) => [entry["number"], entry["access"], entry["lock_hints"]]),
+      [
+        [1, "free", []],
+        [2, "free", []],
+        [3, "locked", ["isLocked=True", "no play address"]],
+        [4, "free", []],
+      ],
+    );
+    assert.deepEqual(Object.keys(run.episodes_digest[0]), ["number", "access", "lock_hints", "duration_s", "music_duration_s", "music_original", "size", "bitrate", "is_preview", "preview_type"]);
+    assert.deepEqual(run.episodes_digest[0], { number: 1, access: "free", lock_hints: [], duration_s: 3, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
     assert.equal(report.summary.length, 3);
     // the signed links live in the raw items only: no attempt keeps its query, and outside `raw` no signed link remains
     const attempts = run.not_downloaded.flatMap((/** @type {{attempts: Record<string, unknown>[]}} */ row) => row.attempts);

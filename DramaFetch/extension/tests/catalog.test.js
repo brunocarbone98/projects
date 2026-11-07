@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import {
   NO_PLAY_ADDRESS,
+  SHORT_HEADER_HINT_PREFIX,
   VIDEO_ONLY_PATH_SUFFIX,
   accessOf,
   catalogWarnings,
@@ -18,6 +19,7 @@ import {
   isLocked,
   isVideoOnlyUrl,
   keyWords,
+  listedSizes,
   makeEpisode,
   mergeEpisodes,
   parseDetailPayload,
@@ -98,6 +100,11 @@ test("a DRM key in whole words locks as DRM; HDR flags, negations and identifier
     assert.equal(isDrmKey(key), false, key);
     assert.deepEqual(accessOf(item({ [key]: 1 })), { access: "free", paid: false, drm: false, hints: [] }, key);
   }
+  // a DRM negation is no price flag either: `isDrmFree: false` is not `isFree=false`
+  for (const key of ["isDrmFree", "drm_free", "encryptionFree"]) {
+    assert.deepEqual(accessOf(item({ [key]: false, unlockPrice: 30 })).hints, ["unlockPrice=30"], key);
+    assert.deepEqual(accessOf(item({ [key]: true, unlockPrice: 30 })), { access: "unlocked", paid: true, drm: false, hints: ["unlockPrice=30"] }, key);
+  }
   assert.deepEqual(keyWords("encryptedUserIDs"), ["encrypted", "user", "ids"]);
   assert.deepEqual(keyWords("HDR10Plus"), ["hdr", "10", "plus"]);
 });
@@ -129,6 +136,201 @@ test("the decision table: entitled, viewer lock, sold with and without a real pl
   assert.deepEqual(accessOf(null), { access: "locked", paid: false, drm: false, hints: [NO_PLAY_ADDRESS] });
 });
 
+/**
+ * An item of a free series with conditions as TikTok served it on 2026-11-06 (the owner's report, anonymised):
+ * `dramaInfo.isLimitedFree`, `IsFreeIntro: false`, `IsPreview` / `PreviewType` on every episode,
+ * `video.size` equal to the H.264 rendition's `DataSize`, the episode's own sound in `music`.
+ * @param {number} number
+ * @param {{videoDuration: number, musicDuration: unknown, original?: unknown, isPreview?: boolean, previewType?: number, extra?: Record<string, unknown>}} fields
+ * @returns {Record<string, unknown>}
+ */
+function limitedFreeItem(number, fields) {
+  const music = { duration: fields.musicDuration, shoot_duration: fields.musicDuration, title: "original sound", authorName: "Author", id: "77" };
+  if (fields.original !== undefined) /** @type {Record<string, unknown>} */ (music)["original"] = fields.original;
+  return {
+    id: `769939377025678${String(number).padStart(4, "0")}`,
+    desc: `Episode ${number}`,
+    dramaInfo: {
+      DramaVideoData: {
+        EpisodeNumber: number,
+        IsFreeIntro: false,
+        IsHighlight: false,
+        IsPreview: fields.isPreview ?? true,
+        LinkedEpisodeID: "0",
+        PreviewType: fields.previewType ?? 4,
+      },
+      dramaID: "7699393770256782366",
+      dramaName: "Limited Free Drama",
+      isLimitedFree: true,
+      numVideos: 3,
+      totalDuration: "9",
+      ...(fields.extra ?? {}),
+    },
+    music,
+    video: {
+      duration: fields.videoDuration,
+      size: 9676471,
+      bitrate: 726189,
+      ratio: "540p",
+      bitrateInfo: [
+        {
+          Bitrate: 726189,
+          CodecType: "h264",
+          GearName: "normal_540_0",
+          PlayAddr: { DataSize: 9676471, UrlList: [`https://v16-webapp-prime.tiktok.com/video/${number}/?a=1988&expire=1900000000`], Uri: "v1", UrlKey: "v1_h264_540p_726189", Width: 576, Height: 1024 },
+        },
+        {
+          Bitrate: 345913,
+          CodecType: "h265_hvc1",
+          GearName: "adapt_540_1",
+          PlayAddr: { DataSize: 4609304, UrlList: [`https://v16-webapp-prime.tiktok.com/video/${number}/hevc/?a=1988&expire=1900000000`] },
+        },
+      ],
+      playAddr: `https://v16-webapp-prime.tiktok.com/video/${number}/?a=1988&expire=1900000000`,
+      cover: `https://p16-sign-sg.tiktokcdn.com/c/${number}.jpeg`,
+      originCover: `https://p16-sign-sg.tiktokcdn.com/o/${number}.jpeg`,
+    },
+  };
+}
+
+test("a free series with conditions (2026-11-06): isLimitedFree is free, IsFreeIntro / IsPreview / PreviewType give no clue", () => {
+  // a free flag alone is no hint: it says nothing about a price or a lock (an empty list means that)
+  const full = accessOf(limitedFreeItem(1, { videoDuration: 69, musicDuration: 69, original: true }));
+  assert.deepEqual(full, { access: "free", paid: false, drm: false, hints: [] });
+  // E02: IsPreview true, PreviewType 4, the sound as long as the video: free as well
+  assert.equal(accessOf(limitedFreeItem(2, { videoDuration: 106, musicDuration: 106, original: true, previewType: 4 })).access, "free");
+  // E03: the episode's own sound lasts 2 s of a 3 s video: the short header locks it, that hint alone
+  const windowed = accessOf(limitedFreeItem(3, { videoDuration: 3, musicDuration: 2, original: true, isPreview: false, previewType: 1 }));
+  assert.deepEqual(windowed, { access: "locked", paid: false, drm: false, hints: [`${SHORT_HEADER_HINT_PREFIX}2 s of 3 s`] });
+  assert.equal(SHORT_HEADER_HINT_PREFIX, "plays ");
+  // the owner's E05: 106 s announced, the sound 69 s
+  const owner = accessOf(limitedFreeItem(5, { videoDuration: 106, musicDuration: 69, original: true }));
+  assert.deepEqual([owner.access, owner.hints], ["locked", ["plays 69 s of 106 s"]]);
+  // the episodes parse with that access and the hint; the quality hint still names the H.264 rendition
+  const episodes = [1, 3].map((number) =>
+    episodeFromItem(limitedFreeItem(number, { videoDuration: 3, musicDuration: number === 3 ? 2 : 3, original: true }), "7699393770256782366"),
+  );
+  assert.deepEqual(
+    episodes.map((episode) => [episode?.number, episode?.access, episode?.lockHints, episode?.paid, episode?.qualityHint]),
+    [
+      [1, "free", [], false, "540p h264"],
+      [3, "locked", ["plays 2 s of 3 s"], false, "540p h264"],
+    ],
+  );
+  // IsFreeIntro gives no clue whatever its value; preview, trial and intro keys alone are nothing
+  assert.deepEqual(accessOf(item({ IsFreeIntro: false })), { access: "free", paid: false, drm: false, hints: [] });
+  assert.deepEqual(accessOf(item({ IsFreeIntro: true, is_free_intro: 1 })).hints, []);
+  assert.deepEqual(accessOf(item({ isPreview: true })), { access: "free", paid: false, drm: false, hints: [] });
+  assert.deepEqual(accessOf(item({ IsPreview: true, PreviewType: 4, isTrial: true, preview_type: 1 })).hints, []);
+  // a FREE clue beats pricing: a sold series the payload calls free is free (and still `paid`);
+  // next to the price the free flag IS a hint — it says why
+  assert.deepEqual(accessOf(item({ isLimitedFree: true, unlockPrice: 30 })), {
+    access: "free",
+    paid: true,
+    drm: false,
+    hints: ["isLimitedFree=True", "unlockPrice=30"],
+  });
+  assert.deepEqual(accessOf(item({ isFree: false, isLimitedFree: true })).hints, ["isFree=false", "isLimitedFree=True"]);
+  assert.deepEqual(accessOf(item({ limitedFree: 1 })), { access: "free", paid: false, drm: false, hints: [] });
+  assert.deepEqual(accessOf(item({ isFree: true })).hints, []);
+  assert.deepEqual(accessOf(item({ freebie: "yes", coinCost: 5 })).hints, ["freebie=yes", "coinCost=5"]); // `free` anywhere in the key
+  // the falsy free key keeps its old hint for every free key but an intro or a DRM one
+  assert.deepEqual(accessOf(item({ freeEpisode: 0 })).hints, ["isFree=false"]);
+  assert.deepEqual(accessOf(item({ is_free: "false" })).hints, ["isFree=false"]);
+  assert.deepEqual(accessOf(item({ freeIntroPrice: 5 })).hints, ["freeIntroPrice=5"]); // an intro key is no free key: the price counts
+  // a free clue does not lift a lock, a missing play address or an entitlement
+  assert.equal(accessOf(item({ isLimitedFree: true, isLocked: true })).access, "locked");
+  assert.equal(accessOf(item({ isLimitedFree: true }, { playAddr: "" })).access, "locked");
+  assert.deepEqual(accessOf(item({ isLimitedFree: true }, {})).hints, [NO_PLAY_ADDRESS]);
+  assert.equal(accessOf(item({ isLimitedFree: true, isUnlocked: true })).access, "unlocked");
+});
+
+test("the short header: music.original, both durations, 85 % and a 1 s gap; the decision order", () => {
+  /** @param {unknown} music @param {Record<string, unknown>} [video] @param {Record<string, unknown>} [drama] */
+  const windowed = (music, video = { duration: 106, ...PLAYABLE }, drama = {}) => accessOf({ ...item(drama, video), music });
+  const sound = (/** @type {unknown} */ duration, /** @type {unknown} */ original = true) => ({ duration, original });
+  assert.deepEqual(windowed(sound(69)), { access: "locked", paid: false, drm: false, hints: ["plays 69 s of 106 s"] });
+  // never without `original` truthy (a licensed track's length says nothing), nor without either duration
+  assert.deepEqual(windowed(sound(69, false)).hints, []);
+  assert.deepEqual(windowed(sound(69, 0)).hints, []);
+  assert.deepEqual(windowed({ duration: 69 }).hints, []);
+  assert.deepEqual(windowed(sound(69), PLAYABLE).hints, []);
+  assert.deepEqual(windowed(sound(69), { duration: 0, ...PLAYABLE }).hints, []);
+  assert.deepEqual(windowed(sound(69), { duration: "x", ...PLAYABLE }).hints, []);
+  assert.deepEqual(windowed(sound("69")).hints, []); // a number only
+  assert.deepEqual(windowed(sound(0)).hints, []);
+  assert.deepEqual(windowed(sound(true)).hints, []);
+  assert.deepEqual(windowed("x").hints, []);
+  assert.deepEqual(windowed(null).hints, []);
+  // `original` as the payload spells truth; `video.duration` as _as_int reads it
+  assert.equal(windowed(sound(69, "true")).access, "locked");
+  assert.equal(windowed(sound(69, "0")).access, "free");
+  assert.deepEqual(windowed(sound(69), { duration: " 106 ", ...PLAYABLE }).hints, ["plays 69 s of 106 s"]);
+  assert.deepEqual(windowed(sound(69), { duration: 106.0, ...PLAYABLE }).hints, ["plays 69 s of 106 s"]);
+  // the thresholds: at most 85 % of the video and at least 1 s shorter
+  assert.equal(windowed(sound(85), { duration: 100, ...PLAYABLE }).access, "locked");
+  assert.equal(windowed(sound(85.5), { duration: 100, ...PLAYABLE }).access, "free");
+  assert.equal(windowed(sound(1.5), { duration: 2, ...PLAYABLE }).access, "free"); // 75 %, but only 0.5 s shorter
+  assert.equal(windowed(sound(1), { duration: 2, ...PLAYABLE }).access, "locked");
+  assert.deepEqual(windowed(sound(69.5)).hints, ["plays 69.5 s of 106 s"]); // floats as Python prints them
+  // `video.duration` is read up to Number.MAX_SAFE_INTEGER (catalog.MAX_EXACT_INT); a 400-digit number — Infinity
+  // here, an exact int in Python — is junk in both front ends, never an `inf s` hint nor an OverflowError
+  assert.deepEqual(windowed(sound(69), { duration: Number.MAX_SAFE_INTEGER, ...PLAYABLE }).hints, [
+    `plays 69 s of ${Number.MAX_SAFE_INTEGER} s`,
+  ]);
+  assert.deepEqual(windowed(sound(69), { duration: 2 ** 53, ...PLAYABLE }).hints, []);
+  assert.deepEqual(windowed(sound(69), { duration: "1".repeat(400), ...PLAYABLE }).hints, []);
+  assert.deepEqual(windowed(sound(69), { duration: JSON.parse("1".repeat(400)), ...PLAYABLE }).hints, []);
+  assert.deepEqual(windowed(sound(Infinity)).hints, []);
+  // the music dict is the item's own (an itemStruct wrapper's too), never dramaInfo's
+  assert.equal(accessOf({ itemStruct: { id: "1", video: { duration: 106, ...PLAYABLE }, music: sound(69) } }).access, "locked");
+  assert.equal(accessOf({ ...item({ music: sound(69) }, { duration: 106, ...PLAYABLE }) }).access, "free");
+  // the order: DRM first, then an entitlement that says yes, then the window, then the rest
+  assert.equal(windowed(sound(69), { duration: 106, ...PLAYABLE }, { isUnlocked: true }).access, "unlocked");
+  const drm = windowed(sound(69), { duration: 106, ...PLAYABLE }, { isDrm: true, isUnlocked: true });
+  assert.deepEqual([drm.access, drm.drm], ["locked", true]);
+  assert.equal(windowed(sound(69), { duration: 106, ...PLAYABLE }, { isLimitedFree: true }).access, "locked");
+  assert.equal(windowed(sound(69), { duration: 106, ...PLAYABLE }, { isFree: false, unlockPrice: 30 }).access, "locked");
+  // the window's hint comes after the clues and before the play address'
+  assert.deepEqual(windowed(sound(69), { duration: 106, playAddr: "" }, { isFree: false }).hints, [
+    "isFree=false",
+    "plays 69 s of 106 s",
+    NO_PLAY_ADDRESS,
+  ]);
+});
+
+test("listedSizes: video.size and every PlayAddr.DataSize, positive ints or digit strings, sorted and unique", () => {
+  assert.deepEqual(listedSizes(limitedFreeItem(1, { videoDuration: 69, musicDuration: 69 })), [4609304, 9676471]);
+  const video = {
+    size: "131072",
+    bitrateInfo: [
+      { PlayAddr: { DataSize: 131072 } },
+      { PlayAddr: { DataSize: " ٣ " } },
+      { PlayAddr: { DataSize: 0 } },
+      { PlayAddr: { DataSize: -5 } },
+      { PlayAddr: { DataSize: 1.5 } },
+      { PlayAddr: { DataSize: true } },
+      { PlayAddr: { DataSize: "x" } },
+      { PlayAddr: "x" },
+      { PlayAddr: { DataSize: 70000 } },
+      "junk",
+      null,
+    ],
+  };
+  assert.deepEqual(listedSizes({ id: "1", video }), [3, 70000, 131072]);
+  assert.deepEqual(listedSizes({ itemStruct: { video: { size: 7 } } }), [7]);
+  assert.deepEqual(listedSizes({ id: "1", video: { size: 2.5, bitrateInfo: {} } }), []);
+  // an int both front ends read exactly is kept; above Number.MAX_SAFE_INTEGER (Infinity for a 400-digit one) is junk
+  assert.deepEqual(listedSizes({ id: "1", video: { size: Number.MAX_SAFE_INTEGER } }), [Number.MAX_SAFE_INTEGER]);
+  assert.deepEqual(listedSizes({ id: "1", video: { size: 2 ** 53, bitrateInfo: [{ PlayAddr: { DataSize: 8 } }] } }), [8]);
+  assert.deepEqual(listedSizes({ id: "1", video: { size: "1".repeat(400) } }), []);
+  assert.deepEqual(listedSizes({ id: "1", video: { size: JSON.parse("1".repeat(400)) } }), []);
+  assert.deepEqual(listedSizes({ id: "1", video: "x" }), []);
+  assert.deepEqual(listedSizes({ id: "1" }), []);
+  assert.deepEqual(listedSizes(null), []);
+  assert.deepEqual(listedSizes([1, 2]), []);
+});
+
 test("re.IGNORECASE is Python's: a dotless i, a long s and the Kelvin sign match ASCII letters", () => {
   assert.equal(accessOf(item({ "\u0131sLocked": true })).access, "locked");
   assert.equal(accessOf(item({ "isLoc\u212aed": true })).access, "locked");
@@ -138,8 +340,8 @@ test("re.IGNORECASE is Python's: a dotless i, a long s and the Kelvin sign match
 
 test("accessOf and episodeFromItem never throw on seeded junk", () => {
   const rng = seededRng(7);
-  const keys = ["isLocked", "isUnlocked", "price", "drm", "lockStatus", "video", "dramaInfo", "itemStruct", "bitrateInfo", "playAddr", "id", ""];
-  const scalars = [null, true, false, 0, 1, -1, 1.5, "", "0", "true", "locked", "https://x/?expire=1", "²"];
+  const keys = ["isLocked", "isUnlocked", "price", "drm", "lockStatus", "video", "dramaInfo", "itemStruct", "bitrateInfo", "playAddr", "id", "", "music", "duration", "original", "size", "PlayAddr", "DataSize", "isLimitedFree", "IsFreeIntro"];
+  const scalars = [null, true, false, 0, 1, -1, 1.5, "", "0", "true", "locked", "https://x/?expire=1", "²", 69, 106];
   /**
    * @param {number} depth
    * @returns {unknown}
@@ -167,6 +369,8 @@ test("accessOf and episodeFromItem never throw on seeded junk", () => {
     episodeFromItem(value, "s");
     playUrlCandidates(value, "best");
     coverUrlOf(value);
+    const sizes = listedSizes(value);
+    assert.ok(sizes.every((size, index) => Number.isInteger(size) && size > 0 && (index === 0 || size > /** @type {number} */ (sizes[index - 1]))));
   }
 });
 

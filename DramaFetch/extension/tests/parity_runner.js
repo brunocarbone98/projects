@@ -6,8 +6,10 @@
  * "value": …}` or `{"ok": false, "error": <message>, "name": <error class>}` per call — so that
  * pytest can compare every answer with the Python function's on the same input.
  *
- * `fn` is `<module>.<export>` of `src/lib/<module>.js` (`catalog.accessOf`, `mp4.verifyVideo`),
- * `$const` with `["<module>.<NAME>"]` (the exported value itself), or `parity.<adapter>` (below:
+ * `fn` is `<module>.<export>` of `src/lib/<module>.js` (`catalog.accessOf`, `catalog.listedSizes`,
+ * `mp4.verifyVideo`), `$const` with `["<module>.<NAME>"]` (the exported value itself:
+ * `catalog.SHORT_HEADER_HINT_PREFIX`, `messages.SHORT_SERVED_PREFIX`, `messages.SHORT_MARK`),
+ * or `parity.<adapter>` (below:
  * calls whose answer includes the state they mutate). Tagged arguments: `{"$bytes": <base64>}` → a
  * Uint8Array; `{"$rng": [r0, r1, …]}` → an Rng whose `uniform(a, b)` is `a + (b - a) * r_i`, like
  * Python's `random.Random.uniform` over a scripted `random()`; `{"$clock": [t0, t1, …]}` → a clock

@@ -29,7 +29,12 @@ never keeps encrypted media. Every written video is then verified
 (``dramafetch.media.verify_video``, unless ``DownloadOptions.verify`` is off) BEFORE the cover
 step: a file that fails is renamed ``<name> (incomplete).mp4`` (one the OS will not rename is
 deleted rather than left under the episode's name) and the episode is FAILED, so a rerun tries it
-again and no cover is fetched for it. Once an episode's video is written and
+again and no cover is fetched for it — unless the body is the whole file by size
+(``catalog.listed_sizes``) with a header that plays less than the listed duration: TikTok serves
+the episode short — a window for an episode this account has not unlocked, or a defective encode
+on TikTok's side; ``downloader.served_short`` names both — and the file is kept as ``<name>
+(short).mp4``, the episode FAILED_UNAVAILABLE with that message, no other mirror, no fresh list,
+no cover. Once an episode's video is written and
 verified, and only then, one more small request fetches its cover image (``Episode.cover_url``)
 unless ``DownloadOptions.thumbnail`` is ``none``; by default
 the cover goes INTO the MP4 as its cover art (``dramafetch.thumbnails.embed_cover``, never
@@ -64,6 +69,7 @@ from dramafetch.downloader import (
     existing_file_result,
     locked_result,
     sanitize_error,
+    served_short,
 )
 from dramafetch.errors import (
     ChallengeError,
@@ -76,6 +82,7 @@ from dramafetch.manifest import episode_stem
 from dramafetch.media import INCOMPLETE_PREFIX, drm_problem_in, quarantine_note, verify_video
 from dramafetch.models import (
     DRM_MARK,
+    SHORT_MARK,
     DiscoveryOptions,
     DownloadOptions,
     DownloadResult,
@@ -312,7 +319,10 @@ class BrowserDownloader:
         is written, no other mirror is tried, no list refreshed and no cover requested — every
         mirror serves the same encrypted file. A written video that fails
         :func:`~dramafetch.media.verify_video` is quarantined and the episode FAILED at once (the
-        same preview would come from every mirror). Otherwise return why the last one was no good.
+        same file would come from every mirror) — or, when the body is the whole file by size
+        with a header that plays less (:func:`~dramafetch.downloader.served_short`), kept as
+        ``(short)`` and the episode FAILED_UNAVAILABLE with the short-served message.
+        Otherwise return why the last one was no good.
         """
         headers = {"Referer": options.base_url.rstrip("/") + "/", "Accept": "*/*"}
         last: _Attempt | None = None
@@ -396,6 +406,18 @@ class BrowserDownloader:
             if options.verify:
                 failure = verify_video(target, episode.duration_s)
                 if failure is not None:
+                    served = served_short(failure, len(body), episode.raw)
+                    if served is not None:
+                        note = quarantine_note(target, mark=SHORT_MARK)
+                        log.debug("episode %s: %s (%s)", episode.number, served, note)
+                        return (
+                            DownloadResult(
+                                episode=episode,
+                                status=DownloadStatus.FAILED_UNAVAILABLE,
+                                message=f"{served} ({note})",
+                            ),
+                            None,
+                        )
                     note = quarantine_note(target)
                     log.debug("episode %s: %s (%s)", episode.number, failure, note)
                     return (
@@ -523,8 +545,8 @@ class BrowserDownloader:
         result is cached, so a run over a long series refreshes once, not once per episode.
 
         The fresh item is access-checked like the first list's (``catalog.access_of``): one that
-        now reads as ``locked`` — a lapsed subscription, a lock, preview or paywall flag, DRM — is
-        not this session's to play, so unless ``options.include_locked`` it is NOT adopted:
+        now reads as ``locked`` — a lapsed subscription, a lock or paywall flag, a short header, DRM
+        — is not this session's to play, so unless ``options.include_locked`` it is NOT adopted:
         ``episode.raw`` stays as it was, none of its URLs is requested, and the FAILED_UNAVAILABLE
         result to return is ``"<UNAVAILABLE_MESSAGE> (locked in a fresh episode list: <hints>)"``
         (``"protected by DRM (in a fresh episode list: <hints>): …"`` for a DRM flag). Such a DRM

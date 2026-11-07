@@ -1,6 +1,7 @@
 """media: the integrity check of a saved video — mutagen probe, atom walk, audio, duration — the
-`(incomplete)` quarantine naming, and the structural DRM check (encrypted tracks) with the deletion
-of an encrypted file."""
+`(incomplete)` / `(short)` quarantine naming, the duration reason read back for the
+short-served file, and the structural DRM check (encrypted tracks) with the deletion of an encrypted
+file."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from dramafetch.media import (
     ENCRYPTED_SAMPLE_ENTRIES,
     INCOMPLETE_MARK,
     INCOMPLETE_PREFIX,
+    INCOMPLETE_WORD,
     PSSH_BOX,
     RENAME_RETRIES,
     RENAME_RETRY_DELAY_S,
@@ -31,12 +33,21 @@ from dramafetch.media import (
     discard_note,
     drm_problem,
     drm_problem_in,
+    duration_mismatch,
     probe_video,
     quarantine,
     quarantine_note,
     verify_video,
 )
-from dramafetch.models import DRM_MARK, DRM_MESSAGE, DownloadOptions, Episode
+from dramafetch.models import (
+    DRM_MARK,
+    DRM_MESSAGE,
+    RECHECK_HINT_TAIL,
+    SHORT_MARK,
+    SHORT_SERVED_PREFIX,
+    DownloadOptions,
+    Episode,
+)
 from encrypted_mp4 import (
     child,
     encrypted_mp4,
@@ -46,6 +57,7 @@ from encrypted_mp4 import (
     with_moov_pssh,
     with_top_level_pssh,
 )
+from short_header_mp4 import SHORT_HEADER_SECONDS, with_short_header
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny.mp4"
 TINY_MP4 = FIXTURE.read_bytes()  # 3 s of 160x120 H.264 + silent AAC; `moov` before `mdat`
@@ -267,6 +279,88 @@ def test_quarantine_note_names_the_kept_file(tmp_path):
     video = _write(tmp_path, "Heiress - Episode 01.mp4", b"x")
     assert quarantine_note(video) == "kept as Heiress - Episode 01 (incomplete).mp4"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Heiress - Episode 01 (incomplete).mp4"]
+
+
+def test_the_short_mark_and_the_short_served_constants():
+    assert (INCOMPLETE_WORD, INCOMPLETE_MARK) == ("incomplete", " (incomplete)")
+    assert SHORT_MARK == "short"
+    assert SHORT_SERVED_PREFIX == "TikTok serves this episode short: "
+    assert RECHECK_HINT_TAIL == "--recheck looks again"
+    from dramafetch.engine import RECHECK_HINT
+
+    assert RECHECK_HINT.endswith(RECHECK_HINT_TAIL)
+
+
+def test_quarantine_with_the_short_mark_names_the_file_short(tmp_path):
+    """A short-served file — the whole file by size, a header that plays less — is kept under
+    `(short)`, `(short 2)`, …, never over another file and never mixed with `(incomplete)`."""
+    first = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"one"), mark=SHORT_MARK)
+    assert first == tmp_path / "Heiress - Episode 01 (short).mp4"
+    second = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"two"), mark="short")
+    assert second == tmp_path / "Heiress - Episode 01 (short 2).mp4"
+    third = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"three"))  # the default
+    assert third == tmp_path / "Heiress - Episode 01 (incomplete).mp4"
+    fourth = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"four"), mark=SHORT_MARK)
+    assert fourth == tmp_path / "Heiress - Episode 01 (short 3).mp4"
+    assert (first.read_bytes(), second.read_bytes(), fourth.read_bytes()) == (
+        b"one",
+        b"two",
+        b"four",
+    )
+    episode = Episode(number=1, item_id="1", title="Ep 1", series_id="s", series_name="Heiress")
+    assert existing_episode_file(tmp_path, episode, DownloadOptions(out_dir=tmp_path)) is None
+
+
+def test_quarantine_note_with_the_short_mark(tmp_path, monkeypatch):
+    video = _write(tmp_path, "Heiress - Episode 01.mp4", b"x")
+    assert quarantine_note(video, mark=SHORT_MARK) == "kept as Heiress - Episode 01 (short).mp4"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Heiress - Episode 01 (short).mp4"]
+    # the mark reaches quarantine; a refused rename deletes, as for an incomplete file
+    seen = {}
+
+    def refuse(path, **kwargs):
+        seen.update(kwargs)
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(media, "quarantine", refuse)
+    again = _write(tmp_path, "Heiress - Episode 02.mp4", b"y")
+    note = quarantine_note(again, mark=SHORT_MARK)
+    assert seen["mark"] == SHORT_MARK and not again.exists()
+    assert note.startswith("could not rename Heiress - Episode 02.mp4: Permission denied; deleted")
+
+
+def test_duration_mismatch_reads_the_duration_reason_back():
+    assert duration_mismatch("duration 70 s, expected 106 s") == (70, 106)
+    assert duration_mismatch("duration 2 s, expected 3 s") == (2, 3)
+    assert duration_mismatch("duration 120 s, expected 61 s") == (120, 61)  # the caller orders
+    for other in (None, "", "no audio track", "no playable duration", "not a valid MP4 (x)"):
+        assert duration_mismatch(other) is None
+    assert duration_mismatch("truncated MP4 (mdat atom cut short: 1 of 2 bytes)") is None
+    assert duration_mismatch(" duration 70 s, expected 106 s") is None  # the whole reason only
+    assert duration_mismatch("duration 70.5 s, expected 106 s") is None  # verify_video prints :.0f
+
+
+def test_a_short_header_variant_keeps_its_size_and_both_probes_read_the_header(tmp_path):
+    """`tests/short_header_mp4.py`: the fixture's `mvhd`, `tkhd` and `mdhd` durations say 2 s while
+    the samples stay — the same byte size, a valid MP4 mutagen reads as 2 s (the sound track's
+    `mdhd`),
+    and the real case in miniature: a file of exactly the listed size that plays less."""
+    data = with_short_header()
+    assert SHORT_HEADER_SECONDS == 2.0 and len(data) == len(TINY_MP4) and data != TINY_MP4
+    path = _write(tmp_path, "short-header.mp4", data)
+    probe = probe_video(path)
+    assert (probe.duration_s, probe.has_audio, probe.audio_codec) == (2.0, True, "mp4a.40.2")
+    assert atom_problem(path) is None and drm_problem(path) is None
+    assert verify_video(path, 3) is None  # within max(3 s, 5 %) of a 3-second episode
+    assert verify_video(path, 10) == "duration 2 s, expected 10 s"
+    assert duration_mismatch(verify_video(path, 106)) == (2, 106)
+    # any window, in both timescales (1000 for the movie, 12800 and 44100 for the tracks)
+    path.write_bytes(with_short_header(seconds=1.25))
+    assert probe_video(path).duration_s == 1.25
+    # the mdat and the sample tables are untouched: only the three header kinds differ
+    changed = [index for index, (a, b) in enumerate(zip(TINY_MP4, data, strict=True)) if a != b]
+    moov, moov_size = child(TINY_MP4, b"moov")
+    assert changed and all(moov < offset < moov + moov_size for offset in changed)
 
 
 def test_quarantine_note_deletes_a_file_the_os_will_not_rename(tmp_path, monkeypatch, caplog):
