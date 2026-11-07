@@ -4,8 +4,8 @@ the integrity checks against it: a transfer cut short, a video far shorter than 
 quality modes, the cooldown a rate limit starts and the CLI's refusal under it; the paid third
 series with and without the session cookie (what THIS account unlocked downloads, what it did not
 is never requested), an encrypted episode refused and remembered, a batch of all three, and the
-limited-free fourth series: its preview window read from the list alone, and a served preview
-named for what it is."""
+fourth series, free with conditions: its short header read from the list alone, and a short-served
+file named for what it is."""
 
 from __future__ import annotations
 
@@ -37,9 +37,9 @@ from dramafetch.media import INCOMPLETE_PREFIX, drm_problem_in
 from dramafetch.models import (
     DRM_MARK,
     DRM_MESSAGE,
+    RECHECK_HINT_TAIL,
     SHORT_MARK,
     SHORT_SERVED_PREFIX,
-    RECHECK_HINT_TAIL,
     DownloadOptions,
     DownloadStatus,
     Series,
@@ -54,12 +54,12 @@ from .fake_tiktok import (
     JPEG_EOI,
     JPEG_SOI,
     MEDIA_SIZE,
-    SHORT_HEADER_LISTED_DURATION_S,
     SECOND_ITEMS,
     SECOND_SERIES_ID,
     SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
+    SHORT_HEADER_LISTED_DURATION_S,
     THIRD_ITEMS,
     THIRD_SERIES_ID,
     THIRD_SERIES_NAME,
@@ -462,7 +462,7 @@ def test_a_video_far_shorter_than_announced_is_quarantined_and_a_rerun_tries_aga
     tmp_path: Path,
 ) -> None:
     """`short_media`: the list says episode 1 lasts 92 s (the fixture's value) while the CDN serves
-    the 3-second file — a locked episode served as a preview looks exactly like this. The file is
+    the 3-second file — far shorter than the episode, its size unlisted. The file is
     kept as `… (incomplete).mp4` untouched (no cover embedded, none requested), the episode is
     FAILED with the reason, and a rerun does not take the quarantined file for the episode."""
     with FakeTikTok(short_media=True) as server:
@@ -982,7 +982,7 @@ def test_a_cli_batch_of_all_three_series_with_the_session_then_costs_nothing(
     assert batch_sleeps == [1.0, 1.0]  # nothing more
 
 
-# ------------------------------------------------ the limited-free series, the preview window
+# ------------------------------------------- the free series with conditions, the short header
 
 FOURTH_FOLDER = f"{FOURTH_SERIES_NAME} [{FOURTH_SERIES_ID}]"
 #: What the fourth series' list alone says of episode 3 (`music.duration` 2 of a `video.duration`
@@ -1016,17 +1016,17 @@ def _info_argv(server: FakeTikTok, out: Path) -> list[str]:
     ]
 
 
-def test_a_limited_free_series_is_free_and_a_served_short_is_named_never_altered(
+def test_a_free_series_with_conditions_is_free_and_a_short_served_file_is_named_never_altered(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The fourth series, modeled on the owner's real payload of 2026-11-06: `isLimitedFree`
     makes it free, `IsFreeIntro: false` / `IsPreview` / `PreviewType` say nothing, and episode 3's
-    `music.duration` (2 s of its 3 s) gives its preview window away in the list itself. `info`
+    `music.duration` (2 s of its 3 s) gives its short header away in the list itself. `info`
     shows episodes 1-2 `free` and 3 `locked: plays 2 s of 3 s`; a download saves 1-2
     (one media and one cover request each) and skips 3 without a request — the series is
     complete, 1 locked. Then, with `--include-locked` and the CDN serving episode 3 as TikTok
     served the owner's 7 (the WHOLE file by size, a header that plays 2 s of the 10 s the list
-    now announces): one request, `failed-unavailable` with the served-preview message, the file
+    now announces): one request, `failed-unavailable` with the short-served message, the file
     kept untouched as `… - Episode 03 (short).mp4`, no cover requested, the manifest remembering
     nothing of it (the next list decides)."""
     out = tmp_path / "out"
@@ -1083,17 +1083,20 @@ def test_a_limited_free_series_is_free_and_a_served_short_is_named_never_altered
     kept_name = _fourth_name(3, SHORT_MARK)
     served = (
         f"{SHORT_SERVED_PREFIX}the whole file came ({MEDIA_SIZE} bytes, as listed) but it "
-        f"plays 2 s of {SHORT_HEADER_LISTED_DURATION_S} s — this session may not watch the episode "
-        f"yet; watch it in the TikTok app, then {RECHECK_HINT_TAIL}"
+        f"plays 2 s of {SHORT_HEADER_LISTED_DURATION_S} s — if the TikTok app plays it whole, "
+        f"watch it there, then {RECHECK_HINT_TAIL}; if the app breaks at the same point, the "
+        "episode is defective on TikTok's side and no retry changes it"
     )
     lines = captured.out.splitlines()
     assert _row(3, "failed-unavailable", f"{served} (kept as {kept_name})") in lines
     for number in (1, 2):
         assert _row(number, "skipped-exists", str(folder / _fourth_name(number))) in lines
     assert "incomplete: 2 of 3 — 1 failed (3)" in lines
-    assert _media_paths(after) == [f"/cdn/{third}/0.mp4"]  # once; no cover for a preview
+    assert _media_paths(after) == [f"/cdn/{third}/0.mp4"]  # once; no cover for a short file
     kept = folder / kept_name
-    assert kept.read_bytes() == short_header_media_bytes(third, "0")  # as the CDN sent it, untouched
+    assert kept.read_bytes() == short_header_media_bytes(
+        third, "0"
+    )  # as the CDN sent it, untouched
     assert len(kept.read_bytes()) == MEDIA_SIZE
     assert abs(MP4(kept).info.length - 2.0) < 0.2  # the header still says 2 s: never rewritten
     assert extract_cover(kept) is None
@@ -1105,7 +1108,7 @@ def test_a_limited_free_series_is_free_and_a_served_short_is_named_never_altered
     ]
 
     # no verdict remembered (the manifest keeps the row, as for any failure, never a DRM-like
-    # verdict): the next run lists the series again and the list's own preview window locks
+    # verdict): the next run lists the series again and the list's own short header locks
     # episode 3 before any request — the owner watches it in the app, then `--recheck`
     manifest = read_manifest(folder, FOURTH_SERIES_ID)
     assert manifest is not None and not manifest.drm_protected(3)

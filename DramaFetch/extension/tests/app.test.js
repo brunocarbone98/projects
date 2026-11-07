@@ -538,7 +538,7 @@ test("download: a video far shorter than listed is never saved", async () => {
   assert.deepEqual(saved, []);
 });
 
-test("download: the whole file by the list's size with a header that plays less is a served preview — failed-unavailable, nothing saved", async () => {
+test("download: the whole file by the list's size with a header that plays less is short-served — failed-unavailable, nothing saved", async () => {
   const size = 128 * 1024; // what video() is
   /** @param {number} listed the size the list announces */
   const listed = (listed, dataSize = listed) => {
@@ -565,7 +565,7 @@ test("download: the whole file by the list's size with a header that plays less 
   assert.equal(result.status, "failed-unavailable");
   assert.equal(
     result.message,
-    `TikTok serves this episode short: the whole file came (${size} bytes, as listed) but it plays 3 s of 92 s — this session may not watch the episode yet; watch it in the TikTok app, then --recheck looks again`,
+    `TikTok serves this episode short: the whole file came (${size} bytes, as listed) but it plays 3 s of 92 s — if the TikTok app plays it whole, watch it there, then --recheck looks again; if the app breaks at the same point, the episode is defective on TikTok's side and no retry changes it`,
   );
   assert.equal(result.message, shortServedMessage(size, "3", "92"));
   assert.deepEqual(saved, []);

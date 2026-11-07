@@ -830,7 +830,7 @@ def _music(duration, original=True, **more):
 def test_the_limited_free_series_as_the_owner_s_real_payload_reads(item_list_pages):
     """The fixture is modeled on the real run of 2026-11-06: `isLimitedFree: true` on every item,
     `IsFreeIntro: false`, `IsPreview` / `PreviewType` on fully served episodes — no clue, no hint —
-    and, on episode 3, a `music.duration` far shorter than `video.duration`: the preview window
+    and, on episode 3, a `music.duration` far shorter than `video.duration`: the short header
     the list alone gives away, locked before any request."""
     page = _limited_free_page()
     assert (page.seen_items, page.skipped_items, page.has_more) == (3, 0, False)
@@ -863,7 +863,7 @@ def test_the_limited_free_series_as_the_owner_s_real_payload_reads(item_list_pag
         (_item({"IsFreeIntro": False}), ("free", False, False), ()),
         (_item({"IsFreeIntro": True}), ("free", False, False), ()),
         (_item({"is_free_intro": False, "unlockPrice": 30}), ("unlocked", True, False), None),
-        # a truthy free key is FREE: it beats a price (a sold series free for now is free for now)
+        # a truthy free key is FREE: it beats a price (a sold series the payload calls free is free)
         # and its hint is listed next to the price it beats
         (
             _item({"isLimitedFree": True, "unlockPrice": 30}),
@@ -904,7 +904,7 @@ def _windowed(video_duration, music_duration, original=True, **drama):
 
 def test_the_short_header_rule_locks_before_any_request():
     """The real tell (2026-11-06): `music.duration` (the episode's own sound) far shorter than
-    `video.duration` — 69 s of 106 s — on an item TikTok serves a preview window of."""
+    `video.duration` — 69 s of 106 s — on an item TikTok serves short."""
     assert (SHORT_HEADER_RATIO, SHORT_HEADER_MIN_GAP_S) == (0.85, 1)
     assert SHORT_HEADER_HINT_PREFIX == "plays "
     assert access_of(_windowed(106, 69)) == (
@@ -949,11 +949,11 @@ def test_the_short_header_rule_locks_before_any_request():
     assert access_of(no_music) == ("free", False, False, ())
     # the item may be wrapped in itemStruct
     wrapped = {"itemStruct": _windowed(106, 69)}
-    assert access_of(wrapped)[0] == "locked" and access_of(wrapped)[3][0].startswith("preview")
+    assert access_of(wrapped)[0] == "locked" and access_of(wrapped)[3][0].startswith("plays")
 
 
 def test_the_short_header_rule_in_the_decision_order():
-    # an entitlement beats a preview window (the account is entitled; the downloader finds out)
+    # an entitlement beats a short header (the account is entitled; the downloader finds out)
     assert access_of(_windowed(106, 69, isUnlocked=True)) == (
         "unlocked",
         True,
@@ -962,7 +962,7 @@ def test_the_short_header_rule_in_the_decision_order():
     )
     # DRM beats everything
     assert access_of(_windowed(106, 69, drmType="widevine"))[:3] == ("locked", False, True)
-    # a preview window beats FREE and PRICING-with-a-play-URL
+    # a short header beats FREE and PRICING-with-a-play-URL
     assert access_of(_windowed(106, 69, isLimitedFree=True))[0] == "locked"
     assert access_of(_windowed(106, 69, isFree=False, unlockPrice=30)) == (
         "locked",
@@ -1056,8 +1056,9 @@ def test_listed_sizes_reads_video_size_and_every_data_size():
         (_item({"needPay": 1}), ("locked", False, False)),
         (_item({"need_unlock": "yes"}), ("locked", False, False)),
         (_item({"paywall": "on"}), ("locked", False, False)),
-        # ... but `preview` and `trial` keys are no lock since 2026-11-06: a real limited-free
-        # series carries IsPreview=true / PreviewType on fully served episodes (no clue, no hint)
+        # ... but `preview` and `trial` keys are no lock since 2026-11-06: a real free series with
+        # conditions carries IsPreview=true / PreviewType on fully served episodes (no clue, no
+        # hint)
         (_item({"isPreview": True}), ("free", False, False)),
         (_item({"IsPreview": True, "PreviewType": 4}), ("free", False, False)),
         (_item({"trialClip": True}), ("free", False, False)),

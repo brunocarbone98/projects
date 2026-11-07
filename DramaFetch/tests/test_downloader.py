@@ -1,5 +1,5 @@
 """downloader: yt-dlp params, the no-network paths, success, every error classification, the
-served preview (the whole file by size, a header that plays less: `(short)`, FAILED_UNAVAILABLE)
+short-served file (the whole file by size, a header that plays less: `(short)`, FAILED_UNAVAILABLE)
 and DRM (an encrypted file deleted, yt-dlp's "DRM protected", the payload's DRM flag)."""
 
 from __future__ import annotations
@@ -835,7 +835,7 @@ def test_a_file_that_fails_the_verification_is_quarantined_with_its_cover_delete
 
 
 def test_a_short_video_fails_the_duration_check_unless_verification_is_off(tmp_path):
-    """The list said 120 s, the file lasts 3 s: what a locked episode's preview looks like."""
+    """The list said 120 s, the file lasts 3 s: far shorter than the episode, its size unlisted."""
     long_episode = replace(EPISODE, duration_s=120)
     factory, log = make_factory(sidecar=None)
     result = YtDlpDownloader(factory).download(
@@ -861,9 +861,9 @@ def test_a_short_video_fails_the_duration_check_unless_verification_is_off(tmp_p
     assert len(log) == 5
 
 
-# --------------------------------------------------------------------------- served preview
+# ------------------------------------------------------------------------ short-served file
 
-#: tiny.mp4 with a 2-second header (`tests/short_header_mp4.py`): the whole file, a short window.
+#: tiny.mp4 with a 2-second header (`tests/short_header_mp4.py`): the whole file, a short header.
 SHORT_HEADER_MP4 = with_short_header(TINY_MP4)
 
 
@@ -900,9 +900,10 @@ def test_served_short_names_the_whole_file_with_a_short_header_and_nothing_else(
     item = _listed(9676471, 106)
     message = served_short("duration 70 s, expected 106 s", 9676471, item)
     assert message == (
-        "TikTok serves this episode short: the whole file came (9676471 bytes, as listed) but it plays "
-        "70 s of 106 s — this session may not watch the episode yet; watch it in the TikTok app, "
-        "then --recheck looks again"
+        "TikTok serves this episode short: the whole file came (9676471 bytes, as listed) but it "
+        "plays 70 s of 106 s — if the TikTok app plays it whole, watch it there, then --recheck "
+        "looks again; if the app breaks at the same point, the episode is defective on TikTok's "
+        "side and no retry changes it"
     )
     assert message.startswith(SHORT_SERVED_PREFIX)
     assert SHORT_SIZE_TOLERANCE == 0.005
@@ -924,10 +925,10 @@ def test_served_short_names_the_whole_file_with_a_short_header_and_nothing_else(
     assert served_short("duration 70 s, expected 106 s", 0, {"video": {"size": 0}}) is None
 
 
-def test_a_file_of_a_listed_size_with_a_short_header_is_a_served_short(tmp_path):
+def test_a_file_of_a_listed_size_with_a_short_header_is_short_served(tmp_path):
     """Verified 2026-11-06: 7 episodes came as files of exactly `video.size` bytes whose header
     plays 70 s of 106 s. Such a file is kept as `(short)`, the cover yt-dlp wrote is deleted,
-    nothing is embedded, and the episode is FAILED_UNAVAILABLE with the served-preview message —
+    nothing is embedded, and the episode is FAILED_UNAVAILABLE with the short-served message —
     not FAILED as incomplete: no retry changes what TikTok serves this session."""
     episode = replace(EPISODE, duration_s=120, raw=_listed(len(SHORT_HEADER_MP4)))
     factory, log = make_factory(video_bytes=SHORT_HEADER_MP4, sidecar=(".jpeg", JPEG))
@@ -935,9 +936,10 @@ def test_a_file_of_a_listed_size_with_a_short_header_is_a_served_short(tmp_path)
     result = YtDlpDownloader(factory).download(episode, options)
     assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
     assert result.message == (
-        f"{SHORT_SERVED_PREFIX}the whole file came ({len(SHORT_HEADER_MP4)} bytes, as listed) but it "
-        "plays 2 s of 120 s — this session may not watch the episode yet; watch it in the TikTok "
-        f"app, then --recheck looks again (kept as {STEM} (short).mp4)"
+        f"{SHORT_SERVED_PREFIX}the whole file came ({len(SHORT_HEADER_MP4)} bytes, as listed) but "
+        "it plays 2 s of 120 s — if the TikTok app plays it whole, watch it there, then --recheck "
+        "looks again; if the app breaks at the same point, the episode is defective on TikTok's "
+        f"side and no retry changes it (kept as {STEM} (short).mp4)"
     )
     assert _names(tmp_path) == [f"{STEM} (short).mp4"]  # the sidecar cover is gone
     assert (tmp_path / f"{STEM} (short).mp4").read_bytes() == SHORT_HEADER_MP4  # byte for byte
@@ -980,10 +982,10 @@ def test_a_short_header_on_an_unlisted_size_is_incomplete_as_before(tmp_path):
     assert result.message.startswith(f"{INCOMPLETE_PREFIX}duration 30 s, expected 10 s (kept as")
 
 
-def test_drm_comes_before_the_preview_rule_and_a_preview_file_is_never_deleted(tmp_path):
-    """An encrypted body of a listed size is deleted as DRM (the check runs first); a served
-    preview is kept, never deleted, whatever the OS does with the rename (deleted only when the
-    rename is refused for good, as for an incomplete file)."""
+def test_drm_comes_before_the_short_header_rule_and_a_short_file_is_never_deleted(tmp_path):
+    """An encrypted body of a listed size is deleted as DRM (the check runs first); a
+    short-served file is kept, never deleted, whatever the OS does with the rename (deleted only
+    when the rename is refused for good, as for an incomplete file)."""
     encrypted = encrypted_mp4(SHORT_HEADER_MP4)
     episode = replace(EPISODE, duration_s=120, raw=_listed(len(encrypted)))
     factory, _ = make_factory(video_bytes=encrypted, sidecar=None)

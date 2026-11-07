@@ -4,9 +4,9 @@ A real headless Chromium loads the extension's TEST copy (`extension_harness.Ext
 `dramafetch_test` and `http://127.0.0.1/*` added to the copy's manifest only) and drives the fake
 TikTok server through the extension's own app page — discovery through the page's own request in
 a background tab, downloads with the Referer rule, verification, DRM, covers, naming, the
-per-series state, pacing, cooldown and stops, batches, the limited-free series and its preview
-window. Every scenario counts the requests the fake server saw. No cookie value is ever printed
-or asserted on, beyond checking that it is stored nowhere.
+per-series state, pacing, cooldown and stops, batches, the free series with conditions and its
+short header. Every scenario counts the requests the fake server saw. No cookie value is ever
+printed or asserted on, beyond checking that it is stored nowhere.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from dramafetch.media import INCOMPLETE_PREFIX
 from dramafetch.models import (
     DRM_MESSAGE,
     DRM_REMEMBERED_MESSAGE,
-    SHORT_SERVED_PREFIX,
     RECHECK_HINT_TAIL,
+    SHORT_SERVED_PREFIX,
 )
 
 from .extension_harness import CHROMIUM, ExtensionHarness
@@ -37,12 +37,12 @@ from .fake_tiktok import (
     FOURTH_SERIES_ID,
     FOURTH_SERIES_NAME,
     MEDIA_SIZE,
-    SHORT_HEADER_LISTED_DURATION_S,
     SECOND_ITEMS,
     SECOND_SERIES_ID,
     SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
+    SHORT_HEADER_LISTED_DURATION_S,
     THIRD_ITEMS,
     THIRD_SERIES_ID,
     THIRD_SERIES_NAME,
@@ -87,16 +87,16 @@ THIRD = dict(enumerate(THIRD_ITEMS, start=1))
 FOURTH_LINK = f"https://www.tiktok.com/shortdrama/episode/{FOURTH_SERIES_ID}/1"
 FOURTH = dict(enumerate(FOURTH_ITEMS, start=1))
 FOURTH_FOLDER = Path("DramaFetch") / f"{FOURTH_SERIES_NAME} [{FOURTH_SERIES_ID}]"
-#: The extension's `lib/diagnosis.js` cause of a served preview (the spec's exact texts; the
+#: The extension's `lib/diagnosis.js` cause of a short-served file (the spec's exact texts; the
 #: Python side has no such report), around `<a> s of <e> s`.
 SHORT_SERVED_CAUSE_PREFIX = (
-    "TikTok serves this episode short: the file is the whole episode by size but its header limits "
-    "playback to "
+    "TikTok serves this episode short: the file is the whole episode by size but its header stops "
+    "at "
 )
 SHORT_SERVED_CAUSE_SUFFIX = (
-    " — how TikTok's own player previews an episode this account has not unlocked; DramaFetch "
-    "does not alter files. A limited-free series unlocks as you watch it in the TikTok app: watch "
-    "the episode there, then look again"
+    ". Either a window for an episode this account has not unlocked, or a defective encode on "
+    "TikTok's side — the list cannot tell: if the TikTok app plays it whole, watch it there and "
+    "look again; if the app breaks at the same point too, no retry will change it"
 )
 MEDIA_RATE_LIMIT = (
     "rate limited (HTTP 429) by the video server: wait 30-60 minutes before trying again"
@@ -986,7 +986,7 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         assert ext.saved_files() == sorted([report_path, second_path])  # still no video
 
 
-def test_r_a_limited_free_series_lists_its_short_header_and_names_a_served_short(
+def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_short_served_file(
     tmp_path: Path,
 ) -> None:
     """The fourth series (the owner's real payload shape of 2026-11-06, `isLimitedFree`), the CDN
@@ -995,19 +995,20 @@ def test_r_a_limited_free_series_lists_its_short_header_and_names_a_served_short
     the list's own hint (`plays 2 s of 10 s`: `music.duration` against `video.duration`,
     no request made; `IsFreeIntro: false` / `IsPreview` / `PreviewType` lock nothing). **Download
     all available** saves 1-2 and asks nothing for 3. **Download selected** with 3 ticked asks
-    for it once: `failed-unavailable` with the served-preview message, nothing saved for it, no
+    for it once: `failed-unavailable` with the short-served message, nothing saved for it, no
     cover; the page shows it apart with the checkbox advice in place of `--recheck`; the report's
-    probable cause names the served preview and its `episodes_digest` carries every listed
+    probable cause names the short-served file and its `episodes_digest` carries every listed
     episode's `music.duration` (3, 3, 2) next to the video's."""
-    preview = frozenset({(FOURTH_SERIES_ID, 3)})
+    short = frozenset({(FOURTH_SERIES_ID, 3)})
     hint = f"{SHORT_HEADER_HINT_PREFIX}2 s of {SHORT_HEADER_LISTED_DURATION_S} s"
     served = (
         f"{SHORT_SERVED_PREFIX}the whole file came ({MEDIA_SIZE} bytes, as listed) but it plays "
-        f"2 s of {SHORT_HEADER_LISTED_DURATION_S} s — this session may not watch the episode yet; watch "
-        f"it in the TikTok app, then {RECHECK_HINT_TAIL}"
+        f"2 s of {SHORT_HEADER_LISTED_DURATION_S} s — if the TikTok app plays it whole, watch it "
+        f"there, then {RECHECK_HINT_TAIL}; if the app breaks at the same point, the episode is "
+        "defective on TikTok's side and no retry changes it"
     )
     with (
-        FakeTikTok(short_header_media=preview) as server,
+        FakeTikTok(short_header_media=short) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         listing = ext.load(FOURTH_LINK)
@@ -1071,15 +1072,20 @@ def test_r_a_limited_free_series_lists_its_short_header_and_names_a_served_short
         shown = page.locator("#failed-table tbody tr").first.locator("td.message").text_content()
         assert shown is not None and shown.startswith(
             f"{SHORT_SERVED_PREFIX}the whole file came ({MEDIA_SIZE} bytes, as listed) but it "
-            f"plays 2 s of {SHORT_HEADER_LISTED_DURATION_S} s — this session may not watch the episode "
-            "yet; watch it in the TikTok app, then tick “"
+            f"plays 2 s of {SHORT_HEADER_LISTED_DURATION_S} s — if the TikTok app plays it whole, "
+            "watch it there, then tick “"
         )
-        assert shown.endswith("” to look again") and "--recheck" not in shown
+        assert shown.endswith(
+            "” to look again; if the app breaks at the same point, the episode is defective on "
+            "TikTok's side and no retry changes it"
+        )
+        assert "--recheck" not in shown
         assert page.locator("#failed-table tbody tr").first.locator(".badge").text_content() == (
             "unavailable"
         )
 
-        # the report: the served preview as the probable cause, the digest of every listed episode
+        # the report: the short-served file as the probable cause, the digest of every listed
+        # episode
         ext.wait_for(lambda: len(_report_files(ext)) == 1, 20, "the report was not saved")
         (report_path,) = _report_files(ext)
         assert _report_name_re(FOURTH_SERIES_NAME).match(report_path.name), report_path.name

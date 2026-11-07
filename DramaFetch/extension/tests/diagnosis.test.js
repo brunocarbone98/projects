@@ -19,13 +19,13 @@ import {
   LOGIN_CAUSE,
   LONGER_FILE_CAUSE_SUFFIX,
   NOT_ATTEMPTED_CAUSE,
-  PREVIEW_CAUSE_MIDDLE,
-  PREVIEW_CAUSE_PREFIX,
-  SHORT_SERVED_CAUSE_PREFIX,
-  SHORT_SERVED_CAUSE_SUFFIX,
   RATE_LIMITED_CAUSE,
   REPORTS_FOLDER,
   REPORT_VERSION,
+  SHORTER_FILE_CAUSE_MIDDLE,
+  SHORTER_FILE_CAUSE_PREFIX,
+  SHORT_SERVED_CAUSE_PREFIX,
+  SHORT_SERVED_CAUSE_SUFFIX,
   UNAVAILABLE_CAUSE_PREFIX,
   UNAVAILABLE_CAUSE_SUFFIX,
   WHAT_THIS_IS,
@@ -137,10 +137,11 @@ function seriesInput(seriesId, name, episodes) {
   };
 }
 
-const PREVIEW = `${INCOMPLETE_PREFIX}duration 70 s, expected 106 s`;
-const PREVIEW_HINTS = ["isFree=False", "unlockPrice=30"];
+/** A shorter file of an UNLISTED size (`downloader.js` quarantines it as incomplete; a listed size is `SERVED`). */
+const SHORTER = `${INCOMPLETE_PREFIX}duration 70 s, expected 106 s`;
+const SHORTER_HINTS = ["isFree=False", "unlockPrice=30"];
 
-/** The downloader's served-preview message (`downloader.js`): the whole file by size, a 70 s header. */
+/** The downloader's short-served message (`downloader.js`): the whole file by size, a 70 s header. */
 const SERVED = shortServedMessage(9676471, "70", "106");
 
 test("probableCause: the twelve rules, first match wins", () => {
@@ -151,12 +152,13 @@ test("probableCause: the twelve rules, first match wins", () => {
   );
   assert.equal(probableCause(row("failed", "stopped: cooldown until 19:30"), null), `${NOT_ATTEMPTED_CAUSE} (cooldown until 19:30)`);
   // 2-4. the stops
-  // 2. a served preview, named by the downloader: the whole file by size, a header that plays a window
+  // 2. a short-served file, named by the downloader: the whole file by size, a header that plays less
   assert.equal(
     probableCause(row("failed-unavailable", SERVED, { access: "free", lockHints: ["isLimitedFree=True"] }), null),
-    "TikTok served a preview: the file is the whole episode by size but its header limits playback to 70 s of 106 s — how " +
-      "TikTok's own player previews an episode this account has not unlocked; DramaFetch does not alter files. A limited-free " +
-      "series unlocks as you watch it in the TikTok app: watch the episode there, then look again",
+    "TikTok serves this episode short: the file is the whole episode by size but its header stops at 70 s of 106 s. Either a " +
+      "window for an episode this account has not unlocked, or a defective encode on TikTok's side — the list cannot tell: " +
+      "if the TikTok app plays it whole, watch it there and look again; if the app breaks at the same point too, no retry " +
+      "will change it",
   );
   assert.equal(probableCause(row("failed-unavailable", SERVED), null), `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
   assert.equal(probableCause(row("failed-unavailable", `${SERVED} (kept as E05 (short).mp4)`), null), `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
@@ -176,27 +178,28 @@ test("probableCause: the twelve rules, first match wins", () => {
     `${LOCKED_CAUSE_PREFIX}isLocked=True; no play address${LOCKED_CAUSE_SUFFIX}`,
   );
   assert.equal(probableCause(row("skipped-locked", "looks locked", { access: "locked" }), null), `${LOCKED_CAUSE_PREFIX}no clue${LOCKED_CAUSE_SUFFIX}`);
-  // …the list's preview-window hint among them when that was the reason
+  // …the list's short-header hint among them when that was the reason
   assert.equal(
     probableCause(row("skipped-locked", "looks locked: isLimitedFree=True; plays 69 s of 106 s", { access: "locked", lockHints: ["isLimitedFree=True", "plays 69 s of 106 s"] }), null),
     `${LOCKED_CAUSE_PREFIX}isLimitedFree=True; plays 69 s of 106 s${LOCKED_CAUSE_SUFFIX}`,
   );
-  // 7. a shorter file: a preview, with the list's marks; a longer one: the list and the media disagree
+  // 8. a shorter file of an unlisted size — the measured fact, both readings, the list's marks; a longer one: the
+  //    list and the media disagree
   assert.equal(
-    probableCause(row("failed", PREVIEW, { access: "unlocked", lockHints: PREVIEW_HINTS }), null),
-    "TikTok served a preview: a complete MP4 of 70 s where the list announces 106 s. That is what TikTok serves for " +
-      "an episode the account has not unlocked (Drama Pass, coins or an unlock in the TikTok app); the list's marks " +
-      "for it: isFree=False; unlockPrice=30",
+    probableCause(row("failed", SHORTER, { access: "unlocked", lockHints: SHORTER_HINTS }), null),
+    "the file plays 70 s where the list announces 106 s, and its size is none the list announced — a shorter file than " +
+      "listed: a window or a preview clip for an episode this account has not unlocked, or a defective encode on " +
+      "TikTok's side; the list's marks for it: isFree=False; unlockPrice=30",
   );
   assert.equal(
-    probableCause(row("failed", PREVIEW), null),
-    `${PREVIEW_CAUSE_PREFIX}a complete MP4 of 70 s where the list announces 106 s${PREVIEW_CAUSE_MIDDLE}none`,
+    probableCause(row("failed", SHORTER), null),
+    `${SHORTER_FILE_CAUSE_PREFIX}70 s where the list announces 106 s${SHORTER_FILE_CAUSE_MIDDLE}none`,
   );
   assert.equal(
     probableCause(row("failed", `${INCOMPLETE_PREFIX}duration 130 s, expected 106 s`), null),
     `the file lasts 130 s where the list announces 106 s${LONGER_FILE_CAUSE_SUFFIX}`,
   );
-  // 8. a transfer cut short, both wordings
+  // 9. a transfer cut short, both wordings
   assert.equal(
     probableCause(row("failed", `${INCOMPLETE_PREFIX}truncated body (100000 of 131072 bytes) from v16.tiktok.com`), null),
     `${CUT_SHORT_CAUSE_PREFIX}100000 of 131072 bytes${CUT_SHORT_CAUSE_SUFFIX}`,
@@ -205,14 +208,14 @@ test("probableCause: the twelve rules, first match wins", () => {
     probableCause(row("failed", `${INCOMPLETE_PREFIX}truncated body (the transfer was cut short) from v16.tiktok.com`), null),
     "the transfer was cut short (the transfer was cut short): a network or server problem, worth a retry",
   );
-  // 9. any other verification reason
+  // 10. any other verification reason
   for (const reason of ["no audio track", "not a valid MP4 (no moov atom)", "no playable duration", "truncated MP4 (mdat atom cut short: 10 of 20 bytes)"]) {
     assert.equal(probableCause(row("failed", `${INCOMPLETE_PREFIX}${reason}`), null), `${INVALID_FILE_CAUSE_PREFIX}${reason}${INVALID_FILE_CAUSE_SUFFIX}`);
   }
-  // 10. no playable stream
+  // 11. no playable stream
   const unavailable = `${UNAVAILABLE_MESSAGE} (HTTP 403 from v4.tiktok.com)`;
   assert.equal(probableCause(row("failed-unavailable", unavailable), null), `${UNAVAILABLE_CAUSE_PREFIX}${unavailable}${UNAVAILABLE_CAUSE_SUFFIX}`);
-  // 11. the rest
+  // 12. the rest
   assert.equal(probableCause(row("failed", "download failed: no response (Failed to fetch) from v1.tiktok.com"), null), `${FAILED_CAUSE_PREFIX}no response (Failed to fetch) from v1.tiktok.com`); // the prefix once, never doubled
   assert.equal(probableCause(row("failed", "could not save E01.mp4: FILE_FAILED"), null), `${FAILED_CAUSE_PREFIX}could not save E01.mp4: FILE_FAILED`);
   // every cause is English text without a URL query or a cookie-like value
@@ -232,7 +235,7 @@ const runs = () => [
   seriesInput(SERIES_ID, "One", [
     episodeInput(4, "failed", `${INCOMPLETE_PREFIX}truncated body (100000 of 131072 bytes) from v16.tiktok.com`, { trace: TRUNCATED_TRACE }),
     episodeInput(1, "done", "saved One - Episode 01.mp4 (0.1 MiB) + cover embedded"),
-    episodeInput(2, "failed", PREVIEW, { access: "unlocked", lockHints: PREVIEW_HINTS }),
+    episodeInput(2, "failed", SHORTER, { access: "unlocked", lockHints: SHORTER_HINTS }),
     episodeInput(3, "skipped-exists", "already exists: One - Episode 03.mp4", { trace: { attempts: [], refreshes: [] } }),
     episodeInput(5, "skipped-locked", "looks locked: isLocked=True; no play address", {
       access: "locked",
@@ -321,8 +324,8 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
       [7, "failed"],
     ],
   );
-  const [preview, truncated, locked, fresh, stopped] = /** @type {Record<string, unknown>[]} */ (rows);
-  assert.deepEqual(Object.keys(/** @type {object} */ (short)), [
+  const [shortFile, truncated, locked, fresh, stopped] = /** @type {Record<string, unknown>[]} */ (rows);
+  assert.deepEqual(Object.keys(/** @type {object} */ (shortFile)), [
     "number",
     "item_id",
     "title",
@@ -340,13 +343,13 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
     "refreshes",
     "raw",
   ]);
-  assert.equal(preview?.["item_id"], "7699400000000000002");
-  assert.equal(preview?.["access"], "unlocked");
-  assert.equal(preview?.["paid"], true);
-  assert.deepEqual(preview?.["lock_hints"], PREVIEW_HINTS);
-  assert.equal(preview?.["attempted"], true);
-  assert.match(String(preview?.["probable_cause"]), /^TikTok served a preview: a complete MP4 of 70 s where the list announces 106 s/);
-  assert.ok(String(preview?.["probable_cause"]).endsWith("isFree=False; unlockPrice=30"));
+  assert.equal(shortFile?.["item_id"], "7699400000000000002");
+  assert.equal(shortFile?.["access"], "unlocked");
+  assert.equal(shortFile?.["paid"], true);
+  assert.deepEqual(shortFile?.["lock_hints"], SHORTER_HINTS);
+  assert.equal(shortFile?.["attempted"], true);
+  assert.match(String(shortFile?.["probable_cause"]), /^the file plays 70 s where the list announces 106 s, and its size is none the list announced/);
+  assert.ok(String(shortFile?.["probable_cause"]).endsWith("isFree=False; unlockPrice=30"));
   // the attempts and refreshes come from the trace, copied
   assert.deepEqual(truncated?.["attempts"], TRUNCATED_TRACE.attempts);
   assert.notEqual(truncated?.["attempts"], TRUNCATED_TRACE.attempts);
@@ -364,7 +367,7 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
   assert.deepEqual(stopped?.["refreshes"], []);
   assert.equal(stopped?.["probable_cause"], `${NOT_ATTEMPTED_CAUSE} (three failures in a row)`);
   // the raw items pass through with their content as served (the signed links included)
-  assert.deepEqual(preview?.["raw"], { id: "item2", video: { playAddr: ["https://v16.tiktok.com/2.mp4?expire=1"] } });
+  assert.deepEqual(shortFile?.["raw"], { id: "item2", video: { playAddr: ["https://v16.tiktok.com/2.mp4?expire=1"] } });
   // the reference: the FIRST done row of the series, with its raw item
   assert.deepEqual(one["reference"], {
     number: 1,
@@ -383,7 +386,7 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
   assert.equal(summary.length, 5);
   assert.equal(
     summary[0],
-    `One: E02 failed — ${PREVIEW} — probable cause: ${PREVIEW_CAUSE_PREFIX}a complete MP4 of 70 s where the list announces 106 s${PREVIEW_CAUSE_MIDDLE}isFree=False; unlockPrice=30`,
+    `One: E02 failed — ${SHORTER} — probable cause: ${SHORTER_FILE_CAUSE_PREFIX}70 s where the list announces 106 s${SHORTER_FILE_CAUSE_MIDDLE}isFree=False; unlockPrice=30`,
   );
   assert.equal(summary[4], `One: E07 failed — stopped: three failures in a row — probable cause: ${NOT_ATTEMPTED_CAUSE} (three failures in a row)`);
 });
@@ -420,7 +423,7 @@ test("buildReport: one series gives unprefixed summary lines and a skipped-exist
 });
 
 /**
- * A list item of the limited-free shape (2026-11-06), the fields the digest reads set as given.
+ * A list item of the `isLimitedFree` shape (2026-11-06), the fields the digest reads set as given.
  * @param {{videoDuration?: unknown, musicDuration?: unknown, original?: unknown, size?: unknown, bitrate?: unknown, isPreview?: unknown, previewType?: unknown}} fields
  * @returns {Record<string, unknown>}
  */
@@ -438,7 +441,7 @@ function rawItem(fields) {
   };
 }
 
-test("buildReport: episodes_digest has one small entry per LISTED episode — the fields the preview rules read, no URL", () => {
+test("buildReport: episodes_digest has one small entry per LISTED episode — the fields the short-header rules read, no URL", () => {
   const listedEpisodes = [
     { number: 1, access: "free", lockHints: ["isLimitedFree=True"], durationS: 69, raw: rawItem({ videoDuration: 69, musicDuration: 69, original: true, size: 6_000_000, bitrate: 700_000, isPreview: true, previewType: 4 }) },
     { number: 5, access: "locked", lockHints: ["isLimitedFree=True", "plays 69 s of 106 s"], durationS: 106, raw: rawItem({ videoDuration: 106, musicDuration: 69, original: true, size: 9676471, bitrate: 726189, isPreview: true, previewType: 4 }) },
@@ -491,7 +494,7 @@ test("buildReport: episodes_digest has one small entry per LISTED episode — th
   assert.deepEqual(digest[3], { number: 8, access: "free", lock_hints: [], duration_s: null, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
   assert.deepEqual(digest[4], { number: 9, access: "locked", lock_hints: ["no play address"], duration_s: null, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
   assert.ok(!JSON.stringify(digest).includes("http"));
-  // the preview row's cause, and the digest copies the hints (the input stays untouched)
+  // the short-served row's cause, and the digest copies the hints (the input stays untouched)
   assert.equal(/** @type {Record<string, unknown>[]} */ (series?.["not_downloaded"])[0]?.["probable_cause"], `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
   assert.notEqual(digest[0]?.["lock_hints"], listedEpisodes[0]?.lockHints);
   // not listed: null (an unstarted series, or an input without the list)

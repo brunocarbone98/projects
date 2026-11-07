@@ -30,14 +30,18 @@ lasts about ``Episode.duration_s``) unless ``DownloadOptions.verify`` is off; a 
 renamed ``<name> (incomplete).<ext>`` (``media.quarantine``; one the OS will not rename is deleted
 rather than left under the episode's name), the cover yt-dlp wrote is deleted and the episode is
 FAILED with ``"download looks incomplete or wrong: <reason> (kept as <name>)"`` — a rerun tries it
-again. One exception (verified 2026-11-06 on a real limited-free series): a file whose size is one
-the episode list announced (``catalog.listed_sizes``, within :data:`SHORT_SIZE_TOLERANCE`) but
-whose header plays LESS than the listed duration is the whole file with a preview window — how
-TikTok's own player previews an episode this account has not unlocked — so it is kept as
-``<name> (short).<ext>`` (``models.SHORT_MARK``) and the episode is FAILED_UNAVAILABLE with
-:func:`served_short`'s message (``models.SHORT_SERVED_PREFIX`` …): no retry changes it, the
-episode is to be watched in the TikTok app, and the next listing reads it fresh. DramaFetch never
-rewrites that header. Only then is the episode cover yt-dlp saved next to the video
+again. One exception (verified 2026-11-06 on a real free series with conditions, ``isLimitedFree``):
+a file whose size is one the episode list announced (``catalog.listed_sizes``, within
+:data:`SHORT_SIZE_TOLERANCE`) but whose header plays LESS than the listed duration is the whole
+episode by size with a short header — a window for an episode this account has not unlocked, or
+a defective encode on TikTok's side (the owner's 7 episodes of 2026-11-06 broke at the same point
+in the TikTok app and in TikTok's web player: no sound past it, a broken picture when seeking
+past it); the list cannot tell the two apart — so it is kept as ``<name> (short).<ext>``
+(``models.SHORT_MARK``) and the episode is FAILED_UNAVAILABLE with :func:`served_short`'s message
+(``models.SHORT_SERVED_PREFIX`` …), which offers both readings: if the TikTok app plays the
+episode whole, watch it there, then ``--recheck`` reads the list fresh; if the app breaks at the
+same point too, no retry changes it. DramaFetch never rewrites that header. Only then is the
+episode cover yt-dlp saved next to the video
 (``writethumbnail``) embedded into the MP4 as its cover art, kept as a file, or both, as
 ``DownloadOptions.thumbnail`` says (see :func:`_finish_cover` and ``dramafetch.thumbnails``);
 what became of it is appended to the DONE message and never changes the status.
@@ -75,9 +79,9 @@ from dramafetch.media import (
 from dramafetch.models import (
     DRM_MARK,
     DRM_MESSAGE,
+    RECHECK_HINT_TAIL,
     SHORT_MARK,
     SHORT_SERVED_PREFIX,
-    RECHECK_HINT_TAIL,
     DownloadOptions,
     DownloadResult,
     DownloadStatus,
@@ -170,7 +174,7 @@ _DRM_RE = re.compile(r"\bdrm\b")
 #: Failures an encrypted file left behind turns into its DRM verdict (the stop statuses are kept).
 _PLAIN_FAILURES = frozenset({DownloadStatus.FAILED, DownloadStatus.FAILED_UNAVAILABLE})
 #: How close a saved file's size must be to one the list announced (``catalog.listed_sizes``) for
-#: a short header to mean a served preview rather than an incomplete download: within 0.5 %.
+#: a short header to mean a short-served file rather than an incomplete download: within 0.5 %.
 SHORT_SIZE_TOLERANCE = 0.005
 
 
@@ -425,18 +429,21 @@ def mentions_drm(message: str) -> bool:
 
 
 def served_short(problem: str | None, size: int, item: dict[str, Any] | None) -> str | None:
-    """The served-preview message when a file that failed ``media.verify_video`` is the whole
+    """The short-served message when a file that failed ``media.verify_video`` is the whole
     episode by size with a header that plays less — else None (the file is incomplete or wrong).
 
     ``problem`` is the verification's reason: only ``duration <a> s, expected <e> s`` with
     ``a < e`` qualifies (``media.duration_mismatch``). ``size`` is the saved file's (or the body's)
     length; it must be within :data:`SHORT_SIZE_TOLERANCE` of one of the sizes the episode list
     announced for the item (``catalog.listed_sizes``: ``video.size`` and every
-    ``PlayAddr.DataSize``). The message, shared word for word with the extension::
+    ``PlayAddr.DataSize``). The message, shared word for word with the extension, says what was
+    measured and offers both readings — a window for an episode the account has not unlocked, or
+    a defective encode on TikTok's side — because the list cannot tell them apart::
 
-        TikTok serves this episode short: the whole file came (<size> bytes, as listed) but it plays <a> s
-        of <e> s — this session may not watch the episode yet; watch it in the TikTok app, then
-        --recheck looks again
+        TikTok serves this episode short: the whole file came (<size> bytes, as listed) but it
+        plays <a> s of <e> s — if the TikTok app plays it whole, watch it there, then --recheck
+        looks again; if the app breaks at the same point, the episode is defective on TikTok's
+        side and no retry changes it
 
     (``models.SHORT_SERVED_PREFIX``, ``models.RECHECK_HINT_TAIL``). The engines append
     `` (kept as <name>)`` after quarantining the file as ``(short)``.
@@ -453,8 +460,9 @@ def served_short(problem: str | None, size: int, item: dict[str, Any] | None) ->
         return None
     return (
         f"{SHORT_SERVED_PREFIX}the whole file came ({size} bytes, as listed) but it plays "
-        f"{actual:.0f} s of {expected} s — this session may not watch the episode yet; watch it in "
-        f"the TikTok app, then {RECHECK_HINT_TAIL}"
+        f"{actual:.0f} s of {expected} s — if the TikTok app plays it whole, watch it there, then "
+        f"{RECHECK_HINT_TAIL}; if the app breaks at the same point, the episode is defective on "
+        "TikTok's side and no retry changes it"
     )
 
 
@@ -806,8 +814,8 @@ class YtDlpDownloader:
         if options.verify:
             problem = verify_video(produced, episode.duration_s)
             if problem is not None:
-                preview = served_short(problem, produced.stat().st_size, episode.raw)
-                return self._quarantine(episode, produced, problem, preview=preview)
+                served = served_short(problem, produced.stat().st_size, episode.raw)
+                return self._quarantine(episode, produced, problem, served=served)
         return DownloadResult(
             episode=episode,
             status=DownloadStatus.DONE,
@@ -817,13 +825,13 @@ class YtDlpDownloader:
 
     @staticmethod
     def _quarantine(
-        episode: Episode, produced: Path, problem: str, *, preview: str | None = None
+        episode: Episode, produced: Path, problem: str, *, served: str | None = None
     ) -> DownloadResult:
         """The FAILED result for a file that failed :func:`~dramafetch.media.verify_video`: the
         file is renamed ``<name> (incomplete).<ext>`` (:func:`~dramafetch.media.quarantine`) so
         that a rerun tries the episode again, the cover yt-dlp wrote next to it is deleted (no
         cover is embedded into or kept for a bad download), and the message is
-        ``"download looks incomplete or wrong: <problem> (kept as <name>)"``. With ``preview`` —
+        ``"download looks incomplete or wrong: <problem> (kept as <name>)"``. With ``served`` —
         :func:`served_short`'s message: the whole file by size, a header that plays less — the
         file is renamed ``<name> (short).<ext>`` instead and the episode is FAILED_UNAVAILABLE
         with that message (no retry changes what TikTok serves this session). A file the OS will
@@ -835,13 +843,13 @@ class YtDlpDownloader:
                 sidecar.unlink()
             except OSError as exc:
                 log.debug("could not delete the cover %s: %s", sidecar.name, exc.strerror)
-        note = quarantine_note(produced, mark=INCOMPLETE_WORD if preview is None else SHORT_MARK)
-        log.debug("episode %s: %s (%s)", episode.number, preview or problem, note)
-        if preview is not None:
+        note = quarantine_note(produced, mark=INCOMPLETE_WORD if served is None else SHORT_MARK)
+        log.debug("episode %s: %s (%s)", episode.number, served or problem, note)
+        if served is not None:
             return DownloadResult(
                 episode=episode,
                 status=DownloadStatus.FAILED_UNAVAILABLE,
-                message=f"{preview} ({note})",
+                message=f"{served} ({note})",
             )
         return DownloadResult(
             episode=episode,

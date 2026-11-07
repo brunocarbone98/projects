@@ -137,7 +137,7 @@ test("the decision table: entitled, viewer lock, sold with and without a real pl
 });
 
 /**
- * An item of a limited-free series as TikTok served it on 2026-11-06 (the owner's report, anonymised):
+ * An item of a free series with conditions as TikTok served it on 2026-11-06 (the owner's report, anonymised):
  * `dramaInfo.isLimitedFree`, `IsFreeIntro: false`, `IsPreview` / `PreviewType` on every episode,
  * `video.size` equal to the H.264 rendition's `DataSize`, the episode's own sound in `music`.
  * @param {number} number
@@ -193,13 +193,13 @@ function limitedFreeItem(number, fields) {
   };
 }
 
-test("a limited-free series (2026-11-06): isLimitedFree is free, IsFreeIntro / IsPreview / PreviewType give no clue", () => {
+test("a free series with conditions (2026-11-06): isLimitedFree is free, IsFreeIntro / IsPreview / PreviewType give no clue", () => {
   // a free flag alone is no hint: it says nothing about a price or a lock (an empty list means that)
   const full = accessOf(limitedFreeItem(1, { videoDuration: 69, musicDuration: 69, original: true }));
   assert.deepEqual(full, { access: "free", paid: false, drm: false, hints: [] });
   // E02: IsPreview true, PreviewType 4, the sound as long as the video: free as well
   assert.equal(accessOf(limitedFreeItem(2, { videoDuration: 106, musicDuration: 106, original: true, previewType: 4 })).access, "free");
-  // E03: the episode's own sound lasts 2 s of a 3 s video: the preview window locks it, that hint alone
+  // E03: the episode's own sound lasts 2 s of a 3 s video: the short header locks it, that hint alone
   const windowed = accessOf(limitedFreeItem(3, { videoDuration: 3, musicDuration: 2, original: true, isPreview: false, previewType: 1 }));
   assert.deepEqual(windowed, { access: "locked", paid: false, drm: false, hints: [`${SHORT_HEADER_HINT_PREFIX}2 s of 3 s`] });
   assert.equal(SHORT_HEADER_HINT_PREFIX, "plays ");
@@ -222,7 +222,7 @@ test("a limited-free series (2026-11-06): isLimitedFree is free, IsFreeIntro / I
   assert.deepEqual(accessOf(item({ IsFreeIntro: true, is_free_intro: 1 })).hints, []);
   assert.deepEqual(accessOf(item({ isPreview: true })), { access: "free", paid: false, drm: false, hints: [] });
   assert.deepEqual(accessOf(item({ IsPreview: true, PreviewType: 4, isTrial: true, preview_type: 1 })).hints, []);
-  // a FREE clue beats pricing: a sold series that is free for now is free for now (and still `paid`);
+  // a FREE clue beats pricing: a sold series the payload calls free is free (and still `paid`);
   // next to the price the free flag IS a hint — it says why
   assert.deepEqual(accessOf(item({ isLimitedFree: true, unlockPrice: 30 })), {
     access: "free",
@@ -245,7 +245,7 @@ test("a limited-free series (2026-11-06): isLimitedFree is free, IsFreeIntro / I
   assert.equal(accessOf(item({ isLimitedFree: true, isUnlocked: true })).access, "unlocked");
 });
 
-test("the plays music.original, both durations, 85 % and a 1 s gap; the decision order", () => {
+test("the short header: music.original, both durations, 85 % and a 1 s gap; the decision order", () => {
   /** @param {unknown} music @param {Record<string, unknown>} [video] @param {Record<string, unknown>} [drama] */
   const windowed = (music, video = { duration: 106, ...PLAYABLE }, drama = {}) => accessOf({ ...item(drama, video), music });
   const sound = (/** @type {unknown} */ duration, /** @type {unknown} */ original = true) => ({ duration, original });

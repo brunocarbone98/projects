@@ -411,11 +411,11 @@ def test_a_short_header_variant_reads_as_two_seconds_in_both_languages(tmp_path:
     assert SHORT_HEADER_SECONDS == 2.0 and len(data) == len(TINY_MP4)
     verdicts = _assert_parity(
         tmp_path,
-        [("preview-2s", data), ("preview-1.25s", with_short_header(seconds=1.25))],
+        [("short-header-2s", data), ("short-header-1.25s", with_short_header(seconds=1.25))],
         durations=(3, 10, 106, None),
     )
     assert verdicts == [None, None]  # 2 s is within max(3 s, 5 %) of a 3-second episode
-    path = tmp_path / "preview.mp4"
+    path = tmp_path / "short-header.mp4"
     path.write_bytes(data)
     (probe,) = _values([{"op": "probe", "path": str(path)}])
     assert _outcome({"value": probe}) == _python_probe(path)

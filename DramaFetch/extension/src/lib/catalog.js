@@ -15,17 +15,22 @@
  * `locked` (listed and skipped). Nothing here unlocks, buys, fakes or sends anything back.
  *
  * Verified 2026-11-06 from the owner's reports (a 62-episode series, `catalog.py` has the same
- * facts): a series free for a limited time carries `dramaInfo.isLimitedFree: true` on every item;
- * `DramaVideoData.IsFreeIntro` ("is this the free intro teaser") is false on every episode, E01
- * included, and `IsPreview` / `PreviewType` (4 or 1) sit on fully served episodes too — none of
- * the three says anything about a lock, so none gives a clue. What does: an episode TikTok serves
- * as a preview comes as the WHOLE file by size (`video.size` == the rendition's
- * `PlayAddr.DataSize`) whose MP4 header limits playback to about 70 s, and the list tells it
- * beforehand — the episode's own sound (`music.original: true`) lasts the window
- * (`music.duration`, 69 s) while `video.duration` is the full length (106 s). That is the
+ * facts): a free series with conditions carries `dramaInfo.isLimitedFree: true` on every item (what
+ * the condition is, the field does not say); `DramaVideoData.IsFreeIntro` ("is this the free intro
+ * teaser") is false on every episode, E01 included, and `IsPreview` / `PreviewType` (4 or 1) sit on
+ * fully served episodes too — none of the three says anything about a lock, so none gives a clue.
+ * What does: an episode TikTok serves short comes as the WHOLE file by size (`video.size` == the
+ * rendition's `PlayAddr.DataSize`) whose MP4 header plays only about 70 s, and the list tells it
+ * beforehand — the episode's own sound (`music.original: true`) lasts that long (`music.duration`,
+ * 69 s) while `video.duration` is the full length (106 s). Either a window for an episode the
+ * account has not unlocked or a defective encode on TikTok's side (the owner's 7 episodes of
+ * 2026-11-06 broke at the same point in the TikTok app and in TikTok's web player: no sound past
+ * it, a broken picture when seeking past it); the list cannot tell the two apart. That is the
  * SHORT-HEADER rule (hint {@link SHORT_HEADER_HINT_PREFIX}); after a download the downloader
- * recognises the served preview by its listed size ({@link listedSizes}). DramaFetch never
- * rewrites that header: watching the episode in the TikTok app, then looking again, is the way.
+ * recognises the short-served file by its listed size ({@link listedSizes}). DramaFetch never
+ * rewrites that header: if the TikTok app plays the episode whole, watching it there and looking
+ * again is the way; if the app breaks at the same point too, nothing changes it until TikTok
+ * replaces the file.
  *
  * Python semantics are kept where they decide: dict keys are own properties only, strings are
  * stripped with Python's whitespace set, `re.IGNORECASE` is emulated with
@@ -52,9 +57,9 @@ export const MAX_DEPTH = 12;
 /** The hint of an item THIS session's payload gives no play address for. */
 export const NO_PLAY_ADDRESS = "no play address";
 /**
- * The hint of an item whose own sound lasts a preview window of its video (`catalog.
- * SHORT_HEADER_HINT_PREFIX`): `plays 69 s of 106 s` — `music.duration` of
- * `video.duration`, the list's tell of an episode TikTok serves as a preview to this session.
+ * The hint of an item whose own sound lasts only part of its video (`catalog.
+ * SHORT_HEADER_HINT_PREFIX`): `plays 69 s of 106 s` — `music.duration` of `video.duration`, the
+ * list's tell of an episode TikTok serves short to this session.
  */
 export const SHORT_HEADER_HINT_PREFIX = "plays ";
 /** Codec of a rendition whose `CodecType` is missing. */
@@ -132,11 +137,11 @@ const NOT_ENTITLED = "not-entitled";
 const VIEWER_LOCK = "viewer-lock";
 const AMBIGUOUS = "ambiguous";
 const PRICING = "pricing";
-/** A truthy `free` key about the price ({@link isFreeKey}): free for now, whatever the price says. */
+/** A truthy `free` key about the price ({@link isFreeKey}): free, whatever the price says (with conditions the key does not name). */
 const FREE = "free";
-/** The structural SHORT-HEADER rule: the item's own sound lasts a window of its video. */
+/** The structural SHORT-HEADER rule: the item's own sound lasts only part of its video. */
 const SHORT_HEADER = "short-header";
-/** The window rule fires when `music.duration` is at most this share of `video.duration`… */
+/** The rule fires when `music.duration` is at most this share of `video.duration`… */
 const SHORT_HEADER_RATIO = 0.85;
 /**
  * `catalog.MAX_EXACT_INT`: the largest integer both front ends read exactly. {@link asInt} — every
@@ -270,24 +275,25 @@ function walkItemLists(node, depth, maxDepth, found) {
  * `lock_?status` bool or number or a string spelling one, truthy; a status string `locked` `lock`
  * `need_pay` `needpay` `unpaid` `unpurchased`), AMBIGUOUS (never decides), FREE (a truthy `free`
  * key about the price, {@link isFreeKey}: `isLimitedFree`, `isFree`, `limitedFree`; its
- * `key=value` is a hint only next to a PRICING clue — it says why a sold episode is free for now;
+ * `key=value` is a hint only next to a PRICING clue — it says why a sold episode is free;
  * alone it says nothing about a price or a lock), PRICING (a falsy such key → `isFree=false`;
  * `price` `coin` `cost` `charge` above 0; `vip` / `paid` outside the entitled keys; the old
  * heuristic's leftovers — "block" is not "lock") and two structural rules: SHORT-HEADER
  * (`music.original` truthy, `music.duration` a number above 0 at most 0.85 × `video.duration` (an
- * int above 0) and at least 1 s shorter: the episode's own sound lasts the playback window TikTok
- * serves this session; hint {@link SHORT_HEADER_HINT_PREFIX} + `69 s of 106 s`) and PLAY (no
+ * int above 0) and at least 1 s shorter: the episode's own sound lasts only part of the episode, and
+ * so does what the file TikTok serves plays — a window for an episode the account has not unlocked,
+ * or a defective encode on TikTok's side; hint {@link SHORT_HEADER_HINT_PREFIX} + `69 s of 106 s`) and PLAY (no
  * play address, {@link NO_PLAY_ADDRESS}). A `free` key with `intro` among its words
  * (`IsFreeIntro`) or naming DRM (`isDrmFree`, a negation) is no price flag at all, whatever its
  * value; `IsPreview`, `PreviewType` and `isTrial` give no clue either (TikTok sets them on fully
  * served episodes; the raw item keeps them for the report).
  *
  * Decision, first match wins: DRM → `locked` with `drm`; ENTITLED → `unlocked`; SHORT-HEADER →
- * `locked`; VIEWER-LOCK or no play address → `locked`; FREE → `free` (a sold series that is free
- * for now is free for now); PRICING → `unlocked` with a real play URL ({@link playUrlCandidates})
+ * `locked`; VIEWER-LOCK or no play address → `locked`; FREE → `free` (a sold series the payload
+ * calls free is free); PRICING → `unlocked` with a real play URL ({@link playUrlCandidates})
  * and no NOT-ENTITLED clue, else `locked` (without a URL, hint {@link NO_PLAY_ADDRESS}); else
  * `free`. `paid` is any PRICING or ENTITLED clue; `hints` are unique, in scan order, the two
- * structural hints last (the window's before the play address').
+ * structural hints last (the short header's before the play address').
  * @param {unknown} item
  * @returns {AccessDecision}
  */
@@ -305,7 +311,7 @@ export function accessOf(item) {
   const playable = isDict(video) && hasPlayAddress(video);
   const window = shortHeaderHint(dict);
   const classes = new Set(clues.map(([kind]) => kind));
-  // a free flag is a hint only next to a price (it says why a sold episode is free for now); on
+  // a free flag is a hint only next to a price (it says why a sold episode is free); on
   // its own it says nothing about a price or a lock, which is what an empty list means
   const hints = clues.filter(([kind]) => kind !== FREE || classes.has(PRICING)).map(([, hint]) => hint);
   if (window !== null) {
@@ -524,7 +530,7 @@ function shortHeaderHint(item) {
  * The file sizes the list announces for an item (`catalog.listed_sizes`): the positive ints among
  * `video.size` and every `video.bitrateInfo[].PlayAddr.DataSize` (ints, or digit strings, of at most
  * {@link MAX_EXACT_INT}; anything else ignored), sorted and de-duplicated. The downloader compares a verified-short body with them:
- * a whole file by size with a short header is a served preview. Pure, never throws.
+ * a whole file by size with a short header is short-served. Pure, never throws.
  * @param {unknown} item
  * @returns {number[]}
  */

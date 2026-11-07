@@ -1,7 +1,7 @@
 """Pure parsing and validation of TikTok's short-drama payloads. No I/O, no network.
 
-TikTok facts this module encodes (verified October 2026; the limited-free series and the preview
-window on 2026-11-06, from the owner's real run):
+TikTok facts this module encodes (verified October 2026; the free series with conditions and the
+short header on 2026-11-06, from the owner's real run):
 
 - The web app lists a series through
   ``GET /api/drama/episode/item_list/?dramaID=<series_id>&cursor=<c>&count=<n>&...`` and answers
@@ -17,29 +17,33 @@ window on 2026-11-06, from the owner's real run):
   the payload TikTok served to the user's own session and sorts each episode into ``free``,
   ``unlocked`` (sold, and this account may play it: an entitlement flag such as ``isUnlocked``,
   or a play URL TikTok gave this session for a sold episode) or ``locked`` (a lock, paywall or
-  DRM flag, a preview window, on a sold episode an entitlement flag that says no, or no play
+  DRM flag, a short header, on a sold episode an entitlement flag that says no, or no play
   address at all); :func:`lock_hints` lists every clue it found. Locked episodes are listed and
   skipped. Nothing here unlocks, buys, fakes entitlement or bypasses anything: the decision only
   reads what TikTok already sent to that session. The field names were inferred without access to
   TikTok; ``--dump-raw`` from a real run confirms them.
-- A limited-free series (verified 2026-11-06: 62 real items, every one of them carrying exactly
-  these fields and nothing else that names a price, a lock or an entitlement) says
-  ``dramaInfo.isLimitedFree: true`` — the whole series is free for a limited time, however it is
-  sold otherwise — and its ``dramaInfo.DramaVideoData`` carries ``IsFreeIntro`` ("is this the
-  free intro teaser": false on every episode, E01 included — NOT "is free"), ``IsPreview``
-  (true on fully served episodes too) and ``PreviewType`` (``4`` or ``1``, on fully served
-  episodes too): none of the three says whether this session may play the episode, so they give
-  no clue. What does say it is the payload's durations: ``video.duration`` is the episode's full
-  length, and ``music.duration`` (the episode's own sound, ``music.original: true``) is the
-  length of what TikTok's web session may play — equal to ``video.duration`` on a fully served
-  episode, about 70 s on one whose file comes WHOLE by size (``video.size`` ==
-  ``bitrateInfo[0].PlayAddr.DataSize`` ≈ ``Bitrate * duration / 8``) but whose MP4 header limits
-  playback to that window: how TikTok's own player previews an episode the account has not
-  unlocked. :func:`access_of`'s SHORT-HEADER rule locks such an episode before any request
-  (hint :data:`SHORT_HEADER_HINT_PREFIX` ``69 s of 106 s``); :func:`listed_sizes` gives the
-  sizes the engines compare a saved file against to name a served preview after a download.
-  DramaFetch never rewrites a header to play past the window — that is TikTok's access control;
-  the episode is to be watched in the TikTok app, after which a new listing reads it fresh.
+- A free series with conditions (verified 2026-11-06: 62 real items, every one of them carrying
+  exactly these fields and nothing else that names a price, a lock or an entitlement) says
+  ``dramaInfo.isLimitedFree: true`` — the whole series is free, however it is sold otherwise;
+  what the condition is, the field does not say — and its ``dramaInfo.DramaVideoData`` carries
+  ``IsFreeIntro`` ("is this the free intro teaser": false on every episode, E01 included — NOT
+  "is free"), ``IsPreview`` (true on fully served episodes too) and ``PreviewType`` (``4`` or
+  ``1``, on fully served episodes too): none of the three says whether this session may play
+  the episode, so they give no clue. What does say something is the payload's durations:
+  ``video.duration`` is the episode's full length, and ``music.duration`` (the episode's own
+  sound, ``music.original: true``) is how long that sound lasts — equal to ``video.duration``
+  on a fully served episode, about 70 s on one whose file comes WHOLE by size (``video.size``
+  == ``bitrateInfo[0].PlayAddr.DataSize`` ≈ ``Bitrate * duration / 8``) but whose MP4 header
+  plays only that part: a window for an episode the account has not unlocked, or a defective
+  encode on TikTok's side (the owner's 7 episodes of 2026-11-06 broke at the same point in the
+  TikTok app and in TikTok's web player: no sound past it, a broken picture when seeking past
+  it) — the list cannot tell the two apart. :func:`access_of`'s SHORT-HEADER rule locks such an
+  episode before any request (hint :data:`SHORT_HEADER_HINT_PREFIX` + ``69 s of 106 s``:
+  ``plays 69 s of 106 s``); :func:`listed_sizes` gives the sizes the engines compare a saved
+  file against to name a short-served file after a download. DramaFetch never rewrites a header
+  to play past what it indexes: if the TikTok app plays the episode whole, the user watches it
+  there, then looks again (``--recheck``) and a new listing reads it fresh; if the app breaks at
+  the same point too, nothing changes it until TikTok replaces the file.
 - ``GET /api/drama/detail/`` carries the series name and announced total; its exact shape is
   unknown, so :func:`parse_detail_payload` is best-effort.
 - Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
@@ -108,7 +112,8 @@ _INTRO_WORD = "intro"
 # The clue classes of :func:`access_of` and the key patterns behind them (case-insensitive).
 _DRM = "drm"
 #: A truthy ``free`` key (``isLimitedFree: true``, ``isFree: true``, ``limitedFree: 1``): the
-#: episode is free for this session now, whatever the series' pricing says otherwise.
+#: episode is free for this session, whatever the series' pricing says otherwise (and whatever
+#: condition the key's name alludes to: the payload does not say).
 _FREE = "free"
 #: The structural rule behind :data:`SHORT_HEADER_HINT_PREFIX` (not a key clue).
 _SHORT_HEADER = "short-header"
@@ -141,7 +146,8 @@ _ENTITLED_KEY_RE = re.compile(
 _LOCKED_KEY_RE = re.compile(r"(?:is_?)?locked", re.IGNORECASE)
 #: Anywhere in the key: a payment still needed, a paywall. ``preview`` and ``trial`` were lock
 #: words until 2026-11-06, when a real payload showed ``IsPreview: true`` and ``PreviewType`` on
-#: fully served episodes of a limited-free series: they give no clue now.
+#: fully served episodes of a free series with conditions (``isLimitedFree``): they give no clue
+#: now.
 _VIEWER_LOCK_KEY_RE = re.compile(r"need_?(?:pay|unlock|buy|purchase)|paywall", re.IGNORECASE)
 #: ``lockStatus`` / ``lock_status`` — not ``unlockStatus``, which is a :data:`_STATUS_KEY_RE`,
 #: and not ``blockStatus`` (matched against the key without its ``block`` words, see
@@ -251,10 +257,11 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     - AMBIGUOUS: an ``(unlock|pay|purchase)_?status`` key with a bool or numeric value (1 can mean
       either), or a ``lock_?status`` key with any other non-falsy string: a hint, it NEVER
       decides.
-    - FREE (free for this session now): a key containing ``free`` whose :func:`key_words` do not
-      include ``intro``, truthy — ``isLimitedFree: true`` (a sold series free for a limited time),
-      ``isFree: true``, ``limitedFree: 1``. Its hint ``<key>=<value>`` (``isLimitedFree=True``)
-      is listed only next to a PRICING clue, where it says why a sold episode is free for now; on
+    - FREE (free for this session): a key containing ``free`` whose :func:`key_words` do not
+      include ``intro``, truthy — ``isLimitedFree: true`` (a sold series free with conditions the
+      field does not name), ``isFree: true``, ``limitedFree: 1``. Its hint ``<key>=<value>``
+      (``isLimitedFree=True``) is listed only next to a PRICING clue, where it says why a sold
+      episode is free; on
       its own a free flag says nothing about a price or a lock, and the hints stay empty (as they
       did for ``isFree: true`` before).
     - PRICING (the episode is sold): such a ``free`` key with a falsy value (hint
@@ -271,10 +278,11 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
       ``music.duration`` (the item's top-level ``music`` dict; a number > 0) and ``music.original``
       truthy, with ``music_duration <= 0.85 * video_duration`` and ``video_duration -
       music_duration >= 1`` (:data:`SHORT_HEADER_RATIO`, :data:`SHORT_HEADER_MIN_GAP_S`): the
-      episode's own sound is far shorter than the episode — TikTok's web session may play a
-      window of it. Hint :data:`SHORT_HEADER_HINT_PREFIX` + ``<music> s of <video> s``
-      (``plays 69 s of 106 s``). Without ``music.original`` truthy, or without either
-      duration, the rule never fires: a licensed track's length says nothing.
+      episode's own sound is far shorter than the episode, and so is what the file TikTok
+      serves plays — a window for an episode the account has not unlocked, or a defective
+      encode on TikTok's side; the list cannot tell. Hint :data:`SHORT_HEADER_HINT_PREFIX` +
+      ``<music> s of <video> s`` (``plays 69 s of 106 s``). Without ``music.original`` truthy,
+      or without either duration, the rule never fires: a licensed track's length says nothing.
     - PLAY (structural): no ``video.playAddr`` and an empty ``video.bitrateInfo`` (or no ``video``
       at all) in this session's payload: the hint :data:`NO_PLAY_ADDRESS`.
 
@@ -282,17 +290,17 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     an ENTITLED clue -> ``unlocked`` (even without a play address: the account is entitled, and
     the downloader finds out what TikTok serves); SHORT-HEADER -> ``locked``; a VIEWER-LOCK clue
     -> ``locked``; no play address -> ``locked`` (free-looking items included); a FREE clue ->
-    ``free`` (it beats PRICING: a sold series that is free for now is free for now); a PRICING clue
+    ``free`` (it beats PRICING: a sold series the payload calls free is free); a PRICING clue
     -> ``unlocked`` when this session's payload holds a real play URL for it
     (:func:`play_url_candidates`: an http(s) URL — a ``bitrateInfo`` entry without one, or a
     ``playAddr`` such as ``"null"``, is no address) and no NOT-ENTITLED clue, else ``locked``
     (without a URL with the hint :data:`NO_PLAY_ADDRESS`); else ``free``. ``paid`` is any PRICING
     or ENTITLED clue. Why a sold episode WITH a play URL counts as unlocked: a client that is to
-    show a paywall or a preview needs a flag for it — a lock or paywall flag, an entitlement flag
-    that says no, or the preview window the durations give away — and with none the URL is what
-    TikTok's own web player plays for this session. Should the file turn out to be a preview after
-    all, the integrity check of every download (``media.verify_video``: the duration) catches it:
-    a whole file by :func:`listed_sizes` with a short header is named a served preview
+    show a paywall or a window needs a flag for it — a lock or paywall flag, an entitlement flag
+    that says no, or the short header the durations give away — and with none the URL is what
+    TikTok's own web player plays for this session. Should the file turn out short after all,
+    the integrity check of every download (``media.verify_video``: the duration) catches it: a
+    whole file by :func:`listed_sizes` with a short header is named short-served
     (``downloader.served_short``), anything else is quarantined as incomplete.
     """
     if not isinstance(item, dict):
@@ -310,7 +318,7 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     playable = isinstance(video, dict) and _has_play_address(video)
     window = _short_header(item, video)
     classes = {kind for kind, _ in clues}
-    # a free flag is a hint only next to a price (it says why a sold episode is free for now); on
+    # a free flag is a hint only next to a price (it says why a sold episode is free); on
     # its own it says nothing about a price or a lock, which is what an empty tuple means
     hints = [hint for kind, hint in clues if kind != _FREE or _PRICING in classes]
     if window is not None:
@@ -343,9 +351,9 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
 
 def lock_hints(item: dict[str, Any]) -> tuple[str, ...]:
     """Every pricing, free, lock, entitlement and DRM clue of an item, deterministic order (the
-    fourth element of :func:`access_of`): ``"key=value"``, ``"isFree=false"``, ``"preview window:
-    69 s of 106 s"``, ``"no play address"``. Informational — ``Episode.access`` decides; an empty
-    tuple means the payload says nothing about a price or a lock."""
+    fourth element of :func:`access_of`): ``"key=value"``, ``"isFree=false"``, ``"plays 69 s of
+    106 s"``, ``"no play address"``. Informational — ``Episode.access`` decides; an empty tuple
+    means the payload says nothing about a price or a lock."""
     return access_of(item)[3]
 
 
@@ -395,8 +403,8 @@ def listed_sizes(item: dict[str, Any]) -> tuple[int, ...]:
     every ``video.bitrateInfo[].PlayAddr.DataSize`` that is a positive int (``_as_int``-style:
     an int that is not a bool, a whole float, a string of digits) of at most
     :data:`MAX_EXACT_INT`; anything else is ignored. Pure, never raises on junk. The engines
-    compare a saved file's size against them (within 0.5 %) to tell a served preview — the whole
-    file, a short header — from an incomplete download. The item may be wrapped in
+    compare a saved file's size against them (within 0.5 %) to tell a short-served file — the
+    whole file, a short header — from an incomplete download. The item may be wrapped in
     ``{"itemStruct": {...}}``."""
     video = _field(item, "video") if isinstance(item, dict) else None
     if not isinstance(video, dict):

@@ -1,6 +1,6 @@
 """media: the integrity check of a saved video — mutagen probe, atom walk, audio, duration — the
-`(incomplete)` / `(short)` quarantine naming, the duration reason read back for the served
-preview, and the structural DRM check (encrypted tracks) with the deletion of an encrypted
+`(incomplete)` / `(short)` quarantine naming, the duration reason read back for the
+short-served file, and the structural DRM check (encrypted tracks) with the deletion of an encrypted
 file."""
 
 from __future__ import annotations
@@ -42,9 +42,9 @@ from dramafetch.media import (
 from dramafetch.models import (
     DRM_MARK,
     DRM_MESSAGE,
+    RECHECK_HINT_TAIL,
     SHORT_MARK,
     SHORT_SERVED_PREFIX,
-    RECHECK_HINT_TAIL,
     DownloadOptions,
     Episode,
 )
@@ -281,9 +281,9 @@ def test_quarantine_note_names_the_kept_file(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Heiress - Episode 01 (incomplete).mp4"]
 
 
-def test_the_preview_mark_and_the_served_short_constants():
+def test_the_short_mark_and_the_short_served_constants():
     assert (INCOMPLETE_WORD, INCOMPLETE_MARK) == ("incomplete", " (incomplete)")
-    assert SHORT_MARK == "preview"
+    assert SHORT_MARK == "short"
     assert SHORT_SERVED_PREFIX == "TikTok serves this episode short: "
     assert RECHECK_HINT_TAIL == "--recheck looks again"
     from dramafetch.engine import RECHECK_HINT
@@ -291,12 +291,12 @@ def test_the_preview_mark_and_the_served_short_constants():
     assert RECHECK_HINT.endswith(RECHECK_HINT_TAIL)
 
 
-def test_quarantine_with_the_preview_mark_names_the_file_a_preview(tmp_path):
-    """A served preview — the whole file by size, a header that plays less — is kept under
+def test_quarantine_with_the_short_mark_names_the_file_short(tmp_path):
+    """A short-served file — the whole file by size, a header that plays less — is kept under
     `(short)`, `(short 2)`, …, never over another file and never mixed with `(incomplete)`."""
     first = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"one"), mark=SHORT_MARK)
     assert first == tmp_path / "Heiress - Episode 01 (short).mp4"
-    second = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"two"), mark="preview")
+    second = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"two"), mark="short")
     assert second == tmp_path / "Heiress - Episode 01 (short 2).mp4"
     third = quarantine(_write(tmp_path, "Heiress - Episode 01.mp4", b"three"))  # the default
     assert third == tmp_path / "Heiress - Episode 01 (incomplete).mp4"
@@ -311,7 +311,7 @@ def test_quarantine_with_the_preview_mark_names_the_file_a_preview(tmp_path):
     assert existing_episode_file(tmp_path, episode, DownloadOptions(out_dir=tmp_path)) is None
 
 
-def test_quarantine_note_with_the_preview_mark(tmp_path, monkeypatch):
+def test_quarantine_note_with_the_short_mark(tmp_path, monkeypatch):
     video = _write(tmp_path, "Heiress - Episode 01.mp4", b"x")
     assert quarantine_note(video, mark=SHORT_MARK) == "kept as Heiress - Episode 01 (short).mp4"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["Heiress - Episode 01 (short).mp4"]
@@ -340,13 +340,14 @@ def test_duration_mismatch_reads_the_duration_reason_back():
     assert duration_mismatch("duration 70.5 s, expected 106 s") is None  # verify_video prints :.0f
 
 
-def test_a_short_header_variant_keeps_its_size_and_both_probes_read_the_window(tmp_path):
-    """`tests/short_header_mp4.py`: the fixture's `mvhd`, `tkhd` and `mdhd` durations say 2 s while the
-    samples stay — the same byte size, a valid MP4 mutagen reads as 2 s (the sound track's `mdhd`),
+def test_a_short_header_variant_keeps_its_size_and_both_probes_read_the_header(tmp_path):
+    """`tests/short_header_mp4.py`: the fixture's `mvhd`, `tkhd` and `mdhd` durations say 2 s while
+    the samples stay — the same byte size, a valid MP4 mutagen reads as 2 s (the sound track's
+    `mdhd`),
     and the real case in miniature: a file of exactly the listed size that plays less."""
     data = with_short_header()
     assert SHORT_HEADER_SECONDS == 2.0 and len(data) == len(TINY_MP4) and data != TINY_MP4
-    path = _write(tmp_path, "preview.mp4", data)
+    path = _write(tmp_path, "short-header.mp4", data)
     probe = probe_video(path)
     assert (probe.duration_s, probe.has_audio, probe.audio_codec) == (2.0, True, "mp4a.40.2")
     assert atom_problem(path) is None and drm_problem(path) is None

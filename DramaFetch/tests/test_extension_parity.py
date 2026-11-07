@@ -320,7 +320,7 @@ FUZZ_KEYS = (
     "needBuy",
     "needPurchase",
     "paywall",
-    # no clue since 2026-11-06 (set on fully served episodes of a limited-free series)
+    # no clue since 2026-11-06 (set on fully served episodes of a free series with conditions)
     "preview",
     "isPreview",
     "IsPreview",
@@ -694,7 +694,9 @@ def fuzz_item(rng: random.Random) -> dict[str, Any]:
             drama["dramaName"] = rng.choice(["Love Story", "  ", None, "\u00dc name", 7])
         for _ in range(0 if clean else rng.randint(0, 4)):
             drama[rng.choice(FUZZ_KEYS)] = fuzz_container(rng, 1)
-        if not clean and rng.random() < 0.12:  # the real shape: free for now, and sold otherwise
+        if (
+            not clean and rng.random() < 0.12
+        ):  # the real shape: free with conditions, sold otherwise
             drama["isLimitedFree"] = rng.choice([True, 1, "true", True])
             drama[rng.choice(["unlockPrice", "coinPrice", "isPaid"])] = rng.choice([30, 10, "30"])
         if not clean and rng.random() < 0.3:

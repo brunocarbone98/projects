@@ -13,7 +13,7 @@
  * duration the media contradicts — which carry time-limited signed media links; per series a
  * digest of every LISTED episode (`episodes_digest`: number, access, hints, the video's duration,
  * size and bitrate, the sound's duration and `original` flag, `IsPreview` / `PreviewType` — the
- * fields the SHORT-HEADER rule and the served-preview check read, no URL); the requests made as
+ * fields the SHORT-HEADER rule and the short-served check read, no URL); the requests made as
  * `scheme://host/path` with their HTTP status and sizes, never a query string (TikTok signs it),
  * never a header value, never a cookie or a token. The causes are stored English texts like every
  * engine text and are never shown in the UI (so `lib/display` needs no rule for them).
@@ -51,15 +51,15 @@ export const WHAT_THIS_IS =
 /** Rule 1: the run stopped before this episode; followed by ` (<the rest of the message>)`. */
 export const NOT_ATTEMPTED_CAUSE = "not attempted: the run stopped before this episode";
 /**
- * Rule 2: a served preview, named by the downloader (`SHORT_SERVED_PREFIX`): `<prefix><a> s of
- * <e> s<suffix>`.
+ * Rule 2: a short-served file, named by the downloader (`SHORT_SERVED_PREFIX`): `<prefix><a> s of
+ * <e> s<suffix>` — what was measured, then both readings, since the list cannot tell them apart.
  */
 export const SHORT_SERVED_CAUSE_PREFIX =
-  "TikTok served a preview: the file is the whole episode by size but its header limits playback to ";
+  "TikTok serves this episode short: the file is the whole episode by size but its header stops at ";
 export const SHORT_SERVED_CAUSE_SUFFIX =
-  " — how TikTok's own player previews an episode this account has not unlocked; DramaFetch does not " +
-  "alter files. A limited-free series unlocks as you watch it in the TikTok app: watch the episode " +
-  "there, then look again";
+  ". Either a window for an episode this account has not unlocked, or a defective encode on TikTok's " +
+  "side — the list cannot tell: if the TikTok app plays it whole, watch it there and look again; if the " +
+  "app breaks at the same point too, no retry will change it";
 /** Rule 3: HTTP 429 on the media. */
 export const RATE_LIMITED_CAUSE =
   "TikTok limited the rate of requests (HTTP 429): the run stopped and the 30-minute cooldown " +
@@ -76,11 +76,14 @@ export const DRM_CAUSE = "encrypted media (DRM): DramaFetch never decrypts or ke
 export const LOCKED_CAUSE_PREFIX = "listed as locked for this session: ";
 export const LOCKED_CAUSE_SUFFIX =
   " — the list TikTok served to your session marks it so; unlock it in the TikTok app, then look again";
-/** Rule 8, a shorter file of an unlisted size: `TikTok served a preview: a complete MP4 of <a> s where the list announces <e> s. …`. */
-export const PREVIEW_CAUSE_PREFIX = "TikTok served a preview: ";
-export const PREVIEW_CAUSE_MIDDLE =
-  ". That is what TikTok serves for an episode the account has not unlocked (Drama Pass, coins or an " +
-  "unlock in the TikTok app); the list's marks for it: ";
+/**
+ * Rule 8, a shorter file of an unlisted size (a listed size is rule 2): `the file plays <a> s where the
+ * list announces <e> s<middle><hints or "none">` — the measured fact and both readings, never a verdict.
+ */
+export const SHORTER_FILE_CAUSE_PREFIX = "the file plays ";
+export const SHORTER_FILE_CAUSE_MIDDLE =
+  ", and its size is none the list announced — a shorter file than listed: a window or a preview clip for an " +
+  "episode this account has not unlocked, or a defective encode on TikTok's side; the list's marks for it: ";
 /** Rule 8, a longer file: `the file lasts <a> s where the list announces <e> s<suffix>`. */
 export const LONGER_FILE_CAUSE_SUFFIX = ": the list and the media disagree; the file was not kept as the episode";
 /** Rule 9: `<prefix><N of M bytes | the transfer was cut short><suffix>`. */
@@ -101,7 +104,7 @@ export const FAILED_CAUSE_PREFIX = "download failed: ";
 const DURATION_RE = /^duration (\d+(?:\.\d+)?) s, expected (\d+(?:\.\d+)?) s/;
 /** The transfer check's reason: `truncated body (<N> of <M> bytes)` / `(the transfer was cut short)`. */
 const TRUNCATED_RE = /truncated body \(([^)]*)\)/;
-/** The durations of a served-preview message (`messages.shortServedMessage`): `… but it plays <a> s of <e> s — …`. */
+/** The durations of a short-served message (`messages.shortServedMessage`): `… but it plays <a> s of <e> s — …`. */
 const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s — /;
 
 /**
@@ -225,8 +228,8 @@ export function probableCause(row, _trace) {
       const expected = Number(durations[2]);
       if (actual < expected) {
         return (
-          `${PREVIEW_CAUSE_PREFIX}a complete MP4 of ${durations[1]} s where the list announces ${durations[2]} s` +
-          `${PREVIEW_CAUSE_MIDDLE}${hints || "none"}`
+          `${SHORTER_FILE_CAUSE_PREFIX}${durations[1]} s where the list announces ${durations[2]} s` +
+          `${SHORTER_FILE_CAUSE_MIDDLE}${hints || "none"}`
         );
       }
       return `the file lasts ${durations[1]} s where the list announces ${durations[2]} s${LONGER_FILE_CAUSE_SUFFIX}`;
@@ -334,7 +337,7 @@ function fieldOf(dict, key) {
 
 /**
  * The digest of one listed episode (snake_case): what the list said of it and the fields the
- * SHORT-HEADER rule and the served-preview check read — `video.duration`, `music.duration`,
+ * SHORT-HEADER rule and the short-served check read — `video.duration`, `music.duration`,
  * `music.original`, `video.size`, `video.bitrateInfo[0].Bitrate`, `dramaInfo.DramaVideoData.
  * IsPreview` / `PreviewType` —, null when absent; no URL, nothing else.
  * @param {ListedEpisode} episode

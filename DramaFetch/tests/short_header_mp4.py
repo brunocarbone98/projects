@@ -1,14 +1,16 @@
-"""A preview-window variant of `tests/fixtures/tiny.mp4`, made by a STRUCTURAL edit — for the
-served-preview tests and the fake TikTok's `short_header_media` mode; no binary fixture of its own.
+"""A short-header variant of `tests/fixtures/tiny.mp4`, made by a STRUCTURAL edit — for the
+short-served tests and the fake TikTok's `short_header_media` mode; no binary fixture of its own.
 
-What TikTok's web session got for 7 episodes of a limited-free series on 2026-11-06: a file of
-exactly the listed size (the whole episode by size) whose MP4 header declares a playback window of
-about 70 s where the list announced 106 s. Here the same thing in miniature: `tiny.mp4` (3 s) with
-its `mvhd` duration, every `tkhd` duration (movie timescale) and every `mdhd` duration (that
-track's timescale) rewritten to say `seconds`, while the `mdat` and the sample tables stay as they
-are — the same byte size, and both parsers (mutagen reads the sound track's `mdhd`; so does
+What TikTok's web session got for 7 episodes of a free series with conditions on 2026-11-06 (they
+broke at the same point in the TikTok app and in TikTok's web player: no sound past it, a broken
+picture when seeking past it): a file of exactly the listed size (the whole episode by size) whose
+MP4 header declares about 70 s where the list announced 106 s. Here the same thing in miniature:
+`tiny.mp4` (3 s) with its `mvhd` duration, every `tkhd` duration (movie timescale) and every
+`mdhd` duration (that track's timescale) rewritten to say `seconds`, while the `mdat` and the
+sample tables stay as they are — the same byte size, and both parsers (mutagen reads the sound
+track's `mdhd`; so does
 `lib/mp4.probe`) report `seconds`. Nothing here rewrites a header the OTHER way: DramaFetch never
-makes a file play past the window TikTok gave it.
+makes a file play past what the header TikTok served indexes.
 
 Imported as `short_header_mp4` (pytest and the e2e scripts put `tests/` on `sys.path`).
 """
@@ -17,12 +19,13 @@ from __future__ import annotations
 
 from encrypted_mp4 import TINY_MP4, boxes, child
 
-#: The boxes whose durations a preview window changes, and where to find them under `moov`.
+#: The boxes whose durations a short header changes, and where to find them under `moov`.
 _MOVIE_HEADER = b"mvhd"
 _TRACK_HEADER = b"tkhd"
 _MEDIA_HEADER = b"mdhd"
-#: How long the window of :func:`with_short_header` lasts by default — within the duration
-#: tolerance of a 3-second episode, so the tests that need a mismatch announce a longer one.
+#: How long the header of :func:`with_short_header` says the file plays by default — within the
+#: duration tolerance of a 3-second episode, so the tests that need a mismatch announce a longer
+#: one.
 SHORT_HEADER_SECONDS = 2.0
 
 

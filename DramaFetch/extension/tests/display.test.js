@@ -756,7 +756,7 @@ test("the downloader's results read in Spanish: file and host names, sizes and l
   assert.equal(es(lockedResult(episode(5, { access: "locked" })).message), `parece bloqueado: ${HINTS.join("; ")}; sin dirección de reproducción`);
 });
 
-test("the preview window's hint and the served-preview message read in Spanish; the flag advice names the checkbox", async () => {
+test("the short header's hint and the short-served message read in Spanish; the flag advice names the checkbox", async () => {
   const hint = `${SHORT_HEADER_HINT_PREFIX}69 s of 106 s`;
   assert.equal(es(hint), "reproduce 69 s de 106 s");
   assert.equal(es("plays 69.5 s of 106 s"), "reproduce 69.5 s de 106 s");
@@ -766,18 +766,20 @@ test("the preview window's hint and the served-preview message read in Spanish; 
   assert.equal(locked, "looks locked: isLimitedFree=True; plays 69 s of 106 s");
   assert.equal(es(locked), "parece bloqueado: isLimitedFree=True; reproduce 69 s de 106 s");
   assert.equal(es(`${messages.UNAVAILABLE_MESSAGE} (locked in a fresh episode list: ${hint})`), `${es(messages.UNAVAILABLE_MESSAGE)} (bloqueado en una lista de episodios nueva: reproduce 69 s de 106 s)`);
-  // the served preview, as the downloader writes it: the numbers kept, the tail the checkbox
+  // the short-served message, as the downloader writes it: the numbers kept, the tail the checkbox
   const served = messages.shortServedMessage(9676471, "70", "106");
   const advice = `para revisarla de nuevo, marca “${ES_LABELS.recheck}”`;
   assert.equal(
     es(served),
     "TikTok sirve este episodio recortado: llegó el archivo entero (9676471 bytes, como anuncia la lista) pero reproduce 70 s de 106 s — " +
-      `esta sesión aún no puede ver el episodio; míralo en la app de TikTok y luego ${advice}`,
+      `si la app de TikTok lo reproduce entero, míralo allí y luego ${advice}; si la app también se corta en el mismo punto, ` +
+      "el episodio está dañado en TikTok y ningún reintento lo cambia",
   );
   assert.equal(
     en(served),
-    "TikTok serves this episode short: the whole file came (9676471 bytes, as listed) but it plays 70 s of 106 s — this session may " +
-      `not watch the episode yet; watch it in the TikTok app, then tick “${EN_LABELS.recheck}” to look again`,
+    "TikTok serves this episode short: the whole file came (9676471 bytes, as listed) but it plays 70 s of 106 s — if the TikTok app " +
+      `plays it whole, watch it there, then tick “${EN_LABELS.recheck}” to look again; if the app breaks at the same point, the ` +
+      "episode is defective on TikTok's side and no retry changes it",
   );
   assertSpanish(served);
   // the complete skip's advice is unchanged: the same words, capitalised after its question
@@ -793,7 +795,12 @@ test("the preview window's hint and the served-preview message read in Spanish; 
   const texts = await downloaderTexts();
   const written = texts.find((text) => text.startsWith(messages.SHORT_SERVED_PREFIX));
   assert.equal(written, messages.shortServedMessage(128 * 1024, "3", "92"));
-  assert.equal(es(/** @type {string} */ (written)), `TikTok sirve este episodio recortado: llegó el archivo entero (${128 * 1024} bytes, como anuncia la lista) pero reproduce 3 s de 92 s — esta sesión aún no puede ver el episodio; míralo en la app de TikTok y luego ${advice}`);
+  assert.equal(
+    es(/** @type {string} */ (written)),
+    `TikTok sirve este episodio recortado: llegó el archivo entero (${128 * 1024} bytes, como anuncia la lista) pero reproduce 3 s de 92 s — ` +
+      `si la app de TikTok lo reproduce entero, míralo allí y luego ${advice}; si la app también se corta en el mismo punto, ` +
+      "el episodio está dañado en TikTok y ningún reintento lo cambia",
+  );
 });
 
 test("the discovery's failures read in Spanish; the login advice stays the extension's own", async () => {

@@ -26,7 +26,8 @@
  * mirror, no fresh list, no cover), the integrity check (`lib/mp4.verifyVideo`, always on → `failed`,
  * nothing saved: the next run retries — unless the body is the whole file by the list's size
  * (`lib/catalog.listedSizes`, within 0.5 %) and its header plays less than the listed duration:
- * then TikTok served a preview, `failed-unavailable` with `SHORT_SERVED_PREFIX`, nothing saved,
+ * then TikTok serves the episode short — a window for an episode the account has not unlocked, or a
+ * defective encode on TikTok's side —, `failed-unavailable` with `SHORT_SERVED_PREFIX`, nothing saved,
  * no header rewritten; the next listing's SHORT-HEADER rule decides again). Only then the one
  * cover GET (outside the media budget,
  * never retried), the cover embedded into the MP4 in memory (`lib/mp4.embedCover`) and/or kept as a
@@ -258,7 +259,7 @@ export function sanitizeError(text) {
 }
 
 /**
- * The served preview a failed verification reveals, or null: the reason is `duration <a> s,
+ * The short-served file a failed verification reveals, or null: the reason is `duration <a> s,
  * expected <e> s` with `a < e` AND the body is the whole file by the list's size (`size` within
  * {@link LISTED_SIZE_TOLERANCE} of one of `sizes`, {@link listedSizes}). Any other mismatch is
  * what it was (`download looks incomplete or wrong: …`).
@@ -275,7 +276,7 @@ export function servedShort(reason, size, sizes) {
   if (!(Number(actual) < Number(expected))) return null;
   const whole = (/** @type {number} */ listed) =>
     Number.isFinite(listed) && Math.abs(size - listed) <= LISTED_SIZE_TOLERANCE * listed;
-  if (!sizes.some(whole)) return null; // `Infinity <= Infinity` would name every short body a preview
+  if (!sizes.some(whole)) return null; // `Infinity <= Infinity` would name every short body short-served
   return { actual, expected };
 }
 
@@ -964,12 +965,12 @@ export class Downloader {
       }
       const invalid = verifyVideo(body, episode.durationS); // always on: a bad file is never saved
       if (invalid !== null) {
-        // the whole file by the list's size, a header that plays less: TikTok served a preview to
-        // this session — named, never saved, never rewritten (the next listing decides again)
-        const preview = servedShort(invalid, body.length, listedSizes(episode.raw));
-        if (preview !== null) {
-          record.outcome = `${ATTEMPT_SHORT_HEADER_PREFIX}${preview.actual} s of ${preview.expected} s`;
-          const message = shortServedMessage(body.length, preview.actual, preview.expected);
+        // the whole file by the list's size, a header that plays less: TikTok serves this episode
+        // short — named, never saved, never rewritten (the next listing decides again)
+        const served = servedShort(invalid, body.length, listedSizes(episode.raw));
+        if (served !== null) {
+          record.outcome = `${ATTEMPT_SHORT_HEADER_PREFIX}${served.actual} s of ${served.expected} s`;
+          const message = shortServedMessage(body.length, served.actual, served.expected);
           return { result: failure(episode, FAILED_UNAVAILABLE, message), last: null };
         }
         record.outcome = `${ATTEMPT_VERIFY_FAILED_PREFIX}${invalid}`;
@@ -1112,7 +1113,7 @@ export class Downloader {
    * tried for this episode — `stale` — or has expired); the newest list is cached for the run, so a
    * long series is listed again only as often as its play URLs run out. The extension's own extra:
    * a re-discovery that FAILED is not tried again for that series in the run. A fresh entry that
-   * reads as `locked` (a lapsed entitlement, a lock, preview or paywall flag, DRM) is not adopted
+   * reads as `locked` (a lapsed entitlement, a lock or paywall flag, a short header, DRM) is not adopted
    * unless includeLocked: FAILED_UNAVAILABLE, none of its URLs requested.
    * @param {Episode} episode
    * @param {ReadonlySet<string>} stale the URLs requested for this episode so far

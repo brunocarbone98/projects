@@ -668,11 +668,11 @@ def _unlocked_first(*urls: str) -> Episode:
 )
 def test_a_fresh_entry_that_reads_as_locked_is_never_adopted(playwright, tmp_path, flags, reason):
     """The fresh item is access-checked like the first list's (`catalog.access_of`): an episode
-    first listed as unlocked whose URL was denied, and which the fresh list now calls locked, a
-    preview or DRM (a lapsed subscription, an expired session), is not this session's to play —
-    none of the fresh item's URLs is requested, `episode.raw` stays the first list's, and the
-    episode is FAILED_UNAVAILABLE saying why (a DRM flag in a payload flag's words, which the
-    manifest does not remember: see the next test)."""
+    first listed as unlocked whose URL was denied, and which the fresh list now calls locked (a
+    lock flag, a short header or DRM: a lapsed subscription, an expired session), is not this
+    session's to play — none of the fresh item's URLs is requested, `episode.raw` stays the first
+    list's, and the episode is FAILED_UNAVAILABLE saying why (a DRM flag in a payload flag's words,
+    which the manifest does not remember: see the next test)."""
     episode = _unlocked_first(_url("old"))
     first = episode.raw
     playwright.request.answer(_url("old"), FakeAPIResponse(403))
@@ -1688,7 +1688,7 @@ def test_a_video_far_shorter_than_the_list_says_is_quarantined_and_gets_no_cover
     playwright, tmp_path
 ):
     """The written file is verified BEFORE the cover step: a 3-second file for a 120-second
-    episode (a locked episode's preview looks like this) is renamed `<stem> (incomplete).mp4`,
+    episode (far shorter than the episode, its size unlisted) is renamed `<stem> (incomplete).mp4`,
     the episode is FAILED with the reason, no cover is requested, and a rerun tries again — into
     `(incomplete 2)`, never over the first file."""
     playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
@@ -1717,8 +1717,8 @@ def test_a_video_far_shorter_than_the_list_says_is_quarantined_and_gets_no_cover
     assert off.status is DownloadStatus.DONE and off.message == f"{SAVED} + cover embedded"
 
 
-#: The fake CDN's shape of a served preview: the fixture with a 2-second header, padded like VIDEO
-#: to exactly the size the list announces.
+#: The fake CDN's shape of a short-served file: the fixture with a 2-second header, padded like
+#: VIDEO to exactly the size the list announces.
 SHORT_HEADER_VIDEO = _padded_mp4(2 * MIN_VIDEO_BYTES, base=with_short_header(TINY_MP4))
 
 
@@ -1732,10 +1732,10 @@ def _listed_item(number: int, item_id: str, url: str, size: int, duration: int =
     return item
 
 
-def test_a_body_of_a_listed_size_with_a_short_header_is_a_served_short(playwright, tmp_path):
+def test_a_body_of_a_listed_size_with_a_short_header_is_short_served(playwright, tmp_path):
     """Verified 2026-11-06 (the extension's report): 7 bodies of exactly `video.size` bytes whose
     header plays 70 s of 106 s. The body is written, found short by the verification, then kept
-    as `(short)` — never altered — and the episode is FAILED_UNAVAILABLE with the served-preview
+    as `(short)` — never altered — and the episode is FAILED_UNAVAILABLE with the short-served
     message; no other mirror, no fresh list, no cover request."""
     playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
     playwright.request.answer(_url("ep1"), FakeAPIResponse(200, SHORT_HEADER_VIDEO, "video/mp4"))
@@ -1748,9 +1748,10 @@ def test_a_body_of_a_listed_size_with_a_short_header_is_a_served_short(playwrigh
 
     assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
     assert result.message == (
-        f"{SHORT_SERVED_PREFIX}the whole file came ({len(SHORT_HEADER_VIDEO)} bytes, as listed) but "
-        "it plays 2 s of 120 s — this session may not watch the episode yet; watch it in the "
-        f"TikTok app, then --recheck looks again (kept as {STEM} (short).mp4)"
+        f"{SHORT_SERVED_PREFIX}the whole file came ({len(SHORT_HEADER_VIDEO)} bytes, as listed) "
+        "but it plays 2 s of 120 s — if the TikTok app plays it whole, watch it there, then "
+        "--recheck looks again; if the app breaks at the same point, the episode is defective on "
+        f"TikTok's side and no retry changes it (kept as {STEM} (short).mp4)"
     )
     assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM} (short).mp4"]
     assert (tmp_path / f"{STEM} (short).mp4").read_bytes() == SHORT_HEADER_VIDEO  # byte for byte
@@ -1775,7 +1776,9 @@ def test_a_short_header_on_an_unlisted_size_stays_incomplete(playwright, tmp_pat
     plain["video"]["duration"] = 120
     downloader = _downloader(playwright)
     for index, raw in enumerate((unlisted, plain)):
-        playwright.request.answer(_url("ep1"), FakeAPIResponse(200, SHORT_HEADER_VIDEO, "video/mp4"))
+        playwright.request.answer(
+            _url("ep1"), FakeAPIResponse(200, SHORT_HEADER_VIDEO, "video/mp4")
+        )
         directory = tmp_path / str(index)
         result = downloader.download(
             _episode(1, raw, cover_url=COVER, duration_s=120), _options(directory)
@@ -1788,9 +1791,9 @@ def test_a_short_header_on_an_unlisted_size_stays_incomplete(playwright, tmp_pat
     assert playwright.request.urls == [_url("ep1"), _url("ep1")]  # still no cover request
 
 
-def test_the_engine_counts_a_served_short_like_any_failure(playwright, tmp_path):
-    """Through engine.download_series: three served previews in a row stop the run like three
-    failures (no pacing change), and the manifest does not remember a preview as DRM — the next
+def test_the_engine_counts_a_short_served_file_like_any_failure(playwright, tmp_path):
+    """Through engine.download_series: three short-served files in a row stop the run like three
+    failures (no pacing change), and the manifest does not remember one as DRM — the next
     listing's SHORT-HEADER rule decides, so a `--recheck` after the owner watched the episode in
     the app lists it fresh."""
     episodes = []

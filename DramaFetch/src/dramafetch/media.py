@@ -11,11 +11,12 @@ deleted but renamed ``<name> (incomplete).<ext>`` (:func:`quarantine`): the byte
 inspection, the stem no longer matches the episode's, so a rerun downloads it again — with one
 exception, a file the OS refuses to rename even after a few retries, which :func:`quarantine_note`
 deletes instead: left under the episode's name it would pass for the episode. Nothing here
-decodes video; ffmpeg is not needed. A locked episode served as a short preview is exactly what the
+decodes video; ffmpeg is not needed. A file far shorter than the episode is exactly what the
 duration check catches — and when the file is the WHOLE episode by size (``catalog.listed_sizes``)
-with a header that plays less, the engines read :func:`duration_mismatch` and name it a served
-preview (``downloader.served_short``), kept as ``<name> (short).<ext>`` (:func:`quarantine`
-with ``mark=models.SHORT_MARK``); DramaFetch never rewrites that header.
+with a header that plays less, the engines read :func:`duration_mismatch` and name it short-served
+(``downloader.served_short``: a window for an episode the account has not unlocked, or a defective
+encode on TikTok's side), kept as ``<name> (short).<ext>`` (:func:`quarantine` with
+``mark=models.SHORT_MARK``); DramaFetch never rewrites that header.
 
 DRM is a separate check that ALWAYS runs, ``--no-verify`` or not: :func:`drm_problem` (a saved
 file) and :func:`drm_problem_in` (a body still in memory) walk the box structure — box headers
@@ -61,7 +62,7 @@ RENAME_RETRY_DELAY_S = 0.5
 MP4_SUFFIXES = frozenset({".mp4", ".m4v", ".mov"})
 #: Duration tolerance: TikTok's ``duration`` is a whole number of seconds and the container's own
 #: clock rounds too, so a few seconds — or 5 % of a long episode — are no problem; a 20-second
-#: preview served for a locked 2-minute episode is.
+#: file served for a 2-minute episode is.
 DURATION_TOLERANCE_S = 3.0
 DURATION_TOLERANCE_RATIO = 0.05
 #: Top-level atoms a real MP4 is made of. The walk trusts no other header and stops there, so a
@@ -184,8 +185,9 @@ def verify_video(path: Path, expected_duration_s: int | None) -> str | None:
 
 def duration_mismatch(reason: str | None) -> tuple[int, int] | None:
     """``(actual, expected)`` seconds of a :func:`verify_video` reason of the form ``duration 70 s,
-    expected 106 s``, None for any other reason (or none). What the engines read to tell a served
-    preview — the whole file by size, a header that plays less — from an incomplete download."""
+    expected 106 s``, None for any other reason (or none). What the engines read to tell a
+    short-served file — the whole file by size, a header that plays less — from an incomplete
+    download."""
     if reason is None:
         return None
     match = _DURATION_MISMATCH_RE.match(reason)
@@ -399,7 +401,7 @@ def quarantine(
     stem no longer matches the episode's, so ``existing_episode_file`` ignores it and a rerun tries
     the episode again, while the manifest records the failure with the reason. ``mark`` is the
     word in the parentheses: ``incomplete`` (:data:`INCOMPLETE_MARK`) for a file that failed the
-    verification, ``models.SHORT_MARK`` (``preview``) for a served preview — ``<stem>
+    verification, ``models.SHORT_MARK`` (``short``) for a short-served file — ``<stem>
     (short).<ext>``, ``(short 2)``, … A rename the OS refuses is tried again
     :data:`RENAME_RETRIES` times, :data:`RENAME_RETRY_DELAY_S` apart (``sleep`` is injectable: no
     test waits for real); the last ``OSError`` propagates."""
@@ -424,7 +426,7 @@ def quarantine_note(
 ) -> str:
     """Move a file that failed :func:`verify_video` out of the episode's way and say what became
     of it — the parenthesised end of the engines' FAILED message, after the reason (``mark`` as
-    in :func:`quarantine`: ``incomplete``, or ``preview`` for a served preview):
+    in :func:`quarantine`: ``incomplete``, or ``short`` for a short-served file):
 
     * ``"kept as <stem> (incomplete).<ext>"`` — the normal case (:func:`quarantine`);
     * ``"could not rename <name>: <OS error>; deleted, so that it does not pass for the
