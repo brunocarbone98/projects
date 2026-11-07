@@ -8,6 +8,10 @@ import {
   DRM_MESSAGE,
   DRM_REMEMBERED_MESSAGE,
   PAYLOAD_DRM_MESSAGE,
+  SHORT_MARK,
+  SHORT_SERVED_PREFIX,
+  RECHECK_HINT,
+  RECHECK_HINT_TAIL,
   STATUSES,
   caseless,
   decimalDigitValue,
@@ -22,7 +26,22 @@ import {
   pyRepr,
   pyScalarText,
   pyStrip,
+  shortServedMessage,
 } from "../src/lib/messages.js";
+
+test("the served preview: its prefix, the Python quarantine mark and the message, ending with RECHECK_HINT's tail", () => {
+  assert.equal(SHORT_SERVED_PREFIX, "TikTok serves this episode short: ");
+  assert.equal(SHORT_MARK, "preview");
+  assert.equal(RECHECK_HINT_TAIL, "--recheck looks again");
+  assert.ok(RECHECK_HINT.endsWith(RECHECK_HINT_TAIL));
+  const message = shortServedMessage(9676471, "70", "106");
+  assert.equal(
+    message,
+    "TikTok serves this episode short: the whole file came (9676471 bytes, as listed) but it plays 70 s of 106 s — this session " +
+      "may not watch the episode yet; watch it in the TikTok app, then --recheck looks again",
+  );
+  assert.ok(message.startsWith(SHORT_SERVED_PREFIX) && message.endsWith(RECHECK_HINT_TAIL));
+});
 
 test("every DRM message starts with the DRM mark; the statuses are Python's, in order", () => {
   for (const message of [DRM_MESSAGE, DRM_REMEMBERED_MESSAGE, PAYLOAD_DRM_MESSAGE]) assert.ok(message.startsWith(DRM_MARK));

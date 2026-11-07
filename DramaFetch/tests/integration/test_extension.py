@@ -4,9 +4,9 @@ A real headless Chromium loads the extension's TEST copy (`extension_harness.Ext
 `dramafetch_test` and `http://127.0.0.1/*` added to the copy's manifest only) and drives the fake
 TikTok server through the extension's own app page — discovery through the page's own request in
 a background tab, downloads with the Referer rule, verification, DRM, covers, naming, the
-per-series state, pacing, cooldown and stops, batches. Every scenario counts the requests the fake
-server saw. No cookie value is ever printed or asserted on, beyond checking that it is stored
-nowhere.
+per-series state, pacing, cooldown and stops, batches, the limited-free series and its preview
+window. Every scenario counts the requests the fake server saw. No cookie value is ever printed
+or asserted on, beyond checking that it is stored nowhere.
 """
 
 from __future__ import annotations
@@ -22,11 +22,22 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from mutagen.mp4 import MP4, MP4Cover
 
+from dramafetch.catalog import SHORT_HEADER_HINT_PREFIX
 from dramafetch.media import INCOMPLETE_PREFIX
-from dramafetch.models import DRM_MESSAGE, DRM_REMEMBERED_MESSAGE
+from dramafetch.models import (
+    DRM_MESSAGE,
+    DRM_REMEMBERED_MESSAGE,
+    SHORT_SERVED_PREFIX,
+    RECHECK_HINT_TAIL,
+)
 
 from .extension_harness import CHROMIUM, ExtensionHarness
 from .fake_tiktok import (
+    FOURTH_ITEMS,
+    FOURTH_SERIES_ID,
+    FOURTH_SERIES_NAME,
+    MEDIA_SIZE,
+    SHORT_HEADER_LISTED_DURATION_S,
     SECOND_ITEMS,
     SECOND_SERIES_ID,
     SECOND_SERIES_NAME,
@@ -60,13 +71,33 @@ THIRD_LINK = THIRD_SERIES_ID  # a bare series id is a series too
 MAIN_FOLDER = Path("DramaFetch") / f"{SERIES_NAME} [{SERIES_ID}]"
 MAIN_ITEMS = {n: f"769940000000000000{n}" for n in range(1, 6)}
 REPORTS_FOLDER = Path("DramaFetch") / "reports"
-#: `<series name> - did not download YYYY-MM-DD HHMM.json` — and ` (1)` before `.json` when a
-#: second report lands in the same minute (`conflictAction: "uniquify"`).
-_REPORT_NAME_RE = re.compile(
-    rf"^{re.escape(SERIES_NAME)} - did not download \d{{4}}-\d{{2}}-\d{{2}} \d{{4}}"
-    r"(?: \(\d+\))?\.json$"
-)
+
+
+def _report_name_re(series_name: str) -> re.Pattern[str]:
+    """`<series name> - did not download YYYY-MM-DD HHMM.json` — and ` (1)` before `.json` when a
+    second report lands in the same minute (`conflictAction: "uniquify"`)."""
+    return re.compile(
+        rf"^{re.escape(series_name)} - did not download \d{{4}}-\d{{2}}-\d{{2}} \d{{4}}"
+        r"(?: \(\d+\))?\.json$"
+    )
+
+
+_REPORT_NAME_RE = _report_name_re(SERIES_NAME)
 THIRD = dict(enumerate(THIRD_ITEMS, start=1))
+FOURTH_LINK = f"https://www.tiktok.com/shortdrama/episode/{FOURTH_SERIES_ID}/1"
+FOURTH = dict(enumerate(FOURTH_ITEMS, start=1))
+FOURTH_FOLDER = Path("DramaFetch") / f"{FOURTH_SERIES_NAME} [{FOURTH_SERIES_ID}]"
+#: The extension's `lib/diagnosis.js` cause of a served preview (the spec's exact texts; the
+#: Python side has no such report), around `<a> s of <e> s`.
+SHORT_SERVED_CAUSE_PREFIX = (
+    "TikTok serves this episode short: the file is the whole episode by size but its header limits "
+    "playback to "
+)
+SHORT_SERVED_CAUSE_SUFFIX = (
+    " — how TikTok's own player previews an episode this account has not unlocked; DramaFetch "
+    "does not alter files. A limited-free series unlocks as you watch it in the TikTok app: watch "
+    "the episode there, then look again"
+)
 MEDIA_RATE_LIMIT = (
     "rate limited (HTTP 429) by the video server: wait 30-60 minutes before trying again"
 )
@@ -110,7 +141,11 @@ def _episode_file(ext: ExtensionHarness, number: int) -> Path:
 def _report_files(ext: ExtensionHarness) -> list[Path]:
     """The "did not download" reports saved so far (`DramaFetch/reports/*.json`), relative to the
     download directory, sorted: a run with a failed episode saves one by default."""
-    return [path for path in ext.saved_files() if path.parent == REPORTS_FOLDER]
+    return [
+        path
+        for path in ext.saved_files()
+        if path.parent == REPORTS_FOLDER and path.suffix == ".json"  # no `.crdownload` in flight
+    ]
 
 
 def _videos(ext: ExtensionHarness) -> list[Path]:
@@ -949,3 +984,150 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         assert retried["job"]["label"] == f"Retry 4 of {SERIES_NAME}"
         assert SESSION_VALUE not in json.dumps(retried) and "sessionid" not in json.dumps(retried)
         assert ext.saved_files() == sorted([report_path, second_path])  # still no video
+
+
+def test_r_a_limited_free_series_lists_its_short_header_and_names_a_served_short(
+    tmp_path: Path,
+) -> None:
+    """The fourth series (the owner's real payload shape of 2026-11-06, `isLimitedFree`), the CDN
+    serving episode 3 as TikTok served the owner's 7 — the whole file by size, a header that plays
+    2 s of the 10 s the list announces. **Load list** shows episodes 1-2 `free` and 3 `locked` with
+    the list's own hint (`plays 2 s of 10 s`: `music.duration` against `video.duration`,
+    no request made; `IsFreeIntro: false` / `IsPreview` / `PreviewType` lock nothing). **Download
+    all available** saves 1-2 and asks nothing for 3. **Download selected** with 3 ticked asks
+    for it once: `failed-unavailable` with the served-preview message, nothing saved for it, no
+    cover; the page shows it apart with the checkbox advice in place of `--recheck`; the report's
+    probable cause names the served preview and its `episodes_digest` carries every listed
+    episode's `music.duration` (3, 3, 2) next to the video's."""
+    preview = frozenset({(FOURTH_SERIES_ID, 3)})
+    hint = f"{SHORT_HEADER_HINT_PREFIX}2 s of {SHORT_HEADER_LISTED_DURATION_S} s"
+    served = (
+        f"{SHORT_SERVED_PREFIX}the whole file came ({MEDIA_SIZE} bytes, as listed) but it plays "
+        f"2 s of {SHORT_HEADER_LISTED_DURATION_S} s — this session may not watch the episode yet; watch "
+        f"it in the TikTok app, then {RECHECK_HINT_TAIL}"
+    )
+    with (
+        FakeTikTok(short_header_media=preview) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        listing = ext.load(FOURTH_LINK)
+        assert listing["series"][0]["episodes"] == 3
+        page = ext.page
+        table = page.locator("#episode-table tbody")
+        for number in (1, 2):
+            row = table.locator(f"tr[data-number='{number}']")
+            assert row.get_attribute("data-access") == "free"
+            assert row.locator("input[type=checkbox]").is_checked()  # free, not on disk yet
+            assert row.locator(".hints").count() == 0
+        third = table.locator("tr[data-number='3']")
+        assert third.get_attribute("data-access") == "locked"
+        assert third.locator("input[type=checkbox]").is_checked() is False
+        assert third.locator(".badge.locked").count() == 1
+        assert third.locator(".hints").text_content() == hint  # the display's English: as is
+        assert server.media_requests == []  # listing asks for no media
+        # the list's thumbnails, one per row once in view — so that every later cover request
+        # for episode 3 can only be the downloader's (none is allowed)
+        for number in (1, 2, 3):
+            row = table.locator(f"tr[data-number='{number}']")
+            row.locator("td.cover-cell").scroll_into_view_if_needed()
+            ext.wait_for(lambda row=row: row.locator("img.cover").count() == 1, 20, "no thumbnail")
+        assert len(_downloader_covers(server, FOURTH[3])) == 1  # the thumbnail, nothing else yet
+
+        available = ext.download_available()
+        (series,) = available["series"]
+        assert _statuses(series) == ["done", "done"]
+        assert series["line"] == "complete: 2 of 3 (2 downloaded) — 1 locked (3)"
+        assert [len(_media_of(server, FOURTH[n])) for n in (1, 2, 3)] == [1, 1, 0]
+        assert _videos(ext) == [
+            FOURTH_FOLDER / f"{FOURTH_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2)
+        ]
+        assert _report_files(ext) == []  # nothing failed: no report
+        assert page.locator("#failed-block").is_hidden()
+
+        for box in table.locator("input[type=checkbox]").all():
+            box.set_checked(box.get_attribute("data-number") == "3")
+        assert page.locator("#download-selected-button").is_enabled()
+        selected = ext._run("#download-selected-button", 90)
+        assert selected["kind"] == "selection"
+        (series,) = selected["series"]
+        assert _statuses(series) == ["failed-unavailable"]
+        row = _rows(series)[3]
+        assert row["message"] == served  # byte for byte the Python engines' message
+        assert series["line"] == "incomplete: 2 of 3 — 1 failed (3)"
+        assert [len(_media_of(server, FOURTH[n])) for n in (1, 2, 3)] == [1, 1, 1]  # once
+        assert len(_downloader_covers(server, FOURTH[3])) == 1  # no cover GET for a failed body
+        assert _videos(ext) == [
+            FOURTH_FOLDER / f"{FOURTH_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2)
+        ]  # nothing saved for episode 3: no video, no `(short)` file, no `.part`
+        state = ext.series_state(FOURTH_SERIES_ID)
+        assert state is not None  # the row as for any failure, no file, no DRM-like verdict
+        assert state["episodes"]["3"]["status"] == "failed-unavailable"
+        assert state["episodes"]["3"]["message"] == served
+        assert state["episodes"]["3"].get("download_id") is None
+
+        # the page: shown apart, the English display with the checkbox advice
+        assert page.locator("#failed-block").is_visible()
+        assert _table_rows(page, "#failed-table") == [("3", "failed-unavailable")]
+        shown = page.locator("#failed-table tbody tr").first.locator("td.message").text_content()
+        assert shown is not None and shown.startswith(
+            f"{SHORT_SERVED_PREFIX}the whole file came ({MEDIA_SIZE} bytes, as listed) but it "
+            f"plays 2 s of {SHORT_HEADER_LISTED_DURATION_S} s — this session may not watch the episode "
+            "yet; watch it in the TikTok app, then tick “"
+        )
+        assert shown.endswith("” to look again") and "--recheck" not in shown
+        assert page.locator("#failed-table tbody tr").first.locator(".badge").text_content() == (
+            "unavailable"
+        )
+
+        # the report: the served preview as the probable cause, the digest of every listed episode
+        ext.wait_for(lambda: len(_report_files(ext)) == 1, 20, "the report was not saved")
+        (report_path,) = _report_files(ext)
+        assert _report_name_re(FOURTH_SERIES_NAME).match(report_path.name), report_path.name
+        report = json.loads((ext.downloads / report_path).read_text(encoding="utf-8"))
+        assert report["dramafetch_report"] == 1
+        assert report["job"]["kind"] == "selection" and report["job"]["stopped"] is None
+        (reported,) = report["series"]
+        assert reported["series_id"] == FOURTH_SERIES_ID and reported["name"] == FOURTH_SERIES_NAME
+        assert reported["listed"] == 3
+        assert reported["access_counts"] == {"free": 2, "unlocked": 0, "locked": 1}
+        (not_downloaded,) = reported["not_downloaded"]
+        assert not_downloaded["number"] == 3 and not_downloaded["status"] == "failed-unavailable"
+        assert not_downloaded["message"] == served
+        assert not_downloaded["access"] == "locked" and not_downloaded["lock_hints"] == [hint]
+        cause = (
+            f"{SHORT_SERVED_CAUSE_PREFIX}2 s of {SHORT_HEADER_LISTED_DURATION_S} s"
+            f"{SHORT_SERVED_CAUSE_SUFFIX}"
+        )
+        assert not_downloaded["probable_cause"] == cause
+        (attempt,) = not_downloaded["attempts"]
+        assert attempt["requested"] is True and attempt["http_status"] == 200
+        assert attempt["content_length"] == MEDIA_SIZE and attempt["received_bytes"] == MEDIA_SIZE
+        assert attempt["outcome"] == hint
+        assert "?" not in attempt["url"] and attempt["host"] == "127.0.0.1"
+        assert not_downloaded["raw"]["id"] == FOURTH[3]
+        assert not_downloaded["raw"]["dramaInfo"]["isLimitedFree"] is True
+        digest = reported["episodes_digest"]
+        assert [entry["number"] for entry in digest] == [1, 2, 3]
+        assert [entry["access"] for entry in digest] == ["free", "free", "locked"]
+        assert [entry["lock_hints"] for entry in digest] == [[], [], [hint]]
+        assert [entry["duration_s"] for entry in digest] == [3, 3, SHORT_HEADER_LISTED_DURATION_S]
+        assert [entry["music_duration_s"] for entry in digest] == [3, 3, 2]
+        assert [entry["music_original"] for entry in digest] == [True, True, True]
+        assert [entry["size"] for entry in digest] == [MEDIA_SIZE] * 3
+        assert all(isinstance(entry["bitrate"], int) and entry["bitrate"] > 0 for entry in digest)
+        assert [entry["is_preview"] for entry in digest] == [True, True, False]
+        assert [entry["preview_type"] for entry in digest] == [4, 4, 1]
+        assert list(digest[0]) == [
+            "number",
+            "access",
+            "lock_hints",
+            "duration_s",
+            "music_duration_s",
+            "music_original",
+            "size",
+            "bitrate",
+            "is_preview",
+            "preview_type",
+        ]
+        assert "UrlList" not in json.dumps(digest) and "http" not in json.dumps(digest)
+        assert report["summary"] == [f"E03 failed-unavailable — {served} — probable cause: {cause}"]

@@ -1,14 +1,22 @@
 """A tiny stand-in for TikTok's web app, enough to drive the browser strategy end to end offline.
 
-It serves three series: the main one (`SERIES_ID`, "The Billionaire's Secret Heiress", five
+It serves four series: the main one (`SERIES_ID`, "The Billionaire's Secret Heiress", five
 episodes on two `item_list` pages, episode 5 locked — `FakeOptions.series_id` can move it to
 another id), a second one (`SECOND_SERIES_ID`, "Second Chance Bride": three free episodes on
-one page, `fixtures/item_list_series2.json`) and a paid third one (`THIRD_SERIES_ID`, "Paid Love
+one page, `fixtures/item_list_series2.json`), a paid third one (`THIRD_SERIES_ID`, "Paid Love
 Story": four episodes on one page whose answer depends on the session — with a `sessionid`
 cookie `fixtures/item_list_series3_logged_in.json`, where episode 3 is sold but unlocked by this
 account and carries play URLs, without one `item_list_series3_logged_out.json`, where it is
-locked and carries none; episode 4 is locked either way), each with its own covers and play URLs
-through the same fake CDN; the series page, `item_list` and `detail` answer per `dramaID`.
+locked and carries none; episode 4 is locked either way) and a limited-free fourth one
+(`FOURTH_SERIES_ID`, "Limited Free Drama", `fixtures/item_list_series4_limited_free.json`,
+modeled on the owner's real payload of 2026-11-06: three episodes with `dramaInfo.isLimitedFree`,
+`IsFreeIntro: false`, `IsPreview` / `PreviewType` and an original `music` block; episodes 1-2
+have `music.duration == video.duration`, episode 3 `music.duration` 2 of a `video.duration` of 3 —
+the preview window the list alone gives away, so it is `locked` without any request; its list is
+served with `video.size` and every `PlayAddr.DataSize` set to the exact length of the media body
+the CDN serves, `MEDIA_SIZE`, so the engines' size rule can fire), each with its own covers and
+play URLs through the same fake CDN; the series page, `item_list` and `detail` answer per
+`dramaID`.
 
 Routes (all GET):
   /shortdrama/episode/<id>/<n>   the series page: inline JS fetches `/api/drama/detail/` and then
@@ -65,6 +73,19 @@ Routes (all GET):
                                  tiny.mp4 with `encv`/`enca` sample entries and a top-level
                                  `pssh` (`tests/encrypted_mp4.py`, a structural edit), padded
                                  the same way; the engines must refuse it and keep nothing.
+                                 `short_header_media` — the same kind of set — serves those episodes
+                                 as TikTok served 7 episodes of a limited-free series on
+                                 2026-11-06: the WHOLE file by size (`MEDIA_SIZE`, which the
+                                 fourth series' list announces) whose header limits playback to
+                                 `short_header_mp4.SHORT_HEADER_SECONDS` (2 s; `tests/short_header_mp4.py`, a
+                                 structural edit of tiny.mp4's `mvhd`/`tkhd`/`mdhd` durations);
+                                 the list served for such an episode announces
+                                 `video.duration = SHORT_HEADER_LISTED_DURATION_S` (10 s) instead of
+                                 the 3 s of `MEDIA_DURATION_S`, because a 2-second header is
+                                 within the engines' duration tolerance of a 3-second episode
+                                 (max(3 s, 5 %)), and the real case is a 70-second window of a
+                                 106-second episode; the engines must name it a served preview
+                                 (`FAILED_UNAVAILABLE`, `(short)`), never alter it.
   /cover/<item_id>.jpg           the fake image CDN. Every `https://p16-sign-sg.tiktokcdn.com/...`
                                  cover URL inside an item_list payload (`video.cover`,
                                  `originCover`, `dynamicCover`) is rewritten to
@@ -114,6 +135,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from encrypted_mp4 import encrypted_mp4
+from short_header_mp4 import with_short_header
 
 SERIES_ID = "7699393770256782354"
 SERIES_NAME = "The Billionaire's Secret Heiress"
@@ -149,6 +171,19 @@ THIRD_PAGES_LOGGED_OUT = {
 }
 #: The item ids of the third series' episodes 1-4.
 THIRD_ITEMS = tuple(str(item["id"]) for item in THIRD_PAGES_LOGGED_IN["0"]["itemList"])
+#: The fourth series, free for a limited time (`dramaInfo.isLimitedFree: true`; every item also
+#: carries `IsFreeIntro: false`, `IsPreview` and `PreviewType`, which say nothing): episodes 1-2
+#: fully served (`music.duration == video.duration`), episode 3 with a preview window in the list
+#: itself (`music.duration` 2 of 3) — `locked` before any request. TikTok announces 3. One page:
+#: `fixtures/item_list_series4_limited_free.json`.
+FOURTH_SERIES_ID = "7699393770256782366"
+FOURTH_SERIES_NAME = "Limited Free Drama"
+FOURTH_TOTAL_EPISODES = 3
+FOURTH_PAGES = {
+    "0": json.loads((FIXTURES / "item_list_series4_limited_free.json").read_text(encoding="utf-8")),
+}
+#: The item ids of the fourth series' episodes 1-3.
+FOURTH_ITEMS = tuple(str(item["id"]) for item in FOURTH_PAGES["0"]["itemList"])
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
 CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
 COVER_PATH_RE = re.compile(r"^/cover/(?P<id>\d+)\.jpg$")
@@ -170,10 +205,17 @@ TINY_MP4 = (FIXTURES / "tiny.mp4").read_bytes()
 #: What `drm_media` serves instead (before the same padding): `tiny.mp4` with its sample entries
 #: renamed `encv`/`enca` and a top-level `pssh` — what an encrypted file declares.
 ENCRYPTED_TINY_MP4 = encrypted_mp4(TINY_MP4)
+#: What `short_header_media` serves instead (before the same padding): `tiny.mp4` whose headers declare
+#: a 2-second playback window over its 3 s of samples — the whole file, a short header.
+SHORT_HEADER_TINY_MP4 = with_short_header(TINY_MP4)
 MEDIA_SIZE = 128 * 1024
 #: What `tiny.mp4` lasts; the lists served announce it (unless `short_media`), so the engines'
 #: duration check passes for the fake CDN's episodes.
 MEDIA_DURATION_S = 3
+#: What the list announces as `video.duration` for an episode in `short_header_media`: far enough from
+#: the 2-second window that the engines' duration check (max(3 s, 5 %)) fails the file, as a
+#: 70-second window fails a 106-second episode; `music.duration` stays the fixture's.
+SHORT_HEADER_LISTED_DURATION_S = 10
 #: How much of the body `truncate_media` sends before dropping the connection.
 TRUNCATE_RATIO = 0.6
 FREE_BOX = b"free"
@@ -288,6 +330,12 @@ class FakeOptions:
     # Episodes, as (series id, episode number), whose media the CDN serves ENCRYPTED: the
     # `encv`/`enca` + `pssh` variant of tiny.mp4 (`drm_media_bytes`), same size, same headers.
     drm_media: frozenset[tuple[str, int]] = frozenset()
+    # Episodes, as (series id, episode number), whose media the CDN serves as a PREVIEW WINDOW:
+    # the whole file by size (`MEDIA_SIZE`, which the fourth series' list announces) with headers
+    # that declare 2 s (`short_header_media_bytes`); their list entry announces `video.duration =
+    # SHORT_HEADER_LISTED_DURATION_S`. The fourth series' episode 3 is NOT preview media by default:
+    # the list alone locks it; a test that forces the download turns this on.
+    short_header_media: frozenset[tuple[str, int]] = frozenset()
     # A 302 to a host the Chrome extension's test copy does not cover — `localhost` (only
     # `http://127.0.0.1/*` is granted there), `/elsewhere` + the same path and query — instead of
     # the video (`redirect_media`) or the cover (`redirect_covers`); `/elsewhere/…` serves what
@@ -457,6 +505,8 @@ class _Handler(BaseHTTPRequestHandler):
                 name, total = SECOND_SERIES_NAME, SECOND_TOTAL_EPISODES
             elif query.get("dramaID") == THIRD_SERIES_ID:
                 name, total = THIRD_SERIES_NAME, THIRD_TOTAL_EPISODES
+            elif query.get("dramaID") == FOURTH_SERIES_ID:
+                name, total = FOURTH_SERIES_NAME, FOURTH_TOTAL_EPISODES
             else:
                 name, total = SERIES_NAME, TOTAL_EPISODES
             self._json({"dramaInfo": {"dramaName": name, "totalEpisode": total}})
@@ -477,6 +527,8 @@ class _Handler(BaseHTTPRequestHandler):
             pages = SECOND_PAGES
         elif drama_id == THIRD_SERIES_ID:  # what THIS session may play: the cookie decides
             pages = THIRD_PAGES_LOGGED_IN if logged_in else THIRD_PAGES_LOGGED_OUT
+        elif drama_id == FOURTH_SERIES_ID:
+            pages = FOURTH_PAGES
         elif drama_id == options.series_id:
             pages = PAGES
         else:
@@ -510,7 +562,7 @@ class _Handler(BaseHTTPRequestHandler):
             if count:
                 server.media_lists_served += 1
         assert isinstance(rewritten, dict)
-        return rewritten
+        return with_listed_sizes(rewritten, MEDIA_SIZE, options.short_header_media)
 
     def _media(
         self, options: FakeOptions, query: dict[str, str], logged_in: bool, item_id: str, index: str
@@ -529,6 +581,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.FORBIDDEN, b"url expired", "text/plain")
         elif EPISODE_OF_ITEM.get(item_id) in options.drm_media:
             self._send(HTTPStatus.OK, drm_media_bytes(item_id, index), "video/mp4")
+        elif EPISODE_OF_ITEM.get(item_id) in options.short_header_media:
+            self._send(HTTPStatus.OK, short_header_media_bytes(item_id, index), "video/mp4")
         elif options.truncate_media:
             self._send_truncated(media_bytes(item_id, index), "video/mp4")
         elif options.gzip_media:
@@ -684,6 +738,43 @@ def rewrite_media_urls(
     return walk(node, "0", {}), rewritten
 
 
+def with_listed_sizes(
+    payload: dict[str, Any], size: int, short_header_media: frozenset[tuple[str, int]] = frozenset()
+) -> dict[str, Any]:
+    """`payload` with, for every item of the FOURTH series, `video.size` and every
+    `bitrateInfo[].PlayAddr.DataSize` set to `size` — the exact length of the body the fake CDN
+    serves (`media_bytes`, `short_header_media_bytes`: both `MEDIA_SIZE`), so that the engines' size
+    rule (a saved file within 0.5 % of a listed size) can fire — and, for every item (of any
+    series) in `short_header_media`, `video.duration` set to `SHORT_HEADER_LISTED_DURATION_S`. Other series'
+    items are left as they are (their fixtures' `DataSize` strings never match the fake's body).
+    Edits in place and returns the payload."""
+    for items in _item_lists(payload):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            drama = item.get("dramaInfo") if isinstance(item.get("dramaInfo"), dict) else {}
+            video = item.get("video")
+            if not isinstance(video, dict):
+                continue
+            if str(drama.get("dramaID")) == FOURTH_SERIES_ID:
+                video["size"] = size
+                for entry in video.get("bitrateInfo") or []:
+                    if isinstance(entry, dict) and isinstance(entry.get("PlayAddr"), dict):
+                        entry["PlayAddr"]["DataSize"] = size
+            if EPISODE_OF_ITEM.get(str(item.get("id"))) in short_header_media:
+                video["duration"] = SHORT_HEADER_LISTED_DURATION_S
+    return payload
+
+
+def _item_lists(payload: dict[str, Any]) -> list[list[Any]]:
+    """The `itemList` of a page, at the top level or under `data` (the shapes the fixtures use)."""
+    found: list[list[Any]] = []
+    for container in (payload, payload.get("data")):
+        if isinstance(container, dict) and isinstance(container.get("itemList"), list):
+            found.append(container["itemList"])
+    return found
+
+
 def media_bytes(item_id: str, index: str, *, base: bytes = TINY_MP4) -> bytes:
     """The real fixture `tests/fixtures/tiny.mp4` (or `base`) followed by one top-level `free` box
     (a 4-byte big-endian size, `free`, the payload) whose payload starts with
@@ -703,11 +794,19 @@ def drm_media_bytes(item_id: str, index: str) -> bytes:
     return media_bytes(item_id, index, base=ENCRYPTED_TINY_MP4)
 
 
+def short_header_media_bytes(item_id: str, index: str) -> bytes:
+    """What `short_header_media` serves for an episode: `SHORT_HEADER_TINY_MP4` padded like `media_bytes` —
+    `MEDIA_SIZE` bytes, the size the fourth series' list announces, a well-formed MP4 whose
+    headers say 2 s (what TikTok's web session got for an episode the account had not unlocked;
+    DramaFetch must name it a served preview and keep it as `(short)`, never alter it)."""
+    return media_bytes(item_id, index, base=SHORT_HEADER_TINY_MP4)
+
+
 def _episodes_of_items() -> dict[str, tuple[str, int]]:
     """item id -> (series id, episode number), from every fixture page the fake serves (an item
     without an episode number, a trailer, is left out)."""
     found: dict[str, tuple[str, int]] = {}
-    for pages in (PAGES, SECOND_PAGES, THIRD_PAGES_LOGGED_IN):
+    for pages in (PAGES, SECOND_PAGES, THIRD_PAGES_LOGGED_IN, FOURTH_PAGES):
         for page in pages.values():
             for item in page.get("itemList") or page.get("data", {}).get("itemList", []):
                 drama = item.get("dramaInfo") or {}
@@ -717,8 +816,8 @@ def _episodes_of_items() -> dict[str, tuple[str, int]]:
     return found
 
 
-#: Which episode an item id of the fixtures is: how `drm_media` (series id, number) pairs reach
-#: the CDN, whose paths carry item ids only.
+#: Which episode an item id of the fixtures is: how `drm_media` / `short_header_media` (series id,
+#: number) pairs reach the CDN, whose paths carry item ids only.
 EPISODE_OF_ITEM = _episodes_of_items()
 
 
@@ -824,6 +923,8 @@ class FakeTikTok:
             items = set(SECOND_ITEMS)
         elif series_id == THIRD_SERIES_ID:
             items = set(THIRD_ITEMS)
+        elif series_id == FOURTH_SERIES_ID:
+            items = set(FOURTH_ITEMS)
         else:
             items = _main_items(series_id)
         found = []

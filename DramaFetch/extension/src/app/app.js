@@ -720,6 +720,7 @@ function seriesInput(run, traceOf) {
     contacted: run.contacted,
     listed: episodes?.length ?? null,
     access,
+    listedEpisodes: episodes, // the raw items of every listed episode: the report's digest
     episodes: run.results.map((result) => ({
       number: result.episode.number,
       itemId: result.episode.itemId,

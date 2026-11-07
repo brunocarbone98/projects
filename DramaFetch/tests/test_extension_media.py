@@ -64,6 +64,7 @@ from encrypted_mp4 import (
     with_moov_pssh,
     with_top_level_pssh,
 )
+from short_header_mp4 import SHORT_HEADER_SECONDS, with_short_header
 
 if TYPE_CHECKING:
     from conftest import Tools
@@ -399,6 +400,27 @@ def test_the_layout_facts_the_variants_rely_on() -> None:
 
 
 # ------------------------------------------------------------- verify / drm / probe parity
+
+
+def test_a_short_header_variant_reads_as_two_seconds_in_both_languages(tmp_path: Path) -> None:
+    """`tests/short_header_mp4.py`: the fixture with its `mvhd`/`tkhd`/`mdhd` durations set to 2 s —
+    the same byte size (the real case in miniature: the whole file by size, a header that plays
+    less). mutagen reads the sound track's `mdhd`; so does `lib/mp4.probe`, and `verifyVideo` says
+    what `verify_video` says at every duration."""
+    data = with_short_header()
+    assert SHORT_HEADER_SECONDS == 2.0 and len(data) == len(TINY_MP4)
+    verdicts = _assert_parity(
+        tmp_path,
+        [("preview-2s", data), ("preview-1.25s", with_short_header(seconds=1.25))],
+        durations=(3, 10, 106, None),
+    )
+    assert verdicts == [None, None]  # 2 s is within max(3 s, 5 %) of a 3-second episode
+    path = tmp_path / "preview.mp4"
+    path.write_bytes(data)
+    (probe,) = _values([{"op": "probe", "path": str(path)}])
+    assert _outcome({"value": probe}) == _python_probe(path)
+    assert float(probe["durationS"]) == 2.0 and probe["hasAudio"] is True
+    assert verify_video(path, 10) == "duration 2 s, expected 10 s"
 
 
 def test_the_fixture_and_its_variants_get_the_same_verdicts(tmp_path: Path) -> None:

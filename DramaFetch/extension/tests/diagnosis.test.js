@@ -21,6 +21,8 @@ import {
   NOT_ATTEMPTED_CAUSE,
   PREVIEW_CAUSE_MIDDLE,
   PREVIEW_CAUSE_PREFIX,
+  SHORT_SERVED_CAUSE_PREFIX,
+  SHORT_SERVED_CAUSE_SUFFIX,
   RATE_LIMITED_CAUSE,
   REPORTS_FOLDER,
   REPORT_VERSION,
@@ -40,7 +42,9 @@ import {
   INCOMPLETE_PREFIX,
   MEDIA_RATE_LIMIT_MESSAGE,
   PAYLOAD_DRM_MESSAGE,
+  SHORT_SERVED_PREFIX,
   UNAVAILABLE_MESSAGE,
+  shortServedMessage,
 } from "../src/lib/messages.js";
 
 const SERIES_ID = "7699393770256782354";
@@ -136,7 +140,10 @@ function seriesInput(seriesId, name, episodes) {
 const PREVIEW = `${INCOMPLETE_PREFIX}duration 70 s, expected 106 s`;
 const PREVIEW_HINTS = ["isFree=False", "unlockPrice=30"];
 
-test("probableCause: the eleven rules, first match wins", () => {
+/** The downloader's served-preview message (`downloader.js`): the whole file by size, a 70 s header. */
+const SERVED = shortServedMessage(9676471, "70", "106");
+
+test("probableCause: the twelve rules, first match wins", () => {
   // 1. the run stopped before the episode — whatever its status
   assert.equal(
     probableCause(row("failed-rate-limited", `stopped: episode 2 failed-rate-limited: ${MEDIA_RATE_LIMIT_MESSAGE}`), null),
@@ -144,6 +151,19 @@ test("probableCause: the eleven rules, first match wins", () => {
   );
   assert.equal(probableCause(row("failed", "stopped: cooldown until 19:30"), null), `${NOT_ATTEMPTED_CAUSE} (cooldown until 19:30)`);
   // 2-4. the stops
+  // 2. a served preview, named by the downloader: the whole file by size, a header that plays a window
+  assert.equal(
+    probableCause(row("failed-unavailable", SERVED, { access: "free", lockHints: ["isLimitedFree=True"] }), null),
+    "TikTok served a preview: the file is the whole episode by size but its header limits playback to 70 s of 106 s — how " +
+      "TikTok's own player previews an episode this account has not unlocked; DramaFetch does not alter files. A limited-free " +
+      "series unlocks as you watch it in the TikTok app: watch the episode there, then look again",
+  );
+  assert.equal(probableCause(row("failed-unavailable", SERVED), null), `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
+  assert.equal(probableCause(row("failed-unavailable", `${SERVED} (kept as E05 (short).mp4)`), null), `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
+  assert.ok(SERVED.startsWith(SHORT_SERVED_PREFIX) && SHORT_SERVED_CAUSE_PREFIX.startsWith(SHORT_SERVED_PREFIX));
+  // whatever the status says, the message decides; a stop still comes first
+  assert.equal(probableCause(row("failed", SERVED), null), `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
+  assert.equal(probableCause(row("failed-unavailable", `stopped: ${SERVED}`), null), `${NOT_ATTEMPTED_CAUSE} (${SERVED})`);
   assert.equal(probableCause(row("failed-rate-limited", MEDIA_RATE_LIMIT_MESSAGE), null), RATE_LIMITED_CAUSE);
   assert.equal(probableCause(row("failed-blocked", BLOCKED_MESSAGE), null), BLOCKED_CAUSE);
   assert.equal(probableCause(row("failed-login-required", "login required: TikTok sent the page to a login"), null), LOGIN_CAUSE);
@@ -156,6 +176,11 @@ test("probableCause: the eleven rules, first match wins", () => {
     `${LOCKED_CAUSE_PREFIX}isLocked=True; no play address${LOCKED_CAUSE_SUFFIX}`,
   );
   assert.equal(probableCause(row("skipped-locked", "looks locked", { access: "locked" }), null), `${LOCKED_CAUSE_PREFIX}no clue${LOCKED_CAUSE_SUFFIX}`);
+  // …the list's preview-window hint among them when that was the reason
+  assert.equal(
+    probableCause(row("skipped-locked", "looks locked: isLimitedFree=True; plays 69 s of 106 s", { access: "locked", lockHints: ["isLimitedFree=True", "plays 69 s of 106 s"] }), null),
+    `${LOCKED_CAUSE_PREFIX}isLimitedFree=True; plays 69 s of 106 s${LOCKED_CAUSE_SUFFIX}`,
+  );
   // 7. a shorter file: a preview, with the list's marks; a longer one: the list and the media disagree
   assert.equal(
     probableCause(row("failed", PREVIEW, { access: "unlocked", lockHints: PREVIEW_HINTS }), null),
@@ -229,7 +254,7 @@ const runs = () => [
 /** @returns {import("../src/lib/diagnosis.js").ReportInput} */
 const input = (series = runs()) => ({
   generatedAt: "2026-11-06T19:30:00.000Z",
-  extensionVersion: "1.2.0",
+  extensionVersion: "1.3.0",
   userAgent: "Mozilla/5.0 Chrome/142",
   language: "es",
   testMode: false,
@@ -261,7 +286,7 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
   ]);
   assert.equal(report["dramafetch_report"], REPORT_VERSION);
   assert.equal(report["generated_at"], "2026-11-06T19:30:00.000Z");
-  assert.equal(report["extension_version"], "1.2.0");
+  assert.equal(report["extension_version"], "1.3.0");
   assert.deepEqual(report["browser"], { user_agent: "Mozilla/5.0 Chrome/142", language: "es" });
   assert.equal(report["test_mode"], false);
   assert.equal(report["what_this_is"], WHAT_THIS_IS);
@@ -278,7 +303,8 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
   const series = /** @type {Record<string, unknown>[]} */ (report["series"]);
   assert.equal(series.length, 2);
   const [one, other] = /** @type {[Record<string, unknown>, Record<string, unknown>]} */ (series);
-  assert.deepEqual(Object.keys(one), ["series_id", "name", "line", "status", "error", "stop", "contacted", "listed", "access_counts", "not_downloaded", "reference"]);
+  assert.deepEqual(Object.keys(one), ["series_id", "name", "line", "status", "error", "stop", "contacted", "listed", "access_counts", "not_downloaded", "reference", "episodes_digest"]);
+  assert.equal(one["episodes_digest"], null); // the series' listed episodes were not passed
   assert.equal(one["series_id"], SERIES_ID);
   assert.equal(one["name"], "One");
   assert.equal(one["listed"], 7);
@@ -296,7 +322,7 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
     ],
   );
   const [preview, truncated, locked, fresh, stopped] = /** @type {Record<string, unknown>[]} */ (rows);
-  assert.deepEqual(Object.keys(/** @type {object} */ (preview)), [
+  assert.deepEqual(Object.keys(/** @type {object} */ (short)), [
     "number",
     "item_id",
     "title",
@@ -389,7 +415,88 @@ test("buildReport: one series gives unprefixed summary lines and a skipped-exist
     access_counts: null,
     not_downloaded: [],
     reference: null,
+    episodes_digest: null,
   });
+});
+
+/**
+ * A list item of the limited-free shape (2026-11-06), the fields the digest reads set as given.
+ * @param {{videoDuration?: unknown, musicDuration?: unknown, original?: unknown, size?: unknown, bitrate?: unknown, isPreview?: unknown, previewType?: unknown}} fields
+ * @returns {Record<string, unknown>}
+ */
+function rawItem(fields) {
+  return {
+    id: "7699393770256782001",
+    dramaInfo: { DramaVideoData: { EpisodeNumber: 1, IsFreeIntro: false, IsPreview: fields.isPreview, PreviewType: fields.previewType }, isLimitedFree: true },
+    music: { duration: fields.musicDuration, original: fields.original, playUrl: "https://sf16.tiktokcdn.com/obj/x.mp3" },
+    video: {
+      duration: fields.videoDuration,
+      size: fields.size,
+      bitrateInfo: [{ Bitrate: fields.bitrate, PlayAddr: { DataSize: fields.size, UrlList: ["https://v16.tiktok.com/1.mp4?expire=1"] } }],
+      playAddr: "https://v16.tiktok.com/1.mp4?expire=1",
+    },
+  };
+}
+
+test("buildReport: episodes_digest has one small entry per LISTED episode — the fields the preview rules read, no URL", () => {
+  const listedEpisodes = [
+    { number: 1, access: "free", lockHints: ["isLimitedFree=True"], durationS: 69, raw: rawItem({ videoDuration: 69, musicDuration: 69, original: true, size: 6_000_000, bitrate: 700_000, isPreview: true, previewType: 4 }) },
+    { number: 5, access: "locked", lockHints: ["isLimitedFree=True", "plays 69 s of 106 s"], durationS: 106, raw: rawItem({ videoDuration: 106, musicDuration: 69, original: true, size: 9676471, bitrate: 726189, isPreview: true, previewType: 4 }) },
+    // absent or odd fields: null; a sound duration that is no number: null; a string original: null
+    { number: 7, access: "free", lockHints: [], durationS: 94, raw: rawItem({ videoDuration: "94", musicDuration: "93", original: "true", size: "x", bitrate: null }) },
+    { number: 8, access: "free", lockHints: [], durationS: null, raw: { id: "x", video: "junk", music: [1], dramaInfo: null } },
+    { number: 9, access: "locked", lockHints: ["no play address"], durationS: null, raw: null },
+  ];
+  const one = { ...seriesInput(SERIES_ID, "One", [episodeInput(5, "failed-unavailable", SERVED, { access: "locked", lockHints: ["isLimitedFree=True", "plays 69 s of 106 s"] })]), listedEpisodes };
+  const report = buildReport(input([one]));
+  const [series] = /** @type {Record<string, unknown>[]} */ (report["series"]);
+  const digest = /** @type {Record<string, unknown>[]} */ (series?.["episodes_digest"]);
+  assert.equal(digest.length, 5); // every listed episode, not only the failures
+  assert.deepEqual(digest[0], {
+    number: 1,
+    access: "free",
+    lock_hints: ["isLimitedFree=True"],
+    duration_s: 69,
+    music_duration_s: 69,
+    music_original: true,
+    size: 6_000_000,
+    bitrate: 700_000,
+    is_preview: true,
+    preview_type: 4,
+  });
+  assert.deepEqual(digest[1], {
+    number: 5,
+    access: "locked",
+    lock_hints: ["isLimitedFree=True", "plays 69 s of 106 s"],
+    duration_s: 106,
+    music_duration_s: 69,
+    music_original: true,
+    size: 9676471,
+    bitrate: 726189,
+    is_preview: true,
+    preview_type: 4,
+  });
+  assert.deepEqual(digest[2], {
+    number: 7,
+    access: "free",
+    lock_hints: [],
+    duration_s: 94, // the episode's parsed duration where the raw value is no number
+    music_duration_s: null,
+    music_original: null,
+    size: null,
+    bitrate: null,
+    is_preview: null,
+    preview_type: null,
+  });
+  assert.deepEqual(digest[3], { number: 8, access: "free", lock_hints: [], duration_s: null, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
+  assert.deepEqual(digest[4], { number: 9, access: "locked", lock_hints: ["no play address"], duration_s: null, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
+  assert.ok(!JSON.stringify(digest).includes("http"));
+  // the preview row's cause, and the digest copies the hints (the input stays untouched)
+  assert.equal(/** @type {Record<string, unknown>[]} */ (series?.["not_downloaded"])[0]?.["probable_cause"], `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
+  assert.notEqual(digest[0]?.["lock_hints"], listedEpisodes[0]?.lockHints);
+  // not listed: null (an unstarted series, or an input without the list)
+  assert.equal(/** @type {Record<string, unknown>[]} */ (buildReport(input([{ ...one, listedEpisodes: null }]))["series"])[0]?.["episodes_digest"], null);
+  assert.equal(REPORT_VERSION, 1); // an additive field: the format version stays
 });
 
 test("hasFailures: any failed-* row of any series; locked skips alone are none", () => {

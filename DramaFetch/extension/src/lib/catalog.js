@@ -14,6 +14,19 @@
  * the user's own logged-in session — `free`, `unlocked` (sold, and this account may play it) or
  * `locked` (listed and skipped). Nothing here unlocks, buys, fakes or sends anything back.
  *
+ * Verified 2026-11-06 from the owner's reports (a 62-episode series, `catalog.py` has the same
+ * facts): a series free for a limited time carries `dramaInfo.isLimitedFree: true` on every item;
+ * `DramaVideoData.IsFreeIntro` ("is this the free intro teaser") is false on every episode, E01
+ * included, and `IsPreview` / `PreviewType` (4 or 1) sit on fully served episodes too — none of
+ * the three says anything about a lock, so none gives a clue. What does: an episode TikTok serves
+ * as a preview comes as the WHOLE file by size (`video.size` == the rendition's
+ * `PlayAddr.DataSize`) whose MP4 header limits playback to about 70 s, and the list tells it
+ * beforehand — the episode's own sound (`music.original: true`) lasts the window
+ * (`music.duration`, 69 s) while `video.duration` is the full length (106 s). That is the
+ * SHORT-HEADER rule (hint {@link SHORT_HEADER_HINT_PREFIX}); after a download the downloader
+ * recognises the served preview by its listed size ({@link listedSizes}). DramaFetch never
+ * rewrites that header: watching the episode in the TikTok app, then looking again, is the way.
+ *
  * Python semantics are kept where they decide: dict keys are own properties only, strings are
  * stripped with Python's whitespace set, `re.IGNORECASE` is emulated with
  * {@link caseless}, `\d` is any Unicode decimal digit, lengths count code points. JSON numbers
@@ -28,6 +41,7 @@ import {
   pyDecimalInt,
   pyHead,
   pyLen,
+  pyNumberText,
   pyRepr,
   pyScalarText,
   pyStrip,
@@ -37,6 +51,12 @@ import {
 export const MAX_DEPTH = 12;
 /** The hint of an item THIS session's payload gives no play address for. */
 export const NO_PLAY_ADDRESS = "no play address";
+/**
+ * The hint of an item whose own sound lasts a preview window of its video (`catalog.
+ * SHORT_HEADER_HINT_PREFIX`): `plays 69 s of 106 s` — `music.duration` of
+ * `video.duration`, the list's tell of an episode TikTok serves as a preview to this session.
+ */
+export const SHORT_HEADER_HINT_PREFIX = "plays ";
 /** Codec of a rendition whose `CodecType` is missing. */
 export const UNKNOWN_CODEC = "unknown";
 /** Height part of a label when neither the `GearName` nor `video.ratio` tells it. */
@@ -98,15 +118,35 @@ export const VIDEO_ONLY_PATH_SUFFIX = "/media-video-hvc1/";
 const ITEM_LIST_KEYS = ["itemList", "item_list"];
 // The key patterns of access_of, written lower-case and matched against `caseless(key)`: that is
 // re.IGNORECASE as Python's re applies it to these ASCII patterns.
-/** The key-name heuristic of the builds before the access model (matched without block words). */
-const LOCK_KEY_RE = /lock|paid|needpay|unlock|price|coin|vip|preview/;
+/**
+ * The key-name heuristic of the builds before the access model (matched without block words);
+ * `preview` left it on 2026-11-06: TikTok sets `IsPreview` on fully served episodes.
+ */
+const LOCK_KEY_RE = /lock|paid|needpay|unlock|price|coin|vip/;
 const FREE_KEY_RE = /free/;
+/** The word that makes a `free` key no price flag: `IsFreeIntro`, "is this the free intro teaser". */
+const INTRO_WORD = "intro";
 const DRM = "drm";
 const ENTITLED = "entitled";
 const NOT_ENTITLED = "not-entitled";
 const VIEWER_LOCK = "viewer-lock";
 const AMBIGUOUS = "ambiguous";
 const PRICING = "pricing";
+/** A truthy `free` key about the price ({@link isFreeKey}): free for now, whatever the price says. */
+const FREE = "free";
+/** The structural SHORT-HEADER rule: the item's own sound lasts a window of its video. */
+const SHORT_HEADER = "short-header";
+/** The window rule fires when `music.duration` is at most this share of `video.duration`… */
+const SHORT_HEADER_RATIO = 0.85;
+/**
+ * `catalog.MAX_EXACT_INT`: the largest integer both front ends read exactly. {@link asInt} — every
+ * episode number, duration, size and bitrate read from the payload — gives null beyond it, so a
+ * 400-digit `video.duration` or `DataSize` (`Infinity` or an inexact float here, an exact int in
+ * Python) is junk in both: the SHORT-HEADER rule never fires on it and {@link listedSizes} drops it.
+ */
+const MAX_EXACT_INT = Number.MAX_SAFE_INTEGER;
+/** …and at least this many seconds shorter. */
+const SHORT_HEADER_MIN_GAP_S = 1;
 /** One word of a key: see {@link keyWords}. Case-sensitive, ASCII only. */
 const KEY_WORD_RE = /[A-Z]+s(?![a-z])|[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+/g;
 const DRM_NEGATION_WORDS = new Set(["free", "no", "non", "not", "un", "without"]);
@@ -116,7 +156,8 @@ const ENTITLED_KEY_RE =
   /^(?:(?:is_?)?(?:unlocked|purchased|bought|entitled)|has_?(?:paid|purchased|unlocked|bought|access)|paid_?by_?(?:user|viewer|me))$/;
 /** Matched against the FULL key: `isLocked`, `is_locked`, `locked`. */
 const LOCKED_KEY_RE = /^(?:is_?)?locked$/;
-const VIEWER_LOCK_KEY_RE = /need_?(?:pay|unlock|buy|purchase)|preview|trial|paywall/;
+/** `preview` and `trial` left it on 2026-11-06 (`IsPreview`, `PreviewType` sit on served episodes). */
+const VIEWER_LOCK_KEY_RE = /need_?(?:pay|unlock|buy|purchase)|paywall/;
 /** `lockStatus` / `lock_status` — not `unlockStatus`, not `blockStatus` (block words removed). */
 const LOCK_STATUS_KEY_RE = /(?<!un)lock_?status/;
 /** A string that spells a number or a bool: a `lock_?status` key reads it as that. */
@@ -225,16 +266,28 @@ function walkItemLists(node, depth, maxDepth, found) {
  * DRM in whole words, {@link isDrmKey}, truthy), ENTITLED (`(is_?)?(unlocked|purchased|bought|
  * entitled)`, `has_?(paid|purchased|unlocked|bought|access)`, `paid_?by_?(user|viewer|me)`, truthy;
  * or a status string `unlocked` `paid` `purchased` `bought` `entitled`), NOT-ENTITLED (one of those
- * full keys, falsy), VIEWER-LOCK (`(is_?)?locked`; `need_?(pay|unlock|buy|purchase)`, `preview`,
- * `trial`, `paywall`; a `lock_?status` bool or number or a string spelling one, truthy; a status
- * string `locked` `lock` `need_pay` `needpay` `unpaid` `unpurchased`), AMBIGUOUS (never decides),
- * PRICING (a falsy `free` key; `price` `coin` `cost` `charge` above 0; `vip` / `paid` outside the
- * entitled keys; the old heuristic's leftovers — "block" is not "lock") and PLAY (no play address).
+ * full keys, falsy), VIEWER-LOCK (`(is_?)?locked`; `need_?(pay|unlock|buy|purchase)`, `paywall`; a
+ * `lock_?status` bool or number or a string spelling one, truthy; a status string `locked` `lock`
+ * `need_pay` `needpay` `unpaid` `unpurchased`), AMBIGUOUS (never decides), FREE (a truthy `free`
+ * key about the price, {@link isFreeKey}: `isLimitedFree`, `isFree`, `limitedFree`; its
+ * `key=value` is a hint only next to a PRICING clue — it says why a sold episode is free for now;
+ * alone it says nothing about a price or a lock), PRICING (a falsy such key → `isFree=false`;
+ * `price` `coin` `cost` `charge` above 0; `vip` / `paid` outside the entitled keys; the old
+ * heuristic's leftovers — "block" is not "lock") and two structural rules: SHORT-HEADER
+ * (`music.original` truthy, `music.duration` a number above 0 at most 0.85 × `video.duration` (an
+ * int above 0) and at least 1 s shorter: the episode's own sound lasts the playback window TikTok
+ * serves this session; hint {@link SHORT_HEADER_HINT_PREFIX} + `69 s of 106 s`) and PLAY (no
+ * play address, {@link NO_PLAY_ADDRESS}). A `free` key with `intro` among its words
+ * (`IsFreeIntro`) or naming DRM (`isDrmFree`, a negation) is no price flag at all, whatever its
+ * value; `IsPreview`, `PreviewType` and `isTrial` give no clue either (TikTok sets them on fully
+ * served episodes; the raw item keeps them for the report).
  *
- * Decision, first match wins: DRM → `locked` with `drm`; ENTITLED → `unlocked`; VIEWER-LOCK or no
- * play address → `locked`; PRICING → `unlocked` with a real play URL ({@link playUrlCandidates})
+ * Decision, first match wins: DRM → `locked` with `drm`; ENTITLED → `unlocked`; SHORT-HEADER →
+ * `locked`; VIEWER-LOCK or no play address → `locked`; FREE → `free` (a sold series that is free
+ * for now is free for now); PRICING → `unlocked` with a real play URL ({@link playUrlCandidates})
  * and no NOT-ENTITLED clue, else `locked` (without a URL, hint {@link NO_PLAY_ADDRESS}); else
- * `free`. `paid` is any PRICING or ENTITLED clue; `hints` are unique, in scan order.
+ * `free`. `paid` is any PRICING or ENTITLED clue; `hints` are unique, in scan order, the two
+ * structural hints last (the window's before the play address').
  * @param {unknown} item
  * @returns {AccessDecision}
  */
@@ -250,8 +303,15 @@ export function accessOf(item) {
     for (const [key, value] of Object.entries(video)) clues.push(...cluesOf(key, value));
   }
   const playable = isDict(video) && hasPlayAddress(video);
+  const window = shortHeaderHint(dict);
   const classes = new Set(clues.map(([kind]) => kind));
-  const hints = clues.map(([, hint]) => hint);
+  // a free flag is a hint only next to a price (it says why a sold episode is free for now); on
+  // its own it says nothing about a price or a lock, which is what an empty list means
+  const hints = clues.filter(([kind]) => kind !== FREE || classes.has(PRICING)).map(([, hint]) => hint);
+  if (window !== null) {
+    classes.add(SHORT_HEADER);
+    hints.push(window);
+  }
   if (!playable) hints.push(NO_PLAY_ADDRESS);
   const drm = classes.has(DRM);
   /** @type {Access} */
@@ -260,8 +320,10 @@ export function accessOf(item) {
     access = "locked";
   } else if (classes.has(ENTITLED)) {
     access = "unlocked";
-  } else if (classes.has(VIEWER_LOCK) || !playable) {
+  } else if (classes.has(SHORT_HEADER) || classes.has(VIEWER_LOCK) || !playable) {
     access = "locked";
+  } else if (classes.has(FREE)) {
+    access = "free";
   } else if (classes.has(PRICING)) {
     // Sold: unlocked only for a real play URL this session got and no entitlement flag saying no.
     if (playUrlCandidates(dict).length === 0) {
@@ -342,8 +404,30 @@ export function keyWords(key) {
  */
 export function isDrmKey(key) {
   const words = keyWords(key);
-  if (!words.some((word) => word === "drm" || word.startsWith("encrypt"))) return false;
+  if (!namesDrm(words)) return false;
   return !words.some((word) => DRM_NEGATION_WORDS.has(word) || DRM_ID_WORDS.has(word));
+}
+
+/**
+ * Whether one of a key's words is `drm` or starts with `encrypt` (negated or not).
+ * @param {readonly string[]} words
+ * @returns {boolean}
+ */
+function namesDrm(words) {
+  return words.some((word) => word === "drm" || word.startsWith("encrypt"));
+}
+
+/**
+ * Whether a key is a `free` flag about the episode's price (the FREE / `isFree=false` clues of
+ * {@link accessOf}): it contains `free`, and none of its {@link keyWords} is `intro`
+ * (`IsFreeIntro`: the free intro teaser flag) or names DRM (`isDrmFree`: a DRM negation).
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isFreeKey(key) {
+  if (!FREE_KEY_RE.test(caseless(key))) return false;
+  const words = keyWords(key);
+  return !words.includes(INTRO_WORD) && !namesDrm(words);
 }
 
 /**
@@ -402,9 +486,66 @@ function cluesOf(key, value) {
     (truthy && !entitledKey && SOLD_KEY_RE.test(folded)) ||
     // the old heuristic's leftovers, for a key no class above turned into a clue
     (truthy && found.length === 0 && LOCK_KEY_RE.test(lockKey));
-  if (FREE_KEY_RE.test(folded) && !truthy) found.push([PRICING, "isFree=false"]);
+  // a `free` key about the price: falsy a price (isFree=false), truthy FREE (isLimitedFree=True)
+  const freeKey = isFreeKey(key);
+  if (freeKey && !truthy) found.push([PRICING, "isFree=false"]);
+  else if (freeKey) found.push([FREE, hint]);
   else if (sold) found.push([PRICING, hint]);
   return found;
+}
+
+/**
+ * The SHORT-HEADER hint of an item, or null when the rule does not fire: `video.duration` (an
+ * int above 0, {@link asInt}), `music.duration` (a number above 0; `music` is the item's top-level
+ * `music` dict) and `music.original` truthy, with the sound at most {@link SHORT_HEADER_RATIO}
+ * of the video and at least {@link SHORT_HEADER_MIN_GAP_S} s shorter. A licensed track's length
+ * says nothing, so without `original` — or either duration — the rule never fires. Numbers print
+ * as Python prints them: the sound's through {@link formatHintValue} (`_format_hint_value`), the
+ * video's through {@link pyNumberText} (`str()` of an int).
+ * @param {Record<string, unknown>} item
+ * @returns {string | null}
+ */
+function shortHeaderHint(item) {
+  const video = field(item, "video");
+  const music = field(item, "music");
+  if (!isDict(video) || !isDict(music)) return null;
+  const videoDuration = asInt(get(video, "duration"));
+  if (videoDuration === null || videoDuration <= 0) return null;
+  const musicDuration = get(music, "duration");
+  if (typeof musicDuration !== "number" || !Number.isFinite(musicDuration) || musicDuration <= 0) return null;
+  if (!isTruthy(get(music, "original"))) return null;
+  if (musicDuration > SHORT_HEADER_RATIO * videoDuration) return null;
+  if (videoDuration - musicDuration < SHORT_HEADER_MIN_GAP_S) return null;
+  // the sound's length as a hint value (`_format_hint_value`), the video's as Python prints an int
+  return `${SHORT_HEADER_HINT_PREFIX}${formatHintValue(musicDuration)} s of ${pyNumberText(videoDuration)} s`;
+}
+
+/**
+ * The file sizes the list announces for an item (`catalog.listed_sizes`): the positive ints among
+ * `video.size` and every `video.bitrateInfo[].PlayAddr.DataSize` (ints, or digit strings, of at most
+ * {@link MAX_EXACT_INT}; anything else ignored), sorted and de-duplicated. The downloader compares a verified-short body with them:
+ * a whole file by size with a short header is a served preview. Pure, never throws.
+ * @param {unknown} item
+ * @returns {number[]}
+ */
+export function listedSizes(item) {
+  const video = isDict(item) ? field(item, "video") : undefined;
+  if (!isDict(video)) return [];
+  /** @type {Set<number>} */
+  const sizes = new Set();
+  const size = asInt(get(video, "size"));
+  if (size !== null && size > 0) sizes.add(size);
+  const bitrateInfo = get(video, "bitrateInfo");
+  if (Array.isArray(bitrateInfo)) {
+    for (const entry of bitrateInfo) {
+      if (!isDict(entry)) continue;
+      const playAddr = get(entry, "PlayAddr");
+      if (!isDict(playAddr)) continue;
+      const dataSize = asInt(get(playAddr, "DataSize"));
+      if (dataSize !== null && dataSize > 0) sizes.add(dataSize);
+    }
+  }
+  return [...sizes].sort((a, b) => a - b);
 }
 
 /**
@@ -592,14 +733,17 @@ function asId(value) {
 
 /**
  * `catalog._as_int`: an int, a whole float, or a string of Unicode decimal digits (optionally
- * negative); null otherwise (bools included).
+ * negative) within ±{@link MAX_EXACT_INT} — what Python reads exactly too; null otherwise (bools,
+ * `Infinity`, a longer number included).
  * @param {unknown} value
  * @returns {number | null}
  */
 function asInt(value) {
-  if (typeof value === "number") return Number.isInteger(value) ? value : null;
-  if (typeof value === "string") return pyDecimalInt(pyStrip(value));
-  return null;
+  /** @type {number | null} */
+  let found = null;
+  if (typeof value === "number") found = value;
+  else if (typeof value === "string") found = pyDecimalInt(pyStrip(value));
+  return found !== null && Number.isSafeInteger(found) ? found : null;
 }
 
 /**

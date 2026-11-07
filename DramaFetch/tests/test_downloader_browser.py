@@ -28,11 +28,19 @@ from dramafetch.downloader_browser import (
     MIN_VIDEO_BYTES,
     BrowserDownloader,
 )
-from dramafetch.manifest import Manifest
+from dramafetch.manifest import Manifest, read_manifest
 from dramafetch.media import INCOMPLETE_PREFIX
-from dramafetch.models import DRM_MESSAGE, DownloadOptions, DownloadStatus, Episode, Series
+from dramafetch.models import (
+    DRM_MESSAGE,
+    SHORT_SERVED_PREFIX,
+    DownloadOptions,
+    DownloadStatus,
+    Episode,
+    Series,
+)
 from dramafetch.thumbnails import EMBED_SUFFIX, extract_cover
 from encrypted_mp4 import encrypted_mp4, with_drm_words_in_mdat
+from short_header_mp4 import with_short_header
 
 SERIES_ID = "7699393770256782354"
 BASE = "https://www.tiktok.com"
@@ -44,11 +52,11 @@ SESSION_VALUE = "secret-session-value-that-must-never-show"
 TINY_MP4 = (Path(__file__).parent / "fixtures" / "tiny.mp4").read_bytes()  # 3 s, mutagen-taggable
 
 
-def _padded_mp4(size: int) -> bytes:
-    """The fixture followed by one top-level `free` box that pads it to `size` bytes — like the
-    fake CDN's episodes: a valid MP4 above MIN_VIDEO_BYTES."""
-    box = size - len(TINY_MP4)
-    return TINY_MP4 + box.to_bytes(4, "big") + b"free" + b"\0" * (box - 8)
+def _padded_mp4(size: int, *, base: bytes = TINY_MP4) -> bytes:
+    """The fixture (or `base`) followed by one top-level `free` box that pads it to `size` bytes —
+    like the fake CDN's episodes: a valid MP4 above MIN_VIDEO_BYTES."""
+    box = size - len(base)
+    return base + box.to_bytes(4, "big") + b"free" + b"\0" * (box - 8)
 
 
 VIDEO = _padded_mp4(2 * MIN_VIDEO_BYTES)
@@ -639,10 +647,10 @@ def _unlocked_first(*urls: str) -> Episode:
     ("flags", "reason"),
     [
         pytest.param(
-            {"isUnlocked": False, "isPreview": True},
+            {"isUnlocked": False, "isPreview": True},  # isPreview: no clue since 2026-11-06
             "no playable stream: locked, region-restricted or not logged in (locked in a fresh "
-            "episode list: isFree=false; isUnlocked=False; isPreview=True)",
-            id="lapsed-preview",
+            "episode list: isFree=false; isUnlocked=False)",
+            id="lapsed-not-entitled",
         ),
         pytest.param(
             {"isLocked": True, "needPay": True},
@@ -1707,6 +1715,115 @@ def test_a_video_far_shorter_than_the_list_says_is_quarantined_and_gets_no_cover
     # --no-verify accepts the same file (a debugging aid), and the cover follows as usual
     off = downloader.download(episode, _options(tmp_path / "off", verify=False))
     assert off.status is DownloadStatus.DONE and off.message == f"{SAVED} + cover embedded"
+
+
+#: The fake CDN's shape of a served preview: the fixture with a 2-second header, padded like VIDEO
+#: to exactly the size the list announces.
+SHORT_HEADER_VIDEO = _padded_mp4(2 * MIN_VIDEO_BYTES, base=with_short_header(TINY_MP4))
+
+
+def _listed_item(number: int, item_id: str, url: str, size: int, duration: int = 120) -> dict:
+    """An item whose list announces `size` (video.size and the h264 DataSize) and `duration`."""
+    item = _item(number, item_id, url)
+    item["video"]["duration"] = duration
+    item["video"]["size"] = size
+    item["video"]["bitrateInfo"][0]["PlayAddr"]["DataSize"] = str(size)
+    item["music"] = {"duration": 2, "original": True}
+    return item
+
+
+def test_a_body_of_a_listed_size_with_a_short_header_is_a_served_short(playwright, tmp_path):
+    """Verified 2026-11-06 (the extension's report): 7 bodies of exactly `video.size` bytes whose
+    header plays 70 s of 106 s. The body is written, found short by the verification, then kept
+    as `(short)` — never altered — and the episode is FAILED_UNAVAILABLE with the served-preview
+    message; no other mirror, no fresh list, no cover request."""
+    playwright.request.answer(COVER, FakeAPIResponse(200, JPEG, "image/jpeg"))
+    playwright.request.answer(_url("ep1"), FakeAPIResponse(200, SHORT_HEADER_VIDEO, "video/mp4"))
+    item = _listed_item(1, ITEM_1, _url("ep1"), len(SHORT_HEADER_VIDEO))
+    item["video"]["bitrateInfo"][0]["PlayAddr"]["UrlList"].append(_url("ep1-mirror"))
+    episode = _episode(1, item, cover_url=COVER, duration_s=120)
+    downloader = _downloader(playwright)
+
+    result = downloader.download(episode, _options(tmp_path))
+
+    assert result.status is DownloadStatus.FAILED_UNAVAILABLE and result.path is None
+    assert result.message == (
+        f"{SHORT_SERVED_PREFIX}the whole file came ({len(SHORT_HEADER_VIDEO)} bytes, as listed) but "
+        "it plays 2 s of 120 s — this session may not watch the episode yet; watch it in the "
+        f"TikTok app, then --recheck looks again (kept as {STEM} (short).mp4)"
+    )
+    assert sorted(p.name for p in tmp_path.iterdir()) == [f"{STEM} (short).mp4"]
+    assert (tmp_path / f"{STEM} (short).mp4").read_bytes() == SHORT_HEADER_VIDEO  # byte for byte
+    assert playwright.request.urls == [_url("ep1")]  # no mirror, no refresh, no cover
+    assert downloader.refreshes == 0
+    again = downloader.download(episode, _options(tmp_path))
+    assert again.status is DownloadStatus.FAILED_UNAVAILABLE
+    assert again.message.endswith(f"(kept as {STEM} (short 2).mp4)")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        f"{STEM} (short 2).mp4",
+        f"{STEM} (short).mp4",
+    ]
+    # --no-verify accepts the file as served (a debugging aid), and the cover follows as usual
+    off = downloader.download(episode, _options(tmp_path / "off", verify=False))
+    assert off.status is DownloadStatus.DONE and off.message.endswith(" + cover embedded")
+
+
+def test_a_short_header_on_an_unlisted_size_stays_incomplete(playwright, tmp_path):
+    """The list announces another size (1 % off) or none: the old path, `(incomplete)`, FAILED."""
+    unlisted = _listed_item(1, ITEM_1, _url("ep1"), int(len(SHORT_HEADER_VIDEO) * 1.01))
+    plain = _item(1, ITEM_1, _url("ep1"))
+    plain["video"]["duration"] = 120
+    downloader = _downloader(playwright)
+    for index, raw in enumerate((unlisted, plain)):
+        playwright.request.answer(_url("ep1"), FakeAPIResponse(200, SHORT_HEADER_VIDEO, "video/mp4"))
+        directory = tmp_path / str(index)
+        result = downloader.download(
+            _episode(1, raw, cover_url=COVER, duration_s=120), _options(directory)
+        )
+        assert result.status is DownloadStatus.FAILED
+        assert result.message == (
+            f"{INCOMPLETE_PREFIX}duration 2 s, expected 120 s (kept as {STEM} (incomplete).mp4)"
+        )
+        assert sorted(p.name for p in directory.iterdir()) == [f"{STEM} (incomplete).mp4"]
+    assert playwright.request.urls == [_url("ep1"), _url("ep1")]  # still no cover request
+
+
+def test_the_engine_counts_a_served_short_like_any_failure(playwright, tmp_path):
+    """Through engine.download_series: three served previews in a row stop the run like three
+    failures (no pacing change), and the manifest does not remember a preview as DRM — the next
+    listing's SHORT-HEADER rule decides, so a `--recheck` after the owner watched the episode in
+    the app lists it fresh."""
+    episodes = []
+    for number in (1, 2, 3, 4):
+        item_id = f"76994000000000000{number:02d}"
+        playwright.request.answer(
+            _url(f"ep{number}"), FakeAPIResponse(200, SHORT_HEADER_VIDEO, "video/mp4")
+        )
+        item = _listed_item(number, item_id, _url(f"ep{number}"), len(SHORT_HEADER_VIDEO))
+        episodes.append(_episode(number, item, duration_s=120))
+    series = Series(SERIES_ID, "Heiress", episodes)
+    results = engine.download_series(
+        series,
+        episodes,
+        _options(tmp_path, thumbnail="none"),
+        downloader=_downloader(playwright),
+        sleep=lambda seconds: None,
+    )
+    assert [r.status for r in results] == [DownloadStatus.FAILED_UNAVAILABLE] * 3 + [
+        DownloadStatus.FAILED
+    ]
+    assert all(r.message.startswith(SHORT_SERVED_PREFIX) for r in results[:3])
+    assert results[3].message.startswith("stopped: 3 consecutive failures")
+    assert playwright.request.urls == [_url("ep1"), _url("ep2"), _url("ep3")]
+    target = tmp_path / f"Heiress [{SERIES_ID}]"
+    assert sorted(p.name for p in target.iterdir()) == [
+        "Heiress - Episode 01 (short).mp4",
+        "Heiress - Episode 02 (short).mp4",
+        "Heiress - Episode 03 (short).mp4",
+        "dramafetch.json",
+    ]
+    manifest = read_manifest(target, SERIES_ID)
+    assert manifest is not None and not any(manifest.drm_protected(n) for n in (1, 2, 3, 4))
 
 
 def test_a_bad_file_the_os_will_not_rename_is_deleted_so_that_a_rerun_tries_again(

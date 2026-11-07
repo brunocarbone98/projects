@@ -24,7 +24,11 @@
  * `failed`, no next mirror), the content (`lib/mp4.bodyProblem` → next URL), encrypted tracks
  * (`lib/mp4.drmProblem` → `failed-unavailable` with `DRM_MESSAGE`, nothing saved, no other
  * mirror, no fresh list, no cover), the integrity check (`lib/mp4.verifyVideo`, always on → `failed`,
- * nothing saved: the next run retries). Only then the one cover GET (outside the media budget,
+ * nothing saved: the next run retries — unless the body is the whole file by the list's size
+ * (`lib/catalog.listedSizes`, within 0.5 %) and its header plays less than the listed duration:
+ * then TikTok served a preview, `failed-unavailable` with `SHORT_SERVED_PREFIX`, nothing saved,
+ * no header rewritten; the next listing's SHORT-HEADER rule decides again). Only then the one
+ * cover GET (outside the media budget,
  * never retried), the cover embedded into the MP4 in memory (`lib/mp4.embedCover`) and/or kept as a
  * file, and the save through `chrome.downloads` under `DramaFetch/<series folder>/<stem>.mp4`.
  * Messages carry host names only — never a signed URL, never a cookie.
@@ -36,7 +40,7 @@
  * decisions and messages as without it.
  */
 
-import { accessOf, playUrlCandidates, urlExpiry } from "../lib/catalog.js";
+import { accessOf, listedSizes, playUrlCandidates, urlExpiry } from "../lib/catalog.js";
 import {
   DONE,
   DRM_MARK,
@@ -50,6 +54,7 @@ import {
   SKIPPED_EXISTS,
   TIKTOK_BASE_URL,
   UNAVAILABLE_MESSAGE,
+  shortServedMessage,
 } from "../lib/messages.js";
 import {
   MAX_COVER_BYTES,
@@ -121,6 +126,15 @@ export const ATTEMPT_NOT_VIDEO_PREFIX = "not a video: ";
 export const ATTEMPT_ENCRYPTED = "encrypted (DRM)";
 /** The integrity check refused the body; `verify failed: <reason>`. */
 export const ATTEMPT_VERIFY_FAILED_PREFIX = "verify failed: ";
+/** The whole file by its listed size, a header that plays less; `plays <a> s of <e> s`. */
+export const ATTEMPT_SHORT_HEADER_PREFIX = "plays ";
+/** A body within this share of a listed size is that file (`listedSizes`). */
+const LISTED_SIZE_TOLERANCE = 0.005;
+/**
+ * The verification reason of a file whose duration disagrees with the list (`lib/mp4.verifyVideo`:
+ * whole seconds), as `media._DURATION_MISMATCH_RE` reads it.
+ */
+const DURATION_REASON_RE = /^duration (\d+) s, expected (\d+) s$/;
 /** The video passed every check and Chrome saved it. */
 export const ATTEMPT_SAVED = "saved";
 /** The video passed every check and the save failed; `not saved: <message>`. */
@@ -241,6 +255,28 @@ export function sanitizeError(text) {
   let first = lines[0] ?? "unknown error";
   if (first.length > MAX_MESSAGE_LEN) first = `${first.slice(0, MAX_MESSAGE_LEN - 1)}…`;
   return first;
+}
+
+/**
+ * The served preview a failed verification reveals, or null: the reason is `duration <a> s,
+ * expected <e> s` with `a < e` AND the body is the whole file by the list's size (`size` within
+ * {@link LISTED_SIZE_TOLERANCE} of one of `sizes`, {@link listedSizes}). Any other mismatch is
+ * what it was (`download looks incomplete or wrong: …`).
+ * @param {string} reason what `verifyVideo` answered
+ * @param {number} size the body's length
+ * @param {readonly number[]} sizes the list's sizes for the episode
+ * @returns {{actual: string, expected: string} | null} the durations as the reason prints them
+ */
+export function servedShort(reason, size, sizes) {
+  const match = DURATION_REASON_RE.exec(reason);
+  if (match === null) return null;
+  const actual = /** @type {string} */ (match[1]);
+  const expected = /** @type {string} */ (match[2]);
+  if (!(Number(actual) < Number(expected))) return null;
+  const whole = (/** @type {number} */ listed) =>
+    Number.isFinite(listed) && Math.abs(size - listed) <= LISTED_SIZE_TOLERANCE * listed;
+  if (!sizes.some(whole)) return null; // `Infinity <= Infinity` would name every short body a preview
+  return { actual, expected };
 }
 
 /**
@@ -928,6 +964,14 @@ export class Downloader {
       }
       const invalid = verifyVideo(body, episode.durationS); // always on: a bad file is never saved
       if (invalid !== null) {
+        // the whole file by the list's size, a header that plays less: TikTok served a preview to
+        // this session — named, never saved, never rewritten (the next listing decides again)
+        const preview = servedShort(invalid, body.length, listedSizes(episode.raw));
+        if (preview !== null) {
+          record.outcome = `${ATTEMPT_SHORT_HEADER_PREFIX}${preview.actual} s of ${preview.expected} s`;
+          const message = shortServedMessage(body.length, preview.actual, preview.expected);
+          return { result: failure(episode, FAILED_UNAVAILABLE, message), last: null };
+        }
         record.outcome = `${ATTEMPT_VERIFY_FAILED_PREFIX}${invalid}`;
         return { result: failure(episode, FAILED, `${INCOMPLETE_PREFIX}${invalid}`), last: null };
       }

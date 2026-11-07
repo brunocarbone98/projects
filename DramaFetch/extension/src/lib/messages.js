@@ -36,11 +36,41 @@ export const DRM_REMEMBERED_MESSAGE =
 export const PAYLOAD_DRM_MESSAGE = `${DRM_MARK} (flagged in the episode list): DramaFetch does not decrypt it`;
 /** What a complete skip's report line adds when locked episodes remain (`engine.RECHECK_HINT`). */
 export const RECHECK_HINT = "unlocked more in the TikTok app since? --recheck looks again";
+/** The advice {@link RECHECK_HINT} ends with, `--recheck looks again`: the served-preview message ends with it too. */
+export const RECHECK_HINT_TAIL = RECHECK_HINT.slice(RECHECK_HINT.indexOf("--recheck"));
+/**
+ * Every served-preview message starts with this (`models.SHORT_SERVED_PREFIX`): the whole file
+ * came, by its listed size, but its header plays a window of it — how TikTok's own player previews
+ * an episode this session may not watch yet. DramaFetch never rewrites that header.
+ */
+export const SHORT_SERVED_PREFIX = "TikTok serves this episode short: ";
+/**
+ * The quarantine mark of a served preview in the Python engines (`models.SHORT_MARK`: `<stem>
+ * (short).mp4`); the extension saves nothing for a failed body, so it only names the constant.
+ */
+export const SHORT_MARK = "preview";
 /** Prefix of a FAILED_BLOCKED message: HTTP 403, TikTok refused (`downloader.BLOCKED_MESSAGE`). */
 export const BLOCKED_MESSAGE =
   "blocked (HTTP 403): TikTok refused the request; wait 30-60 minutes before trying again";
 /** Prefix of the message of an episode whose bytes failed the verification (`media.INCOMPLETE_PREFIX`). */
 export const INCOMPLETE_PREFIX = "download looks incomplete or wrong: ";
+
+/**
+ * The FAILED_UNAVAILABLE message of a served preview, byte for byte the Python engines' (without
+ * their ` (kept as <name>)` tail: the extension saves nothing): `TikTok serves this episode short: the whole
+ * file came (9676471 bytes, as listed) but it plays 70 s of 106 s — this session may not watch the
+ * episode yet; watch it in the TikTok app, then --recheck looks again`.
+ * @param {number} size the body's length in bytes (within 0.5 % of a listed size)
+ * @param {string} actual the measured duration as `verifyVideo` prints it (`{a:.0f}`)
+ * @param {string} expected the listed duration as `verifyVideo` prints it
+ * @returns {string}
+ */
+export function shortServedMessage(size, actual, expected) {
+  return (
+    `${SHORT_SERVED_PREFIX}the whole file came (${size} bytes, as listed) but it plays ${actual} s of ` +
+    `${expected} s — this session may not watch the episode yet; watch it in the TikTok app, then ${RECHECK_HINT_TAIL}`
+  );
+}
 /** No URL gave a video (`downloader_browser.UNAVAILABLE_MESSAGE`). */
 export const UNAVAILABLE_MESSAGE = "no playable stream: locked, region-restricted or not logged in";
 /** A 429 from the video CDN (`downloader_browser.RATE_LIMIT_MESSAGE`): stop + cooldown. */

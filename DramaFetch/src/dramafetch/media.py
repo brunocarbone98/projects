@@ -12,7 +12,10 @@ inspection, the stem no longer matches the episode's, so a rerun downloads it ag
 exception, a file the OS refuses to rename even after a few retries, which :func:`quarantine_note`
 deletes instead: left under the episode's name it would pass for the episode. Nothing here
 decodes video; ffmpeg is not needed. A locked episode served as a short preview is exactly what the
-duration check catches.
+duration check catches — and when the file is the WHOLE episode by size (``catalog.listed_sizes``)
+with a header that plays less, the engines read :func:`duration_mismatch` and name it a served
+preview (``downloader.served_short``), kept as ``<name> (short).<ext>`` (:func:`quarantine`
+with ``mark=models.SHORT_MARK``); DramaFetch never rewrites that header.
 
 DRM is a separate check that ALWAYS runs, ``--no-verify`` or not: :func:`drm_problem` (a saved
 file) and :func:`drm_problem_in` (a body still in memory) walk the box structure — box headers
@@ -24,6 +27,7 @@ yt-dlp engine deletes such a file (:func:`discard_note`), the browser engine nev
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -38,10 +42,16 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: The word :func:`quarantine` puts in the parentheses by default (``models.SHORT_MARK`` is the
+#: other one), and the mark it makes of it.
+INCOMPLETE_WORD = "incomplete"
 #: Appended to the stem of a file that failed the verification (``quarantine``).
-INCOMPLETE_MARK = " (incomplete)"
+INCOMPLETE_MARK = f" ({INCOMPLETE_WORD})"
 #: Prefix of the message of an episode whose saved file failed the verification.
 INCOMPLETE_PREFIX = "download looks incomplete or wrong: "
+#: The duration reason of :func:`verify_video`, ``duration 70 s, expected 106 s``, as
+#: :func:`duration_mismatch` reads it back (the probed length printed with ``:.0f``).
+_DURATION_MISMATCH_RE = re.compile(r"^duration (\d+) s, expected (\d+) s$")
 #: A rename the OS refuses — on Windows, a just-written file that an antivirus or an indexer still
 #: holds — is tried again this many times, :data:`RENAME_RETRY_DELAY_S` apart, before
 #: :func:`quarantine_note` gives up and deletes the file instead.
@@ -170,6 +180,18 @@ def verify_video(path: Path, expected_duration_s: int | None) -> str | None:
         if abs(probe.duration_s - expected_duration_s) > tolerance:
             return f"duration {probe.duration_s:.0f} s, expected {expected_duration_s} s"
     return None
+
+
+def duration_mismatch(reason: str | None) -> tuple[int, int] | None:
+    """``(actual, expected)`` seconds of a :func:`verify_video` reason of the form ``duration 70 s,
+    expected 106 s``, None for any other reason (or none). What the engines read to tell a served
+    preview — the whole file by size, a header that plays less — from an incomplete download."""
+    if reason is None:
+        return None
+    match = _DURATION_MISMATCH_RE.match(reason)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def atom_problem(path: Path) -> str | None:
@@ -369,17 +391,22 @@ def discard_note(path: Path, *, sleep: Callable[[float], None] = time.sleep) -> 
     return None
 
 
-def quarantine(path: Path, *, sleep: Callable[[float], None] = time.sleep) -> Path:
+def quarantine(
+    path: Path, *, sleep: Callable[[float], None] = time.sleep, mark: str = INCOMPLETE_WORD
+) -> Path:
     """Rename ``<stem>.<ext>`` to ``<stem> (incomplete).<ext>`` — ``<stem> (incomplete 2).<ext>``
     and so on when that name is taken, never overwriting anything — and return the new path. The
     stem no longer matches the episode's, so ``existing_episode_file`` ignores it and a rerun tries
-    the episode again, while the manifest records the failure with the reason. A rename the OS
-    refuses is tried again :data:`RENAME_RETRIES` times, :data:`RENAME_RETRY_DELAY_S` apart
-    (``sleep`` is injectable: no test waits for real); the last ``OSError`` propagates."""
+    the episode again, while the manifest records the failure with the reason. ``mark`` is the
+    word in the parentheses: ``incomplete`` (:data:`INCOMPLETE_MARK`) for a file that failed the
+    verification, ``models.SHORT_MARK`` (``preview``) for a served preview — ``<stem>
+    (short).<ext>``, ``(short 2)``, … A rename the OS refuses is tried again
+    :data:`RENAME_RETRIES` times, :data:`RENAME_RETRY_DELAY_S` apart (``sleep`` is injectable: no
+    test waits for real); the last ``OSError`` propagates."""
     attempt = 1
     while True:
-        mark = INCOMPLETE_MARK if attempt == 1 else f" (incomplete {attempt})"
-        target = path.with_name(f"{path.stem}{mark}{path.suffix}")
+        suffix = f" ({mark})" if attempt == 1 else f" ({mark} {attempt})"
+        target = path.with_name(f"{path.stem}{suffix}{path.suffix}")
         if not target.exists():
             break
         attempt += 1
@@ -392,9 +419,12 @@ def quarantine(path: Path, *, sleep: Callable[[float], None] = time.sleep) -> Pa
     return path.rename(target)
 
 
-def quarantine_note(path: Path, *, sleep: Callable[[float], None] = time.sleep) -> str:
+def quarantine_note(
+    path: Path, *, sleep: Callable[[float], None] = time.sleep, mark: str = INCOMPLETE_WORD
+) -> str:
     """Move a file that failed :func:`verify_video` out of the episode's way and say what became
-    of it — the parenthesised end of the engines' FAILED message, after the reason:
+    of it — the parenthesised end of the engines' FAILED message, after the reason (``mark`` as
+    in :func:`quarantine`: ``incomplete``, or ``preview`` for a served preview):
 
     * ``"kept as <stem> (incomplete).<ext>"`` — the normal case (:func:`quarantine`);
     * ``"could not rename <name>: <OS error>; deleted, so that it does not pass for the
@@ -409,7 +439,7 @@ def quarantine_note(path: Path, *, sleep: Callable[[float], None] = time.sleep) 
     Both failures are logged at WARNING. Never raises for an OS error.
     """
     try:
-        kept = quarantine(path, sleep=sleep)
+        kept = quarantine(path, sleep=sleep, mark=mark)
     except OSError as exc:
         reason = exc.strerror or exc.__class__.__name__
         try:

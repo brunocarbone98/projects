@@ -12,8 +12,9 @@
  *   message after `stopped: `, the reason of a cooldown, …);
  * - `lang: "en"` keeps the English;
  * - in BOTH languages, advice that names a command-line flag is replaced by what to do in the
- *   extension: {@link RECHECK_HINT}'s `--recheck looks again` points at the “Look again at series
- *   found complete…” checkbox, {@link DRM_REMEMBERED_MESSAGE}'s `--include-locked tries again` at
+ *   extension: {@link RECHECK_HINT}'s `--recheck looks again` (the served-preview message ends with
+ *   the same tail, {@link RECHECK_HINT_TAIL}) points at the “Look again at series found complete…”
+ *   checkbox, {@link DRM_REMEMBERED_MESSAGE}'s `--include-locked tries again` at
  *   the “Also ask for locked episodes…” checkbox (`labels.recheck`, `labels.includeLocked`: the
  *   UI's own words, from `chrome.i18n`). No text the extension shows names a cookies file: it has
  *   none, and its login advice already says to log in to TikTok in a normal Chrome tab.
@@ -24,7 +25,7 @@
  * DOM (the app page picks the language and the labels, `src/app/i18n.js`).
  */
 
-import { NO_PLAY_ADDRESS } from "./catalog.js";
+import { NO_PLAY_ADDRESS, SHORT_HEADER_HINT_PREFIX } from "./catalog.js";
 import { EXTENSION_LIFT_TEXT } from "./cooldown.js";
 import {
   BLOCKED_MESSAGE,
@@ -44,7 +45,9 @@ import {
   MEDIA_RATE_LIMIT_MESSAGE,
   NOT_STARTED_PREFIX,
   PAYLOAD_DRM_MESSAGE,
+  SHORT_SERVED_PREFIX,
   RECHECK_HINT,
+  RECHECK_HINT_TAIL,
   SKIPPED_EXISTS,
   SKIPPED_LOCKED,
   STATUSES,
@@ -221,6 +224,18 @@ function nonEmpty(value) {
 
 /** `RECHECK_HINT` up to its question mark: `unlocked more in the TikTok app since?`. */
 const RECHECK_QUESTION = RECHECK_HINT.slice(0, RECHECK_HINT.indexOf("?") + 1);
+/** `RECHECK_HINT` between the question and its flag advice: ` `. */
+const RECHECK_JOINER = RECHECK_HINT.slice(RECHECK_QUESTION.length, RECHECK_HINT.length - RECHECK_HINT_TAIL.length);
+/**
+ * The served-preview message (`messages.shortServedMessage`) as a pattern: its size and two
+ * durations captured, an optional ` (kept as <name>)` tail (the Python engines') too; a unit test
+ * keeps it matching the real message.
+ */
+const SHORT_SERVED_RE = new RegExp(
+  `^${esc(SHORT_SERVED_PREFIX)}the whole file came \\((\\d+) bytes, as listed\\) but it plays (\\S+) s of (\\S+) s — ` +
+    `this session may not watch the episode yet; watch it in the TikTok app, then ${esc(RECHECK_HINT_TAIL)}(?: \\(kept as (.*)\\))?$`,
+  "s",
+);
 /** `DRM_REMEMBERED_MESSAGE` without its flag advice: `protected by DRM (found by …): … decrypt it`. */
 const DRM_REMEMBERED_VERDICT = DRM_REMEMBERED_MESSAGE.slice(0, DRM_REMEMBERED_MESSAGE.lastIndexOf("; "));
 /** What every DRM message says after its parenthesis: `: DramaFetch does not decrypt it`. */
@@ -250,18 +265,31 @@ function esc(text) {
 // ------------------------------------------------------------------------------- English
 
 /**
- * The English texts with the flag advice replaced by the extension's own controls.
+ * The English texts with the flag advice replaced by the extension's own controls: the whole
+ * {@link RECHECK_HINT} first, then its bare tail (the served-preview message ends with it).
  * @param {string} text
  * @param {Context} context
  * @returns {string}
  */
 function english(text, context) {
-  if (!text.includes(DRM_REMEMBERED_MESSAGE) && !text.includes(RECHECK_HINT)) return text;
+  if (!text.includes(DRM_REMEMBERED_MESSAGE) && !text.includes(RECHECK_HINT_TAIL)) return text;
   return text
     .split(DRM_REMEMBERED_MESSAGE)
     .join(`${DRM_REMEMBERED_VERDICT}; tick “${context.includeLocked}” to try again`)
     .split(RECHECK_HINT)
-    .join(`${RECHECK_QUESTION} Tick “${context.recheck}” to look again`);
+    .join(`${RECHECK_QUESTION}${RECHECK_JOINER}Tick “${context.recheck}” to look again`)
+    .split(RECHECK_HINT_TAIL)
+    .join(`tick “${context.recheck}” to look again`);
+}
+
+/**
+ * The Spanish of `--recheck looks again` ({@link RECHECK_HINT_TAIL}): the checkbox to tick, in
+ * lower case (a sentence's middle); {@link RECHECK_HINT} capitalises it after its question.
+ * @param {Context} context
+ * @returns {string}
+ */
+function recheckAdviceEs(context) {
+  return `para revisarla de nuevo, marca “${context.recheck}”`;
 }
 
 // ------------------------------------------------------------------------------- Spanish
@@ -297,16 +325,28 @@ function minutesLeftEs(minutes) {
 }
 
 /**
- * Lock hints (`isLocked=True; no play address`): the payload's own `key=value` hints are data;
- * only the extension's own hint, {@link NO_PLAY_ADDRESS}, is translated.
+ * One lock hint: the two structural hints of the extension's own — {@link NO_PLAY_ADDRESS} and the
+ * preview window (`plays 69 s of 106 s` → `reproduce 69 s de 106 s`, the numbers
+ * passed through) — translated; a payload's `key=value` hint is data, kept as it is.
+ * @param {string} hint
+ * @returns {string}
+ */
+function hintEs(hint) {
+  if (hint === NO_PLAY_ADDRESS) return "sin dirección de reproducción";
+  const window = SHORT_HEADER_RE.exec(hint);
+  if (window !== null) return `reproduce ${window[1]} s de ${window[2]} s`;
+  return hint;
+}
+/** The preview-window hint (`catalog.SHORT_HEADER_HINT_PREFIX`): `plays <a> s of <e> s`. */
+const SHORT_HEADER_RE = new RegExp(`^${esc(SHORT_HEADER_HINT_PREFIX)}(\\S+) s of (\\S+) s$`);
+
+/**
+ * Lock hints (`isLocked=True; no play address`), each through {@link hintEs}.
  * @param {string} hints
  * @returns {string}
  */
 function hintsEs(hints) {
-  return hints
-    .split("; ")
-    .map((hint) => (hint === NO_PLAY_ADDRESS ? "sin dirección de reproducción" : hint))
-    .join("; ");
+  return hints.split("; ").map(hintEs).join("; ");
 }
 
 /**
@@ -343,7 +383,10 @@ const EXACT = new Map(
     [PAYLOAD_DRM_MESSAGE, "protegido con DRM (así lo marca la lista de episodios): DramaFetch no lo descifra"],
     [
       RECHECK_HINT,
-      (context) => `¿desbloqueaste más en la app de TikTok desde entonces? Para revisarla de nuevo, marca “${context.recheck}”`,
+      (context) => {
+        const advice = recheckAdviceEs(context);
+        return `¿desbloqueaste más en la app de TikTok desde entonces? ${advice.charAt(0).toUpperCase()}${advice.slice(1)}`;
+      },
     ],
     [
       BLOCKED_MESSAGE,
@@ -388,6 +431,8 @@ const EXACT = new Map(
     ],
     [EXTENSION_LIFT_TEXT, "la extensión no tiene forma de levantarla antes de tiempo"],
     [DRM_MARK, "protegido con DRM"],
+    [SHORT_SERVED_PREFIX, "TikTok sirve este episodio recortado: "],
+    [RECHECK_HINT_TAIL, recheckAdviceEs],
     [NOT_STARTED_PREFIX, "no iniciada: "],
     [new StopRequested().message, "detenido por ti"],
     [NO_PLAY_ADDRESS, "sin dirección de reproducción"],
@@ -749,6 +794,16 @@ const RULES = [
     },
   ],
   [/^looks locked(?:: (.*))?$/s, (m) => (m[1] === undefined ? "parece bloqueado" : `parece bloqueado: ${hintsEs(m[1])}`)],
+  // the list's own hint of a preview window (catalog.accessOf), shown on its own in a hint cell
+  [SHORT_HEADER_RE, (m) => hintEs(String(m.input))],
+  // the served preview (downloader.js, messages.shortServedMessage), the Python tail included
+  [
+    SHORT_SERVED_RE,
+    (m, _inner, context) =>
+      `TikTok sirve este episodio recortado: llegó el archivo entero (${m[1]} bytes, como anuncia la lista) pero reproduce ${m[2]} s ` +
+      `de ${m[3]} s — esta sesión aún no puede ver el episodio; míralo en la app de TikTok y luego ${recheckAdviceEs(context)}` +
+      (m[4] === undefined ? "" : ` (conservado como ${m[4]})`),
+  ],
   [/^locked in a fresh episode list: (.*)$/s, (m) => `bloqueado en una lista de episodios nueva: ${hintsEs(String(m[1]))}`],
   // the downloader's results
   [/^already exists: (.*)$/s, (m) => `ya existe: ${m[1]}`],

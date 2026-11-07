@@ -10,10 +10,13 @@
  *
  * What the report holds, and what it never holds: the raw list items (`Episode.raw`) as TikTok
  * served them — the whole point: a payload field that makes DramaFetch call an episode locked, a
- * duration the media contradicts — which carry time-limited signed media links; the requests
- * made as `scheme://host/path` with their HTTP status and sizes, never a query string (TikTok
- * signs it), never a header value, never a cookie or a token. The causes are stored English texts
- * like every engine text and are never shown in the UI (so `lib/display` needs no rule for them).
+ * duration the media contradicts — which carry time-limited signed media links; per series a
+ * digest of every LISTED episode (`episodes_digest`: number, access, hints, the video's duration,
+ * size and bitrate, the sound's duration and `original` flag, `IsPreview` / `PreviewType` — the
+ * fields the SHORT-HEADER rule and the served-preview check read, no URL); the requests made as
+ * `scheme://host/path` with their HTTP status and sizes, never a query string (TikTok signs it),
+ * never a header value, never a cookie or a token. The causes are stored English texts like every
+ * engine text and are never shown in the UI (so `lib/display` needs no rule for them).
  */
 
 import {
@@ -25,6 +28,7 @@ import {
   FAILED_RATE_LIMITED,
   FAILED_UNAVAILABLE,
   INCOMPLETE_PREFIX,
+  SHORT_SERVED_PREFIX,
   SKIPPED_EXISTS,
   SKIPPED_LOCKED,
   STOPPED_PREFIX,
@@ -46,47 +50,59 @@ export const WHAT_THIS_IS =
 
 /** Rule 1: the run stopped before this episode; followed by ` (<the rest of the message>)`. */
 export const NOT_ATTEMPTED_CAUSE = "not attempted: the run stopped before this episode";
-/** Rule 2: HTTP 429 on the media. */
+/**
+ * Rule 2: a served preview, named by the downloader (`SHORT_SERVED_PREFIX`): `<prefix><a> s of
+ * <e> s<suffix>`.
+ */
+export const SHORT_SERVED_CAUSE_PREFIX =
+  "TikTok served a preview: the file is the whole episode by size but its header limits playback to ";
+export const SHORT_SERVED_CAUSE_SUFFIX =
+  " — how TikTok's own player previews an episode this account has not unlocked; DramaFetch does not " +
+  "alter files. A limited-free series unlocks as you watch it in the TikTok app: watch the episode " +
+  "there, then look again";
+/** Rule 3: HTTP 429 on the media. */
 export const RATE_LIMITED_CAUSE =
   "TikTok limited the rate of requests (HTTP 429): the run stopped and the 30-minute cooldown " +
   "started; nothing is wrong with the episode";
-/** Rule 3: HTTP 403 or a verification page. */
+/** Rule 4: HTTP 403 or a verification page. */
 export const BLOCKED_CAUSE =
   "TikTok blocked or challenged the request (HTTP 403 or a verification page); the run stopped and " +
   "the cooldown started";
-/** Rule 4: the session is not logged in. */
+/** Rule 5: the session is not logged in. */
 export const LOGIN_CAUSE = "the session is not logged in to TikTok (log in in a normal tab of this Chrome profile)";
-/** Rule 5: encrypted media. */
+/** Rule 6: encrypted media. */
 export const DRM_CAUSE = "encrypted media (DRM): DramaFetch never decrypts or keeps it; retrying cannot change it";
-/** Rule 6: `<prefix><hints or "no clue"><suffix>`. */
+/** Rule 7: `<prefix><hints or "no clue"><suffix>`; the hints include `plays 69 s of 106 s` when that was the reason. */
 export const LOCKED_CAUSE_PREFIX = "listed as locked for this session: ";
 export const LOCKED_CAUSE_SUFFIX =
   " — the list TikTok served to your session marks it so; unlock it in the TikTok app, then look again";
-/** Rule 7, a shorter file: `TikTok served a preview: a complete MP4 of <a> s where the list announces <e> s. …`. */
+/** Rule 8, a shorter file of an unlisted size: `TikTok served a preview: a complete MP4 of <a> s where the list announces <e> s. …`. */
 export const PREVIEW_CAUSE_PREFIX = "TikTok served a preview: ";
 export const PREVIEW_CAUSE_MIDDLE =
   ". That is what TikTok serves for an episode the account has not unlocked (Drama Pass, coins or an " +
   "unlock in the TikTok app); the list's marks for it: ";
-/** Rule 7, a longer file: `the file lasts <a> s where the list announces <e> s<suffix>`. */
+/** Rule 8, a longer file: `the file lasts <a> s where the list announces <e> s<suffix>`. */
 export const LONGER_FILE_CAUSE_SUFFIX = ": the list and the media disagree; the file was not kept as the episode";
-/** Rule 8: `<prefix><N of M bytes | the transfer was cut short><suffix>`. */
+/** Rule 9: `<prefix><N of M bytes | the transfer was cut short><suffix>`. */
 export const CUT_SHORT_CAUSE_PREFIX = "the transfer was cut short (";
 export const CUT_SHORT_CAUSE_SUFFIX = "): a network or server problem, worth a retry";
-/** Rule 9: `<prefix><reason><suffix>`. */
+/** Rule 10: `<prefix><reason><suffix>`. */
 export const INVALID_FILE_CAUSE_PREFIX = "the file TikTok served is not a valid episode video (";
 export const INVALID_FILE_CAUSE_SUFFIX =
   "): worth one retry; if it repeats, the rendition TikTok serves this session is broken";
-/** Rule 10: `<prefix><message><suffix>`. */
+/** Rule 11: `<prefix><message><suffix>`. */
 export const UNAVAILABLE_CAUSE_PREFIX = "no playable stream this session may use (";
 export const UNAVAILABLE_CAUSE_SUFFIX =
   "): locked, region-restricted, not logged in, or TikTok served no video at any play URL";
-/** Rule 11: `<prefix><message>`. */
+/** Rule 12: `<prefix><message>`. */
 export const FAILED_CAUSE_PREFIX = "download failed: ";
 
 /** The verification reason of a file whose duration disagrees with the list (`lib/mp4.verifyVideo`). */
 const DURATION_RE = /^duration (\d+(?:\.\d+)?) s, expected (\d+(?:\.\d+)?) s/;
 /** The transfer check's reason: `truncated body (<N> of <M> bytes)` / `(the transfer was cut short)`. */
 const TRUNCATED_RE = /truncated body \(([^)]*)\)/;
+/** The durations of a served-preview message (`messages.shortServedMessage`): `… but it plays <a> s of <e> s — …`. */
+const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s — /;
 
 /**
  * @typedef {object} AttemptRecord One candidate play URL of an episode, as the downloader saw it.
@@ -136,6 +152,13 @@ const TRUNCATED_RE = /truncated body \(([^)]*)\)/;
  * @property {string | null} path
  * @property {EpisodeTrace | null} trace
  *
+ * @typedef {object} ListedEpisode What the digest reads of one LISTED episode (a `catalog.Episode` fits).
+ * @property {number} number
+ * @property {string} access
+ * @property {readonly string[]} lockHints
+ * @property {number | null} durationS
+ * @property {Record<string, unknown> | null} raw the list item as TikTok served it
+ *
  * @typedef {object} SeriesInput One series of the run, in the run's order.
  * @property {string} seriesId
  * @property {string | null} name
@@ -147,6 +170,8 @@ const TRUNCATED_RE = /truncated body \(([^)]*)\)/;
  * @property {number | null} listed how many episodes the list had, when the series was listed
  * @property {{free: number, unlocked: number, locked: number} | null} access the counts over the list
  * @property {EpisodeInput[]} episodes every result row of the run, in order
+ * @property {readonly ListedEpisode[] | null} [listedEpisodes] every episode the list had, in its
+ *   order (`series.episodes`), for the digest; null (or absent) when the series was not listed
  *
  * @typedef {object} JobInput The job as the history records it.
  * @property {string} kind
@@ -183,6 +208,10 @@ export function probableCause(row, _trace) {
   const { status, message } = row;
   const hints = row.lockHints.join("; ");
   if (message.startsWith(STOPPED_PREFIX)) return `${NOT_ATTEMPTED_CAUSE} (${message.slice(STOPPED_PREFIX.length)})`;
+  if (message.startsWith(SHORT_SERVED_PREFIX)) {
+    const window = SHORT_SERVED_RE.exec(message);
+    if (window !== null) return `${SHORT_SERVED_CAUSE_PREFIX}${window[1]} s of ${window[2]} s${SHORT_SERVED_CAUSE_SUFFIX}`;
+  }
   if (status === FAILED_RATE_LIMITED) return RATE_LIMITED_CAUSE;
   if (status === FAILED_BLOCKED) return BLOCKED_CAUSE;
   if (status === FAILED_LOGIN) return LOGIN_CAUSE;
@@ -283,6 +312,57 @@ function notDownloadedEntry(episode) {
 }
 
 /**
+ * `value` when it is a finite number, else null (a digest field read from the raw item).
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function numberOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * `dict[key]` when `dict` is a plain object and owns the key, else undefined.
+ * @param {unknown} dict
+ * @param {string} key
+ * @returns {unknown}
+ */
+function fieldOf(dict, key) {
+  if (dict === null || typeof dict !== "object" || Array.isArray(dict)) return undefined;
+  const record = /** @type {Record<string, unknown>} */ (dict);
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+/**
+ * The digest of one listed episode (snake_case): what the list said of it and the fields the
+ * SHORT-HEADER rule and the served-preview check read — `video.duration`, `music.duration`,
+ * `music.original`, `video.size`, `video.bitrateInfo[0].Bitrate`, `dramaInfo.DramaVideoData.
+ * IsPreview` / `PreviewType` —, null when absent; no URL, nothing else.
+ * @param {ListedEpisode} episode
+ * @returns {Record<string, unknown>}
+ */
+function digestEntry(episode) {
+  const raw = episode.raw;
+  const video = fieldOf(raw, "video");
+  const music = fieldOf(raw, "music");
+  const bitrateInfo = fieldOf(video, "bitrateInfo");
+  const first = Array.isArray(bitrateInfo) ? bitrateInfo[0] : undefined;
+  const videoData = fieldOf(fieldOf(raw, "dramaInfo"), "DramaVideoData");
+  const original = fieldOf(music, "original");
+  return {
+    number: episode.number,
+    access: episode.access,
+    lock_hints: [...episode.lockHints],
+    duration_s: numberOrNull(fieldOf(video, "duration")) ?? episode.durationS,
+    music_duration_s: numberOrNull(fieldOf(music, "duration")),
+    music_original: typeof original === "boolean" ? original : null,
+    size: numberOrNull(fieldOf(video, "size")),
+    bitrate: numberOrNull(fieldOf(first, "Bitrate")),
+    is_preview: fieldOf(videoData, "IsPreview") ?? null,
+    preview_type: fieldOf(videoData, "PreviewType") ?? null,
+  };
+}
+
+/**
  * The row to compare the failures with: the first `done` row of the series, else the first
  * `skipped-exists` one (a file an earlier run saved), else null.
  * @param {readonly EpisodeInput[]} episodes
@@ -305,8 +385,9 @@ function referenceEntry(episodes) {
  * The report of one run: a plain JSON-serialisable object, snake_case keys. Every series of the
  * run is in it, with its rows that did not download (every status but `done`, `skipped-exists`
  * and `dry-run`: the `failed-*` ones and `skipped-locked`), ascending by number, each with its
- * probable cause, its attempts and re-discoveries and its raw list item; and one downloaded row
- * for comparison. The `summary` has one line per such row, series-prefixed when the run had
+ * probable cause, its attempts and re-discoveries and its raw list item; one downloaded row for
+ * comparison; and the digest of every LISTED episode ({@link digestEntry}; null when the series
+ * was not listed). The `summary` has one line per such row, series-prefixed when the run had
  * several series.
  * @param {ReportInput} input
  * @returns {Record<string, unknown>}
@@ -336,6 +417,7 @@ export function buildReport(input) {
       access_counts: run.access === null ? null : { ...run.access },
       not_downloaded: notDownloaded,
       reference: referenceEntry(run.episodes),
+      episodes_digest: run.listedEpisodes === null || run.listedEpisodes === undefined ? null : run.listedEpisodes.map(digestEntry),
     };
   });
   const job = input.job;

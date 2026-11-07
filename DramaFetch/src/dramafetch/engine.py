@@ -63,6 +63,7 @@ from dramafetch.models import (
     DRM_REMEMBERED_MESSAGE,
     QUALITY_MODES,
     RECHECK_AFTER_S,
+    RECHECK_HINT_TAIL,
     THUMBNAIL_MODES,
     Discovery,
     DiscoveryOptions,
@@ -155,7 +156,7 @@ COOKIES_STOP = "malformed cookies file"
 #: Message of the rows synthesized for a series skipped as complete (and of manifest skips).
 MANIFEST_SKIP_PREFIX = "already downloaded (manifest): "
 #: What the report line of a series skipped as complete adds when locked episodes remain.
-RECHECK_HINT = "unlocked more in the TikTok app since? --recheck looks again"
+RECHECK_HINT = f"unlocked more in the TikTok app since? {RECHECK_HINT_TAIL}"
 
 
 def resolve(
