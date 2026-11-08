@@ -1,0 +1,72 @@
+{
+  "id": "x8abcd1",
+  "title": "Example video – a fixture title with “quotes” and a / slash",
+  "channel": "news",
+  "owner": {
+    "id": "x1owner",
+    "screenname": "Example Channel",
+    "username": "examplechannel",
+    "url": "https://www.example-dm.test/examplechannel",
+    "avatars": {
+      "60": "https://posters.example-dm.test/u/abcdef-60x60.png",
+      "120": "https://posters.example-dm.test/u/abcdef-120x120.png"
+    },
+    "country": "FR",
+    "verified": true,
+    "accounttype": "partner"
+  },
+  "duration": 187,
+  "created_time": 1711496732,
+  "explicit": false,
+  "url": "https://www.example-dm.test/video/x8abcd1",
+  "country": "FR",
+  "language": "en",
+  "views_total": 123456,
+  "tags": ["fixture", "example"],
+  "is_created_for_kids": false,
+  "thumbnails": {
+    "60": "https://posters.example-dm.test/v/Abc12/x60-thumb.jpg",
+    "120": "https://posters.example-dm.test/v/Abc12/x120-thumb.jpg",
+    "180": "https://posters.example-dm.test/v/Abc12/x180-thumb.jpg",
+    "240": "https://posters.example-dm.test/v/Abc12/x240-thumb.jpg",
+    "360": "https://posters.example-dm.test/v/Abc12/x360-thumb.jpg",
+    "480": "https://posters.example-dm.test/v/Abc12/x480-thumb.jpg",
+    "720": "https://posters.example-dm.test/v/Abc12/x720-thumb.jpg",
+    "1080": "https://posters.example-dm.test/v/Abc12/x1080-thumb.jpg"
+  },
+  "posters": {
+    "60": "https://posters.example-dm.test/v/Abc12/x60-poster.jpg",
+    "120": "https://posters.example-dm.test/v/Abc12/x120-poster.jpg",
+    "180": "https://posters.example-dm.test/v/Abc12/x180-poster.jpg",
+    "240": "https://posters.example-dm.test/v/Abc12/x240-poster.jpg",
+    "360": "https://posters.example-dm.test/v/Abc12/x360-poster.jpg",
+    "480": "https://posters.example-dm.test/v/Abc12/x480-poster.jpg",
+    "720": "https://posters.example-dm.test/v/Abc12/x720-poster.jpg",
+    "1080": "https://posters.example-dm.test/v/Abc12/x1080-poster.jpg"
+  },
+  "qualities": {
+    "auto": [
+      {
+        "type": "application/x-mpegURL",
+        "url": "https://www.example-dm.test/cdn/manifest/video/x8abcd1.m3u8?sec=AbCdEf0123456789&dmTs=1234567&dmV1st=0123456789abcdef"
+      },
+      {
+        "type": "application/vnd.lumberjack.manifest",
+        "url": "https://www.example-dm.test/cdn/manifest/video/x8abcd1.lumberjack?sec=AbCdEf0123456789"
+      }
+    ]
+  },
+  "subtitles": {
+    "enable": false,
+    "data": {}
+  },
+  "metadata": {
+    "advertising": {
+      "adformat": "auto",
+      "autoplay": false
+    }
+  },
+  "reporting": {
+    "enabled": false
+  }
+}

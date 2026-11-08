@@ -1,0 +1,10 @@
+{
+  "error": {
+    "status_code": 404,
+    "title": "The owner has removed this video.",
+    "message": "The owner has removed this video.",
+    "raw_message": "Video removed by its owner.",
+    "code": "DM999",
+    "type": "not_found"
+  }
+}

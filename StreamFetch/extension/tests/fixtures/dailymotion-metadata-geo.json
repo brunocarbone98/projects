@@ -1,0 +1,10 @@
+{
+  "error": {
+    "status_code": 403,
+    "title": "Video geo-restricted by the owner.",
+    "message": "Video geo-restricted by the owner.",
+    "raw_message": "Video geo-restricted by the owner.",
+    "code": "DM007",
+    "type": "geoblock"
+  }
+}
