@@ -1,0 +1,25 @@
+# StreamFetch is a Chrome extension (`extension/`): this file only configures the Python tooling
+# of its end-to-end suite (`tests/`: pytest + Playwright against the local fake sites, ruff).
+# Set up once: `python -m venv .venv && .venv/bin/pip install -r tests/requirements.txt`.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+markers = [
+  "e2e: end to end against the local fake sites (ffmpeg; a real Chromium for the browser scenarios)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["tests"]
+
+[tool.ruff.lint]
+# The rule set DramaFetch uses (DramaFetch/pyproject.toml), never loosened.
+select = ["E", "W", "F", "I", "B", "UP", "N", "SIM", "RUF", "ANN", "PTH", "RET", "C4"]
+# typing.Any is legitimate for the untyped JSON payloads of the fake sites and the extension.
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_*.py" = ["ANN"]
+"tests/conftest.py" = ["ANN"]

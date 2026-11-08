@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_extName__",
+  "short_name": "StreamFetch",
+  "description": "__MSG_extDescription__",
+  "version": "1.0.0",
+  "default_locale": "en",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "__MSG_actionTitle__",
+    "default_popup": "src/app/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/app/background.js",
+    "type": "module"
+  },
+  "permissions": ["downloads", "storage", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": [
+    "https://www.dailymotion.com/*",
+    "https://*.dailymotion.com/*",
+    "https://dai.ly/*",
+    "https://*.dmcdn.net/*",
+    "https://www.bilibili.com/*",
+    "https://*.bilibili.com/*",
+    "https://b23.tv/*",
+    "https://*.bilivideo.com/*",
+    "https://*.bilivideo.cn/*",
+    "https://upos-hz-mirrorakam.akamaized.net/*",
+    "https://*.hdslb.com/*",
+    "https://*.bilibili.tv/*",
+    "https://*.biliintl.com/*",
+    "https://*.bstarstatic.com/*",
+    "https://upos-bstar1-mirrorakam.akamaized.net/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

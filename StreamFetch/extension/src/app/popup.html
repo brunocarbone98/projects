@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title data-i18n="appTitle">StreamFetch</title>
+<link rel="stylesheet" href="app.css">
+<style>
+  body { width: 300px; }
+  .popup { padding: 14px 16px 16px; display: grid; gap: 10px; }
+  .popup button { width: 100%; }
+  .popup p { margin: 0; }
+</style>
+<script type="module" src="popup.js"></script>
+</head>
+<body>
+<div class="popup">
+  <div class="title-line"><h1 data-i18n="appTitle">StreamFetch</h1><span id="popup-version" class="version"></span></div>
+  <p id="popup-video" class="meta" hidden></p>
+  <button type="button" id="popup-download" class="primary" hidden data-i18n="popupDownload">Download this video</button>
+  <button type="button" id="popup-open" data-i18n="popupOpen">Open StreamFetch</button>
+  <p class="hint" data-i18n="popupHint">Open a Dailymotion, Bilibili.tv or Bilibili video to add it with one click, or paste links in the StreamFetch tab.</p>
+</div>
+</body>
+</html>

@@ -1,8 +1,8 @@
-// Hand-written declarations of exactly the chrome.* APIs DramaFetch for Chrome uses — there is no
+// Hand-written declarations of exactly the chrome.* APIs StreamFetch for Chrome uses — there is no
 // @types/chrome because the extension has no dependencies at all. Only what src/app/* calls is
 // declared, with the shapes Chrome documents (Manifest V3, Chrome 116+). Add a member here when the
-// extension starts to use one; never declare an API the extension must not use (cookies,
-// debugger, webRequestBlocking, proxy, …): their absence is part of the contract.
+// extension starts to use one; never declare an API the extension must not use (scripting,
+// webRequest, cookies, debugger, proxy, …): their absence is part of the contract.
 
 declare namespace chrome {
   // ------------------------------------------------------------------------------- events
@@ -21,22 +21,39 @@ declare namespace chrome {
       host_permissions?: string[];
       permissions?: string[];
       /** Set only in the test harness' temporary copy of the extension. */
-      dramafetch_test?: boolean;
+      streamfetch_test?: boolean;
       [key: string]: unknown;
     }
     interface MessageSender {
       id?: string;
       url?: string;
-      tab?: tabs.Tab;
+    }
+    /** One of the extension's own open documents (`getContexts`, Chrome 116+). */
+    interface ExtensionContext {
+      contextType: "TAB" | "POPUP" | "BACKGROUND" | "OFFSCREEN_DOCUMENT" | "SIDE_PANEL";
+      contextId: string;
+      tabId: number;
+      windowId: number;
+      documentUrl?: string;
+      frameId: number;
+      incognito: boolean;
+    }
+    interface ContextFilter {
+      contextTypes?: ExtensionContext["contextType"][];
+      documentUrls?: string[];
     }
     const id: string;
     function getManifest(): Manifest;
     function getURL(path: string): string;
+    function getContexts(filter: ContextFilter): Promise<ExtensionContext[]>;
     function sendMessage(message: unknown): Promise<unknown>;
     const onMessage: ChromeEvent<
-      (message: unknown, sender: MessageSender, sendResponse: (response?: unknown) => void) => boolean | void
+      (
+        message: unknown,
+        sender: MessageSender,
+        sendResponse: (response?: unknown) => void,
+      ) => boolean | void
     >;
-    const onInstalled: ChromeEvent<(details: { reason: string; previousVersion?: string }) => void>;
   }
 
   // --------------------------------------------------------------------------------- i18n
@@ -46,56 +63,29 @@ declare namespace chrome {
   }
 
   // --------------------------------------------------------------------------------- tabs
+  // Only what needs no `tabs` permission: the popup reads the active tab's URL, which Chrome
+  // fills in for the hosts of `host_permissions` only; the worker opens or focuses the app tab.
   namespace tabs {
     interface Tab {
       id?: number;
-      index: number;
       windowId: number;
       active: boolean;
       url?: string;
-      pendingUrl?: string;
-      title?: string;
-      status?: "unloaded" | "loading" | "complete";
-      mutedInfo?: { muted: boolean };
-      /** Whether Chrome may discard the tab when short of memory (Memory Saver). */
-      autoDiscardable?: boolean;
-      discarded?: boolean;
     }
     interface CreateProperties {
       url?: string;
       active?: boolean;
-      windowId?: number;
-      index?: number;
-      openerTabId?: number;
     }
     interface UpdateProperties {
-      url?: string;
       active?: boolean;
-      muted?: boolean;
-      /** false: Chrome never discards the tab on its own (the DramaFetch tab while a job runs or waits). */
-      autoDiscardable?: boolean;
     }
     interface QueryInfo {
-      url?: string | string[];
       active?: boolean;
       currentWindow?: boolean;
-      lastFocusedWindow?: boolean;
-      windowId?: number;
-    }
-    interface TabChangeInfo {
-      status?: string;
-      url?: string;
-      title?: string;
-      discarded?: boolean;
     }
     function create(createProperties: CreateProperties): Promise<Tab>;
     function update(tabId: number, updateProperties: UpdateProperties): Promise<Tab | undefined>;
-    function get(tabId: number): Promise<Tab>;
-    function getCurrent(): Promise<Tab | undefined>;
-    function remove(tabIds: number | number[]): Promise<void>;
     function query(queryInfo: QueryInfo): Promise<Tab[]>;
-    const onRemoved: ChromeEvent<(tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void>;
-    const onUpdated: ChromeEvent<(tabId: number, changeInfo: TabChangeInfo, tab: Tab) => void>;
   }
 
   // ------------------------------------------------------------------------------ windows
@@ -107,33 +97,8 @@ declare namespace chrome {
     function update(windowId: number, updateInfo: { focused?: boolean }): Promise<Window>;
   }
 
-  // ---------------------------------------------------------------------------- scripting
-  namespace scripting {
-    type ExecutionWorld = "ISOLATED" | "MAIN";
-    interface InjectionTarget {
-      tabId: number;
-      frameIds?: number[];
-      allFrames?: boolean;
-    }
-    interface ScriptInjection<Args extends unknown[], Result> {
-      target: InjectionTarget;
-      world?: ExecutionWorld;
-      func: (...args: Args) => Result;
-      args?: Args;
-      injectImmediately?: boolean;
-    }
-    interface InjectionResult<Result> {
-      frameId: number;
-      documentId?: string;
-      result?: Result;
-    }
-    function executeScript<Args extends unknown[], Result>(
-      injection: ScriptInjection<Args, Result>,
-    ): Promise<InjectionResult<Awaited<Result>>[]>;
-  }
-
-  // --------------------------------------------------------------------------- webRequest
-  namespace webRequest {
+  // ----------------------------------------------------------------- declarativeNetRequest
+  namespace declarativeNetRequest {
     type ResourceType =
       | "main_frame"
       | "sub_frame"
@@ -149,50 +114,6 @@ declare namespace chrome {
       | "websocket"
       | "webbundle"
       | "other";
-    interface RequestFilter {
-      urls: string[];
-      types?: ResourceType[];
-      tabId?: number;
-      windowId?: number;
-    }
-    interface RequestDetails {
-      requestId: string;
-      url: string;
-      method: string;
-      tabId: number;
-      type: ResourceType;
-      timeStamp: number;
-      initiator?: string;
-    }
-    interface CompletedDetails extends RequestDetails {
-      statusCode: number;
-      fromCache: boolean;
-    }
-    interface ErrorDetails extends RequestDetails {
-      error: string;
-      fromCache: boolean;
-    }
-    /** A redirect answered to a request (the extension's own: `src/app/redirects.js`). */
-    interface RedirectDetails extends RequestDetails {
-      redirectUrl: string;
-      statusCode: number;
-      fromCache: boolean;
-    }
-    /** Observation only: DramaFetch never passes "blocking" / "requestBody" / "extraHeaders". */
-    interface WebRequestEvent<Details> {
-      addListener(callback: (details: Details) => void, filter: RequestFilter): void;
-      removeListener(callback: (details: Details) => void): void;
-      hasListener(callback: (details: Details) => void): boolean;
-    }
-    const onBeforeRequest: WebRequestEvent<RequestDetails>;
-    const onCompleted: WebRequestEvent<CompletedDetails>;
-    const onErrorOccurred: WebRequestEvent<ErrorDetails>;
-    const onBeforeRedirect: WebRequestEvent<RedirectDetails>;
-  }
-
-  // ----------------------------------------------------------------- declarativeNetRequest
-  namespace declarativeNetRequest {
-    type ResourceType = webRequest.ResourceType;
     interface ModifyHeaderInfo {
       header: string;
       operation: "set" | "append" | "remove";
@@ -207,7 +128,6 @@ declare namespace chrome {
       initiatorDomains?: string[];
       requestDomains?: string[];
       resourceTypes?: ResourceType[];
-      tabIds?: number[];
     }
     interface Rule {
       id: number;
@@ -215,7 +135,10 @@ declare namespace chrome {
       action: RuleAction;
       condition: RuleCondition;
     }
-    function updateSessionRules(options: { removeRuleIds?: number[]; addRules?: Rule[] }): Promise<void>;
+    function updateSessionRules(options: {
+      removeRuleIds?: number[];
+      addRules?: Rule[];
+    }): Promise<void>;
     function getSessionRules(): Promise<Rule[]>;
   }
 
@@ -225,17 +148,12 @@ declare namespace chrome {
     interface DownloadItem {
       id: number;
       url: string;
-      finalUrl?: string;
       filename: string;
-      mime?: string;
       state: State;
       error?: string;
       exists: boolean;
       bytesReceived: number;
       totalBytes: number;
-      byExtensionId?: string;
-      startTime: string;
-      endTime?: string;
     }
     interface DownloadOptions {
       url: string;
@@ -245,32 +163,22 @@ declare namespace chrome {
     }
     interface DownloadQuery {
       id?: number;
-      query?: string[];
       filenameRegex?: string;
       state?: State;
       exists?: boolean;
       limit?: number;
-      orderBy?: string[];
     }
     interface StringDelta {
       current?: string;
       previous?: string;
     }
-    interface BooleanDelta {
-      current?: boolean;
-      previous?: boolean;
-    }
     interface DownloadDelta {
       id: number;
       state?: StringDelta;
       error?: StringDelta;
-      filename?: StringDelta;
-      exists?: BooleanDelta;
     }
     function download(options: DownloadOptions): Promise<number>;
     function search(query: DownloadQuery): Promise<DownloadItem[]>;
-    function show(downloadId: number): void;
-    function showDefaultFolder(): void;
     const onChanged: ChromeEvent<(downloadDelta: DownloadDelta) => void>;
   }
 
@@ -286,8 +194,8 @@ declare namespace chrome {
       remove(keys: string | string[]): Promise<void>;
     }
     const local: StorageArea;
-    /** In memory for the browser session, extension pages and the worker only (the `storage` permission). */
-    const session: StorageArea;
-    const onChanged: ChromeEvent<(changes: Record<string, StorageChange>, areaName: string) => void>;
+    const onChanged: ChromeEvent<
+      (changes: Record<string, StorageChange>, areaName: string) => void
+    >;
   }
 }

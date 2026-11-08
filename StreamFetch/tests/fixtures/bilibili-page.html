@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{{TITLE}}_哔哩哔哩_bilibili</title>
+<meta property="og:title" content="{{TITLE}}">
+<meta property="og:image" content="{{COVER}}">
+<script>
+// A reader of the state before its assignment, as the real page has: a scanner must skip it.
+if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.videoData) { console.log("read"); }
+</script>
+</head>
+<body>
+<div id="app"><h1 class="video-title">{{TITLE}}</h1></div>
+{{PLAYINFO_SCRIPT}}
+<script>window.__INITIAL_STATE__={{STATE}};(function(){var s;(s=document.currentScript||document.scripts[document.scripts.length-1]).parentNode.removeChild(s);}());</script>
+</body>
+</html>

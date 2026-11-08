@@ -1,0 +1,867 @@
+{
+  "extName": {
+    "message": "StreamFetch",
+    "description": "The extension's name"
+  },
+  "extDescription": {
+    "message": "Descarga como archivos MP4, para verlos sin conexión, los videos de Dailymotion, Bilibili.tv y Bilibili que tu propia sesión del navegador reproduce.",
+    "description": "The extension's description"
+  },
+  "actionTitle": {
+    "message": "StreamFetch: descargar videos",
+    "description": "The toolbar button's tooltip"
+  },
+  "uiLanguage": {
+    "message": "es",
+    "description": "The language of these messages (the page reads it)"
+  },
+  "appTitle": {
+    "message": "StreamFetch",
+    "description": "The page title"
+  },
+  "appSubtitle": {
+    "message": "Videos de Dailymotion, Bilibili.tv y Bilibili como archivos MP4, para verlos sin conexión",
+    "description": "Under the title"
+  },
+  "appStatusLoading": {
+    "message": "cargando",
+    "description": "The page's state"
+  },
+  "appStatusIdle": {
+    "message": "listo",
+    "description": "The page's state"
+  },
+  "appStatusRunning": {
+    "message": "trabajando",
+    "description": "The page's state"
+  },
+  "appStatusReadonly": {
+    "message": "solo lectura",
+    "description": "The page's state"
+  },
+  "readonlyBanner": {
+    "message": "StreamFetch ya está abierto en otra pestaña: usa esa (un solo motor a la vez). Esta pestaña es de solo lectura.",
+    "description": "A second StreamFetch tab"
+  },
+  "cooldownTitle": {
+    "message": "Un sitio rechazó una solicitud: StreamFetch espera antes de volver a preguntar.",
+    "description": "The cooldown banner's title"
+  },
+  "cooldownText": {
+    "message": "No se pide nada hasta las $UNTIL$ (faltan $MINUTES$ min). Causa: $REASON$",
+    "description": "The cooldown banner",
+    "placeholders": {
+      "until": {
+        "content": "$1"
+      },
+      "minutes": {
+        "content": "$2"
+      },
+      "reason": {
+        "content": "$3"
+      }
+    }
+  },
+  "linksHeading": {
+    "message": "Enlaces",
+    "description": "The input card"
+  },
+  "linksLabel": {
+    "message": "Pega un enlace de video por línea (Dailymotion, Bilibili.tv, Bilibili)",
+    "description": "Above the text box"
+  },
+  "linksPlaceholder": {
+    "message": "https://www.dailymotion.com/video/…\nhttps://www.bilibili.tv/es/video/…\nhttps://www.bilibili.com/video/BV…",
+    "description": "The text box's placeholder"
+  },
+  "analyzeButton": {
+    "message": "Analizar",
+    "description": "Button"
+  },
+  "downloadAllButton": {
+    "message": "Descargar todo",
+    "description": "Button"
+  },
+  "stopButton": {
+    "message": "Detener",
+    "description": "Button"
+  },
+  "clearButton": {
+    "message": "Limpiar",
+    "description": "Button"
+  },
+  "linksHint": {
+    "message": "Analizar lee primero cada enlace (título, duración, calidades) sin descargar nada. Descargar todo descarga cada fila, una tras otra, con la calidad elegida en cada fila. Mantén esta pestaña abierta mientras StreamFetch trabaja.",
+    "description": "Under the buttons"
+  },
+  "columnCover": {
+    "message": "Portada",
+    "description": "Column"
+  },
+  "columnTitle": {
+    "message": "Título",
+    "description": "Column"
+  },
+  "columnSite": {
+    "message": "Sitio",
+    "description": "Column"
+  },
+  "columnDuration": {
+    "message": "Duración",
+    "description": "Column"
+  },
+  "columnQuality": {
+    "message": "Calidad",
+    "description": "Column"
+  },
+  "columnStatus": {
+    "message": "Estado",
+    "description": "Column"
+  },
+  "columnProgress": {
+    "message": "Progreso",
+    "description": "Column"
+  },
+  "columnMessage": {
+    "message": "Mensaje",
+    "description": "Column"
+  },
+  "summaryLine": {
+    "message": "$VIDEOS$ videos · $DETECTED$ detectados · $FAILED$ fallidos",
+    "description": "The summary line",
+    "placeholders": {
+      "videos": {
+        "content": "$1"
+      },
+      "detected": {
+        "content": "$2"
+      },
+      "failed": {
+        "content": "$3"
+      }
+    }
+  },
+  "groupEpisodes": {
+    "message": "$COUNT$ episodios",
+    "description": "A series' group header",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "groupParts": {
+    "message": "$COUNT$ partes",
+    "description": "A multi-part video's group header",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "premiumOption": {
+    "message": "$LABEL$ — solo premium",
+    "description": "A quality this session is not served",
+    "placeholders": {
+      "label": {
+        "content": "$1"
+      }
+    }
+  },
+  "hint_premium": {
+    "message": "$LABELS$ requiere una membresía premium",
+    "description": "A row's hint",
+    "placeholders": {
+      "labels": {
+        "content": "$1"
+      }
+    }
+  },
+  "hint_login_or_premium": {
+    "message": "inicia sesión en Bilibili.tv en este navegador; un episodio premium sigue sin estar disponible",
+    "description": "A Bilibili.tv row that needs a login (or a premium membership)"
+  },
+  "hint_playlist_ignored": {
+    "message": "lista ignorada: solo se descarga este video",
+    "description": "A row's hint"
+  },
+  "note_no_audio": {
+    "message": "la fuente no tiene audio",
+    "description": "A done row's note"
+  },
+  "note_browser_unreadable": {
+    "message": "el navegador no pudo leer la duración del archivo: $CODEC$",
+    "description": "A done row's note",
+    "placeholders": {
+      "codec": {
+        "content": "$1"
+      }
+    }
+  },
+  "savedAs": {
+    "message": "guardado como $NAME$",
+    "description": "A done row",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "droppedLine": {
+    "message": "descartado (repetido, o más allá de 100 enlaces): $LINE$",
+    "description": "Under the box",
+    "placeholders": {
+      "line": {
+        "content": "$1"
+      }
+    }
+  },
+  "noLinks": {
+    "message": "Primero pega al menos un enlace de video.",
+    "description": "Activity line"
+  },
+  "activityResolving": {
+    "message": "leyendo $LINK$",
+    "description": "Activity line",
+    "placeholders": {
+      "link": {
+        "content": "$1"
+      }
+    }
+  },
+  "activityDownloading": {
+    "message": "descargando $TITLE$",
+    "description": "Activity line",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "activityPauseVideo": {
+    "message": "pausa entre videos: $SECONDS$ s",
+    "description": "Activity line",
+    "placeholders": {
+      "seconds": {
+        "content": "$1"
+      }
+    }
+  },
+  "activityPausePage": {
+    "message": "pausa entre solicitudes de página: $SECONDS$ s",
+    "description": "Activity line",
+    "placeholders": {
+      "seconds": {
+        "content": "$1"
+      }
+    }
+  },
+  "activityStopped": {
+    "message": "detenido: $REASON$",
+    "description": "Activity line",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "activityAnalyzed": {
+    "message": "analizado: $COUNT$ filas",
+    "description": "Activity line",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "activityFinished": {
+    "message": "terminado: $DONE$ de $TOTAL$ descargados",
+    "description": "Activity line",
+    "placeholders": {
+      "done": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      }
+    }
+  },
+  "failedHeading": {
+    "message": "No se descargaron ($COUNT$)",
+    "description": "The failed block's heading",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "retryButton": {
+    "message": "Reintentar estos",
+    "description": "Button"
+  },
+  "reportButton": {
+    "message": "Guardar el informe",
+    "description": "Button"
+  },
+  "reportSaved": {
+    "message": "Informe guardado: $FILE$",
+    "description": "Under the failed block",
+    "placeholders": {
+      "file": {
+        "content": "$1"
+      }
+    }
+  },
+  "reportNotSaved": {
+    "message": "Informe no guardado: $REASON$",
+    "description": "Under the failed block",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "historyHeading": {
+    "message": "Últimas ejecuciones",
+    "description": "The history card"
+  },
+  "historyEmpty": {
+    "message": "Todavía no hay ejecuciones.",
+    "description": "The history card"
+  },
+  "historyCounts": {
+    "message": "$ROWS$ filas: $DONE$ completadas, $SKIPPED$ ya estaban, $FAILED$ fallidas, $STOPPED$ detenidas",
+    "description": "A history entry",
+    "placeholders": {
+      "rows": {
+        "content": "$1"
+      },
+      "done": {
+        "content": "$2"
+      },
+      "skipped": {
+        "content": "$3"
+      },
+      "failed": {
+        "content": "$4"
+      },
+      "stopped": {
+        "content": "$5"
+      }
+    }
+  },
+  "historyRetry": {
+    "message": "Reintentar $COUNT$",
+    "description": "A history entry's button",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "settingsHeading": {
+    "message": "Ajustes",
+    "description": "The settings card"
+  },
+  "settingQuality": {
+    "message": "Calidad",
+    "description": "Setting"
+  },
+  "qualityBest": {
+    "message": "La mejor que la sesión puede reproducir",
+    "description": "Quality option"
+  },
+  "quality1080": {
+    "message": "Como máximo 1080p",
+    "description": "Quality option"
+  },
+  "quality720": {
+    "message": "Como máximo 720p",
+    "description": "Quality option"
+  },
+  "quality480": {
+    "message": "Como máximo 480p",
+    "description": "Quality option"
+  },
+  "settingCodec": {
+    "message": "Códec de video",
+    "description": "Setting"
+  },
+  "codecCompatible": {
+    "message": "Compatible (H.264 cuando se ofrece: se reproduce en todas partes)",
+    "description": "Codec option"
+  },
+  "codecBest": {
+    "message": "Mejor (mayor tasa de bits: HEVC o AV1 pueden necesitar un reproductor reciente)",
+    "description": "Codec option"
+  },
+  "settingVideoPause": {
+    "message": "Pausa entre videos (s, mín. / máx.)",
+    "description": "Setting"
+  },
+  "settingPagePause": {
+    "message": "Pausa entre solicitudes de página (s, mín. / máx.)",
+    "description": "Setting"
+  },
+  "settingMediaPause": {
+    "message": "Pausa entre solicitudes de medios (ms, mín. / máx.)",
+    "description": "Setting"
+  },
+  "settingReport": {
+    "message": "Guardar un informe de lo que no se descargó al final de cada ejecución",
+    "description": "Setting"
+  },
+  "settingLanguage": {
+    "message": "Idioma",
+    "description": "Setting"
+  },
+  "languageAuto": {
+    "message": "El idioma de Chrome",
+    "description": "Language option"
+  },
+  "pacingHint": {
+    "message": "Las pausas solo pueden ser más largas que las predeterminadas: StreamFetch se comporta como una persona que mira.",
+    "description": "Under the settings"
+  },
+  "saveSettingsButton": {
+    "message": "Guardar ajustes",
+    "description": "Button"
+  },
+  "settingsSaved": {
+    "message": "Ajustes guardados.",
+    "description": "Under the settings"
+  },
+  "clearCooldownHint": {
+    "message": "Después de un rechazo StreamFetch espera 30 minutos. Puedes borrar la espera aquí, bajo tu propio riesgo: volver a preguntar enseguida es lo que hace que un sitio te bloquee por más tiempo.",
+    "description": "The cooldown's delete button"
+  },
+  "clearCooldownButton": {
+    "message": "Borrar la espera (bajo tu propio riesgo)",
+    "description": "Button"
+  },
+  "popupDownload": {
+    "message": "Descargar este video",
+    "description": "Popup button"
+  },
+  "popupOpen": {
+    "message": "Abrir StreamFetch",
+    "description": "Popup button"
+  },
+  "popupHint": {
+    "message": "Abre un video de Dailymotion, Bilibili.tv o Bilibili para agregarlo con un clic, o pega enlaces en la pestaña de StreamFetch.",
+    "description": "Popup hint"
+  },
+  "popupVideo": {
+    "message": "Esta pestaña: $LINK$",
+    "description": "Popup",
+    "placeholders": {
+      "link": {
+        "content": "$1"
+      }
+    }
+  },
+  "encrypted_default_detail": {
+    "message": "pistas cifradas",
+    "description": "The detail of an encryption refusal when none is known"
+  },
+  "stop_reason_cooldown_until": {
+    "message": "espera hasta las $TIME$",
+    "description": "A stop reason",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  },
+  "legalNotice": {
+    "message": "StreamFetch es una herramienta personal para guardar, para verlos sin conexión, videos que Dailymotion y Bilibili ya reproducen en tu propia sesión del navegador. Nunca elude DRM, muros de pago, restricciones geográficas, inicios de sesión ni ningún otro control de acceso, y no oculta que es una herramienta de descarga. Descargar puede estar restringido por las condiciones de servicio de los sitios y por la ley de derechos de autor de tu país; tú eres responsable de cómo la usas. Sin afiliación con Dailymotion ni Bilibili.",
+    "description": "The legal notice (verbatim from the README)"
+  },
+  "failure_http_status": {
+    "message": "HTTP $P1$ en la solicitud de $P2$",
+    "description": "Failure http_status; parameters: status, what",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "failure_host_not_covered": {
+    "message": "el medio está en $P1$, un host para el que la extensión no tiene permiso; no se solicitó",
+    "description": "Failure host_not_covered; parameters: host",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_redirect_refused": {
+    "message": "una redirección llevó a $P1$, fuera del sitio; no se siguió",
+    "description": "Failure redirect_refused; parameters: host",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_no_response": {
+    "message": "sin respuesta del servidor ($P1$)",
+    "description": "Failure no_response; parameters: detail",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_truncated_body": {
+    "message": "la transferencia se cortó (se recibieron $P1$ de $P2$ bytes)",
+    "description": "Failure truncated_body; parameters: received, expected",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      }
+    }
+  },
+  "failure_not_a_video": {
+    "message": "el servidor envió $P1$ donde se esperaba un video o una lista de reproducción",
+    "description": "Failure not_a_video; parameters: content_type",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_encrypted": {
+    "message": "medio cifrado (DRM: $P1$); StreamFetch nunca lo descifra ni lo guarda",
+    "description": "Failure encrypted; parameters: detail",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_key_protected": {
+    "message": "la lista de reproducción está protegida con clave (EXT-X-KEY METHOD=$P1$); StreamFetch nunca la descifra",
+    "description": "Failure key_protected; parameters: method",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_live_stream": {
+    "message": "una transmisión en vivo (la lista de reproducción nunca termina); las transmisiones en vivo están fuera del alcance",
+    "description": "Failure live_stream; parameters: none"
+  },
+  "failure_discontinuous_stream": {
+    "message": "la lista de reproducción tiene $P1$ discontinuidades (contenido empalmado como anuncios); no compatible en la versión 1.0",
+    "description": "Failure discontinuous_stream; parameters: count",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_legacy_stream": {
+    "message": "Bilibili envió una transmisión FLV/MP4 antigua (durl) en lugar de DASH; todavía no es compatible",
+    "description": "Failure legacy_stream; parameters: none"
+  },
+  "failure_geo_blocked": {
+    "message": "no disponible en tu país ($P1$); StreamFetch nunca elude las restricciones geográficas",
+    "description": "Failure geo_blocked; parameters: site_message",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_login_required": {
+    "message": "el sitio pide iniciar sesión; inicia sesión en una pestaña normal de este perfil de Chrome y vuelve a intentarlo",
+    "description": "Failure login_required; parameters: none"
+  },
+  "failure_premium_only": {
+    "message": "solo existen calidades premium para este video ($P1$) y esta sesión no recibe ninguna; StreamFetch nunca elude un muro de pago",
+    "description": "Failure premium_only; parameters: labels",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_supporter_only": {
+    "message": "reservado para los seguidores de pago del autor; esta sesión no recibe ninguna transmisión",
+    "description": "Failure supporter_only; parameters: none"
+  },
+  "failure_trial_only": {
+    "message": "Bilibili envió solo un fragmento de prueba (试看) a esta sesión; no se guardó como el video",
+    "description": "Failure trial_only; parameters: none"
+  },
+  "failure_deleted": {
+    "message": "el video ya no existe o no está disponible para esta sesión ($P1$)",
+    "description": "Failure deleted; parameters: site_message",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_interactive": {
+    "message": "un video interactivo (historia con ramificaciones); no compatible",
+    "description": "Failure interactive; parameters: none"
+  },
+  "failure_rate_limited": {
+    "message": "el sitio está limitando esta sesión ($P1$); la ejecución se detuvo y empezó una espera de 30 minutos",
+    "description": "Failure rate_limited; parameters: detail",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_blocked": {
+    "message": "el sitio bloqueó la solicitud ($P1$); la ejecución se detuvo y empezó una espera de 30 minutos",
+    "description": "Failure blocked; parameters: detail",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_verify_failed": {
+    "message": "el archivo terminado no pasó la verificación ($P1$); no se guardó",
+    "description": "Failure verify_failed; parameters: reason",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_remux_failed": {
+    "message": "no se pudo escribir el MP4 ($P1$); no se guardó nada",
+    "description": "Failure remux_failed; parameters: reason",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_save_failed": {
+    "message": "Chrome no pudo guardar el archivo ($P1$)",
+    "description": "Failure save_failed; parameters: reason",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_stopped": {
+    "message": "no se intentó: $P1$",
+    "description": "Failure stopped; parameters: reason",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_unsupported_link": {
+    "message": "enlace no compatible: $P1$",
+    "description": "Failure unsupported_link; parameters: what",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_no_streams": {
+    "message": "el sitio no ofreció ninguna transmisión que esta sesión pueda reproducir ($P1$)",
+    "description": "Failure no_streams; parameters: detail",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_cooldown": {
+    "message": "hay una espera en curso hasta las $P1$ (faltan $P2$ min) después de que el sitio rechazó una solicitud ($P3$); no se pide nada antes",
+    "description": "Failure cooldown; parameters: until, minutes_left, reason",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      },
+      "p2": {
+        "content": "$2"
+      },
+      "p3": {
+        "content": "$3"
+      }
+    }
+  },
+  "failure_unsupported_codec": {
+    "message": "la transmisión usa un códec que StreamFetch no puede procesar (tipo de flujo MPEG-TS $P1$)",
+    "description": "Failure unsupported_codec; parameters: stream_type",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "failure_corrupt_stream": {
+    "message": "la transmisión de medios está corrupta ($P1$)",
+    "description": "Failure corrupt_stream; parameters: detail",
+    "placeholders": {
+      "p1": {
+        "content": "$1"
+      }
+    }
+  },
+  "status_queued": {
+    "message": "En cola",
+    "description": "Status queued"
+  },
+  "status_resolving": {
+    "message": "Leyendo",
+    "description": "Status resolving"
+  },
+  "status_downloading": {
+    "message": "Descargando",
+    "description": "Status downloading"
+  },
+  "status_finishing": {
+    "message": "Terminando",
+    "description": "Status finishing"
+  },
+  "status_verifying": {
+    "message": "Verificando",
+    "description": "Status verifying"
+  },
+  "status_done": {
+    "message": "Listo",
+    "description": "Status done"
+  },
+  "status_skipped_exists": {
+    "message": "Ya estaba",
+    "description": "Status skipped-exists"
+  },
+  "status_failed": {
+    "message": "Falló",
+    "description": "Status failed"
+  },
+  "status_failed_unavailable": {
+    "message": "No disponible",
+    "description": "Status failed-unavailable"
+  },
+  "status_failed_rate_limited": {
+    "message": "Limitado",
+    "description": "Status failed-rate-limited"
+  },
+  "status_failed_blocked": {
+    "message": "Bloqueado",
+    "description": "Status failed-blocked"
+  },
+  "status_stopped": {
+    "message": "Detenido",
+    "description": "Status stopped"
+  },
+  "refused_playlist": {
+    "message": "un enlace de lista de reproducción: pega el enlace de un video",
+    "description": "Link refusal playlist"
+  },
+  "refused_bangumi": {
+    "message": "un enlace de bangumi (anime o serie): fuera del alcance de la versión 1.0",
+    "description": "Link refusal bangumi"
+  },
+  "refused_space": {
+    "message": "un enlace de espacio de usuario (canal): pega el enlace de un video",
+    "description": "Link refusal space"
+  },
+  "refused_list": {
+    "message": "un enlace de lista, favoritos o búsqueda: pega el enlace de un video",
+    "description": "Link refusal list"
+  },
+  "refused_audio": {
+    "message": "un enlace de audio: fuera del alcance de la versión 1.0",
+    "description": "Link refusal audio"
+  },
+  "refused_live": {
+    "message": "un enlace de transmisión en vivo: las transmisiones en vivo están fuera del alcance",
+    "description": "Link refusal live"
+  },
+  "refused_other_site": {
+    "message": "no es un enlace de Dailymotion, Bilibili.tv ni Bilibili",
+    "description": "Link refusal other-site"
+  },
+  "refused_unsupported_path": {
+    "message": "una página que no es un solo video; para un enlace corto de compartir (bili.im/…), pega el enlace completo bilibili.tv/…/video/… desde la barra de direcciones del navegador",
+    "description": "Link refusal unsupported-path"
+  },
+  "refused_junk": {
+    "message": "no es un enlace",
+    "description": "Link refusal junk"
+  },
+  "refused_festival": {
+    "message": "una página de festival: pega el enlace propio del video (…/video/BV…)",
+    "description": "Link refusal festival"
+  },
+  "stop_reason_user": {
+    "message": "presionaste Detener",
+    "description": "Stop reason user"
+  },
+  "stop_reason_consecutive_failures": {
+    "message": "3 fallos seguidos detuvieron la ejecución",
+    "description": "Stop reason consecutive_failures"
+  },
+  "stop_reason_rate_limited": {
+    "message": "el sitio limitó esta sesión y la ejecución se detuvo",
+    "description": "Stop reason rate_limited"
+  },
+  "stop_reason_blocked": {
+    "message": "el sitio bloqueó una solicitud y la ejecución se detuvo",
+    "description": "Stop reason blocked"
+  },
+  "stop_reason_login_required": {
+    "message": "el sitio pidió iniciar sesión y la ejecución se detuvo",
+    "description": "Stop reason login_required"
+  },
+  "stop_reason_cooldown": {
+    "message": "hay una espera en curso",
+    "description": "Stop reason cooldown"
+  },
+  "request_kind_page": {
+    "message": "página",
+    "description": "Request kind page"
+  },
+  "request_kind_short_link": {
+    "message": "enlace corto",
+    "description": "Request kind short link"
+  },
+  "request_kind_metadata": {
+    "message": "metadatos",
+    "description": "Request kind metadata"
+  },
+  "request_kind_manifest": {
+    "message": "manifiesto",
+    "description": "Request kind manifest"
+  },
+  "request_kind_playlist": {
+    "message": "lista de segmentos",
+    "description": "Request kind playlist"
+  },
+  "request_kind_segment": {
+    "message": "segmento",
+    "description": "Request kind segment"
+  },
+  "request_kind_media": {
+    "message": "medio",
+    "description": "Request kind media"
+  },
+  "request_kind_cover": {
+    "message": "portada",
+    "description": "Request kind cover"
+  }
+}
