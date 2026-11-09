@@ -18,7 +18,7 @@
     <!-- Test stack versions. JUnit and Cucumber are pinned to the versions the Serenity release
          below is built on (junit5.version and cucumber.version in serenity-core's root pom.xml). -->
     <junit.version>6.1.3</junit.version>
-    <serenity.version>5.4.1</serenity.version>
+    <serenity.version>5.4.2</serenity.version>
     <!-- Must match the Cucumber that Serenity is built against (its SerenityReporter plugs
          into Cucumber's plugin SPI), otherwise the BDD reports break. -->
     <cucumber.version>8.0.4</cucumber.version>
