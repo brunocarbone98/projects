@@ -70,9 +70,12 @@ model User {
 }
 
 // Hashed, rotating refresh tokens. We store only a SHA-256 hash of the token.
+// familyId: every token one sign-in produces by rotation shares it, so a replayed token revokes
+// that sign-in's tokens only, never the user's other sessions.
 model RefreshToken {
   id        String    @id @default(uuid())
   tokenHash String    @unique
+  familyId  String
   userId    String
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
@@ -80,6 +83,7 @@ model RefreshToken {
   createdAt DateTime  @default(now())
 
   @@index([userId])
+  @@index([familyId])
   @@map("refresh_tokens")
 }
 

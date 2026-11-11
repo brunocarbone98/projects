@@ -148,13 +148,13 @@ if (-not (Test-Path $envFile)) {
     Write-Step 'apps/api/.env (from .env.example)'
     Copy-Item (Join-Path $apiDir '.env.example') $envFile
 } else {
-    # A .env copied before the API required JWT secrets of 32+ characters (#74) still holds the old
-    # example values, which the API now refuses at startup: swap in the current example values.
+    # A .env copied before the API required a JWT secret of 32+ characters (#74) still holds the old
+    # example value, which the API now refuses at startup: swap in the current example value. (Its
+    # JWT_REFRESH_SECRET line is no longer read, whatever it holds.)
     $envText = [IO.File]::ReadAllText($envFile)
     $upgraded = $envText.Replace('"dev-access-secret-change-me"', '"dev-access-secret-change-me-at-least-32-chars"')
-    $upgraded = $upgraded.Replace('"dev-refresh-secret-change-me"', '"dev-refresh-secret-change-me-at-least-32-chars"')
     if ($upgraded -cne $envText) {
-        Write-Step 'apps/api/.env: old JWT secrets replaced with the 32+ character example values'
+        Write-Step 'apps/api/.env: old JWT secret replaced with the 32+ character example value'
         [IO.File]::WriteAllText($envFile, $upgraded)
     }
 }

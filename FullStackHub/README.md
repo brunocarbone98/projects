@@ -75,10 +75,11 @@ stateless — they receive data, compute/generate, and return a result.
 
 ## Features by phase
 
-- **1 — Transactional API**: JWT auth (access + rotating refresh tokens), roles
-  (customer/courier/admin), shipment CRUD, append-only tracking events validated against a
-  **state machine**, public **rate-limited** tracking, rate-limited login and registration (per
-  visitor), zone pricing + business-day ETAs, OpenAPI docs.
+- **1 — Transactional API**: JWT auth (HS256 access tokens + single-use rotating refresh tokens
+  with reuse detection: a token replayed after a 30-second grace window ends the sign-in it came
+  from, its token family, and leaves the user's other sessions alone), roles (customer/courier/admin), shipment CRUD, append-only tracking events validated
+  against a **state machine**, public **rate-limited** tracking, rate-limited login, registration,
+  refresh and logout (per visitor), zone pricing + business-day ETAs, OpenAPI docs.
 - **2 — Public web**: bilingual landing, **SSR tracking** with a `ParcelDelivery` JSON-LD timeline,
   quote calculator, coverage, FAQ. Full SEO (dynamic metadata, OG + dynamic OG images, hreflang,
   sitemap, robots).
@@ -103,7 +104,7 @@ pnpm install
 docker compose up -d
 
 # 2. API settings. The API refuses to start with a JWT secret shorter than 32 characters,
-#    so refresh an older copy (or put `openssl rand -hex 32` values in it).
+#    so refresh an older copy (or put an `openssl rand -hex 32` value in it).
 cp apps/api/.env.example apps/api/.env
 
 # 3. Migrate + seed demo data (22 customers, 60 shipments across every state, with wallet activity)

@@ -12,7 +12,7 @@ Feature: Authentication
     When method post
     Then status 201
     And match response.user contains { id: '#string', email: '#(email)', name: '#string', role: 'CUSTOMER', createdAt: '#string' }
-    And match response.tokens contains { accessToken: '#string', refreshToken: '#string', tokenType: '#string', expiresIn: '#number' }
+    And match response.tokens contains { accessToken: '#string', refreshToken: '#string', tokenType: 'Bearer', expiresIn: '#number? _ > 0', refreshExpiresIn: '#number? _ > 0' }
 
   Scenario: registering an already-taken email returns 409 EMAIL_TAKEN
     Given path 'auth', 'register'
@@ -27,7 +27,7 @@ Feature: Authentication
     When method post
     Then status 200
     And match response.user.email == customerEmail
-    And match response.tokens.accessToken == '#string'
+    And match response.tokens contains { accessToken: '#string', refreshToken: '#string', tokenType: 'Bearer', expiresIn: '#number? _ > 0', refreshExpiresIn: '#number? _ > 0' }
 
   Scenario: a wrong password returns 401 INVALID_CREDENTIALS
     Given path 'auth', 'login'
@@ -43,22 +43,28 @@ Feature: Authentication
     Then status 400
     And match response.error.code == 'VALIDATION_ERROR'
 
-  Scenario: a refresh token rotates and the old token is then rejected (401 INVALID_TOKEN)
+  Scenario: a refresh token rotates, the old token is then rejected (401 INVALID_TOKEN) and an unknown one ends the session (401 SESSION_ENDED)
     * def user = call read('classpath:karate/helpers/register.feature')
     # First refresh: succeeds and rotates the token.
     Given path 'auth', 'refresh'
     And request { refreshToken: '#(user.refreshToken)' }
     When method post
     Then status 200
-    And match response.accessToken == '#string'
-    And match response.refreshToken == '#string'
+    And match response contains { accessToken: '#string', refreshToken: '#string', tokenType: 'Bearer', expiresIn: '#number? _ > 0', refreshExpiresIn: '#number? _ > 0' }
     And match response.refreshToken != user.refreshToken
-    # Reusing the original (now-revoked) refresh token must fail.
+    # Reusing the original (now-revoked) refresh token must fail. Moments after the rotation it is
+    # INVALID_TOKEN (a concurrent request may hold the new token, so a client keeps its cookies).
     Given path 'auth', 'refresh'
     And request { refreshToken: '#(user.refreshToken)' }
     When method post
     Then status 401
     And match response.error.code == 'INVALID_TOKEN'
+    # A token the API never issued can never work: SESSION_ENDED (a client drops it and signs in).
+    Given path 'auth', 'refresh'
+    And request { refreshToken: 'not-a-refresh-token-the-api-issued' }
+    When method post
+    Then status 401
+    And match response.error.code == 'SESSION_ENDED'
 
   Scenario: GET /auth/me with a valid token returns the current user
     * def user = call read('classpath:karate/helpers/register.feature')

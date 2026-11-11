@@ -14,7 +14,9 @@ export interface AuthRouterOptions {
   loginFailuresPerClient: number;
   /** Registrations allowed per client address per window. */
   registrationsPerClient: number;
-  /** The window of the three limits, in milliseconds. */
+  /** Refresh requests allowed per client address per window; logout has a budget of this size too. */
+  sessionRequestsPerClient: number;
+  /** The window of the limits, in milliseconds. */
   windowMs: number;
 }
 
@@ -22,6 +24,10 @@ export const DEFAULT_AUTH_LIMITS: AuthRouterOptions = {
   loginFailuresPerAccountPerClient: 10,
   loginFailuresPerClient: 30,
   registrationsPerClient: 10,
+  // A browser refreshes about once per access-token lifetime (15 minutes): 60 leaves room for many
+  // tabs and devices behind one address and still caps the database updates one client can cause.
+  // Logout gets a budget of the same size of its own.
+  sessionRequestsPerClient: 60,
   windowMs: 15 * 60_000,
 };
 
@@ -73,6 +79,11 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
     skipSuccessfulRequests: true,
   });
   const registerPerClient = rateLimit({ ...common, limit: options.registrationsPerClient });
+  // Refresh and logout each run a database update, valid token or not. Each has its own budget, so
+  // no amount of refreshing from a shared address can turn someone's sign-out into a 429 that leaves
+  // their refresh token live.
+  const refreshPerClient = rateLimit({ ...common, limit: options.sessionRequestsPerClient });
+  const logoutPerClient = rateLimit({ ...common, limit: options.sessionRequestsPerClient });
 
   router.post("/register", registerPerClient, async (req, res) => {
     const input = parseOrThrow(RegisterSchema, req.body ?? {});
@@ -84,12 +95,12 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
     res.json(await authService.login(input));
   });
 
-  router.post("/refresh", async (req, res) => {
+  router.post("/refresh", refreshPerClient, async (req, res) => {
     const input = parseOrThrow(RefreshSchema, req.body ?? {});
     res.json(await authService.refresh(input));
   });
 
-  router.post("/logout", async (req, res) => {
+  router.post("/logout", logoutPerClient, async (req, res) => {
     const input = parseOrThrow(RefreshSchema, req.body ?? {});
     await authService.logout(input);
     res.status(204).end();

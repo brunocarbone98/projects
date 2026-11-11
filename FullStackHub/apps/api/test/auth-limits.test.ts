@@ -9,6 +9,7 @@ const RELAXED: AuthRouterOptions = {
   loginFailuresPerAccountPerClient: 1000,
   loginFailuresPerClient: 1000,
   registrationsPerClient: 1000,
+  sessionRequestsPerClient: 1000,
   windowMs: 60_000,
 };
 
@@ -31,6 +32,18 @@ function register(app: Express, email: string, visitor?: string) {
     name: "Rate Limit",
   });
 }
+
+/** A refresh or logout as the web server sends it, with a token that is not live. */
+function session(app: Express, endpoint: "refresh" | "logout", visitor?: string) {
+  const request = supertest(app).post(`/api/v1/auth/${endpoint}`);
+  return (visitor ? request.set("X-Forwarded-For", visitor) : request).send({
+    refreshToken: "not-a-live-refresh-token",
+  });
+}
+
+const RATE_LIMITED = {
+  error: { code: "RATE_LIMITED", message: "Too many attempts, please try again later" },
+};
 
 describe("login and registration limits", () => {
   it("limits one client's failed logins to an account, in any letter case", async () => {
@@ -126,11 +139,14 @@ describe("login and registration limits", () => {
       loginFailuresPerAccountPerClient: 1,
       loginFailuresPerClient: 1,
       registrationsPerClient: 1,
+      sessionRequestsPerClient: 1,
     });
 
     for (const email of ["x1@example.com", "x2@example.com", "x3@example.com"]) {
       expect((await login(app, "local@example.com", "wrong")).status).toBe(401);
       expect((await register(app, email)).status).toBe(201);
+      expect((await session(app, "refresh")).status).toBe(401);
+      expect((await session(app, "logout")).status).toBe(204);
     }
     expect((await login(app, "local@example.com", DEFAULT_PASSWORD)).status).toBe(200);
   });
@@ -146,14 +162,78 @@ describe("login and registration limits", () => {
   });
 });
 
+describe("refresh and logout limits", () => {
+  it("with the default limits, refuses a client's 61st refresh in the window and no one else's", async () => {
+    const app = buildApp({ publicRateLimitMax: 1000, authRateLimits: DEFAULT_AUTH_LIMITS });
+    expect(DEFAULT_AUTH_LIMITS.sessionRequestsPerClient).toBe(60);
+    expect(DEFAULT_AUTH_LIMITS.windowMs).toBe(15 * 60_000);
+
+    for (let i = 0; i < 60; i++) {
+      expect((await session(app, "refresh", "203.0.113.50")).status).toBe(401);
+    }
+    const blocked = await session(app, "refresh", "203.0.113.50");
+    expect(blocked.status).toBe(429);
+    expect(blocked.body).toEqual(RATE_LIMITED);
+    // Signing out has a budget of its own: no amount of refreshing blocks it.
+    expect((await session(app, "logout", "203.0.113.50")).status).toBe(204);
+
+    expect((await session(app, "refresh", "198.51.100.51")).status).toBe(401);
+    expect((await session(app, "logout", "198.51.100.51")).status).toBe(204);
+  });
+
+  it("keeps separate refresh and logout budgets, per forwarded client", async () => {
+    const app = appWith({ sessionRequestsPerClient: 2 });
+
+    expect((await session(app, "refresh", "203.0.113.52")).status).toBe(401);
+    expect((await session(app, "refresh", "203.0.113.52")).status).toBe(401);
+    const refresh = await session(app, "refresh", "203.0.113.52");
+    expect(refresh.status).toBe(429);
+    expect(refresh.body).toEqual(RATE_LIMITED);
+
+    expect((await session(app, "logout", "203.0.113.52")).status).toBe(204);
+    expect((await session(app, "logout", "203.0.113.52")).status).toBe(204);
+    const logout = await session(app, "logout", "203.0.113.52");
+    expect(logout.status).toBe(429);
+    expect(logout.body).toEqual(RATE_LIMITED);
+
+    expect((await session(app, "refresh", "198.51.100.53")).status).toBe(401);
+    expect((await session(app, "logout", "198.51.100.53")).status).toBe(204);
+  });
+
+  it("counts successful refreshes too", async () => {
+    const { tokens } = await registerCustomer("busy@example.com");
+    const app = appWith({ sessionRequestsPerClient: 2 });
+    const refresh = (refreshToken: string) =>
+      supertest(app)
+        .post("/api/v1/auth/refresh")
+        .set("X-Forwarded-For", "203.0.113.54")
+        .send({ refreshToken });
+
+    const first = await refresh(tokens.refreshToken);
+    expect(first.status).toBe(200);
+    const second = await refresh(first.body.refreshToken);
+    expect(second.status).toBe(200);
+    expect((await refresh(second.body.refreshToken)).status).toBe(429);
+  });
+});
+
 describe("refresh token rotation", () => {
   it("lets only one of two concurrent refreshes with the same token succeed", async () => {
     const { tokens } = await registerCustomer("race@example.com");
     const refresh = () =>
       api().post("/api/v1/auth/refresh").send({ refreshToken: tokens.refreshToken });
 
-    const statuses = (await Promise.all([refresh(), refresh()])).map((res) => res.status).sort();
-    expect(statuses).toEqual([200, 401]);
+    const responses = await Promise.all([refresh(), refresh()]);
+    expect(responses.map((res) => res.status).sort()).toEqual([200, 401]);
+    // The loser's token was used a moment earlier: INVALID_TOKEN, so the web keeps its cookies.
+    expect(responses.find((res) => res.status === 401)?.body.error.code).toBe("INVALID_TOKEN");
+
+    // The loser's request is a reuse inside the grace window: the winner's new token stays live.
+    const winner = responses.find((res) => res.status === 200);
+    const next = await api()
+      .post("/api/v1/auth/refresh")
+      .send({ refreshToken: winner?.body.refreshToken });
+    expect(next.status).toBe(200);
   });
 });
 

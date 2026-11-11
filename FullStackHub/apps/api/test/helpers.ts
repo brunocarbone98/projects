@@ -17,6 +17,7 @@ export const app: Express = buildApp({
     loginFailuresPerAccountPerClient: 1000,
     loginFailuresPerClient: 1000,
     registrationsPerClient: 1000,
+    sessionRequestsPerClient: 1000,
   },
 });
 

@@ -19,7 +19,7 @@ export interface AppOptions {
   publicRateLimitMax?: number;
   /** Public-tracking rate-limit window in ms (default 60000). */
   publicRateLimitWindowMs?: number;
-  /** Login and registration limits (defaults: `DEFAULT_AUTH_LIMITS`). */
+  /** Login, registration, refresh and logout limits (defaults: `DEFAULT_AUTH_LIMITS`). */
   authRateLimits?: Partial<AuthRouterOptions>;
 }
 

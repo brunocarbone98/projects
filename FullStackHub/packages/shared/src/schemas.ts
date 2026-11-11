@@ -103,12 +103,21 @@ export interface UserDto {
   createdAt: string;
 }
 
-export interface AuthTokensDto {
-  accessToken: string;
-  refreshToken: string;
-  tokenType: "Bearer";
-  expiresIn: number; // access token lifetime in seconds
-}
+/**
+ * The token pair the API returns on register, login and refresh. A Zod schema rather than a bare
+ * interface because the web reads these lifetimes to set its session cookies, so it can check the
+ * response before trusting them.
+ */
+export const AuthTokensSchema = z.object({
+  accessToken: z.string().min(1),
+  refreshToken: z.string().min(1),
+  tokenType: z.literal("Bearer"),
+  /** Access token lifetime in seconds. */
+  expiresIn: z.int().positive(),
+  /** Refresh token lifetime in seconds (the API's REFRESH_TOKEN_TTL_DAYS). */
+  refreshExpiresIn: z.int().positive(),
+});
+export type AuthTokensDto = z.infer<typeof AuthTokensSchema>;
 
 export interface AuthResponseDto {
   user: UserDto;
