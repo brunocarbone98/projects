@@ -16,7 +16,7 @@ defaults:
   run:
     working-directory: FullStackHub
 
-# Every job has a timeout-minutes at about three times its normal duration, so a job that hangs
+# Every job has a timeout-minutes well above its slowest observed run, so a job that hangs
 # ends red by itself instead of running for GitHub's default six hours: a run that has not finished
 # is only ever slow, never stuck. The merge gate relies on this (.claude/agents/merge-steward.md →
 # "After each merge": it waits up to 90 minutes and never reverts a run that is still going).
