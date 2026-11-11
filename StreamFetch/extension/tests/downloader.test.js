@@ -16,13 +16,18 @@ import {
   StepFailure,
   StopRequested,
   applyRefererRule,
+  audioExpected,
   completeMoov,
   contentLength,
   contentRange,
+  coverFailureReason,
+  coverUrl,
   download,
   durationMatches,
+  embeddedTitle,
   fetchText,
   hostCovered,
+  jpegFromImage,
   keyMethodOf,
   mediaProblem,
   oneLine,
@@ -34,15 +39,18 @@ import {
 } from "../src/app/downloader.js";
 import { WorkFiles } from "../src/app/files.js";
 import { parseMedia } from "../src/lib/hls.js";
+import { probe } from "../src/lib/mp4.js";
 import {
   SOURCE_SECONDS,
   dashFixture,
   encryptedFixture,
+  ffmpeg,
   ffprobe,
   framemd5,
   hlsFmp4Fixture,
   hlsTsFixture,
   mediaSkip,
+  mp4Boxes,
   scratchPath,
   sourceClip,
 } from "./helpers/media.js";
@@ -699,6 +707,28 @@ test("DASH: a duration far from the site's fails verification and nothing is sav
   assert.deepEqual(leftovers(root), []);
 });
 
+test("DASH: an audio file that ended early fails verification, against the site's or the video's duration", { skip: mediaSkip() }, async () => {
+  const dash = dashFixture();
+  const audio = new Uint8Array(readFileSync(dash.audio));
+  // a clean cut at a fragment boundary, served with a matching Content-Length: only the
+  // durations can tell (the file's own duration is still the video's 6 s)
+  const boxes = mp4Boxes(audio);
+  const fragments = boxes.filter((box) => box.type === "moof");
+  const cut = /** @type {{ start: number }} */ (fragments[2]).start;
+  const short = audio.slice(0, cut);
+  for (const durationS of [6, null]) {
+    const net = network({ [VIDEO_URL]: servedFile(readFileSync(dash.video)), [AUDIO_URL]: servedFile(short) });
+    const { ctx, saved, root } = context(net.fetch);
+    const result = await download(dashTarget([VIDEO_URL], [AUDIO_URL], { durationS }), ctx);
+    assert.equal(result.failure?.code, "verify_failed", JSON.stringify(result.failure));
+    const against = durationS === null ? "the video's" : "expected";
+    const reason = new RegExp(`^audio track [12]\\.\\d s, ${against} 6\\.\\d s$`);
+    assert.match(String(result.failure?.params["reason"]), reason);
+    assert.equal(saved.length, 0);
+    assert.deepEqual(leftovers(root), []);
+  }
+});
+
 test("DASH: a source without audio is saved with the no-audio note", { skip: mediaSkip() }, async () => {
   const dash = dashFixture();
   const net = network({ [VIDEO_URL]: servedFile(readFileSync(dash.video)) });
@@ -809,4 +839,250 @@ test("Stop ends the current request and the download is stopped; the work files 
   assert.equal(saved.length, 0);
   assert.deepEqual(leftovers(root), []);
   assert.ok(dash.video.length > 0);
+});
+
+// ------------------------------------------------------------------- cover and title
+
+test("cover and title helpers: the https twin, the reasons, the embedded title, the audio expected", async () => {
+  assert.equal(coverUrl("http://i0.hdslb.com/bfs/archive/a.jpg", HOSTS), "https://i0.hdslb.com/bfs/archive/a.jpg");
+  assert.equal(coverUrl("https://s1.dmcdn.net/v/x720", HOSTS), "https://s1.dmcdn.net/v/x720");
+  assert.equal(coverUrl("http://127.0.0.1:8123/btv-cover/1.jpg", ["http://127.0.0.1/*"]), "http://127.0.0.1:8123/btv-cover/1.jpg");
+  assert.equal(coverUrl("http://evil.example/a.jpg", HOSTS), "http://evil.example/a.jpg", "no twin: as given");
+  /** @param {import("../src/lib/messages.js").Failure} fail */
+  const reason = (fail) => coverFailureReason(new StepFailure(fail));
+  assert.equal(reason({ code: "rate_limited", params: { detail: "HTTP 429 (cover)" } }), "HTTP 429");
+  assert.equal(reason({ code: "http_status", params: { status: 404, what: "cover" } }), "HTTP 404");
+  assert.match(reason({ code: "host_not_covered", params: { host: "evil.example" } }), /evil\.example, a host the extension has no permission for/);
+  assert.equal(coverFailureReason(new Error("boom")), "boom");
+  const dash = dashTarget([VIDEO_URL], [AUDIO_URL]);
+  assert.equal(embeddedTitle(dash), "An invented clip");
+  assert.equal(embeddedTitle({ ...dash, part: 2, partCount: 3, partTitle: "Second" }), "An invented clip — P02 Second");
+  assert.equal(embeddedTitle({ ...dash, part: 2, partCount: 3, partTitle: null }), "An invented clip — P02");
+  assert.equal(embeddedTitle({ ...dash, site: "bilibilitv", title: "Page title", partTitle: "E2 - Middle" }), "E2 - Middle");
+  const streams = /** @type {import("../src/app/resolver.js").DashChoice} */ (dash.streams);
+  assert.equal(audioExpected(streams), true);
+  assert.equal(audioExpected({ ...streams, audio: null }), false);
+  const hls = /** @type {import("../src/app/resolver.js").HlsChoice} */ (hlsTarget("#EXTM3U\n", "https://x.dailymotion.com/m.m3u8").streams);
+  assert.equal(audioExpected(hls), true, "mp4a in the variant's CODECS");
+  assert.equal(audioExpected({ ...hls, variant: { ...hls.variant, codecs: "avc1.64001f" } }), false);
+  assert.equal(audioExpected({ ...hls, variant: { ...hls.variant, codecs: null } }), false);
+});
+
+test("jpegFromImage: decoded, drawn at its own size, encoded as JPEG 0.92 by the browser's tools", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const tools = /** @type {import("../src/app/downloader.js").ImageTools} */ ({
+    createImageBitmap: async (blob) => {
+      calls.push(["decode", blob.type]);
+      return { width: 64, height: 36, close: () => void calls.push(["close"]) };
+    },
+    OffscreenCanvas: class {
+      /** @param {number} width @param {number} height */
+      constructor(width, height) {
+        calls.push(["canvas", width, height]);
+      }
+      getContext() {
+        return { drawImage: (/** @type {unknown} */ _image, /** @type {number} */ x, /** @type {number} */ y) => void calls.push(["draw", x, y]) };
+      }
+      /** @param {{ type: string, quality: number }} options */
+      async convertToBlob(options) {
+        calls.push(["encode", options.type, options.quality]);
+        return new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe0])]);
+      }
+    },
+  });
+  const jpeg = await jpegFromImage(new Blob(["RIFF"], { type: "image/webp" }), tools);
+  assert.deepEqual([...jpeg], [0xff, 0xd8, 0xff, 0xe0]);
+  assert.deepEqual(calls, [["decode", "image/webp"], ["canvas", 64, 36], ["draw", 0, 0], ["encode", "image/jpeg", 0.92], ["close"]]);
+  await assert.rejects(jpegFromImage(new Blob(["x"]), null), /cannot convert images/);
+});
+
+const COVER_URL = "https://i0.hdslb.com/bfs/archive/cover.jpg";
+
+/**
+ * An image made by ffmpeg (a 64×36 red frame), once per name.
+ * @param {"jpg" | "png"} ext
+ * @returns {Uint8Array}
+ */
+function coverImage(ext) {
+  const path = scratchPath(`cover-fixture.${ext}`);
+  ffmpeg(["-f", "lavfi", "-i", "color=c=red:s=64x36", "-frames:v", "1", "-f", "image2", path]);
+  return readFileSync(path);
+}
+
+/**
+ * What ffmpeg reads of a saved file's cover and title: its streams' codecs (`ffprobe`), its
+ * `title` tag (`-f ffmetadata`) and the picture of its second video stream — the attached
+ * picture — copied out as served.
+ * @param {Uint8Array} bytes
+ * @param {string} name
+ * @returns {{ codecs: (string | null)[], title: string | null, picture: Uint8Array }}
+ */
+function probeCover(bytes, name) {
+  const path = scratchPath(name);
+  writeFileSync(path, bytes);
+  const metadata = new TextDecoder().decode(ffmpeg(["-i", path, "-f", "ffmetadata", "-"]));
+  const title = /^title=(.*)$/m.exec(metadata)?.[1] ?? null;
+  const picture = ffmpeg(["-i", path, "-map", "0:v:1", "-c", "copy", "-frames:v", "1", "-f", "image2pipe", "-"]);
+  return { codecs: ffprobe(path).streams.map((stream) => stream.codec_name), title, picture };
+}
+
+test(
+  "DASH with a JPEG cover: one cover request after the media, embedded with the title; the frames unchanged",
+  { skip: mediaSkip() },
+  async () => {
+    const dash = dashFixture();
+    const jpeg = coverImage("jpg");
+    const routes = {
+      [VIDEO_URL]: servedFile(readFileSync(dash.video)),
+      [AUDIO_URL]: servedFile(readFileSync(dash.audio)),
+      [COVER_URL]: servedFile(jpeg, { type: "image/jpeg" }),
+    };
+    const net = network(routes);
+    const { ctx, saved, sleeps } = context(net.fetch);
+    const target = dashTarget([VIDEO_URL], [AUDIO_URL], { cover: COVER_URL.replace("https:", "http:") });
+    const result = await download(target, ctx);
+    assert.equal(result.status, "done", JSON.stringify(result.failure));
+    assert.deepEqual(net.calls.map((call) => call.url), [VIDEO_URL, AUDIO_URL, COVER_URL], "the cover after the media, over https");
+    assert.equal(sleeps.filter((seconds) => seconds === 0.2).length, 2, "a media pause before the audio and before the cover");
+    assert.deepEqual(result.notes, []);
+    assert.deepEqual(result.verify?.cover, { type: "jpeg", bytes: jpeg.length });
+    assert.equal(result.verify?.title, "An invented clip");
+    const bytes = /** @type {Uint8Array} */ (saved[0]?.bytes);
+    const probed = await probe(bytes);
+    assert.deepEqual([...(probed.cover?.bytes ?? [])], [...jpeg], "the JPEG as served");
+    const seen = probeCover(bytes, "saved-cover.mp4");
+    assert.deepEqual(seen.codecs, ["h264", "aac", "mjpeg"], "ffmpeg reads the cover as a picture stream");
+    assert.equal(seen.title, "An invented clip");
+    assert.deepEqual([...seen.picture], [...jpeg], "ffmpeg reads back the JPEG as served");
+    // the same download without the cover: the same frames, no cover request
+    const plain = network(routes);
+    const without = context(plain.fetch);
+    without.ctx.cover = "none";
+    const bare = await download(dashTarget([VIDEO_URL], [AUDIO_URL], { cover: COVER_URL }), without.ctx);
+    assert.equal(bare.status, "done");
+    assert.deepEqual(plain.calls.map((call) => call.url), [VIDEO_URL, AUDIO_URL], "cover: none asks for no cover");
+    assert.equal(bare.verify?.cover, null);
+    assert.equal(bare.verify?.title, "An invented clip", "the title is embedded all the same");
+    const barePath = scratchPath("saved-no-cover.mp4");
+    writeFileSync(barePath, /** @type {Uint8Array} */ (without.saved[0]?.bytes));
+    const coverPath = scratchPath("saved-cover.mp4");
+    for (const stream of ["v:0", "a:0"]) {
+      assert.deepEqual(framemd5(coverPath, { stream }), framemd5(barePath, { stream }), stream);
+    }
+    assert.deepEqual(framemd5(coverPath, { stream: "v:0" }), framemd5(sourceClip(), { stream: "v:0" }));
+  },
+);
+
+test("a WebP cover is converted to JPEG; a PNG is embedded as served", { skip: mediaSkip() }, async () => {
+  const dash = dashFixture();
+  const jpeg = coverImage("jpg");
+  const png = coverImage("png");
+  const webp = new TextEncoder().encode("RIFF\x00\x00\x00\x00WEBPVP8 not really");
+  const net = network({
+    [VIDEO_URL]: servedFile(readFileSync(dash.video)),
+    [AUDIO_URL]: servedFile(readFileSync(dash.audio)),
+    [COVER_URL]: servedFile(webp, { type: "image/webp" }),
+    [COVER_URL.replace(".jpg", ".png")]: servedFile(png, { type: "image/png" }),
+  });
+  /** @type {string[]} */
+  const converted = [];
+  const { ctx, saved } = context(net.fetch);
+  ctx.toJpeg = async (image) => {
+    converted.push(image.type);
+    return jpeg;
+  };
+  const result = await download(dashTarget([VIDEO_URL], [AUDIO_URL], { cover: COVER_URL }), ctx);
+  assert.equal(result.status, "done", JSON.stringify(result.failure));
+  assert.deepEqual(converted, ["image/webp"]);
+  assert.deepEqual(result.verify?.cover, { type: "jpeg", bytes: jpeg.length });
+  assert.deepEqual([...((await probe(/** @type {Uint8Array} */ (saved[0]?.bytes))).cover?.bytes ?? [])], [...jpeg]);
+  const second = await download(dashTarget([VIDEO_URL], [AUDIO_URL], { cover: COVER_URL.replace(".jpg", ".png") }), ctx);
+  assert.equal(second.status, "done");
+  assert.deepEqual(second.verify?.cover, { type: "png", bytes: png.length });
+  assert.deepEqual(converted, ["image/webp"], "a PNG is never converted");
+});
+
+test("a cover that cannot be had leaves the video saved, the row saying why — never a stop", { skip: mediaSkip() }, async () => {
+  const dash = dashFixture();
+  const media = {
+    [VIDEO_URL]: servedFile(readFileSync(dash.video)),
+    [AUDIO_URL]: servedFile(readFileSync(dash.audio)),
+  };
+  for (const [reply, cover, reason, requests] of /** @type {const} */ ([
+    [{ status: 429 }, COVER_URL, "HTTP 429", 3],
+    [{ status: 403 }, COVER_URL, "HTTP 403", 3],
+    [{ body: "<html>", headers: { "content-type": "text/html" } }, COVER_URL, "the image cannot be converted to JPEG here", 3],
+    [{ status: 200 }, "https://evil.example/cover.jpg", "the image is on evil.example, a host the extension has no permission for", 2],
+  ])) {
+    const net = network({ ...media, [COVER_URL]: () => reply });
+    const { ctx, saved } = context(net.fetch);
+    const result = await download(dashTarget([VIDEO_URL], [AUDIO_URL], { cover }), ctx);
+    assert.equal(result.status, "done", `${reason}: ${JSON.stringify(result.failure)}`);
+    assert.deepEqual(result.notes, [{ code: "cover", params: { reason } }]);
+    assert.equal(net.calls.length, requests, `${reason}: asked once, never retried`);
+    assert.equal(result.verify?.cover, null);
+    assert.equal(saved.length, 1);
+  }
+  const converter = network({ ...media, [COVER_URL]: () => ({ body: "GIF89a", headers: { "content-type": "image/gif" } }) });
+  const failing = context(converter.fetch);
+  failing.ctx.toJpeg = async () => {
+    throw new Error("decode failed");
+  };
+  const result = await download(dashTarget([VIDEO_URL], [AUDIO_URL], { cover: COVER_URL }), failing.ctx);
+  assert.equal(result.status, "done");
+  assert.deepEqual(result.notes, [{ code: "cover", params: { reason: "image/gif could not be converted to JPEG (decode failed)" } }]);
+});
+
+test("B.4: a file the MP4 reader refuses is remux_failed; announced audio that never came fails the file", { skip: mediaSkip() }, async () => {
+  const dash = dashFixture();
+  const html = network({ [VIDEO_URL]: () => ({ body: "<html>not a video</html>", headers: { "content-type": "text/html" } }) });
+  const { ctx, saved, root } = context(html.fetch);
+  const result = await download(dashTarget([VIDEO_URL], null), ctx);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.code, "remux_failed");
+  assert.equal(saved.length, 0);
+  assert.deepEqual(leftovers(root), []);
+  const mute = network({
+    [VIDEO_URL]: servedFile(readFileSync(dash.video)),
+    [AUDIO_URL]: servedFile(readFileSync(dash.video)), // the "audio" file holds video only
+  });
+  const second = context(mute.fetch);
+  const failed = await download(dashTarget([VIDEO_URL], [AUDIO_URL]), second.ctx);
+  assert.equal(failed.failure?.code, "remux_failed");
+  assert.match(String(failed.failure?.params["reason"]), /announced audio but carried no audio sample/);
+  assert.equal(second.saved.length, 0);
+});
+
+test("Bilibili.tv: progressive video and audio files (moov after mdat) download, verify and carry the Bilibili.tv Referer", { skip: mediaSkip() }, async () => {
+  const source = sourceClip();
+  const videoPath = scratchPath("btv-progressive-video.mp4");
+  const audioPath = scratchPath("btv-progressive-audio.mp4");
+  ffmpeg(["-i", source, "-an", "-c:v", "copy", "-f", "mp4", videoPath]);
+  ffmpeg(["-i", source, "-vn", "-c:a", "copy", "-f", "mp4", audioPath]);
+  const cdn = "https://upos-bstar1-mirrorakam.akamaized.net/iupxcodeboss";
+  const net = network({
+    [`${cdn}/80.mp4`]: servedFile(readFileSync(videoPath)),
+    [`${cdn}/audio-30280.mp4`]: servedFile(readFileSync(audioPath)),
+  });
+  const { ctx, saved, referers } = context(net.fetch);
+  const target = {
+    ...dashTarget([`${cdn}/80.mp4?e=1`], [`${cdn}/audio-30280.mp4?e=1`]),
+    key: "bilibilitv:video:4801520000000001",
+    site: /** @type {const} */ ("bilibilitv"),
+    id: "4801520000000001",
+    partCount: null,
+    cid: null,
+    title: "An invented Bstation clip",
+    pageUrl: "https://www.bilibili.tv/en/video/4801520000000001",
+  };
+  const result = await download(target, ctx);
+  assert.equal(result.status, "done", JSON.stringify(result.failure));
+  assert.deepEqual(referers, ["bilibilitv"]);
+  assert.equal(saved[0]?.filename, "StreamFetch/Bilibili.tv/An invented Bstation clip [4801520000000001].mp4");
+  const path = scratchPath("saved-btv-progressive.mp4");
+  writeFileSync(path, /** @type {Uint8Array} */ (saved[0]?.bytes));
+  assert.deepEqual(framemd5(path, { stream: "v:0" }), framemd5(source, { stream: "v:0" }), "video frames");
+  // a progressive source keeps its AAC priming edit: the audio frames are the source's own
+  assert.deepEqual(framemd5(path, { stream: "a:0" }), framemd5(source, { stream: "a:0" }), "audio frames");
 });

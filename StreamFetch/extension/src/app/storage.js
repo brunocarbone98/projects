@@ -24,8 +24,17 @@ export const HISTORY_MAX_BYTES = 1024 * 1024;
 
 /** The quality caps the settings offer: `best` (no cap) or a maximum height. */
 export const QUALITIES = Object.freeze(/** @type {const} */ (["best", "1080", "720", "480"]));
-/** `compatible` prefers H.264 at the chosen height (every Windows Chrome plays it); `best` the highest bandwidth. */
+/**
+ * The codec preference AT the chosen height (the height is never lowered for it): `compatible`
+ * prefers H.264 (every Windows Chrome plays it), then HEVC, then AV1; `best` the highest bandwidth.
+ */
 export const CODECS = Object.freeze(/** @type {const} */ (["compatible", "best"]));
+/**
+ * The cover of each saved file: `embed` (one request for the video's cover after its media, the
+ * image embedded in the MP4 with the title) or `none` (no cover request; the title is still
+ * embedded). The list's lazy thumbnails do not depend on it.
+ */
+export const COVERS = Object.freeze(/** @type {const} */ (["embed", "none"]));
 /** The UI language: Chrome's (`auto`), or English / Spanish whatever Chrome's is. */
 export const LANGUAGES = Object.freeze(/** @type {const} */ (["auto", "en", "es"]));
 /** The sites a test base URL may stand in for (test mode only). */
@@ -43,9 +52,11 @@ export const BASE_URL_KEYS = Object.freeze(
  * @property {Range} pagePauseS between two page or manifest requests, seconds
  * @property {Range} mediaPauseMs between two media requests, milliseconds
  * @property {boolean} report save the "did not download" report at the end of a run with failures
+ * @property {(typeof COVERS)[number]} cover embed the video's cover in each saved file, or not
  * @property {(typeof LANGUAGES)[number]} language
  *
- * @typedef {object} BaseUrls Test mode: where the fake sites live (`http://127.0.0.1:<port>/dm`, …).
+ * @typedef {object} BaseUrls Test mode: where the fake sites live (`http://127.0.0.1:<port>/dm`,
+ *   …).
  * @property {string} [dailymotion] stands for `https://www.dailymotion.com`
  * @property {string} [bilibili] stands for `https://www.bilibili.com`
  * @property {string} [b23] stands for `https://b23.tv`
@@ -72,6 +83,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   pagePauseS: /** @type {Range} */ ([...PACING_DEFAULTS.pagePauseS]),
   mediaPauseMs: /** @type {Range} */ ([...PACING_DEFAULTS.mediaPauseMs]),
   report: true,
+  cover: "embed",
   language: "auto",
 });
 
@@ -93,9 +105,9 @@ function isRecord(value) {
 }
 
 /**
- * Why `settings` cannot be saved, or null: an unknown quality, codec or language, a report switch
- * that is not a boolean, pauses that `lib/pacing.pacingProblem` refuses (below the floors outside
- * test mode, inverted, negative, longer than a day).
+ * Why `settings` cannot be saved, or null: an unknown quality, codec, cover choice or language, a
+ * report switch that is not a boolean, pauses that `lib/pacing.pacingProblem` refuses (below the
+ * floors outside test mode, inverted, negative, longer than a day).
  * @param {Record<string, unknown>} settings a {@link Settings} (or something claiming to be one)
  * @param {boolean} testMode
  * @returns {string | null}
@@ -106,6 +118,9 @@ export function settingsProblem(settings, testMode) {
   }
   if (!(/** @type {readonly unknown[]} */ (CODECS).includes(settings["codec"]))) {
     return "unknown codec preference";
+  }
+  if (!(/** @type {readonly unknown[]} */ (COVERS).includes(settings["cover"]))) {
+    return "unknown cover choice";
   }
   if (!(/** @type {readonly unknown[]} */ (LANGUAGES).includes(settings["language"]))) {
     return "unknown language";
@@ -131,7 +146,9 @@ export function normalizeSettings(raw, testMode) {
     if (Object.hasOwn(raw, key)) known[key] = raw[key];
   }
   const merged = { ...settings, ...known };
-  if (settingsProblem(merged, testMode) === null) return copySettings(/** @type {Settings} */ (merged));
+  if (settingsProblem(merged, testMode) === null) {
+    return copySettings(/** @type {Settings} */ (merged));
+  }
   for (const [key, value] of Object.entries(known)) {
     const candidate = { ...settings, [key]: value };
     if (settingsProblem(candidate, testMode) === null) {
@@ -154,6 +171,7 @@ export function copySettings(settings) {
     pagePauseS: [settings.pagePauseS[0], settings.pagePauseS[1]],
     mediaPauseMs: [settings.mediaPauseMs[0], settings.mediaPauseMs[1]],
     report: settings.report,
+    cover: settings.cover,
     language: settings.language,
   };
 }

@@ -52,7 +52,9 @@ import { StepFailure, fetchText, isStop, keyMethodOf, mediaProblem } from "./dow
  * @property {string} id the Dailymotion xid, the Bilibili bvid / `av…` / `b23:<code>`, the
  *   Bilibili.tv aid, ep_id or season_id — always a string (16-digit aids exceed 2^53)
  * @property {number | null} part
- * @property {string | null} [seasonId] a Bilibili.tv episode's season
+ * @property {string | null} [seasonId] a Bilibili.tv episode's season (a series' own id)
+ * @property {true} [playlistIgnored] a Dailymotion video link that also named a playlist: only
+ *   the video is downloaded and the row says so (Addendum A.8)
  * @property {string | null} shortLink
  * @property {string} pageUrl
  * @property {string} original
@@ -286,20 +288,6 @@ export function onBase(url, origin, base) {
 // ------------------------------------------------------------------------- Dailymotion
 
 /**
- * Whether the pasted Dailymotion link carried a `playlist` parameter (ignored: only the video).
- * @param {string} original
- * @returns {boolean}
- */
-function namesPlaylist(original) {
-  try {
-    const url = new URL(/^[a-z]+:\/\//i.test(original) ? original : `https://${original}`);
-    return url.searchParams.has("playlist");
-  } catch {
-    return false;
-  }
-}
-
-/**
  * The HLS streams of a Dailymotion video from its master URL: master → chosen variant (+ audio
  * rendition) → their media playlists. Every request paced.
  * @param {string} masterUrl
@@ -399,16 +387,19 @@ function siteMessage(json, title) {
 }
 
 /**
- * A Dailymotion metadata answer, mapped to the failure codes of the run: geo-blocking stays
- * `geo_blocked`; any other error of the site makes the video unavailable to this session
- * (`deleted` with the site's own message, `failed-unavailable`).
+ * A Dailymotion metadata answer, mapped to the failure codes of the run: geo-blocking (`DM007`)
+ * stays `geo_blocked`; any other error of the site makes the video unavailable to this session
+ * (`deleted`, `failed-unavailable`) with the site's own words as `Dailymotion says: <message>`.
  * @param {unknown} json
  * @param {string} id
  * @param {string} contentType
  */
 function dailymotionMetadata(json, id, contentType) {
   /** @param {Failure} fail @param {Status} [status] */
-  const refused = (fail, status) => ({ ok: /** @type {const} */ (false), ...withStatus(fail, status) });
+  const refused = (fail, status) => ({
+    ok: /** @type {const} */ (false),
+    ...withStatus(fail, status),
+  });
   if (json === undefined) return refused(failure("not_a_video", { content_type: contentType }));
   const parsed = parseMetadata(json, id);
   if (parsed.ok) return parsed;
@@ -417,7 +408,7 @@ function dailymotionMetadata(json, id, contentType) {
     return refused(failure("no_streams", { detail: parsed.params["types"] || "no HLS master" }));
   }
   if (parsed.params["site_code"] !== undefined) {
-    const message = siteMessage(json, parsed.params["site_message"]);
+    const message = `Dailymotion says: ${siteMessage(json, parsed.params["site_message"])}`;
     return refused(failure("deleted", { site_message: message }), FAILED_UNAVAILABLE);
   }
   return refused(failure("not_a_video", { content_type: contentType }));
@@ -453,7 +444,7 @@ async function resolveDailymotion(item, ctx) {
     durationS: info.durationS,
     cover: info.cover,
     uploader: info.uploader,
-    hints: namesPlaylist(item.original) ? [PLAYLIST_IGNORED] : [],
+    hints: item.playlistIgnored === true ? [PLAYLIST_IGNORED] : [],
     page,
   };
   /** @type {Awaited<ReturnType<typeof hlsStreams>>} */
@@ -729,15 +720,17 @@ function bilibilitvRefusal(refusal) {
 
 /**
  * The page URL of a Bilibili.tv video or episode under `base` (`/en/video/<aid>`,
- * `/en/play/<season>/<ep>`).
+ * `/en/play/<season>/<ep>`: `lib/bilibilitv.pageUrl`), or null for an episode whose season is not
+ * known (`lib/urls.js` always gives one; the page is then not asked for — the playurl answer
+ * suffices).
  * @param {string} base
  * @param {{ aid?: string, epId?: string, seasonId?: string | null }} ids
- * @returns {string}
+ * @returns {string | null}
  */
 export function bilibilitvPage(base, ids) {
-  const root = base.replace(/\/+$/, "");
-  if (ids.aid !== undefined) return `${root}/en/video/${ids.aid}`;
-  return `${root}/en/play/${ids.seasonId ?? "0"}/${ids.epId ?? ""}`;
+  if (ids.aid !== undefined) return btv.pageUrl({ kind: "video", id: ids.aid }, base);
+  if (!ids.seasonId || ids.epId === undefined) return null;
+  return btv.pageUrl({ kind: "episode", id: ids.epId, seasonId: ids.seasonId }, base);
 }
 
 /**
@@ -850,18 +843,21 @@ async function bilibilitvPageInfo(url, ctx, attempts) {
  */
 
 /**
- * The fields of a Bilibili.tv target that do not depend on its answers.
+ * The fields of a Bilibili.tv target that do not depend on its answers: a series episode's own
+ * title is its `partTitle` (the list's `title_display`, A.3), its position its `part`.
  * @param {BilibilitvWhat} what
+ * @param {string} fallbackPage the pasted item's canonical page (when no page URL can be built)
  * @returns {Partial<Target>}
  */
-function bilibilitvFields(what) {
+function bilibilitvFields(what, fallbackPage) {
   const id = what.aid ?? String(what.epId);
   return {
     key: what.aid !== undefined ? `bilibilitv:video:${id}` : `bilibilitv:episode:${id}`,
     id,
     part: what.index,
-    pageUrl: bilibilitvPage(PRODUCTION_BASES.bilibilitv, what),
+    pageUrl: bilibilitvPage(PRODUCTION_BASES.bilibilitv, what) ?? fallbackPage,
     title: what.title ?? id,
+    partTitle: what.index !== null ? what.title : null,
     seasonId: what.seasonId,
     episodeId: what.epId ?? null,
     seriesTitle: what.seriesTitle,
@@ -881,9 +877,13 @@ function bilibilitvFields(what) {
 async function bilibilitvTarget(item, what, ctx, shared) {
   /** @type {Attempt[]} */
   const own = [];
-  const base = bilibilitvFields(what);
-  const info = await bilibilitvPageInfo(bilibilitvPage(ctx.bases.bilibilitv, what), ctx, own);
-  await ctx.pagePause();
+  const base = bilibilitvFields(what, item.pageUrl);
+  const pageUrl = bilibilitvPage(ctx.bases.bilibilitv, what);
+  const info =
+    pageUrl === null
+      ? { title: null, cover: null, durationS: null, page: null }
+      : await bilibilitvPageInfo(pageUrl, ctx, own);
+  if (pageUrl !== null) await ctx.pagePause();
   const streams = await bilibilitvStreams(what, ctx, own);
   const fields = {
     ...base,
@@ -914,7 +914,8 @@ async function resolveSeries(item, ctx, attempts) {
   const seasonId = item.id;
   let seriesTitle = /** @type {string | null} */ (null);
   try {
-    const info = await fetchJson(btv.seasonInfoUrl(ctx.bases.bilibilitvApi, seasonId), ctx, attempts);
+    const url = btv.seasonInfoUrl(ctx.bases.bilibilitvApi, seasonId);
+    const info = await fetchJson(url, ctx, attempts);
     const parsed = btv.parseSeasonInfo(safeParse(info.text));
     seriesTitle = typeof parsed?.title === "string" && parsed.title ? parsed.title : null;
   } catch (error) {
@@ -923,11 +924,24 @@ async function resolveSeries(item, ctx, attempts) {
   }
   await ctx.pagePause();
   const list = await fetchJson(btv.episodesUrl(ctx.bases.bilibilitvApi, seasonId), ctx, attempts);
-  const listed = btv.parseEpisodes(safeParse(list.text))?.episodes ?? [];
-  const episodes = listed.slice(0, MAX_SERIES_EPISODES);
+  const json = safeParse(list.text);
+  const page = pageOf(list.attempt);
+  if (json === undefined) {
+    const fail = failure("not_a_video", { content_type: list.contentType });
+    return itemFailure(item, fail, attempts, { page, title: seriesTitle });
+  }
+  const listed = btv.parseEpisodes(json);
+  if (listed.refusal !== null) {
+    // the site's own code (geo, login, …): the series is refused as its episodes would be
+    const refused = bilibilitvRefusal(listed.refusal);
+    const extra = { status: refused.status, page, raw: json, title: seriesTitle };
+    return itemFailure(item, refused.failure, attempts, extra);
+  }
+  const episodes = listed.episodes.slice(0, MAX_SERIES_EPISODES);
   if (episodes.length === 0) {
     const fail = failure("no_streams", { detail: "the series lists no episode" });
-    const extra = { status: FAILED_UNAVAILABLE, page: pageOf(list.attempt), title: seriesTitle };
+    /** @type {{ status: Status, page: PageInput | null, raw: unknown, title: string | null }} */
+    const extra = { status: FAILED_UNAVAILABLE, page, raw: json, title: seriesTitle };
     return itemFailure(item, fail, attempts, extra);
   }
   /** @type {Target[]} */
@@ -946,7 +960,7 @@ async function resolveSeries(item, ctx, attempts) {
       durationS: typeof episode.durationS === "number" ? episode.durationS : null,
     };
     if (stopped !== null) {
-      const fields = { ...bilibilitvFields(what), attempts: [...attempts] };
+      const fields = { ...bilibilitvFields(what, item.pageUrl), attempts: [...attempts] };
       targets.push(makeTarget(item, { ...fields, ...withStatus(stopped, STOPPED) }));
       continue;
     }
@@ -957,7 +971,7 @@ async function resolveSeries(item, ctx, attempts) {
       target = await bilibilitvTarget(item, what, ctx, attempts);
     } catch (error) {
       const step = asStep(error);
-      const fields = { ...bilibilitvFields(what), attempts: [...attempts] };
+      const fields = { ...bilibilitvFields(what, item.pageUrl), attempts: [...attempts] };
       target = makeTarget(item, { ...fields, ...withStatus(step.failure) });
     }
     targets.push(target);
@@ -1047,16 +1061,23 @@ export async function refreshStreams(target, ctx) {
   }
   try {
     if (streams.kind === "hls") {
-      const metadata = await fetchText(metadataUrl(ctx.bases.dailymotion, target.id), "metadata", ctx.net, target.attempts, { accept: "application/json" });
+      const url = metadataUrl(ctx.bases.dailymotion, target.id);
+      const accept = { accept: "application/json" };
+      const metadata = await fetchText(url, "metadata", ctx.net, target.attempts, accept);
       const json = safeParse(metadata.text);
       const decided = dailymotionMetadata(json, target.id, metadata.contentType);
       if (!decided.ok) return { ok: false, failure: decided.failure, status: decided.status };
-      const keep = { name: streams.variant.name, height: streams.variant.height, codecs: streams.variant.codecs };
-      const fresh = await hlsStreams(decided.info.masterUrl, ctx, target.attempts, keep);
+      const { name, height, codecs } = streams.variant;
+      const fresh = await hlsStreams(decided.info.masterUrl, ctx, target.attempts, {
+        name,
+        height,
+        codecs,
+      });
       if (!fresh.ok) return { ok: false, ...withStatus(fresh.failure) };
       return { ok: true, streams: fresh.streams, raw: { metadata: json, ...fresh.raw } };
     }
-    /** @type {{ videos: DashRep[], audios: DashRep[], raw: unknown } | { failure: Failure, status: Status }} */
+    /** @type {{ videos: DashRep[], audios: DashRep[], raw: unknown } |
+     *   { failure: Failure, status: Status }} */
     let offered;
     if (target.site === "bilibili") {
       const fresh = await bilibiliPage(target.id, target.part, ctx, target.attempts);
@@ -1068,26 +1089,40 @@ export async function refreshStreams(target, ctx) {
       }
     } else {
       const ids = target.episodeId !== null ? { epId: target.episodeId } : { aid: target.id };
-      const url = ids.epId !== undefined ? btv.playurlUrl(ctx.bases.bilibilitvApi, { epId: ids.epId }) : btv.playurlUrl(ctx.bases.bilibilitvApi, { aid: target.id });
-      const answer = await fetchText(url, "metadata", ctx.net, target.attempts, { accept: "application/json" });
+      const answer = await fetchJson(playurlOf(ctx, ids), ctx, target.attempts);
       const json = safeParse(answer.text);
       const play = json === undefined ? null : btv.parsePlayurl(json);
-      if (play === null) offered = withStatus(failure("not_a_video", { content_type: answer.contentType }));
-      else if (!play.ok) offered = bilibilitvRefusal(play);
-      else offered = { videos: play.videos ?? [], audios: play.audios ?? [], raw: json };
+      if (play === null) {
+        offered = withStatus(failure("not_a_video", { content_type: answer.contentType }));
+      } else if (!play.ok) {
+        offered = bilibilitvRefusal(play);
+      } else {
+        offered = { videos: play.videos ?? [], audios: play.audios ?? [], raw: json };
+      }
     }
-    if ("failure" in offered) return { ok: false, failure: offered.failure, status: offered.status };
+    if ("failure" in offered) {
+      return { ok: false, failure: offered.failure, status: offered.status };
+    }
     /** @param {DashRep | null} rep @param {DashRep[]} pool */
     const same = (rep, pool) =>
-      rep === null ? null : (pool.find((one) => one.id === rep.id && one.codecs === rep.codecs) ?? null);
+      rep === null
+        ? null
+        : (pool.find((one) => one.id === rep.id && one.codecs === rep.codecs) ?? null);
     const video = same(streams.video, offered.videos);
     const audio = same(streams.audio, offered.audios);
     if (video === null || (streams.audio !== null && audio === null)) {
-      return { ok: false, ...withStatus(failure("no_streams", { detail: "the refreshed answer no longer offers the chosen quality" })) };
+      const detail = "the refreshed answer no longer offers the chosen quality";
+      return { ok: false, ...withStatus(failure("no_streams", { detail })) };
     }
     return {
       ok: true,
-      streams: { ...streams, video, audio, available: offered.videos, audioAvailable: offered.audios },
+      streams: {
+        ...streams,
+        video,
+        audio,
+        available: offered.videos,
+        audioAvailable: offered.audios,
+      },
       raw: offered.raw,
     };
   } catch (error) {

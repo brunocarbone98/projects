@@ -462,6 +462,20 @@ test("selection edge cases: a cap below every height, unknown heights, audio-onl
   assert.equal(codecFamily(under720?.codecs), "hevc");
 });
 
+test("compatible prefers avc, then hevc, then av1 at the chosen height; best takes the bandwidth (B.1)", () => {
+  const AV1 = "av01.0.08M.08,mp4a.40.2";
+  const noAvc = [variant(1080, AV1, 6000000), variant(1080, HEVC, 4000000), variant(720, AVC, 9000000)];
+  const compatible = chooseVariant(noAvc, { maxHeight: null, codec: "compatible" });
+  assert.equal(compatible?.height, 1080, "the resolution is never lowered to get H.264");
+  assert.equal(codecFamily(compatible?.codecs), "hevc", "hevc before av1");
+  const best = chooseVariant(noAvc, { maxHeight: null, codec: "best" });
+  assert.equal(codecFamily(best?.codecs), "av1", "best: the highest bandwidth at that height");
+  const all = [...noAvc, variant(1080, AVC, 3000000)];
+  assert.equal(codecFamily(chooseVariant(all, { maxHeight: null, codec: "compatible" })?.codecs), "avc");
+  const av1Only = [variant(1080, AV1, 6000000), variant(720, HEVC, 9000000)];
+  assert.equal(codecFamily(chooseVariant(av1Only, { maxHeight: null, codec: "compatible" })?.codecs), "av1");
+});
+
 test("the audio rendition: DEFAULT first, else the first with a URI, null when muxed", () => {
   /** @type {HlsRendition[]} */
   const renditions = [

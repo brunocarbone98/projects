@@ -9,6 +9,7 @@ Every scenario counts the fake sites' requests (`FakeSites.about`, `media_reques
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from e2e_checks import (
 from extension_harness import ExtensionHarness
 from fake_sites import (
     BILI_MAIN,
+    CLAIMED_SECONDS,
     DM_SHORT_ID,
     DM_TITLES,
     DM_TS_ID,
@@ -31,14 +33,14 @@ from fake_sites import (
     FakeSites,
     bili_cid,
 )
-from media_fixtures import MediaSet, assert_same_media
+from media_fixtures import MediaSet, assert_saved_media
 
 pytestmark = [NEEDS_CHROMIUM]
 
 DM = "https://www.dailymotion.com/video/{}"
 BILI = "https://www.bilibili.com/video/{}"
 GEO, KEYED, LIVE, GONE, AFTER = "xgeo7b1", "xkey3m9", "xlive4q", "xgone8z", "xafter5"
-LIMITED = "xlimit2"
+LIMITED, LONGER = "xlimit2", "xlong6p"
 LOGIN, DELETED, RISK, BANNED = "BV1Lo6G1nR3q", "BV1De7L1eT4d", "BV1Rk5D1aT2a", "BV1Ba4N1nE7d"
 DRM, PREMIUM, TRIAL, UPOWER = "BV1Dr2M1aB3c", "BV1Pr3M1uM9x", "BV1Tr1A1lO6n", "BV1Up0W1eR5x"
 
@@ -95,9 +97,9 @@ def test_dailymotion_refusals_request_no_media_and_three_failures_in_a_row_stop_
         assert not sites.by_route("dm-key")
         assert [r.route for r in sites.about(GONE)] == ["dm-metadata"]
         assert sites.about(AFTER) == []
-        assert ext.wait_saved(1) == [
-            f"StreamFetch/Dailymotion/{DM_TITLES[DM_TS_ID]} [{DM_TS_ID}].mp4"
-        ]
+        (saved,) = ext.wait_saved(1)
+        assert saved == f"StreamFetch/Dailymotion/{DM_TITLES[DM_TS_ID]} [{DM_TS_ID}].mp4"
+        assert_saved_media(ext.saved_path(saved), media.expected("ts-hls"))
         assert_sequential(sites.site_requests())
 
         # the failed block: the five rows the run did not download, with the two buttons
@@ -141,7 +143,7 @@ def test_an_expired_segment_is_refreshed_once_and_a_cut_segment_retried(
         ext.download_all(_links(DM, DM_TS_ID, DM_SHORT_ID))
         assert _statuses(ext, DM_TS_ID, DM_SHORT_ID) == ["done", "done"]
         for name in ext.wait_saved(2):
-            assert_same_media(ext.saved_path(name), media.src)
+            assert_saved_media(ext.saved_path(name), media.expected("ts-hls"))
         # the expired segment: one refresh (master + media playlist again), then new URLs
         routes = [r.route for r in sites.about(DM_TS_ID)]
         assert routes.count("dm-master") == 2 and routes.count("dm-media-playlist") == 2, routes
@@ -155,6 +157,42 @@ def test_an_expired_segment_is_refreshed_once_and_a_cut_segment_retried(
         assert [r.route for r in sites.about(DM_SHORT_ID)].count("dm-master") == 1
         assert_sequential(sites.site_requests())
         assert ext.reports() == []
+
+
+def test_a_file_shorter_than_the_site_says_is_never_saved_and_no_work_file_is_left(
+    media: MediaSet, tmp_path: Path
+):
+    """B.1 "complete": every segment arrives and the MP4 is written, but the site says 60 s and
+    the file holds 6 s — the verification refuses it, nothing is saved, the run goes on, and the
+    origin private file system holds no work file afterwards."""
+    with (
+        FakeSites(media, dm_claims_longer=frozenset({LONGER})) as sites,
+        ExtensionHarness(tmp_path, sites) as ext,
+    ):
+        ext.download_all(_links(DM, LONGER, DM_TS_ID))
+        assert _statuses(ext, LONGER, DM_TS_ID) == ["failed", "done"]
+        message = ext.row_of(LONGER).message
+        expected = rf"failed verification \(duration 6\.\d s, expected {CLAIMED_SECONDS}\.0 s\)"
+        assert re.search(expected + "; it was not saved", message), message
+        # the whole media was asked for, exactly as for the video that was saved
+        segments = [
+            r.path.rsplit("/", 1)[1] for r in sites.about(LONGER) if r.route == "dm-segment"
+        ]
+        saved_segments = [
+            r.path.rsplit("/", 1)[1] for r in sites.about(DM_TS_ID) if r.route == "dm-segment"
+        ]
+        assert segments and segments == saved_segments, (segments, saved_segments)
+        (saved,) = ext.wait_saved(1)
+        assert saved == f"StreamFetch/Dailymotion/{DM_TITLES[DM_TS_ID]} [{DM_TS_ID}].mp4"
+        assert_saved_media(ext.saved_path(saved), media.expected("ts-hls"))
+        assert ext.private_files() == ["streamfetch/", "streamfetch/work/"]  # used, then emptied
+        (path,) = ext.wait_reports(1)
+        (row,) = load_report(path)["not_downloaded"]
+        assert (row["id"], row["status"]) == (LONGER, "failed")
+        assert row["failure"]["code"] == "verify_failed"
+        assert re.search(expected, row["message_en"]), row["message_en"]
+        assert sum(1 for a in row["attempts"] if a["requested"]) >= len(segments)
+        assert_sequential(sites.site_requests())
 
 
 def test_a_429_on_a_manifest_stops_the_run_and_starts_a_cooldown_that_refuses_new_runs(
@@ -181,10 +219,10 @@ def test_a_429_on_a_manifest_stops_the_run_and_starts_a_cooldown_that_refuses_ne
         assert report["not_downloaded"][0]["failure"]["code"] == "rate_limited"
 
         # a new run during the cooldown is refused: nothing is asked of the sites
-        before = len(sites.requests)
+        before = len(sites.site_requests())
         ext.paste(DM.format(DM_SHORT_ID))
         ext.click_and_settle("#download-all-button")
-        assert len(sites.requests) == before, sites.requests[before:]
+        assert len(sites.site_requests()) == before, sites.site_requests()[before:]
         assert ext.visible("#cooldown-banner")
         assert ext.saved_files() == [
             f"StreamFetch/Dailymotion/{DM_TITLES[DM_TS_ID]} [{DM_TS_ID}].mp4"
@@ -216,7 +254,7 @@ def test_a_deleted_bilibili_video_fails_and_the_run_goes_on(media: MediaSet, tmp
         assert [r.route for r in sites.about(DELETED)] == ["bili-page"]
         (name,) = ext.wait_saved(1)
         assert name == f"StreamFetch/Bilibili/Fake Bilibili two-part video [{BILI_MAIN}].mp4"
-        assert_same_media(ext.saved_path(name), media.src)
+        assert_saved_media(ext.saved_path(name), media.expected("dash"))
 
 
 def test_a_risk_control_page_stops_the_run_and_starts_the_cooldown(media: MediaSet, tmp_path: Path):
@@ -310,7 +348,7 @@ def test_a_part_query_selects_that_part_only(media: MediaSet, tmp_path: Path):
         (name,) = ext.wait_saved(1)
         folder = f"StreamFetch/Bilibili/Fake Bilibili two-part video [{BILI_MAIN}]"
         assert name == f"{folder}/P02 - Second half.mp4"
-        assert_same_media(ext.saved_path(name), media.src)
+        assert_saved_media(ext.saved_path(name), media.expected("dash"))
 
 
 def test_an_expired_audio_url_rereads_the_page_once_and_the_download_completes(
@@ -326,7 +364,7 @@ def test_an_expired_audio_url_rereads_the_page_once_and_the_download_completes(
         assert [r.status for r in sites.by_route("bili-audio")] == [403, 200]
         assert [r.status for r in sites.by_route("bili-video")] == [200]  # not asked again
         (name,) = ext.wait_saved(1)
-        assert_same_media(ext.saved_path(name), media.src)
+        assert_saved_media(ext.saved_path(name), media.expected("dash"))
         assert_sequential(sites.site_requests())
 
 

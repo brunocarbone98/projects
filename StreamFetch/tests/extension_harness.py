@@ -27,7 +27,13 @@ with `.site`, `.title` (a link), `.duration`, `.quality` (`select.quality-select
 `#retry-button`, `#report-button`, `#failed-report`), `#history-list`, `#cooldown-banner`,
 `#settings-form` (`#setting-report`, `#setting-language`, `#save-settings-button`, …),
 `#version`, `#legal-notice`. Storage keys: `history` (the last runs, most recent first), `cooldown`,
-`settings`, `testSettings`.
+`settings`, `testSettings`. A setting without a form id in the spec (B.2's `cover: "embed" |
+"none"`) is changed in the stored `settings` (`update_settings`), then the page is reloaded.
+
+Covers: a row's thumbnail (A.4) and the cover B.2 embeds in a saved file are both the extension's
+own `fetch` of the same URL. Thumbnails are asked for only for rows in view, once each, never
+during a job — so a scenario that counts embed requests lets the thumbnails settle first
+(`settle_thumbnails`, in a window where every row is in view) and clears the log.
 
 When a run is over: the spec defines no status attribute, so the harness waits for a CHANGE of the
 stored `history` (a run writes its entry) and then for the page to be idle — `#stop-button`
@@ -68,12 +74,16 @@ CHROMIUM = Path(os.environ.get("STREAMFETCH_CHROMIUM") or "/opt/pw-browsers/chro
 TEST_HOST_PERMISSION = "http://127.0.0.1/*"
 APP_PATH = "src/app/app.html"
 #: Test pacing: pauses near zero (allowed only in test mode), retries fast, a short stall timeout.
+#: `existenceRateLimitS: 0`: the `skipped-exists` look at Chrome's downloads before each target
+#: does not wait out Chrome's 10 s between two file-existence checks (as DramaFetch's harness) —
+#: no scenario deletes a saved file, so the answer never depends on it.
 TEST_PACING: dict[str, Any] = {
     "videoPauseS": [0, 0.05],
     "pagePauseS": [0, 0.05],
     "mediaPauseMs": [0, 10],
     "retryBackoffS": [0.1, 0.2, 0.4],
     "stallTimeoutS": 3,
+    "existenceRateLimitS": 0,
 }
 POLL_S = 0.1
 #: Consecutive idle polls that make a run "over" (the page has settled).
@@ -97,6 +107,21 @@ ACTIVE_WORKER_JS = """async () => {
   return active ? [active.scriptURL, active.state] : null;
 }"""
 #: Every item row as plain data (see `Row`).
+OPFS_ENTRIES_JS = """async () => {
+  const found = [];
+  const walk = async (dir, prefix) => {
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind === "directory") {
+        found.push(`${prefix}${name}/`);
+        await walk(handle, `${prefix}${name}/`);
+      } else {
+        found.push(`${prefix}${name}`);
+      }
+    }
+  };
+  await walk(await navigator.storage.getDirectory(), "");
+  return found;
+}"""
 ROWS_JS = """(selector) => [...document.querySelectorAll(selector)].map((tr) => {
   const text = (sel) => (tr.querySelector(sel)?.textContent ?? '').replace(/\\s+/g, ' ').trim();
   const badge = tr.querySelector('.status span.badge') ?? tr.querySelector('span.badge');
@@ -520,6 +545,26 @@ class ExtensionHarness:
             f"Analyze did not settle with {min_rows} rows: {self.rows()}",
         )
 
+    def settle_thumbnails(self, count: int, timeout_s: float = 20) -> None:
+        """Wait until the fake sites have answered exactly `count` cover requests for
+        `IDLE_POLLS` polls in a row: the rows' lazy thumbnails (A.4) — one per row in view,
+        fetched once, outside jobs. After that, and a `clear_log`, a cover request during a
+        download run is the one B.2 makes to embed a file's cover (both are the extension's own
+        `fetch` of the same URL: the log cannot tell them apart otherwise)."""
+        streak = 0
+
+        def settled() -> bool:
+            nonlocal streak
+            streak = streak + 1 if len(self.sites.cover_requests()) == count else 0
+            return streak >= IDLE_POLLS
+
+        self.wait_for(
+            settled,
+            timeout_s,
+            f"expected {count} thumbnail request(s), the sites saw "
+            f"{[r.path for r in self.sites.cover_requests()]}",
+        )
+
     def start(self, click: str) -> str:
         """Click `click` (a button that starts a run); a mark for `finish`."""
         mark = self._history_mark()
@@ -568,6 +613,24 @@ class ExtensionHarness:
         selector = f'#items-table tbody tr[data-key="{row.key}"] select.quality-select'
         self.page.locator(selector).select_option(value=wanted[0]["value"])
         return str(wanted[0]["text"])
+
+    def update_settings(self, **changes: Any) -> None:
+        """Change stored settings (spec 6: `chrome.storage.local` `settings`; B.2's `cover:
+        "embed" | "none"` has no form id in the spec) over what is stored, then reload the page
+        so the app reads them at start."""
+        settings = {**self.stored_settings(), **changes}
+        self.page.evaluate("(value) => chrome.storage.local.set({settings: value})", settings)
+        self.wait_for(
+            lambda: all(self.stored_settings().get(k) == v for k, v in changes.items()),
+            10,
+            f"the settings {changes} were not stored",
+        )
+        self.page.reload()
+        self.wait_ready(self.page)
+        stored = self.stored_settings()
+        assert all(stored.get(k) == v for k, v in changes.items()), (
+            f"the app dropped the settings {changes} at start: {stored}"
+        )
 
     def set_report_setting(self, on: bool) -> None:
         """Tick or untick `#setting-report` and save the settings form."""
@@ -630,3 +693,9 @@ class ExtensionHarness:
 
     def saved_path(self, relative: str) -> Path:
         return self.downloads / relative
+
+    def private_files(self) -> list[str]:
+        """Every entry of the extension's origin private file system, sorted: directories end
+        with `/` (the downloader's work files live in `streamfetch/work/`)."""
+        found: list[str] = self.page.evaluate(OPFS_ENTRIES_JS)
+        return sorted(found)

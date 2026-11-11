@@ -198,6 +198,24 @@
       }
     }
   },
+  "note_cover": {
+    "message": "cover: $REASON$",
+    "description": "The end of a done row's message: saved without its cover, and why",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "site_says": {
+    "message": "$SITE$ says:",
+    "description": "Before a site's own words in a failure message (Dailymotion's error title)",
+    "placeholders": {
+      "site": {
+        "content": "$1"
+      }
+    }
+  },
   "savedAs": {
     "message": "saved as $NAME$",
     "description": "A done row",
@@ -410,6 +428,18 @@
   "settingReport": {
     "message": "Save a report of what did not download at the end of a run",
     "description": "Setting"
+  },
+  "settingCover": {
+    "message": "Cover in each saved file",
+    "description": "Setting"
+  },
+  "coverEmbed": {
+    "message": "Embed the video's cover and title (one more request per file)",
+    "description": "Cover option"
+  },
+  "coverNone": {
+    "message": "Title only, no cover request",
+    "description": "Cover option"
   },
   "settingLanguage": {
     "message": "Language",

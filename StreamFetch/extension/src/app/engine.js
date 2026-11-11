@@ -16,7 +16,12 @@
  * from which the report (`lib/report.js`) and the history are made.
  */
 
-import { activeCooldown, cooldownFailure, cooldownStopReason, makeCooldown } from "../lib/cooldown.js";
+import {
+  activeCooldown,
+  cooldownFailure,
+  cooldownStopReason,
+  makeCooldown,
+} from "../lib/cooldown.js";
 import { FAILED, STOPPED, failure, render, statusForFailure } from "../lib/messages.js";
 import { afterResult, pagePauseS, videoPauseS } from "../lib/pacing.js";
 import { StopRequested, isStop, oneLine, traceOf } from "./downloader.js";
@@ -139,7 +144,10 @@ export function streamsSummary(target) {
   });
   return {
     kind: "dash",
-    chosen: { video: rep(streams.video), audio: streams.audio === null ? null : rep(streams.audio) },
+    chosen: {
+      video: rep(streams.video),
+      audio: streams.audio === null ? null : rep(streams.audio),
+    },
     available: streams.available.map(rep),
     audio_available: streams.audioAvailable.map(rep),
     missing_premium: [...streams.missingPremium],
@@ -200,7 +208,8 @@ export function itemRow(item, status, fail, resolved) {
     streams: null,
     page: resolved?.page ?? null,
     raw: resolved?.raw ?? null,
-    seasonId: item.kind === "episode" ? (item.seasonId ?? null) : item.kind === "series" ? item.id : null,
+    seasonId:
+      item.kind === "episode" ? (item.seasonId ?? null) : item.kind === "series" ? item.id : null,
     episodeId: item.kind === "episode" ? item.id : null,
     path: null,
     notes: [],
@@ -534,7 +543,8 @@ export async function analyzeBatch(items, ctx) {
       const status = target.status ?? "queued";
       state.run.rows.push(targetRow(target, status, target.failure, null));
       if (target.failure !== null) {
-        await state.after(status === "queued" ? statusForFailure(target.failure.code) : status, target.failure, target.site);
+        const failed = status === "queued" ? statusForFailure(target.failure.code) : status;
+        await state.after(failed, target.failure, target.site);
       }
     }
   }

@@ -8,14 +8,17 @@ import {
   MAX_FOLDER_LEN,
   MAX_NAME_LEN,
   ROOT_FOLDER,
+  SEASON_FOLDER_PREFIX,
   SITE_FOLDERS,
   chromeSafeFilename,
   fileBaseName,
+  isEpisode,
   isMultiPart,
   partLabel,
   partStem,
   reportPath,
   reportStem,
+  seriesFolder,
   targetPath,
   videoStem,
 } from "../src/lib/naming.js";
@@ -167,7 +170,11 @@ test("the paths of the spec: Dailymotion, Bilibili with one part, multi-part num
     partCount: 5,
   };
   assert.equal(isMultiPart(single), false);
-  assert.deepEqual(SITE_FOLDERS, { dailymotion: "Dailymotion", bilibili: "Bilibili" });
+  assert.deepEqual(SITE_FOLDERS, {
+    dailymotion: "Dailymotion",
+    bilibili: "Bilibili",
+    bilibilitv: "Bilibili.tv",
+  });
   assert.equal(ROOT_FOLDER, "StreamFetch");
 });
 
@@ -216,4 +223,55 @@ test("the report path: local date and time, no colon; file names from Chrome's p
   assert.equal(fileBaseName("C:\\Users\\me\\Downloads\\StreamFetch\\reports\\x.json"), "x.json");
   assert.equal(fileBaseName("StreamFetch/Dailymotion/a [x].mp4"), "a [x].mp4");
   assert.equal(fileBaseName("plain.mp4"), "plain.mp4");
+});
+
+test("Bilibili.tv: a user video, an episode in its series' folder or its season's", () => {
+  const aid = "4801520000000001";
+  /** @type {import("../src/lib/naming.js").NamingTarget} */
+  const video = {
+    site: "bilibilitv",
+    id: aid,
+    title: "An invented clip: part 1",
+    part: null,
+    partTitle: null,
+    seasonId: null,
+    episodeId: null,
+    seriesTitle: null,
+  };
+  assert.equal(targetPath(video), `StreamFetch/Bilibili.tv/An invented clip_ part 1 [${aid}].mp4`);
+  assert.equal(isEpisode(video), false);
+  assert.equal(isMultiPart({ ...video, part: 3, partCount: 5 }), false);
+  /** @type {import("../src/lib/naming.js").NamingTarget} */
+  const episode = {
+    site: "bilibilitv",
+    id: "30010003",
+    title: "E3 - The End?",
+    part: 3,
+    partTitle: null,
+    seasonId: "2090001",
+    episodeId: "30010003",
+    seriesTitle: "An Invented Series",
+  };
+  assert.equal(isEpisode(episode), true);
+  assert.equal(
+    targetPath(episode),
+    "StreamFetch/Bilibili.tv/An Invented Series/E3 - The End_ [30010003].mp4",
+  );
+  // the series' title unknown (an episode pasted alone): `season <season_id>`
+  assert.equal(
+    targetPath({ ...episode, seriesTitle: null }),
+    "StreamFetch/Bilibili.tv/season 2090001/E3 - The End_ [30010003].mp4",
+  );
+  assert.equal(seriesFolder({ ...episode, seriesTitle: "  " }), `${SEASON_FOLDER_PREFIX} 2090001`);
+  // the episode's own title when the resolver keeps it apart; the episode id in brackets
+  assert.equal(
+    targetPath({ ...episode, title: "Series", partTitle: "E3 - Own", id: "x" }),
+    "StreamFetch/Bilibili.tv/An Invented Series/E3 - Own [30010003].mp4",
+  );
+  // a long series title is a folder of at most 80 units; forbidden characters become _
+  const long = targetPath({ ...episode, seriesTitle: `A/B ${"S".repeat(200)}` });
+  const folder = /** @type {string} */ (long.split("/")[2]);
+  assert.equal(folder.length, MAX_FOLDER_LEN);
+  assert.ok(folder.startsWith("A_B SSS"));
+  assert.equal(SITE_FOLDERS.bilibilitv, "Bilibili.tv");
 });

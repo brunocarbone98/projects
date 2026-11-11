@@ -23,11 +23,15 @@ import {
   qualityLabel,
   qualityOptions,
   retryInputs,
+  rowMessage,
+  rowTitle,
   siteName,
   streamLabel,
   summaryCounts,
 } from "../src/app/app.js";
+import { setCatalogs, setLanguage } from "../src/app/i18n.js";
 import { makeCooldown } from "../src/lib/cooldown.js";
+import { hintText } from "../src/lib/messages.js";
 
 /**
  * @typedef {import("../src/app/resolver.js").StreamChoice} StreamChoice
@@ -165,6 +169,62 @@ test("covers: only rows in view, one request at a time, never while not allowed,
   const again = image();
   loader.watch(again, "a", "https://s1.dmcdn.net/a.jpg");
   assert.equal(again.src, "blob:cover", "a cover already fetched is shown at once");
+});
+
+test("a row's message: failure, hints, notes, where it was saved, and `; cover: <reason>` last", () => {
+  /** @param {string} lang @returns {import("../src/app/i18n.js").Catalog} */
+  const catalog = (lang) => JSON.parse(readFileSync(new URL(`../_locales/${lang}/messages.json`, import.meta.url), "utf8"));
+  setCatalogs({ en: catalog("en"), es: catalog("es") });
+  setLanguage("en");
+  /** @type {Parameters<typeof rowMessage>[0]} */
+  const done = {
+    failure: null,
+    site: "dailymotion",
+    hints: [{ code: "playlist_ignored", params: {} }],
+    notes: [{ code: "cover", params: { reason: "HTTP 429" } }, { code: "no_audio", params: {} }],
+    path: "C:\\Users\\me\\Downloads\\StreamFetch\\Dailymotion\\A [xbq9z2k].mp4",
+    status: "done",
+  };
+  assert.equal(
+    rowMessage(done),
+    "playlist ignored: only this video is downloaded · no audio in the source · saved as A [xbq9z2k].mp4; cover: HTTP 429",
+  );
+  const premium = { ...done, hints: [{ code: "premium", params: { labels: ["1080P60", "4K"] } }], notes: [] };
+  assert.equal(rowMessage(premium).split(" · ")[0], hintText("premium", { labels: ["1080P60", "4K"] }));
+  /** @type {Parameters<typeof rowMessage>[0]} */
+  const login = { failure: { code: "login_required", params: {} }, site: "bilibilitv", hints: [], notes: [], path: null, status: "failed-unavailable" };
+  assert.match(rowMessage(login), /log in to Bilibili\.tv in this browser; a premium episode stays unavailable$/);
+  assert.doesNotMatch(rowMessage({ ...login, site: "bilibili" }), /premium/, "the login-or-premium hint is Bilibili.tv's");
+  /** @type {Parameters<typeof rowMessage>[0]} */
+  const gone = {
+    failure: { code: "deleted", params: { site_message: "Dailymotion says: Video not found — The video was removed" } },
+    site: "dailymotion",
+    hints: [],
+    notes: [],
+    path: null,
+    status: "failed-unavailable",
+  };
+  assert.equal(
+    rowMessage(gone),
+    "the video is gone or not available to this session (Dailymotion says: Video not found — The video was removed)",
+  );
+  setLanguage("es");
+  assert.match(rowMessage(done), /; portada: HTTP 429$/);
+  assert.match(rowMessage(done), /^lista ignorada/);
+  assert.match(rowMessage(login), /inicia sesión en Bilibili\.tv/);
+  assert.equal(
+    rowMessage(gone),
+    "el video ya no existe o no está disponible para esta sesión (Dailymotion dice: Video not found — The video was removed)",
+    "the prefix in Spanish, the site's own words as it wrote them",
+  );
+  setLanguage("en");
+});
+
+test("a row's title: a Bilibili.tv episode's own title, a Bilibili part's P<nn>, else the video's", () => {
+  assert.equal(rowTitle({ site: "bilibilitv", id: "13000002", title: "Fake Bstation Series", part: 2, partTitle: "E2 - The fake middle" }), "E2 - The fake middle");
+  assert.equal(rowTitle({ site: "bilibilitv", id: "4801520000000001", title: "A clip", part: null, partTitle: null }), "A clip");
+  assert.equal(rowTitle({ site: "bilibili", id: "BV1", title: "Anthology", part: 2, partTitle: "Second half" }), "P02 · Second half — Anthology");
+  assert.equal(rowTitle({ site: "dailymotion", id: "xbq9z2k", title: "", part: null, partTitle: null }), "xbq9z2k");
 });
 
 // ---------------------------------------------------------------------------- the page
@@ -528,6 +588,8 @@ test("the page loads idle: version, the engine lock held, the history empty", as
     assert.match(page.element("history-list").textContent, /No run yet/);
     assert.equal(page.element("cooldown-banner").hidden, true);
     assert.equal(page.element("setting-quality").value, "best");
+    assert.equal(page.element("setting-codec").value, "compatible");
+    assert.equal(page.element("setting-cover").value, "embed");
   } finally {
     page.restore();
   }
@@ -708,6 +770,13 @@ test("the popup offers a video page of the three sites only (test bases mapped o
   assert.equal(linkOfTab("https://www.youtube.com/watch?v=x", {}), null);
   assert.equal(linkOfTab(undefined, {}), null);
   assert.equal(linkOfTab("http://127.0.0.1:8123/dm/video/xbq9z2k", { dailymotion: "http://127.0.0.1:8123/dm" }), "https://www.dailymotion.com/video/xbq9z2k");
+  const aid = "4801520000000001";
+  const bstar = "?bstar_from=bstar-web.ugc-video-detail.related-recommend.all";
+  assert.equal(linkOfTab(`https://www.bilibili.tv/es/video/${aid}${bstar}`, {}), `https://www.bilibili.tv/en/video/${aid}`);
+  assert.equal(linkOfTab("https://www.bilibili.tv/en/play/2090001/13000002", {}), "https://www.bilibili.tv/en/play/2090001/13000002");
+  assert.equal(linkOfTab("https://www.bilibili.tv/en/play/2090001", {}), "https://www.bilibili.tv/en/play/2090001", "a series page");
+  assert.equal(linkOfTab("https://www.bilibili.tv/en/trending", {}), null);
+  assert.equal(linkOfTab(`http://127.0.0.1:8123/btv/en/video/${aid}`, { bilibilitv: "http://127.0.0.1:8123/btv" }), `https://www.bilibili.tv/en/video/${aid}`);
 });
 
 test("the worker opens the StreamFetch tab, or focuses the one open and hands it the link", async () => {

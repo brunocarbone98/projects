@@ -18,7 +18,10 @@ import { test } from "node:test";
 
 import {
   BOX_HEADER_PEEK,
+  COVER_ITEM,
+  DATA_TYPE,
   Mp4Error,
+  TITLE_ITEM,
   SAMPLE_FLAG_DEPENDS_YES,
   SAMPLE_FLAG_NON_SYNC,
   TFHD,
@@ -33,12 +36,14 @@ import {
   fullBox,
   i32,
   i64,
+  imageType,
   isSyncSample,
   memoryFile,
   parseFragments,
   parseInit,
   probe,
   readBoxes,
+  readMetadata,
   str4,
   u16,
   u24,
@@ -1015,6 +1020,123 @@ test("probe: layout, fragmented durations, truncation, Uint8Array input", MEDIA,
     "only headers and the moov are read",
   );
   await assert.rejects(probe(latin1("plain text, not a movie")), Mp4Error);
+});
+
+// ------------------------------------------------------------------- the iTunes metadata
+
+const JPEG = Uint8Array.from([0xff, 0xd8, 0xff, 0xdb, 0x01, 0x02, 0xff, 0xd9]);
+const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+/** The title ffmpeg is given below, with non-ASCII characters. */
+const TITLE = "Ñandú 日本 🎬";
+
+/**
+ * An `ilst` item holding one `data` atom of `dataType`.
+ * @param {string} type
+ * @param {number} dataType
+ * @param {Uint8Array} payload
+ */
+const item = (type, dataType, payload) => box(type, box("data", u32(dataType), u32(0), payload));
+const MDIR = fullBox("hdlr", 0, 0, u32(0), str4("mdir"), str4("appl"), new Uint8Array(9));
+
+/**
+ * A `moov` holding only `udta` › `meta` › `hdlr` + `ilst` of `items`; `quickTime` leaves out the
+ * meta's version and flags.
+ * @param {Uint8Array[]} items
+ * @param {boolean} [quickTime]
+ */
+function metaMoov(items, quickTime = false) {
+  const ilst = box("ilst", ...items);
+  const meta = quickTime ? box("meta", MDIR, ilst) : fullBox("meta", 0, 0, MDIR, ilst);
+  return box("moov", box("udta", meta));
+}
+
+test("imageType: the JPEG and PNG signatures, nothing else", () => {
+  assert.equal(imageType(JPEG), "jpeg");
+  assert.equal(imageType(PNG), "png");
+  assert.equal(imageType(JPEG.subarray(0, 2)), null, "cut short");
+  assert.equal(imageType(PNG.subarray(0, 7)), null, "cut short");
+  assert.equal(imageType(latin1("RIFF\0\0\0\0WEBPVP8 ")), null, "WebP is not embedded as is");
+  assert.equal(imageType(latin1("<html>")), null);
+  assert.equal(imageType(new Uint8Array(0)), null);
+  assert.equal(imageType(/** @type {Uint8Array} */ (/** @type {unknown} */ ("jpeg"))), null);
+});
+
+test("readMetadata: ISO and QuickTime meta, UTF-8/UTF-16 titles, cover types", () => {
+  assert.equal(TITLE_ITEM, "©nam");
+  assert.equal(COVER_ITEM, "covr");
+  assert.deepEqual(DATA_TYPE, { UTF8: 1, UTF16: 2, JPEG: 13, PNG: 14 });
+  const title = new TextEncoder().encode(TITLE);
+  const iso = metaMoov([item(TITLE_ITEM, 1, title), item(COVER_ITEM, 13, JPEG)]);
+  assert.deepEqual(readMetadata(iso), { title: TITLE, cover: { type: "jpeg", bytes: JPEG } });
+  // QuickTime's meta (no version and flags), a UTF-16 title and a cover of the implicit type 0.
+  const utf16 = Uint8Array.from([0x00, 0xd1, 0x00, 0x75]);
+  const quickTime = metaMoov([item(COVER_ITEM, 0, PNG), item(TITLE_ITEM, 2, utf16)], true);
+  assert.deepEqual(readMetadata(quickTime), { title: "Ñu", cover: { type: "png", bytes: PNG } });
+  assert.deepEqual(readMetadata(metaMoov([item(COVER_ITEM, 14, PNG)])).cover?.type, "png");
+  const bmp = latin1("BM\0\0\0\0");
+  assert.deepEqual(readMetadata(metaMoov([item(COVER_ITEM, 27, bmp)])).cover, {
+    type: "other",
+    bytes: bmp,
+  });
+  // The first item and the first data atom win; a binary title, an empty cover are no metadata.
+  const twice = metaMoov([
+    box(TITLE_ITEM, box("data", u32(1), u32(0), latin1("one")), box("data", u32(1), u32(0))),
+    item(TITLE_ITEM, 1, latin1("two")),
+  ]);
+  assert.equal(readMetadata(twice).title, "one");
+  const none = { title: null, cover: null };
+  assert.deepEqual(readMetadata(metaMoov([item(TITLE_ITEM, 0, latin1("?"))])), none);
+  assert.deepEqual(readMetadata(metaMoov([item(COVER_ITEM, 13, new Uint8Array(0))])), none);
+  assert.deepEqual(readMetadata(metaMoov([box(TITLE_ITEM), box(COVER_ITEM)])), none);
+  // The cover is a copy: the moov's bytes may be reused.
+  const copied = readMetadata(iso).cover;
+  iso.fill(0);
+  assert.deepEqual(copied?.bytes, JPEG);
+});
+
+test("readMetadata: no udta, no meta, no ilst, cut or junk boxes → nulls, never a throw", () => {
+  const none = { title: null, cover: null };
+  const whole = metaMoov([item(TITLE_ITEM, 1, latin1("title")), item(COVER_ITEM, 13, JPEG)]);
+  /** @type {Uint8Array[]} */
+  const inputs = [
+    new Uint8Array(0),
+    latin1("plain text, not a movie"),
+    box("moov", fullBox("mvhd", 0, 0, new Uint8Array(96))),
+    box("moov", box("udta", box("©too", latin1("Lavf")))),
+    box("moov", box("udta", fullBox("meta", 0, 0, MDIR))),
+    box("moov", box("udta", fullBox("meta", 0, 0, MDIR, box("ilst", u32(99))))),
+    box("free", box("udta")),
+  ];
+  for (const input of inputs) assert.deepEqual(readMetadata(input), none);
+  for (let cut = 0; cut < whole.length; cut += 7) {
+    assert.doesNotThrow(() => readMetadata(whole.subarray(0, cut)), `cut at ${cut}`);
+  }
+  const lying = whole.slice();
+  new DataView(lying.buffer).setUint32(8, 0xfffffff0, false);
+  assert.deepEqual(readMetadata(lying), none, "a udta that claims more bytes than the moov");
+});
+
+test("probe: the title and cover ffmpeg embeds (covr from an attached pic)", MEDIA, async () => {
+  const media = fixtures();
+  const src = await probe(media.bytes("src.mp4"));
+  assert.equal(src.title, null, "ffmpeg's own ilst holds only ©too");
+  assert.equal(src.cover, null);
+  ffmpeg(...options("-f lavfi -i color=c=blue:s=96x54 -frames:v 1"), media.path("cover.png"));
+  ffmpeg(
+    ...["-i", media.path("video-faststart.mp4"), "-i", media.path("cover.png")],
+    ...options("-map 0 -map 1 -c copy -disposition:v:1 attached_pic -movflags faststart"),
+    ...["-metadata", `title=${TITLE}`, media.path("with-cover.mp4")],
+  );
+  const probed = await probe(memoryFile("with-cover.mp4", media.bytes("with-cover.mp4")));
+  assert.equal(probed.title, TITLE);
+  assert.equal(probed.cover?.type, "png");
+  assert.deepEqual(probed.cover?.bytes, media.bytes("cover.png"));
+  assert.equal(probed.progressive, true);
+  assert.deepEqual(
+    probed.tracks.map((track) => [track.kind, track.codec, track.sampleCount]),
+    [["video", "avc1", 150]],
+    "the cover is no track",
+  );
 });
 
 // ------------------------------------------------------------------- samples against ffprobe

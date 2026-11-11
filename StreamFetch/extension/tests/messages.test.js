@@ -2,6 +2,7 @@
 // Unit tests of src/lib/messages.js: the statuses and their sets, every failure code's parameters
 // and English text, the stop reasons and the link refusals.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -10,6 +11,8 @@ import {
   FAILURE_CODES,
   FAILURE_PARAMS,
   FINAL_STATUSES,
+  HINT_CODES,
+  HINT_PARAMS,
   LINK_REFUSALS,
   LINK_REFUSAL_TEXTS_EN,
   NOT_DOWNLOADED_STATUSES,
@@ -21,9 +24,12 @@ import {
   failure,
   failureSubstitutions,
   failureText,
+  hintSubstitutions,
+  hintText,
   isFailure,
   isFailureCode,
   isFinal,
+  isHintCode,
   isNotDownloaded,
   isStatus,
   isStopReason,
@@ -337,4 +343,50 @@ test("failure records, the status a code gives, the stop reasons and the link re
     assert.ok(LINK_REFUSAL_TEXTS_EN[reason].length >= 10, reason);
   }
   assert.equal(refusalText("mystery"), "mystery");
+});
+
+test("hints: premium, playlist ignored (A.8), login or premium (Bilibili.tv), parameters", () => {
+  assert.deepEqual(HINT_CODES, ["premium", "playlist_ignored", "login_or_premium"]);
+  assert.deepEqual(HINT_PARAMS, {
+    premium: ["labels"],
+    playlist_ignored: [],
+    login_or_premium: [],
+  });
+  assert.equal(
+    hintText("premium", { labels: ["1080P60", "4K"] }),
+    "1080P60, 4K needs a premium membership",
+  );
+  assert.equal(hintText("premium"), "none listed needs a premium membership");
+  assert.equal(hintText("playlist_ignored"), "playlist ignored: only this video is downloaded");
+  assert.equal(
+    hintText("login_or_premium"),
+    "log in to Bilibili.tv in this browser; a premium episode stays unavailable",
+  );
+  assert.equal(hintText("mystery"), "mystery");
+  assert.deepEqual(hintSubstitutions("premium", { labels: ["1080P+"] }), ["1080P+"]);
+  assert.deepEqual(hintSubstitutions("playlist_ignored", { labels: ["x"] }), []);
+  assert.deepEqual(hintSubstitutions("mystery"), []);
+  assert.ok(isHintCode("premium") && !isHintCode("premium_only") && !isHintCode(1));
+});
+
+test("the hint and link-refusal texts are the English catalog's, the share-link advice too", () => {
+  /** @type {Record<string, { message: string }>} */
+  const english = JSON.parse(
+    readFileSync(new URL("../_locales/en/messages.json", import.meta.url), "utf8"),
+  );
+  for (const code of HINT_CODES) {
+    const values = HINT_PARAMS[code].map((name, index) => `<${name}:${index + 1}>`);
+    const params = Object.fromEntries(
+      HINT_PARAMS[code].map((name, index) => [name, values[index]]),
+    );
+    const message = english[`hint_${code}`]?.message ?? "";
+    const shown = message.replace(/\$[A-Z_]+\$/g, () => String(values.shift()));
+    assert.equal(shown, hintText(code, params), code);
+  }
+  for (const reason of LINK_REFUSALS) {
+    const key = `refused_${reason.replace(/-/g, "_")}`;
+    assert.equal(english[key]?.message, refusalText(reason), key);
+  }
+  assert.match(refusalText("other-site"), /Bilibili\.tv/);
+  assert.match(refusalText("unsupported-path"), /bili\.im/);
 });

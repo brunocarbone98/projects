@@ -17,7 +17,9 @@ Dailymotion (`/dm`, base `baseUrls.dailymotion`; CDN `/dm/cdn`, `baseUrls.dmcdn`
                                       the HLS master (`application/x-mpegURL`, with a `sec` token)
                                       and a lumberjack entry to ignore; HTTP 200 with an `error`
                                       object for `dm_geo_blocked` (`DM007`) and `dm_not_found`
-                                      (`DM002`), as the real endpoint answers
+                                      (`DM002`), as the real endpoint answers; `dm_claims_longer`:
+                                      `duration` 60 while the media is the 6 s clip (a shorter
+                                      file than the site says: never saved)
   /dm/cdn/manifest/<xid>.m3u8         the HLS master: two variants, `NAME="1080"` (1920x1080) and
                                       `NAME="480"` (854x480), muxed audio; 429 for
                                       `dm_rate_limit_manifest`. Every master request starts a new
@@ -31,16 +33,18 @@ Dailymotion (`/dm`, base `baseUrls.dailymotion`; CDN `/dm/cdn`, `baseUrls.dmcdn`
                                       `EXPIRING_SEGMENT` the first time it is asked for (a fresh
                                       master serves new URLs: a new `gen`);
                                       `dm_truncate_segment`: segment `TRUNCATED_SEGMENT` cut short
-                                      once (full `Content-Length`, half the body, connection closed)
+                                      once (full `Content-Length`, half the body, the connection
+                                      dropped `CUT_LINGER_S` later)
   /dm/cdn/<xid>/init.mp4              the fMP4 init segment
   /dm/cdn/<xid>/key.bin               404: StreamFetch never asks for a key (the log shows it if it
                                       did)
-  /dm/poster/<xid>.jpg                a poster
+  /dm/poster/<xid>.jpg                a poster (the cover rules below)
 
 Bilibili (`/bili`, base `baseUrls.bilibili`; short links `/b23`, `baseUrls.b23`)
   /bili/video/<bvid>[/]?p=N           the video page (`fixtures/bilibili-page.html`) embedding
                                       `window.__INITIAL_STATE__ = {...}` (`videoData` with
-                                      `bili_parts` pages, `upData`) and `window.__playinfo__ =
+                                      `bili_parts` pages — `bili_parts_of` sets one video's
+                                      count —, `upData`) and `window.__playinfo__ =
                                       {...}` for part N (default 1): DASH `video[]` per
                                       `bili_qualities`, `audio[]` 30280 + 30216, `support_formats`,
                                       `accept_quality`, `accept_description`, `timelength`; every
@@ -63,10 +67,10 @@ Bilibili (`/bili`, base `baseUrls.bilibili`; short links `/b23`, `baseUrls.b23`)
                                       `bili_cdn_412`: 412 `Request is blocked by server (412)`;
                                       `bili_drm`: the video served encrypted (`encv` + `pssh`);
                                       `bili_cut_once`: the first request of part 1's chosen video
-                                      file is cut short (half the body, connection closed)
+                                      file is cut short (half the body, then the connection drops)
   /bili/cdn/<cid>/audio-<id>.m4s      a DASH audio track; same rules; `bili_expire_once`: 403 the
                                       first time (expired: the extension re-reads the page)
-  /bili/cover/<bvid>.jpg              the cover (`videoData.pic`)
+  /bili/cover/<bvid>.jpg              the cover (`videoData.pic`; the cover rules below)
 
 Bilibili.tv (`/btv` pages, base `baseUrls.bilibilitv`; API `/btv-api`, `baseUrls.bilibilitvApi`)
   /btv[/<lang>]/video/<aid>           a user video page (`fixtures/bilibilitv-page.html`):
@@ -88,7 +92,13 @@ Bilibili.tv (`/btv` pages, base `baseUrls.bilibilitv`; API `/btv-api`, `baseUrls
   /btv-api/intl/gateway/web/v2/ogv/play/season_info?season_id=… `data.season.title`
   /btv-cdn/<id>/<q>.mp4, /btv-cdn/<id>/audio-<q>.mp4             the media; `Range`; 403 unless
                                       the `Referer` is `{base}/btv/`, or once `deadline` passed
-  /btv-cover/<id>.jpg                 the cover
+  /btv-cover/<id>.jpg                 the cover (the cover rules below)
+
+Covers (B.2: StreamFetch embeds the cover in the MP4; its rows show it as a lazy thumbnail): every
+cover is `media.cover` (a JPEG) at a `.jpg` URL, except `cover_png` (`media.cover_png` at `.png`)
+and `cover_webp` (`media.cover_webp` at `.webp`, the one the extension converts to JPEG);
+`cover_status` refuses one video's cover with a status (404, 429, 403 …: a cover is never worth a
+stop). A cover asked for under another extension than its own is a 404.
 
 Per-video options are sets of ids (`"*"` = every id): xids for `dm_*`, bvids for `bili_*`, aids
 or episode ids for `btv_*`. `FakeSites.set_options(...)` changes them while the server runs (a
@@ -139,10 +149,20 @@ DM_VARIANTS = (("1080", "1920x1080", 5_000_000), ("480", "854x480", 1_200_000))
 EXPIRING_SEGMENT = 2
 #: `dm_truncate_segment` cuts this segment (`seg001`) short once.
 TRUNCATED_SEGMENT = 1
+#: `dm_claims_longer`: the duration the metadata claims, far beyond the 6 s clip it serves.
+CLAIMED_SECONDS = SOURCE_SECONDS * 10
 
 #: Bilibili: `BV` + 10 alphanumerics.
 BILI_MAIN = "BV1Fk4y1A7Ab"
-BILI_TITLES = {BILI_MAIN: "Fake Bilibili two-part video"}
+#: A one-part video pasted as a share link (`vd_source`, `spm_id_from`: B.3).
+BILI_SHARE = "BV1Sh8R1aE2s"
+#: A video whose title is not ASCII: the `©nam` tag must carry it in UTF-8 (B.2).
+BILI_UNICODE = "BV1Uc9N1iC0d"
+BILI_TITLES = {
+    BILI_MAIN: "Fake Bilibili two-part video",
+    BILI_SHARE: "Fake Bilibili share link video",
+    BILI_UNICODE: "Fake 封面测试 — vídeo ñandú",
+}
 BILI_PART_TITLES = ("First half", "Second half")
 BILI_ID_RE = re.compile(r"^(?:BV[0-9A-Za-z]{10}|av\d+)$")
 #: b23.tv short codes → the video they redirect to.
@@ -196,6 +216,11 @@ BTV_LANG_RE = r"(?:/(?P<lang>[A-Za-z]{2}))?"
 
 #: How long a read of the log waits for the requests being answered.
 SETTLE_S = 2.0
+#: How long a cut answer keeps its connection open after the half body, before dropping it: a
+#: network cut drops a connection that has delivered bytes, and a browser hands the body stream
+#: what it received before it reports the error — closed at once, Chrome reports the error first
+#: and the client never sees the bytes it could resume from.
+CUT_LINGER_S = 0.3
 #: Every option's id set accepts this as "every id".
 ANY = "*"
 
@@ -205,12 +230,13 @@ _DM_MEDIA = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/media-(?P<name>[0-9a-z]+)\.m3u8$
 _DM_SEGMENT = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/seg(?P<n>\d+)\.(?P<ext>ts|m4s)$")
 _DM_INIT = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/init\.mp4$")
 _DM_KEY = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/key\.bin$")
-_DM_POSTER = re.compile(r"^/dm/poster/(?P<id>[^/]+)\.jpg$")
+_COVER_EXT = r"\.(?P<ext>jpg|png|webp)"
+_DM_POSTER = re.compile(rf"^/dm/poster/(?P<id>[^/]+){_COVER_EXT}$")
 _BILI_PAGE = re.compile(r"^/bili/video/(?P<id>[^/]+)/?$")
 _B23 = re.compile(r"^/b23/(?P<code>[0-9A-Za-z]+)$")
 _BILI_VIDEO = re.compile(r"^/bili/cdn/(?P<cid>\d+)/(?P<q>\d+)(?:-(?P<codec>hevc))?\.m4s$")
 _BILI_AUDIO = re.compile(r"^/bili/cdn/(?P<cid>\d+)/audio-(?P<q>\d+)\.m4s$")
-_BILI_COVER = re.compile(r"^/bili/cover/(?P<id>[^/]+)\.jpg$")
+_BILI_COVER = re.compile(rf"^/bili/cover/(?P<id>[^/]+){_COVER_EXT}$")
 _BTV_VIDEO_PAGE = re.compile(rf"^/btv{BTV_LANG_RE}/video/(?P<aid>\d+)/?$")
 _BTV_EPISODE_PAGE = re.compile(rf"^/btv{BTV_LANG_RE}/play/(?P<season>\d+)/(?P<ep>\d+)/?$")
 _BTV_PLAYURL = "/btv-api/intl/gateway/web/playurl"
@@ -218,7 +244,7 @@ _BTV_EPISODES = "/btv-api/intl/gateway/web/v2/ogv/play/episodes"
 _BTV_SEASON_INFO = "/btv-api/intl/gateway/web/v2/ogv/play/season_info"
 _BTV_VIDEO = re.compile(r"^/btv-cdn/(?P<id>\d+)/(?P<q>\d+)\.mp4$")
 _BTV_AUDIO = re.compile(r"^/btv-cdn/(?P<id>\d+)/audio-(?P<q>\d+)\.mp4$")
-_BTV_COVER = re.compile(r"^/btv-cover/(?P<id>\d+)\.jpg$")
+_BTV_COVER = re.compile(rf"^/btv-cover/(?P<id>\d+){_COVER_EXT}$")
 _RANGE = re.compile(r"^bytes=(?P<start>\d+)-(?P<end>\d*)$")
 
 #: Route name → (site, kind). `kind`: page (pages, metadata, manifests, APIs, redirects), media
@@ -261,8 +287,13 @@ class FakeOptions:
     dm_expire_segment_once: frozenset[str] = frozenset()
     dm_rate_limit_manifest: frozenset[str] = frozenset()
     dm_truncate_segment: frozenset[str] = frozenset()
+    #: Not in spec 9's list: the metadata says the video lasts `CLAIMED_SECONDS` while the media is
+    #: the 6 s clip, so the e2e suite proves B.1's "a shorter file is never saved as the video".
+    dm_claims_longer: frozenset[str] = frozenset()
     # Bilibili (bvids)
     bili_parts: int = 1
+    #: `(bvid, parts)` pairs: those videos' part counts, whatever `bili_parts` says.
+    bili_parts_of: tuple[tuple[str, int], ...] = ()
     bili_qualities: tuple[tuple[int, str], ...] = DEFAULT_BILI_QUALITIES
     bili_missing_premium: frozenset[str] = frozenset()
     bili_login_wall: frozenset[str] = frozenset()
@@ -284,6 +315,11 @@ class FakeOptions:
     btv_fragmented: frozenset[str] = frozenset()
     btv_missing_quality: frozenset[str] = frozenset()
     btv_uncovered_host: frozenset[str] = frozenset()
+    # Covers (xids, bvids, aids, episode ids)
+    cover_png: frozenset[str] = frozenset()
+    cover_webp: frozenset[str] = frozenset()
+    #: `(video id, status)` pairs: that video's cover is refused with that status.
+    cover_status: tuple[tuple[str, int], ...] = ()
     #: Seconds every media answer waits before its body (a slow CDN; `0` = none). Lets a test see
     #: a job in progress (covers never requested during a job, Stop, the second tab).
     media_delay_s: float = 0.0
@@ -292,6 +328,26 @@ class FakeOptions:
 def applies(option: frozenset[str], video_id: str) -> bool:
     """Whether a per-video option names `video_id` (or `ANY`)."""
     return ANY in option or video_id in option
+
+
+def parts_of(options: FakeOptions, bvid: str) -> int:
+    """How many parts the fake Bilibili video `bvid` has (`bili_parts_of`, else `bili_parts`)."""
+    return max(1, dict(options.bili_parts_of).get(bvid, options.bili_parts))
+
+
+#: Cover formats: extension → (content type, `MediaSet` attribute).
+COVER_FORMATS = {
+    "jpg": ("image/jpeg", "cover"),
+    "png": ("image/png", "cover_png"),
+    "webp": ("image/webp", "cover_webp"),
+}
+
+
+def cover_ext(options: FakeOptions, video_id: str) -> str:
+    """The extension of `video_id`'s cover URL: `png`, `webp` or `jpg` (the default)."""
+    if applies(options.cover_png, video_id):
+        return "png"
+    return "webp" if applies(options.cover_webp, video_id) else "jpg"
 
 
 @dataclass(frozen=True)
@@ -466,7 +522,9 @@ def dm_metadata(base: str, xid: str, options: FakeOptions, generation_token: str
         return {"error": {**error, "title": title, "message": message, "raw_message": message}}
     raw = _template("dailymotion-metadata.json").replace("{{ID}}", xid)
     metadata: dict[str, Any] = json.loads(raw.replace("{{TITLE}}", dm_title(xid)))
-    poster = f"{base}/dm/poster/{xid}.jpg"
+    if applies(options.dm_claims_longer, xid):
+        metadata["duration"] = CLAIMED_SECONDS
+    poster = f"{base}/dm/poster/{xid}.{cover_ext(options, xid)}"
     metadata["posters"] = {height: f"{poster}?h={height}" for height in ("120", "360", "720")}
     metadata["thumbnails"] = dict(metadata["posters"])
     master = f"{base}/dm/cdn/manifest/{xid}.m3u8?sec={generation_token}&dmTs=1762560000"
@@ -521,8 +579,8 @@ def bili_page_html(base: str, bvid: str, part: int, options: FakeOptions) -> str
     if applies(options.bili_riskdata, bvid):
         return _template("bilibili-riskdata.html")
     title = bili_title(bvid)
-    cover = f"{base}/bili/cover/{bvid}.jpg"
-    parts = max(1, options.bili_parts)
+    cover = f"{base}/bili/cover/{bvid}.{cover_ext(options, bvid)}"
+    parts = parts_of(options, bvid)
     aid = int(bili_cid(bvid, 0)) // 10
     state: dict[str, Any] = {"aid": aid, "bvid": bvid, "p": part, "episode": "", "error": {}}
     if applies(options.bili_login_wall, bvid):
@@ -662,11 +720,13 @@ def bili_playinfo(base: str, bvid: str, part: int, options: FakeOptions) -> dict
     return {"code": 0, "message": "0", "ttl": 1, "data": data, "session": "fake0123456789"}
 
 
-def btv_page_html(base: str, lang: str, *, aid: str | None, ep_id: str | None) -> str:
+def btv_page_html(
+    base: str, lang: str, options: FakeOptions, *, aid: str | None, ep_id: str | None
+) -> str:
     """A bilibili.tv page: a user video (`aid`) or an episode (`ep_id`)."""
     if aid is not None:
         title = btv_title(aid)
-        cover = f"{base}/btv-cover/{aid}.jpg"
+        cover = f"{base}/btv-cover/{aid}.{cover_ext(options, aid)}"
         video = {
             "aid": int(aid),  # a number, as JSON gives it; the URL's string is the truth (A.7)
             "title": title,
@@ -680,7 +740,7 @@ def btv_page_html(base: str, lang: str, *, aid: str | None, ep_id: str | None) -
     else:
         assert ep_id is not None
         title = btv_episode_title(ep_id)
-        cover = f"{base}/btv-cover/{ep_id}.jpg"
+        cover = f"{base}/btv-cover/{ep_id}.{cover_ext(options, ep_id)}"
         episode = {
             "episode_id": int(ep_id),
             "season_id": int(BTV_SEASON),
@@ -759,7 +819,7 @@ def btv_playurl(
     return {"code": 0, "message": "0", "ttl": 1, "data": {"playurl": playurl}}
 
 
-def btv_episodes(base: str) -> dict[str, Any]:
+def btv_episodes(base: str, options: FakeOptions) -> dict[str, Any]:
     sections = []
     for number, indexes in enumerate(BTV_SECTIONS, start=1):
         episodes = []
@@ -771,7 +831,7 @@ def btv_episodes(base: str) -> dict[str, Any]:
                     "title": title.split(" - ", 1)[-1],
                     "title_display": title,
                     "short_title_display": title.split(" - ", 1)[0],
-                    "cover": f"{base}/btv-cover/{ep_id}.jpg",
+                    "cover": f"{base}/btv-cover/{ep_id}.{cover_ext(options, ep_id)}",
                     "duration": SOURCE_SECONDS,
                 }
             )
@@ -870,7 +930,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _media(self, data: bytes, content_type: str, *, ranges: bool, cut: bool = False) -> None:
         """A media body: `Range` honoured when `ranges` (206 / 416), cut at half when `cut`
-        (the full length announced, the connection closed)."""
+        (the full length announced, the connection dropped `CUT_LINGER_S` after the half)."""
         delay = self.server.options.media_delay_s
         if delay > 0:
             self.server.release.wait(delay)
@@ -894,9 +954,23 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(half)
             self.wfile.flush()
             self._sent, self._cut = len(half), True
+            self.server.release.wait(CUT_LINGER_S)
             self.close_connection = True
             return
         self._send(status, body, content_type, extra)
+
+    def _cover(self, video_id: str, ext: str) -> None:
+        """A cover or poster (the cover rules of the module docstring)."""
+        server, options = self.server, self.server.options
+        refused = dict(options.cover_status).get(video_id)
+        if refused is not None:
+            self._send(refused, f"cover refused ({refused})".encode())
+            return
+        if ext != cover_ext(options, video_id):
+            self._not_found()
+            return
+        content_type, attribute = COVER_FORMATS[ext]
+        self._send(200, server.file(getattr(server.media, attribute)), content_type)
 
     def _referer_ok(self, site_prefix: str) -> bool:
         return self.headers.get("Referer") == f"{self.server.base_url}{site_prefix}/"
@@ -971,9 +1045,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif _DM_KEY.match(path):
             self._route = "dm-key"
             self._not_found()
-        elif _DM_POSTER.match(path):
+        elif match := _DM_POSTER.match(path):
             self._route = "dm-poster"
-            self._send(200, server.file(media.cover), "image/jpeg")
+            self._cover(match.group("id"), match.group("ext"))
         else:
             self._not_found()
 
@@ -1010,7 +1084,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not BILI_ID_RE.match(bvid):
                 self._not_found()
                 return
-            parts = max(1, options.bili_parts)
+            parts = parts_of(options, bvid)
             part = int(query["p"]) if query.get("p", "").isdigit() else 1
             part = part if 1 <= part <= parts else 1
             with server.lock:
@@ -1036,9 +1110,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif match := _BILI_AUDIO.match(path):
             self._route = "bili-audio"
             self._bili_cdn(match.group("cid"), query, video=None)
-        elif _BILI_COVER.match(path):
+        elif match := _BILI_COVER.match(path):
             self._route = "bili-cover"
-            self._send(200, server.file(server.media.cover), "image/jpeg")
+            self._cover(match.group("id"), match.group("ext"))
         else:
             self._not_found()
 
@@ -1094,7 +1168,8 @@ class _Handler(BaseHTTPRequestHandler):
         if match := _BTV_VIDEO_PAGE.match(path):
             self._route = "btv-page"
             lang = (match.group("lang") or "en").lower()
-            self._html(btv_page_html(server.base_url, lang, aid=match.group("aid"), ep_id=None))
+            aid = match.group("aid")
+            self._html(btv_page_html(server.base_url, lang, options, aid=aid, ep_id=None))
         elif match := _BTV_EPISODE_PAGE.match(path):
             self._route = "btv-page"
             lang = (match.group("lang") or "en").lower()
@@ -1102,7 +1177,7 @@ class _Handler(BaseHTTPRequestHandler):
             if match.group("season") != BTV_SEASON or ep_id not in dict(BTV_EPISODES):
                 self._not_found()
                 return
-            self._html(btv_page_html(server.base_url, lang, aid=None, ep_id=ep_id))
+            self._html(btv_page_html(server.base_url, lang, options, aid=None, ep_id=ep_id))
         elif path == _BTV_PLAYURL:
             self._route = "btv-playurl"
             video_id = query.get("aid") or query.get("ep_id") or ""
@@ -1115,7 +1190,7 @@ class _Handler(BaseHTTPRequestHandler):
             if query.get("season_id") != BTV_SEASON:
                 self._json({"code": -404, "message": "-404", "ttl": 1, "data": None})
                 return
-            self._json(btv_episodes(server.base_url))
+            self._json(btv_episodes(server.base_url, options))
         elif path == _BTV_SEASON_INFO:
             self._route = "btv-season-info"
             if query.get("season_id") != BTV_SEASON:
@@ -1144,9 +1219,9 @@ class _Handler(BaseHTTPRequestHandler):
             fragmented = applies(options.btv_fragmented, video_id)
             source = media.dash_audio if fragmented else media.progressive_audio
             self._media(server.file(source), "audio/mp4", ranges=True)
-        elif _BTV_COVER.match(path):
+        elif match := _BTV_COVER.match(path):
             self._route = "btv-cover"
-            self._send(200, server.file(media.cover), "image/jpeg")
+            self._cover(match.group("id"), match.group("ext"))
         else:
             self._not_found()
 

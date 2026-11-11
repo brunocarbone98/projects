@@ -198,6 +198,24 @@
       }
     }
   },
+  "note_cover": {
+    "message": "portada: $REASON$",
+    "description": "The end of a done row's message: saved without its cover, and why",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "site_says": {
+    "message": "$SITE$ dice:",
+    "description": "Before a site's own words in a failure message (Dailymotion's error title)",
+    "placeholders": {
+      "site": {
+        "content": "$1"
+      }
+    }
+  },
   "savedAs": {
     "message": "guardado como $NAME$",
     "description": "A done row",
@@ -410,6 +428,18 @@
   "settingReport": {
     "message": "Guardar un informe de lo que no se descargó al final de cada ejecución",
     "description": "Setting"
+  },
+  "settingCover": {
+    "message": "Portada en cada archivo guardado",
+    "description": "Setting"
+  },
+  "coverEmbed": {
+    "message": "Incluir la portada y el título del video (una solicitud más por archivo)",
+    "description": "Cover option"
+  },
+  "coverNone": {
+    "message": "Solo el título, sin pedir la portada",
+    "description": "Cover option"
   },
   "settingLanguage": {
     "message": "Idioma",

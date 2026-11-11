@@ -1,0 +1,12 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "playurl": {
+      "duration": 0,
+      "video": [],
+      "audio_resource": []
+    }
+  }
+}

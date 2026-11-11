@@ -1,5 +1,6 @@
 """The StreamFetch tab end to end (spec 6 and 9): Chrome in Spanish (`LANGUAGE=es`, how Chrome on
-Linux picks its UI language) shows statuses, failure messages and the failed block in Spanish; a
+Linux picks its UI language) shows statuses, failure messages, the note of a file saved without
+its cover (B.2) and the failed block in Spanish; a
 second StreamFetch tab is read-only while the first holds the engine; **Retry** re-runs exactly
 the inputs that did not download; **Stop** ends the run and marks the rest stopped; the page
 shows its version and the legal notice."""
@@ -73,7 +74,7 @@ def test_the_spanish_ui_shows_statuses_failures_and_the_failed_block_in_spanish(
 ):
     monkeypatch.setenv("LANGUAGE", "es")  # Chrome on Linux takes its UI language from it
     with (
-        FakeSites(media, dm_geo_blocked=frozenset({GEO})) as sites,
+        FakeSites(media, dm_geo_blocked=frozenset({GEO}), cover_status=((DM_TS_ID, 404),)) as sites,
         ExtensionHarness(tmp_path, sites) as ext,
     ):
         es, en = ext.messages("es"), ext.messages("en")
@@ -89,6 +90,9 @@ def test_the_spanish_ui_shows_statuses_failures_and_the_failed_block_in_spanish(
         chunks = _literal_chunks(template)
         assert chunks and all(chunk in geo.message for chunk in chunks), (geo.message, template)
         assert "not available in your country" not in geo.message
+        # a done row saved without its cover (a 404 on it, B.2): the note in Spanish too
+        assert "; " in done.message and "cover:" not in done.message, done.message
+        _assert_spanish(done.message.rsplit("; ", 1)[-1], es, en)
         # the failed block, its buttons and the report line
         for selector in ("#failed-heading", "#retry-button", "#report-button"):
             _assert_spanish(ext.text(selector), es, en)
@@ -180,8 +184,8 @@ def test_stop_ends_the_current_request_and_marks_the_rest_stopped(media: MediaSe
             "stopped",
         ]
         assert sites.about(BILI_MAIN) == []
-        count = len(sites.requests)
+        count = len(sites.site_requests())
         time.sleep(2)
-        assert len(sites.requests) == count, "requests went on after Stop"
+        assert len(sites.site_requests()) == count, "requests went on after Stop"
         assert ext.saved_files() == []
         assert ext.cooldown() is None  # Stop is no refusal: no cooldown

@@ -88,8 +88,7 @@ test("Dailymotion: x and k ids, slugs, embed, geo player, dai.ly, no scheme, htt
   assert.equal(item(`  ${page}  `).original, page);
 });
 
-test("Dailymotion refusals: playlists of every shape, searches, channels, bad ids, paths", () => {
-  assert.equal(reason("https://www.dailymotion.com/video/x8vu47w?playlist=x7wdsj"), "playlist");
+test("Dailymotion refusals: a playlist and no video, searches, channels, bad ids, paths", () => {
   assert.equal(reason("https://geo.dailymotion.com/player/xf7zn.html?playlist=x7wdsj"), "playlist");
   assert.equal(reason("https://www.dailymotion.com/playlist/x7wdsj"), "playlist");
   assert.equal(reason("https://www.dailymotion.com/playlist"), "playlist");
@@ -234,8 +233,8 @@ test("other sites and junk; the original is kept as pasted", () => {
     "https://www.tiktok.com/@a/video/1",
     "https://vimeo.com/1",
     "example.com/video/BV1GJ411x7h7",
-    "https://bilibili.tv/en/video/1",
-    "https://www.biliintl.com/en/video/1",
+    "https://notbilibili.tv/en/video/1",
+    "https://www.bilibili.tv.example.com/en/video/1",
     "https://dailymotion.example.com/video/x8vu47w",
     "https://notdailymotion.com/video/x1",
     "https://dai.ly.example.com/x1",
@@ -351,4 +350,271 @@ test("the popup's check: a tab on a video page, real or under the test bases; no
   assert.equal(videoItemFromUrl(`http://127.0.0.1:8123/bili/video/${BVID}`), null);
   assert.equal(videoItemFromUrl(`http://127.0.0.1:8123/other/video/${BVID}`, bases), null);
   assert.equal(videoItemFromUrl("http://127.0.0.1:8123/bili/bangumi/play/ep1", bases), null);
+});
+
+// ------------------------------------------------------- Addendum A.7: Bilibili.tv links
+
+/** An invented aid of the shape of the owner's examples (16 digits). */
+const AID = "4801520000000001";
+/** The tracking parameter the site adds to links of its "related" list, exactly. */
+const BSTAR_FROM = "bstar_from=bstar-web.ugc-video-detail.related-recommend.all";
+
+test("Bilibili.tv: a user video with and without bstar_from, any language, host and scheme", () => {
+  const plain = `https://www.bilibili.tv/en/video/${AID}`;
+  assert.deepEqual(item(`${plain}?${BSTAR_FROM}`), {
+    key: `bilibilitv:video:${AID}`,
+    site: "bilibilitv",
+    kind: "video",
+    id: AID,
+    part: null,
+    shortLink: null,
+    pageUrl: plain,
+    original: `${plain}?${BSTAR_FROM}`,
+    seasonId: null,
+  });
+  for (const link of [
+    plain,
+    `${plain}/`,
+    `https://www.bilibili.tv/es/video/${AID}?${BSTAR_FROM}`,
+    `https://www.bilibili.tv/EN/video/${AID}`,
+    `https://www.bilibili.tv/id/video/${AID}`,
+    `https://www.bilibili.tv/th/video/${AID}#comments`,
+    `https://www.bilibili.tv/vi/video/${AID}?spm_id_from=a.b.c&share_source=copy_link`,
+    `https://www.bilibili.tv/zh/video/${AID}?share_medium=android&from_spmid=x&t=42`,
+    `https://bilibili.tv/video/${AID}`,
+    `http://www.bilibili.tv/en/video/${AID}`,
+    `www.bilibili.tv/en/video/${AID}?${BSTAR_FROM}`,
+    `bilibili.tv/en/video/${AID}`,
+    `https://www.biliintl.com/en/video/${AID}`,
+    `https://biliintl.com/video/${AID}?${BSTAR_FROM}`,
+    `HTTPS://WWW.BILIBILI.TV/EN/VIDEO/${AID}`,
+  ]) {
+    const parsed = item(link);
+    assert.deepEqual(
+      [parsed.key, parsed.id, parsed.pageUrl, parsed.kind],
+      [`bilibilitv:video:${AID}`, AID, plain, "video"],
+      link,
+    );
+  }
+});
+
+test("Bilibili.tv: the aid is text end to end — 16 digits past 2^53 keep every digit", () => {
+  const big = "9007199254740993";
+  const parsed = item(`https://www.bilibili.tv/en/video/${big}?${BSTAR_FROM}`);
+  assert.equal(parsed.id, big);
+  assert.equal(parsed.key, `bilibilitv:video:${big}`);
+  assert.equal(parsed.pageUrl, `https://www.bilibili.tv/en/video/${big}`);
+  assert.notEqual(String(Number(big)), big, "a number would have lost the last digit");
+  // two aids that are the same number once parsed stay two items
+  const next = "9007199254740992";
+  const both = parseInput(
+    `https://www.bilibili.tv/en/video/${big}\nhttps://www.bilibili.tv/en/video/${next}`,
+  );
+  assert.deepEqual(
+    both.items.map((entry) => entry.id),
+    [big, next],
+  );
+});
+
+test("Bilibili.tv: episodes and whole series (play/<season>, media/<season>)", () => {
+  assert.deepEqual(item("https://www.bilibili.tv/en/play/2090001/30010003?bstar_from=x"), {
+    key: "bilibilitv:episode:30010003",
+    site: "bilibilitv",
+    kind: "episode",
+    id: "30010003",
+    part: null,
+    shortLink: null,
+    pageUrl: "https://www.bilibili.tv/en/play/2090001/30010003",
+    original: "https://www.bilibili.tv/en/play/2090001/30010003?bstar_from=x",
+    seasonId: "2090001",
+  });
+  const intl = item("https://www.biliintl.com/es/play/2090001/30010003/");
+  assert.equal(intl.key, "bilibilitv:episode:30010003");
+  const series = item("https://www.bilibili.tv/en/play/2090001");
+  assert.deepEqual(
+    [series.key, series.kind, series.id, series.seasonId, series.pageUrl],
+    [
+      "bilibilitv:series:2090001",
+      "series",
+      "2090001",
+      "2090001",
+      "https://www.bilibili.tv/en/play/2090001",
+    ],
+  );
+  const media = item("https://www.bilibili.tv/en/media/2090001?x=1");
+  assert.equal(media.key, "bilibilitv:series:2090001");
+  assert.equal(item("https://www.bilibili.tv/play/2090001/").key, "bilibilitv:series:2090001");
+  assert.equal(item("https://www.biliintl.com/EN/media/2090001").key, "bilibilitv:series:2090001");
+});
+
+test("Bilibili.tv refusals: other paths and hosts, bili.im share links", () => {
+  for (const url of [
+    "https://www.bilibili.tv/en/space/123456",
+    "https://www.bilibili.tv/en/trending",
+    "https://www.bilibili.tv/en/search-result?q=drama",
+    "https://www.bilibili.tv/en",
+    "https://www.bilibili.tv/",
+    "https://bilibili.tv",
+    `https://www.bilibili.tv/en/video/${AID}/extra`,
+    "https://www.bilibili.tv/en/video/abc123",
+    "https://www.bilibili.tv/en/video/",
+    "https://www.bilibili.tv/english/video/1",
+    "https://www.bilibili.tv/en/play/2090001/30010003/1",
+    "https://www.bilibili.tv/en/media/2090001/30010003",
+    `https://api.bilibili.tv/intl/gateway/web/playurl?platform=web&aid=${AID}`,
+    `https://m.bilibili.tv/en/video/${AID}`,
+    "https://bili.im/AbCdEfG",
+    "bili.im/AbCdEfG",
+  ]) {
+    assert.equal(reason(url), "unsupported-path", url);
+  }
+});
+
+test("Bilibili.tv in the text box: the same video in two languages is one item", () => {
+  const parsed = parseInput(
+    [
+      `https://www.bilibili.tv/en/video/${AID}?${BSTAR_FROM}`,
+      `https://www.bilibili.tv/es/video/${AID}`,
+      `bilibili.tv/video/${AID}`,
+      "https://www.bilibili.tv/en/play/2090001",
+      "https://www.bilibili.tv/en/media/2090001",
+      "https://bili.im/AbCdEfG",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    parsed.items.map((entry) => entry.key),
+    [`bilibilitv:video:${AID}`, "bilibilitv:series:2090001"],
+  );
+  assert.deepEqual(parsed.dropped, [
+    `https://www.bilibili.tv/es/video/${AID}`,
+    `bilibili.tv/video/${AID}`,
+    "https://www.bilibili.tv/en/media/2090001",
+  ]);
+  assert.deepEqual(parsed.refused, [
+    { original: "https://bili.im/AbCdEfG", reason: "unsupported-path" },
+  ]);
+  assert.equal(itemKey("bilibilitv", AID), `bilibilitv:video:${AID}`);
+  assert.equal(itemKey("bilibilitv", "7", null, "episode"), "bilibilitv:episode:7");
+  assert.equal(itemKey("bilibilitv", "9", null, "series"), "bilibilitv:series:9");
+  assert.equal(pageUrlOf("bilibilitv", AID), `https://www.bilibili.tv/en/video/${AID}`);
+});
+
+test("the popup's check knows Bilibili.tv pages, real or under the test base", () => {
+  assert.equal(isVideoPageUrl(`https://www.bilibili.tv/en/video/${AID}?${BSTAR_FROM}`), true);
+  assert.equal(isVideoPageUrl("https://www.bilibili.tv/en/play/2090001/30010003"), true);
+  assert.equal(isVideoPageUrl("https://www.bilibili.tv/en/trending"), false);
+  const bases = { bilibilitv: "http://127.0.0.1:8123/btv/" };
+  const fake = videoItemFromUrl(`http://127.0.0.1:8123/btv/es/video/${AID}`, bases);
+  assert.deepEqual(
+    [fake?.key, fake?.pageUrl, fake?.original],
+    [
+      `bilibilitv:video:${AID}`,
+      `https://www.bilibili.tv/en/video/${AID}`,
+      `http://127.0.0.1:8123/btv/es/video/${AID}`,
+    ],
+  );
+  assert.equal(videoItemFromUrl(`http://127.0.0.1:8123/btv/es/video/${AID}`), null);
+});
+
+// ---------------------------------------------------------- Addendum A.8: Dailymotion
+
+test("Dailymotion: a video link with ?playlist= is the video, flagged; playlist ignored", () => {
+  const xid = "xbq9z2k";
+  const flagged = item(`https://www.dailymotion.com/video/${xid}?playlist=x7wdsj`);
+  assert.deepEqual(flagged, {
+    key: `dailymotion:${xid}`,
+    site: "dailymotion",
+    kind: "video",
+    id: xid,
+    part: null,
+    shortLink: null,
+    pageUrl: `https://www.dailymotion.com/video/${xid}`,
+    original: `https://www.dailymotion.com/video/${xid}?playlist=x7wdsj`,
+    playlistIgnored: true,
+  });
+  for (const link of [
+    `https://dai.ly/${xid}?playlist=x7wdsj`,
+    `https://www.dailymotion.com/embed/video/${xid}?autoplay=1&playlist=x7wdsj`,
+    `https://geo.dailymotion.com/player/xf7zn.html?video=${xid}&playlist=x7wdsj`,
+    `https://www.dailymotion.com/video/${xid}_an-invented-slug?playlist=x7wdsj&start=10`,
+  ]) {
+    const parsed = item(link);
+    assert.deepEqual([parsed.key, parsed.playlistIgnored], [`dailymotion:${xid}`, true], link);
+  }
+  // every other parameter is ignored and sets no flag
+  const other = item(`https://www.dailymotion.com/video/${xid}?autoplay=1&start=10&ref=share`);
+  assert.equal(other.key, `dailymotion:${xid}`);
+  assert.equal("playlistIgnored" in other, false);
+  // one item with the plain link
+  const page = `https://www.dailymotion.com/video/${xid}`;
+  const both = parseInput(`${page}?playlist=x7wdsj\n${page}`);
+  assert.equal(both.items.length, 1);
+  assert.equal(both.items[0]?.playlistIgnored, true);
+  // only a link that names a playlist and no video is refused
+  assert.equal(reason("https://www.dailymotion.com/playlist/x7wdsj"), "playlist");
+  assert.equal(reason("https://geo.dailymotion.com/player.html?playlist=x7wdsj"), "playlist");
+});
+
+// ----------------------------------------------------- Addendum B.3: bilibili.com links
+
+/** The parameters real Bilibili share links carry (B.3), with invented values. */
+const SHARE_PARAMS = [
+  "vd_source=0123456789abcdef0123456789abcdef",
+  "spm_id_from=333.1007.tianma.1-1-1.click",
+  "share_source=copy_web",
+  "share_medium=android",
+  "share_plat=android",
+  "share_from=ugc",
+  "share_tag=s_i",
+  "bbid=XY0123456789ABCDEF0123456789ABCDEF012",
+  "ts=1762600000",
+  "timestamp=1762600000",
+  "from_spmid=search.search-result.0.0",
+  "from=search",
+  "seid=1234567890123456789",
+  "t=90",
+  "buvid=XY0123456789ABCDEF",
+  "is_story_h5=false",
+  "mid=AbCdEfGh%3D%3D",
+  "plat_id=116",
+  "unique_k=AbCdEfG",
+  "up_id=123456",
+];
+
+test("Bilibili: every share parameter is ignored; ?p= is the only one that selects", () => {
+  const plain = `https://www.bilibili.com/video/${BVID}`;
+  for (const param of SHARE_PARAMS) {
+    const parsed = item(`${plain}/?${param}#reply123`);
+    assert.deepEqual(
+      [parsed.key, parsed.part, parsed.pageUrl],
+      [`bilibili:${BVID}:all`, null, plain],
+      param,
+    );
+    const withPart = item(`${plain}?${param}&p=3`);
+    assert.deepEqual(
+      [withPart.key, withPart.part, withPart.pageUrl],
+      [`bilibili:${BVID}:3`, 3, `${plain}?p=3`],
+      param,
+    );
+    const partFirst = item(`https://m.bilibili.com/video/${BVID}?p=2&${param}`);
+    assert.equal(partFirst.key, `bilibili:${BVID}:2`, param);
+  }
+  const all = item(`bilibili.com/video/av170001?${SHARE_PARAMS.join("&")}&p=4`);
+  assert.deepEqual(
+    [all.key, all.pageUrl],
+    ["bilibili:av170001:4", "https://www.bilibili.com/video/av170001?p=4"],
+  );
+  assert.equal(item(`http://www.bilibili.com/video/bV1GJ411x7h7?${SHARE_PARAMS[0]}`).id, BVID);
+  const short = item(`https://b23.tv/abcDEF1?${SHARE_PARAMS[2]}&${SHARE_PARAMS[3]}`);
+  assert.equal(short.key, "bilibili:b23:abcDEF1:all");
+  // refused with a reason whatever the parameters
+  const tail = `?${SHARE_PARAMS[0]}&${SHARE_PARAMS[1]}`;
+  assert.equal(reason(`https://www.bilibili.com/bangumi/play/ep1234${tail}`), "bangumi");
+  assert.equal(reason(`https://space.bilibili.com/3985676${tail}`), "space");
+  assert.equal(reason(`https://www.bilibili.com/list/watchlater${tail}`), "list");
+  assert.equal(reason(`https://www.bilibili.com/audio/au1003142${tail}`), "audio");
+  assert.equal(reason(`https://live.bilibili.com/196${tail}`), "live");
+  const festival = `https://www.bilibili.com/festival/x?bvid=${BVID}&${SHARE_PARAMS[0]}`;
+  assert.equal(reason(festival), "unsupported-path");
+  assert.equal(reason(`https://www.bilibili.com/cheese/play/ep1${tail}`), "unsupported-path");
 });

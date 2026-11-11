@@ -5,7 +5,9 @@
  * ffprobe reads with one h264 and one aac stream, framemd5-equal to the source, `moov` before
  * `mdat`, no `moof`; the edit rules (a later start, negative composition offsets); chunk
  * interleaving checked against `ffprobe -show_packets`; `co64` and the largesize `mdat` header
- * on a synthetic plan past 4 GiB; the refusals.
+ * on a synthetic plan past 4 GiB; the refusals; the embedded title and cover (`moov/udta/meta`:
+ * the boxes byte for byte, the 5 MiB cover limit, ffprobe's attached picture and title tag, the
+ * audio and video framemd5 and the sample bytes unchanged by the metadata).
  *
  * The ffmpeg helpers at the bottom are a private copy (the shared `tests/helpers/media.js` is
  * written in parallel); fixtures are built once per process under `fixtures/generated/remux/`.
@@ -39,7 +41,10 @@ import {
 } from "../src/lib/mp4.js";
 import {
   DEFAULT_CHUNK_S,
+  MAX_COVER_BYTES,
   MAX_READ_BYTES,
+  coverProblem,
+  metadataUdta,
   planMoov,
   writeProgressiveMp4,
 } from "../src/lib/remux.js";
@@ -58,6 +63,7 @@ const MEDIA = TOOLS ? {} : { skip: SKIP_MESSAGE };
 /** @typedef {import("../src/lib/mp4.js").SampleRef} SampleRef */
 /** @typedef {import("../src/lib/mp4.js").Box} Box */
 /** @typedef {import("../src/lib/remux.js").MoovPlan} MoovPlan */
+/** @typedef {import("../src/lib/remux.js").Mp4Meta} Mp4Meta */
 
 // ---------------------------------------------------------------------------------- helpers
 
@@ -81,7 +87,7 @@ const getU64 = (bytes, at) => Number(new DataView(bytes.buffer, bytes.byteOffset
  * Writes `plans` into memory: the output bytes, the writer's result and every `read` call.
  * @param {TrackPlan[]} plans
  * @param {Map<string, Uint8Array>} sources
- * @param {{ chunkS?: number }} [opts]
+ * @param {{ chunkS?: number, meta?: Mp4Meta }} [opts]
  */
 async function writeToMemory(plans, sources, opts) {
   /** @type {Uint8Array[]} */
@@ -749,6 +755,229 @@ test("the writer refuses a short read and counts every byte it writes", async ()
   assert.deepEqual(tail, source, "the samples, byte for byte, after the mdat header");
 });
 
+// ------------------------------------------------------------- the cover and the title (B.2)
+
+/** A title with non-ASCII characters: Latin-1, CJK and an astral-plane emoji. */
+const TITLE = "Ñandú 日本 🎬";
+/** {@link TITLE} in UTF-8, written out by hand (19 bytes). */
+const TITLE_UTF8 = [
+  0xc3, 0x91, 0x61, 0x6e, 0x64, 0xc3, 0xba, 0x20, 0xe6, 0x97, 0xa5, 0xe6, 0x9c, 0xac, 0x20, 0xf0,
+  0x9f, 0x8e, 0xac,
+];
+/** The smallest "JPEG" the signature check accepts: SOI, an APP0 marker, two bytes, EOI. */
+const TINY_JPEG = [0xff, 0xd8, 0xff, 0xe0, 0x01, 0x02, 0xff, 0xd9];
+const TINY_PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00];
+
+/** @param {string} text ASCII, or "©" (0xA9) @returns {number[]} */
+const chars = (text) => Array.from(text, (char) => char.charCodeAt(0));
+
+/**
+ * A meta of any shape, for the refusals.
+ * @param {unknown} value
+ * @returns {Mp4Meta}
+ */
+const looseMeta = (value) => /** @type {Mp4Meta} */ (value);
+
+test("meta: udta › meta › hdlr mdir › ilst ©nam + covr, byte for byte", () => {
+  const cover = { bytes: Uint8Array.from(TINY_JPEG), type: /** @type {const} */ ("jpeg") };
+  const udta = metadataUdta({ title: TITLE, cover });
+  const expected = [
+    ...[0, 0, 0, 136, ...chars("udta")],
+    ...[0, 0, 0, 128, ...chars("meta"), 0, 0, 0, 0], // full box: version 0, flags 0
+    ...[0, 0, 0, 33, ...chars("hdlr"), 0, 0, 0, 0], // full box
+    ...[0, 0, 0, 0, ...chars("mdir"), ...chars("appl"), 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ...[0, 0, 0, 83, ...chars("ilst")],
+    ...[0, 0, 0, 43, ...chars("©nam")],
+    ...[0, 0, 0, 35, ...chars("data"), 0, 0, 0, 1, 0, 0, 0, 0, ...TITLE_UTF8], // type 1: UTF-8
+    ...[0, 0, 0, 32, ...chars("covr")],
+    ...[0, 0, 0, 24, ...chars("data"), 0, 0, 0, 13, 0, 0, 0, 0, ...TINY_JPEG], // type 13: JPEG
+  ];
+  assert.deepEqual(udta, Uint8Array.from(expected));
+
+  const png = metadataUdta({ cover: { bytes: Uint8Array.from(TINY_PNG), type: "png" } });
+  assert.ok(png);
+  assert.deepEqual(
+    png.subarray(png.length - 33),
+    Uint8Array.from([
+      ...[0, 0, 0, 33, ...chars("covr")],
+      ...[0, 0, 0, 25, ...chars("data"), 0, 0, 0, 14, 0, 0, 0, 0, ...TINY_PNG], // type 14: PNG
+    ]),
+  );
+  assert.deepEqual(readBoxes(png).map((found) => [found.type, found.size]), [["udta", 94]]);
+
+  const titleOnly = metadataUdta({ title: TITLE });
+  assert.ok(titleOnly);
+  assert.equal(titleOnly.length, 136 - 32, "no covr without a cover");
+  assert.equal(metadataUdta(undefined), null);
+  assert.equal(metadataUdta({}), null, "nothing to write: no udta");
+  assert.equal(metadataUdta({ title: "" }), null, "an empty title is not written");
+});
+
+test("meta: the udta ends the moov, every chunk offset moves by its size", async () => {
+  const video = syntheticPlan("video", { count: 30, step: 100 });
+  const audio = syntheticPlan("audio", { count: 30, step: 100 });
+  const cover = { bytes: Uint8Array.from(TINY_JPEG), type: /** @type {const} */ ("jpeg") };
+  const meta = { title: TITLE, cover };
+  const plain = planMoov([video, audio]);
+  const plan = planMoov([video, audio], { meta });
+  const udta = metadataUdta(meta);
+  assert.ok(udta);
+  assert.equal(plain.udtaBytes, 0);
+  assert.equal(plan.udtaBytes, udta.length);
+  assert.equal(plan.moov.length, plain.moov.length + udta.length);
+  assert.deepEqual(plan.moov.subarray(plan.moov.length - udta.length), udta);
+  const moovBox = readBoxes(plan.moov)[0];
+  assert.ok(moovBox);
+  assert.deepEqual(
+    childBoxes(plan.moov, moovBox).map((found) => found.type),
+    ["mvhd", "trak", "trak", "udta"],
+  );
+  assert.equal(plan.mdatOffset, plain.mdatOffset + udta.length);
+  assert.equal(plan.totalBytes, plain.totalBytes + udta.length);
+  assert.deepEqual(
+    plan.order.map((chunk) => chunk.offset),
+    plain.order.map((chunk) => chunk.offset + udta.length),
+  );
+  const out = concat(plan.ftyp, plan.moov);
+  for (const index of [0, 1]) {
+    assert.deepEqual(
+      words(out, tablesOf(out, index).get("stco")).slice(1),
+      plan.order.filter((chunk) => chunk.track === index).map((chunk) => chunk.offset),
+      "the stco points past the udta",
+    );
+  }
+  const probed = await probe(concat(out, plan.mdatHeader, new Uint8Array(plan.payloadBytes)));
+  assert.equal(probed.progressive, true);
+  assert.equal(probed.title, TITLE);
+  assert.deepEqual(probed.cover, { type: "jpeg", bytes: Uint8Array.from(TINY_JPEG) });
+  const bare = await probe(concat(plain.ftyp, plain.moov, plain.mdatHeader));
+  assert.equal(bare.title, null);
+  assert.equal(bare.cover, null);
+  const empty = planMoov([video, audio], { meta: { title: "" } });
+  assert.deepEqual(empty.moov, plain.moov, "no metadata, the very same moov");
+});
+
+test("meta refusals: a cover over 5 MiB, not JPEG/PNG, wrong bytes, before any write", async () => {
+  const video = syntheticPlan("video");
+  /** @type {Uint8Array[]} */
+  const written = [];
+  const sink = {
+    write: async (/** @type {Uint8Array} */ bytes) => {
+      written.push(bytes);
+    },
+  };
+  const read = async (/** @type {{ offset: number }} */ _ref, /** @type {number} */ size) =>
+    new Uint8Array(size);
+  assert.equal(MAX_COVER_BYTES, 5 * 1024 * 1024);
+  const limit = new Uint8Array(MAX_COVER_BYTES);
+  limit.set(TINY_JPEG);
+  const atLimit = planMoov([video], { meta: { cover: { bytes: limit, type: "jpeg" } } });
+  assert.equal(atLimit.udtaBytes, MAX_COVER_BYTES + 85, "exactly 5 MiB is embedded");
+  const over = new Uint8Array(MAX_COVER_BYTES + 1);
+  over.set(TINY_JPEG);
+  const tooBig = { cover: { bytes: over, type: /** @type {const} */ ("jpeg") } };
+  const overLimit = /^the cover is 5242881 bytes, over the 5 MiB limit \(5242880 bytes\)$/;
+  await refuses(() => planMoov([video], { meta: tooBig }), "unsupported", overLimit);
+  const writing = writeProgressiveMp4([video], read, sink, { meta: tooBig });
+  await refuses(writing, "unsupported", overLimit);
+  assert.equal(written.length, 0, "nothing reaches the sink");
+  assert.match(coverProblem(tooBig.cover) ?? "", overLimit);
+
+  const jpeg = Uint8Array.from(TINY_JPEG);
+  const notJpegOrPng = /^the cover type must be "jpeg" or "png", not /;
+  /** @type {[unknown, RegExp][]} */
+  const refused = [
+    [{ bytes: jpeg, type: "webp" }, new RegExp(`${notJpegOrPng.source}"webp"$`)],
+    [{ bytes: jpeg }, new RegExp(`${notJpegOrPng.source}undefined$`)],
+    [{ bytes: jpeg, type: "png" }, /^the cover is not a PNG image \(its bytes are a JPEG image\)$/],
+    [{ bytes: latin1Bytes("<html>"), type: "jpeg" }, /^the cover is not a JPEG image$/],
+    [{ bytes: new Uint8Array(0), type: "jpeg" }, /^the cover is empty$/],
+    [{ bytes: [0xff, 0xd8, 0xff], type: "jpeg" }, /^the cover has no bytes$/],
+    ["cover.jpg", /^the cover is not \{ bytes, type \}$/],
+  ];
+  for (const [cover, pattern] of refused) {
+    await refuses(() => planMoov([video], { meta: looseMeta({ cover }) }), "invalid", pattern);
+    assert.match(coverProblem(cover) ?? "", pattern);
+  }
+  const badTitle = looseMeta({ title: 42 });
+  await refuses(() => planMoov([video], { meta: badTitle }), "invalid", /^the title must be a/);
+  await refuses(() => planMoov([video], { meta: looseMeta("x") }), "invalid", /must be an object/);
+  assert.equal(coverProblem({ bytes: jpeg, type: "jpeg" }), null);
+  assert.equal(coverProblem({ bytes: Uint8Array.from(TINY_PNG), type: "png" }), null);
+  assert.equal(written.length, 0);
+});
+
+test("cover + title embedded: ffprobe's attached pic and title; A/V untouched", MEDIA, async () => {
+  const media = fixtures();
+  const images = coverImages(media);
+  const { plans, sources } = await plansOf(media, ["video.m4s", "audio.m4s"]);
+  const plain = await writeToMemory(plans, sources);
+  const plainPath = media.write("out-plain.mp4", plain.out);
+  const plainPlan = planMoov(plans);
+  const plainSamples = await collectMp4(memoryFile("plain.mp4", plain.out));
+  const plainProbe = await probe(plain.out);
+  const reference = { v: framemd5(plainPath, "v"), a: framemd5(plainPath, "a") };
+  assert.deepEqual(reference.v, framemd5(media.path("src.mp4"), "v"));
+  for (const [type, codec] of /** @type {const} */ ([["jpeg", "mjpeg"], ["png", "png"]])) {
+    const cover = { bytes: images[type], type };
+    const meta = { title: TITLE, cover };
+    const written = await writeToMemory(plans, sources, { meta });
+    const path = media.write(`out-meta-${type}.mp4`, written.out);
+    const plan = planMoov(plans, { meta });
+
+    // What ffprobe reads: h264, aac, then the cover as an attached picture; the title tag.
+    const info = ffprobeAll(path);
+    assert.deepEqual(
+      info.streams.map((stream) => [
+        stream.codec_type,
+        stream.codec_name,
+        stream.disposition?.attached_pic,
+      ]),
+      [
+        ["video", "h264", 0],
+        ["audio", "aac", 0],
+        ["video", codec, 1],
+      ],
+      type,
+    );
+    assert.equal(info.format.tags?.title, TITLE, "the title, non-ASCII characters intact");
+    const duration = Number(info.format.duration);
+    assert.ok(Math.abs(duration - Number(ffprobeAll(plainPath).format.duration)) < 0.001);
+
+    // The audio and the video decode to the same frames as without meta.
+    assert.deepEqual(framemd5(path, "v"), reference.v, `${type}: video framemd5`);
+    assert.deepEqual(framemd5(path, "a"), reference.a, `${type}: audio framemd5`);
+
+    // The sample data is the same bytes, read the same way; only the offsets moved.
+    assert.equal(written.result.bytes, written.out.length);
+    assert.equal(written.out.length, plain.out.length + plan.udtaBytes);
+    const payload = (/** @type {Uint8Array} */ out, /** @type {MoovPlan} */ moovPlan) =>
+      out.subarray(moovPlan.mdatOffset + moovPlan.mdatHeader.length);
+    assert.deepEqual(payload(written.out, plan), payload(plain.out, plainPlan));
+    assert.deepEqual(written.reads, plain.reads);
+    const samples = await collectMp4(memoryFile("plain.mp4", written.out));
+    /** @param {number} shift @returns {(track: TrackPlan) => SampleRef[]} */
+    const moved = (shift) => (track) =>
+      track.samples.map((sample) => ({
+        ...sample,
+        data: { file: sample.data.file, offset: sample.data.offset + shift },
+      }));
+    assert.deepEqual(
+      samples.map(moved(0)),
+      plainSamples.map(moved(plan.udtaBytes)),
+      "every sample: the same dts, cts, size and sync; its offset moved by the udta",
+    );
+
+    // probe: still progressive with the same two tracks; it reads the title and the cover back.
+    const probed = await probe(written.out);
+    assert.equal(probed.progressive, true);
+    assert.deepEqual(probed.tracks, plainProbe.tracks, "the cover is not a track");
+    assert.equal(probed.title, TITLE);
+    assert.equal(probed.cover?.type, type);
+    assert.deepEqual(probed.cover?.bytes, images[type]);
+  }
+});
+
 // ----------------------------------------------------------------------------- tfdt shifting
 
 /**
@@ -843,6 +1072,48 @@ function framemd5(path, stream) {
     .split("\n")
     .filter((line) => line.trim() !== "" && !line.startsWith("#"))
     .map((line) => (line.split(",").at(-1) ?? "").trim());
+}
+
+/**
+ * @typedef {{ index: number, codec_type: string, codec_name: string,
+ *   disposition?: { attached_pic?: number } }} FullStream
+ * @typedef {{ streams: FullStream[],
+ *   format: { duration?: string, tags?: Record<string, string> } }} FullProbe
+ */
+
+/**
+ * `ffprobe -show_streams -show_format` of a file, as JSON.
+ * @param {string} path
+ * @returns {FullProbe}
+ */
+function ffprobeAll(path) {
+  const text = run("ffprobe", [...options("-v error -of json -show_streams -show_format"), path]);
+  return /** @type {FullProbe} */ (JSON.parse(text));
+}
+
+/**
+ * Latin-1 text as bytes.
+ * @param {string} text
+ * @returns {Uint8Array}
+ */
+function latin1Bytes(text) {
+  return Uint8Array.from(text, (char) => char.charCodeAt(0));
+}
+
+/** @type {{ jpeg: Uint8Array, png: Uint8Array } | null} */
+let covers = null;
+
+/**
+ * Two small cover images made by ffmpeg once per process: a 96×54 JPEG and a 96×54 PNG.
+ * @param {Fixtures} media
+ * @returns {{ jpeg: Uint8Array, png: Uint8Array }}
+ */
+function coverImages(media) {
+  if (covers !== null) return covers;
+  ffmpeg(...options("-f lavfi -i color=c=red:s=96x54 -frames:v 1"), media.path("cover.jpg"));
+  ffmpeg(...options("-f lavfi -i color=c=blue:s=96x54 -frames:v 1"), media.path("cover.png"));
+  covers = { jpeg: media.bytes("cover.jpg"), png: media.bytes("cover.png") };
+  return covers;
 }
 
 /**

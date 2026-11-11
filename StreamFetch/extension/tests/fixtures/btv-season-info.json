@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "season": {
+      "season_id": "2090001",
+      "title": "An Invented Series",
+      "description": "An invented series for StreamFetch's tests.",
+      "horizontal_cover": "https://pic.bstarstatic.example/ogv/0123456789abcdef.png",
+      "styles": [
+        {
+          "id": 1,
+          "title": "Comedy"
+        }
+      ]
+    }
+  }
+}

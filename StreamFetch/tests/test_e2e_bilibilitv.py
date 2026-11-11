@@ -6,6 +6,10 @@ has no permission for is never requested and the row and the report name the hos
 quality selector picks what is saved; a quality the session cannot get shows as a disabled
 option; covers load lazily — only for rows in view, one at a time, never during a job.
 
+Every saved file passes B.1's proof for its media path (bilibili.tv's progressive or fragmented
+MP4 pair; H.264 + AAC, the source's durations, framemd5-equal video, audio equal to the track as
+served, progressive) and carries B.2's cover and title.
+
 All aids and episode ids are INVENTED (16-digit aids of the owner's shape, A.7)."""
 
 from __future__ import annotations
@@ -28,17 +32,15 @@ from fake_sites import (
     BTV_EPISODES,
     BTV_SEASON,
     BTV_SEASON_TITLE,
+    BTV_TITLES,
     FakeSites,
 )
 from media_fixtures import (
-    DURATION_TOLERANCE_S,
     LOW_HEIGHT,
     MediaSet,
-    assert_same_media,
-    duration_of,
-    ffprobe,
-    framemd5,
-    is_progressive,
+    assert_cover,
+    assert_saved_media,
+    title_tag,
     video_height,
 )
 
@@ -48,6 +50,12 @@ VIDEO = "https://www.bilibili.tv/en/video/{}"
 GEO, LOGIN, PREMIUM = "4801520000000101", "4801520000000102", "4801520000000103"
 UNCOVERED, MISSING = "4801520000000201", "4801520000000202"
 _PLACEHOLDER = re.compile(r"\$[A-Za-z0-9_@]+\$|\$\d")
+#: Scroll the last item row into the middle of the window (the history and the settings are below
+#: the table: the page's bottom is not the table's).
+LAST_ROW_INTO_VIEW = """() => {
+  const rows = document.querySelectorAll('#items-table tbody tr[data-key]');
+  rows[rows.length - 1].scrollIntoView({ block: 'center' });
+}"""
 
 
 def _aid_of(row: Row) -> str:
@@ -75,7 +83,10 @@ def test_a_user_video_served_as_progressive_files_downloads_and_verifies(
         assert row.href == f"https://www.bilibili.tv/en/video/{BTV_AID}"
         (name,) = ext.wait_saved(1)
         assert name == f"StreamFetch/Bilibili.tv/Fake Bstation user video [{BTV_AID}].mp4"
-        assert_same_media(ext.saved_path(name), media.src)
+        saved = ext.saved_path(name)
+        probed = assert_saved_media(saved, media.expected("btv-progressive"))
+        assert_cover(saved, probed, media.cover)
+        assert title_tag(probed) == BTV_TITLES[BTV_AID]
         assert _btv_media(sites, BTV_AID) == ["btv-video 80.mp4", "btv-audio audio-30280.mp4"]
         assert_media_headers(sites, sites.media_requests())
         playurl = sites.by_route("btv-playurl")
@@ -99,7 +110,10 @@ def test_an_episode_served_as_fragmented_files_downloads_and_verifies(
         assert name in {
             f"StreamFetch/Bilibili.tv/{folder}/{title} [{ep_id}].mp4" for folder in folders
         }
-        assert_same_media(ext.saved_path(name), media.src)
+        saved = ext.saved_path(name)
+        probed = assert_saved_media(saved, media.expected("btv-fragmented"))
+        assert_cover(saved, probed, media.cover)
+        assert title in (title_tag(probed) or ""), title_tag(probed)
         assert _btv_media(sites, ep_id) == ["btv-video 80.mp4", "btv-audio audio-30280.mp4"]
         playurl = sites.by_route("btv-playurl")
         assert playurl and all(r.query == {"platform": "web", "ep_id": ep_id} for r in playurl)
@@ -126,8 +140,9 @@ def test_a_series_link_lists_every_episode_under_a_header_and_downloads_them_in_
             for ep_id, title in BTV_EPISODES
         ]
         assert ext.wait_saved(3) == sorted(expected)
-        for name in expected:
-            assert_same_media(ext.saved_path(name), media.src)
+        for name, (_, title) in zip(expected, BTV_EPISODES, strict=True):
+            probed = assert_saved_media(ext.saved_path(name), media.expected("btv-progressive"))
+            assert title in (title_tag(probed) or ""), (name, title_tag(probed))
         downloaded = [r.path.split("/")[2] for r in sites.by_route("btv-video")]
         assert downloaded == [ep_id for ep_id, _ in BTV_EPISODES]  # in order, once each
         assert_sequential(sites.site_requests())
@@ -209,12 +224,7 @@ def test_the_quality_selector_chooses_what_is_saved(media: MediaSet, tmp_path: P
         (name,) = ext.wait_saved(1)
         saved = ext.saved_path(name)
         assert video_height(saved) == LOW_HEIGHT  # the 480P file (the fake's 160x90 clip)
-        assert abs(duration_of(ffprobe(saved)) - duration_of(ffprobe(media.low))) <= (
-            DURATION_TOLERANCE_S
-        )
-        assert framemd5(saved, "v:0") == framemd5(media.low, "v:0")
-        assert framemd5(saved, "a:0") == framemd5(media.src, "a:0")
-        assert is_progressive(saved)
+        assert_saved_media(saved, media.expected("btv-progressive-low"))
         assert _btv_media(sites, BTV_AID) == ["btv-video 32.mp4", "btv-audio audio-30280.mp4"]
 
 
@@ -239,21 +249,35 @@ def test_a_quality_without_a_url_shows_as_a_disabled_option(media: MediaSet, tmp
 def test_covers_load_only_in_view_one_at_a_time_and_never_during_a_job(
     media: MediaSet, tmp_path: Path
 ):
+    """The rows' thumbnails (A.4, A.5): none before its row is in view, one request at a time,
+    each once, none during a job. `cover: "none"` (B.2): the job itself asks for no cover to
+    embed, so every cover request the fake sees is a thumbnail's."""
     aids = [f"48015200000100{n:02d}" for n in range(1, 41)]
     height = 360
     with (
         FakeSites(media, media_delay_s=0.3) as sites,
         ExtensionHarness(tmp_path, sites, viewport={"width": 1280, "height": height}) as ext,
     ):
+        ext.update_settings(cover="none")
         ext.page.evaluate("() => window.scrollTo(0, 0)")
         ext.analyze("\n".join(VIDEO.format(aid) for aid in aids), min_rows=len(aids))
+        time.sleep(1.5)  # whatever would load has had time to
+        rows = ext.rows()
+        far = [row for row in rows if row.top > height + 1200]
+        assert far, f"the rows never leave the window ({rows[-1].top} px): no lazy loading to test"
+        assert not {f"/btv-cover/{_aid_of(row)}.jpg" for row in far} & {
+            r.path for r in sites.cover_requests()
+        }, "a cover was asked for before its row was in view"
+
+        # the table scrolled into view: its first rows' covers, and only theirs
+        ext.page.evaluate("() => document.querySelector('#items-table').scrollIntoView()")
         ext.wait_for(lambda: sites.cover_requests(), 20, "no cover was loaded")
         time.sleep(1.5)  # whatever else would load has had time to
         rows = ext.rows()
         asked = [r.path for r in sites.cover_requests()]
         assert len(asked) == len(set(asked)), "a cover was asked for twice"
         far = [row for row in rows if row.top > height + 1200]
-        assert far, f"the rows never leave the window ({rows[-1].top} px): no lazy loading to test"
+        assert far, "the rows never leave the window: no lazy loading to test"
         assert f"/btv-cover/{_aid_of(rows[0])}.jpg" in asked
         assert not {f"/btv-cover/{_aid_of(row)}.jpg" for row in far} & set(asked)
         assert_sequential(sites.cover_requests())  # one at a time
@@ -262,9 +286,10 @@ def test_covers_load_only_in_view_one_at_a_time_and_never_during_a_job(
         start = time.monotonic()
         mark = ext.start("#download-all-button")
         ext.wait_for(lambda: sites.media_requests(), 60, "the job asked for no media")
-        ext.page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+        ext.page.evaluate(LAST_ROW_INTO_VIEW)
         time.sleep(1.5)
-        ext.page.click("#stop-button")
+        # Stop by script: a pointer click would scroll the button, and the window, back up
+        ext.page.evaluate("() => document.querySelector('#stop-button').click()")
         ext.finish(mark, 60)
         job = [r for r in sites.site_requests() if r.started >= start]
         end = max(r.finished for r in job)
@@ -276,4 +301,6 @@ def test_covers_load_only_in_view_one_at_a_time_and_never_during_a_job(
             20,
             "the rows scrolled into view got no cover after the job",
         )
+        asked = [r.path for r in sites.cover_requests()]
+        assert len(asked) == len(set(asked)), "a cover was asked for twice"
         assert_sequential(sites.cover_requests())

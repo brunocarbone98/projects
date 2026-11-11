@@ -115,6 +115,11 @@
         <span class="pair"><input type="number" id="setting-media-pause-min" min="0" step="10"><input type="number" id="setting-media-pause-max" min="0" step="10"></span>
         <label for="setting-report" data-i18n="settingReport">Save a report of what did not download at the end of a run</label>
         <input type="checkbox" id="setting-report">
+        <label for="setting-cover" data-i18n="settingCover">Cover in each saved file</label>
+        <select id="setting-cover">
+          <option value="embed" data-i18n="coverEmbed">Embed the video's cover and title (one more request per file)</option>
+          <option value="none" data-i18n="coverNone">Title only, no cover request</option>
+        </select>
         <label for="setting-language" data-i18n="settingLanguage">Language</label>
         <select id="setting-language">
           <option value="auto" data-i18n="languageAuto">Chrome's language</option>

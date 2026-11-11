@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { FAILURE_CODES, render } from "../src/lib/messages.js";
 import {
+  BILIBILITV_PROBABLE_CAUSES,
   PROBABLE_CAUSES,
   REPORT_VERSION,
   WHAT_THIS_IS,
@@ -232,6 +233,8 @@ test("the report: snake_case, the undownloaded rows in input order, counts, summ
     "site",
     "id",
     "part",
+    "season_id",
+    "episode_id",
     "title",
     "status",
     "failure",
@@ -453,4 +456,59 @@ test("a run with nothing to report still builds; strings pass through, bad dates
   );
   assert.equal(rows[0]?.["probable_cause"], "no failure was recorded for this row");
   assert.equal(rowEntry(row("stopped", null))["message_en"], "not attempted: no reason given");
+});
+
+test("Bilibili.tv rows: season_id and episode_id, the site's own probable causes", () => {
+  const login = rowEntry(
+    row(
+      "failed-unavailable",
+      {
+        code: "login_required",
+        params: { site_code: "10023006", site_message: "premium members only" },
+      },
+      {
+        input: "https://www.bilibili.tv/en/play/2090001/30010003?bstar_from=x",
+        site: "bilibilitv",
+        id: "30010003",
+        part: 3,
+        seasonId: "2090001",
+        episodeId: "30010003",
+        title: "E3 - Invented",
+      },
+    ),
+  );
+  assert.deepEqual(
+    [login["site"], login["season_id"], login["episode_id"], login["input"]],
+    ["bilibilitv", "2090001", "30010003", "https://www.bilibili.tv/en/play/2090001/30010003"],
+  );
+  assert.equal(login["probable_cause"], BILIBILITV_PROBABLE_CAUSES.login_required);
+  assert.match(String(login["probable_cause"]), /log in to Bilibili\.tv/);
+  assert.match(String(login["probable_cause"]), /premium/);
+  assert.deepEqual(login["failure"], {
+    code: "login_required",
+    params: { site_code: "10023006", site_message: "premium members only" },
+  });
+  /** @param {import("../src/lib/messages.js").FailureCode} code @param {string} site */
+  const cause = (code, site) =>
+    probableCause({ status: "failed-unavailable", failure: { code, params: {} }, site });
+  assert.match(cause("geo_blocked", "bilibilitv"), /^Bilibili\.tv does not serve this video/);
+  assert.equal(cause("geo_blocked", "dailymotion"), PROBABLE_CAUSES.geo_blocked);
+  assert.equal(cause("geo_blocked", "bilibili"), PROBABLE_CAUSES.geo_blocked);
+  for (const code of /** @type {const} */ ([
+    "deleted",
+    "premium_only",
+    "no_streams",
+    "host_not_covered",
+  ])) {
+    assert.equal(cause(code, "bilibilitv"), BILIBILITV_PROBABLE_CAUSES[code], code);
+    assert.notEqual(cause(code, "bilibilitv"), PROBABLE_CAUSES[code], code);
+  }
+  assert.match(cause("host_not_covered", "bilibilitv"), /send this report/);
+  // the codes without a Bilibili.tv sentence keep the common one
+  assert.equal(cause("rate_limited", "bilibilitv"), PROBABLE_CAUSES.rate_limited);
+  assert.match(PROBABLE_CAUSES.unsupported_link, /bili\.im/);
+  // the other sites' rows carry the two keys as null
+  const dm = rowEntry(row("failed", { code: "no_response", params: {} }));
+  assert.deepEqual([dm["season_id"], dm["episode_id"]], [null, null]);
+  assert.match(WHAT_THIS_IS, /Dailymotion, Bilibili\.tv or Bilibili/);
 });

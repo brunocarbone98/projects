@@ -329,8 +329,10 @@ export const LINK_REFUSAL_TEXTS_EN = Object.freeze({
   list: "a list, favourites or search link: paste the link of one video",
   audio: "an audio link: out of scope in 1.0",
   live: "a live-stream link: live streams are out of scope",
-  "other-site": "not a Dailymotion or Bilibili link",
-  "unsupported-path": "a Dailymotion or Bilibili page that is not a single video",
+  "other-site": "not a Dailymotion, Bilibili.tv or Bilibili link",
+  "unsupported-path":
+    "a page that is not a single video; for a short share link (bili.im/…), paste the full " +
+    "bilibili.tv/…/video/… link from the browser's address bar",
   junk: "not a link",
   festival: "a festival page: paste the video's own link (…/video/BV…)",
 });
@@ -344,6 +346,70 @@ export function refusalText(reason) {
   return /** @type {readonly string[]} */ (LINK_REFUSALS).includes(reason)
     ? LINK_REFUSAL_TEXTS_EN[/** @type {LinkRefusal} */ (reason)]
     : reason;
+}
+
+// ---------------------------------------------------------------------------------- hints
+
+/**
+ * What a row may say next to a target that is not a failure: `premium` (qualities this session
+ * is not served, `labels`), `playlist_ignored` (a Dailymotion video link that also named a
+ * playlist: only the video is downloaded, Addendum A.8) and `login_or_premium` (a Bilibili.tv
+ * `login_required` row: the site's codes mean a login or a premium-only episode, A.1). The UI's
+ * `_locales` carry `hint_<code>` with the same parameters in the same order ({@link HINT_PARAMS}).
+ */
+export const HINT_CODES = Object.freeze(
+  /** @type {const} */ (["premium", "playlist_ignored", "login_or_premium"]),
+);
+/** @typedef {(typeof HINT_CODES)[number]} HintCode */
+
+/**
+ * The parameters of every hint, in the order of its `$1…$n` placeholders.
+ * @type {Readonly<Record<HintCode, readonly string[]>>}
+ */
+export const HINT_PARAMS = Object.freeze({
+  premium: ["labels"],
+  playlist_ignored: [],
+  login_or_premium: [],
+});
+
+/**
+ * Whether `text` is one of the {@link HINT_CODES}.
+ * @param {unknown} text
+ * @returns {text is HintCode}
+ */
+export function isHintCode(text) {
+  return typeof text === "string" && /** @type {readonly string[]} */ (HINT_CODES).includes(text);
+}
+
+/**
+ * The English text of a hint (the English UI and the `hint_<code>` texts of `_locales/en`); an
+ * unknown code renders as itself.
+ * @param {string} code
+ * @param {FailureParams} [params]
+ * @returns {string}
+ */
+export function hintText(code, params = {}) {
+  switch (code) {
+    case "premium":
+      return `${paramText("labels", params["labels"])} needs a premium membership`;
+    case "playlist_ignored":
+      return "playlist ignored: only this video is downloaded";
+    case "login_or_premium":
+      return "log in to Bilibili.tv in this browser; a premium episode stays unavailable";
+    default:
+      return code;
+  }
+}
+
+/**
+ * The `$1…$n` substitutions of a hint's `_locales` message, in the order of {@link HINT_PARAMS}.
+ * @param {string} code
+ * @param {FailureParams} [params]
+ * @returns {string[]}
+ */
+export function hintSubstitutions(code, params = {}) {
+  const names = isHintCode(code) ? HINT_PARAMS[code] : [];
+  return names.map((name) => paramText(name, params[name]));
 }
 
 /**

@@ -162,20 +162,28 @@ export function t(key, substitutions, lang = current) {
 }
 
 /** The request kinds a detail text names in parentheses (`HTTP 429 (manifest)`). */
-const KIND_IN_DETAIL_RE = /\((page|short link|metadata|manifest|playlist|segment|media|cover|api)\)/g;
+const KIND_IN_DETAIL_RE =
+  /\((page|short link|metadata|manifest|playlist|segment|media|cover|api)\)/g;
+/** The resolver's `<Site> says: ` before a site's own words (Dailymotion's error title). */
+const SITE_SAYS_RE = /^(Dailymotion|Bilibili\.tv|Bilibili) says: /;
 
 /**
- * A detail text the engine wrote in English (`HTTP 429 (manifest)`), its request kind translated.
+ * A detail text the engine wrote in English (`HTTP 429 (manifest)`), its request kind translated,
+ * and a leading `Dailymotion says: ` as `site_says` (the site's own words stay as it wrote them).
  * @param {string} text
  * @param {Lang} lang
  * @returns {string}
  */
 export function localizeDetail(text, lang) {
   if (lang === "en") return text;
-  return text.replace(KIND_IN_DETAIL_RE, (match, kind) => {
-    const key = messageKey("request_kind", kind);
-    return hasMessage(key, lang) ? `(${t(key, undefined, lang)})` : match;
-  });
+  return text
+    .replace(SITE_SAYS_RE, (match, site) =>
+      hasMessage("site_says", lang) ? `${t("site_says", site, lang)} ` : match,
+    )
+    .replace(KIND_IN_DETAIL_RE, (match, kind) => {
+      const key = messageKey("request_kind", kind);
+      return hasMessage(key, lang) ? `(${t(key, undefined, lang)})` : match;
+    });
 }
 
 /**

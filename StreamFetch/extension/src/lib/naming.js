@@ -9,6 +9,10 @@
  *     StreamFetch/Dailymotion/<title> [<id>].mp4
  *     StreamFetch/Bilibili/<title> [<bvid>].mp4                         one part
  *     StreamFetch/Bilibili/<title> [<bvid>]/P<nn> - <part title>.mp4   several parts
+ *     StreamFetch/Bilibili.tv/<title> [<aid>].mp4                      a user video
+ *     StreamFetch/Bilibili.tv/<series title>/<title> [<ep_id>].mp4      an episode (Addendum A.3;
+ *                                         the folder is `season <season_id>` when the series'
+ *                                         title is unknown)
  *     StreamFetch/reports/<YYYY-MM-DD HHMM> - did not download.json
  *
  * A name component is at most {@link MAX_NAME_LEN} UTF-16 units (what Windows counts), the
@@ -21,11 +25,14 @@
 export const ROOT_FOLDER = "StreamFetch";
 /** One folder per site under the root. */
 export const SITE_FOLDERS = Object.freeze(
-  /** @type {Readonly<Record<"dailymotion" | "bilibili", string>>} */ ({
+  /** @type {Readonly<Record<"dailymotion" | "bilibili" | "bilibilitv", string>>} */ ({
     dailymotion: "Dailymotion",
     bilibili: "Bilibili",
+    bilibilitv: "Bilibili.tv",
   }),
 );
+/** The folder of a Bilibili.tv episode whose series title is unknown: `season <season_id>`. */
+export const SEASON_FOLDER_PREFIX = "season";
 /** The folder under the root the reports go to. */
 export const REPORTS_FOLDER = "reports";
 /** How a report's file name ends. */
@@ -177,14 +184,19 @@ export function partStem(part, partTitle, title, max = MAX_NAME_LEN) {
 
 /**
  * @typedef {object} NamingTarget What {@link targetPath} reads of a target.
- * @property {"dailymotion" | "bilibili"} site
- * @property {string} id the Dailymotion xid, or the Bilibili bvid (`av…` when the page gave none)
- * @property {string} title the video's title
- * @property {number | null} part the Bilibili part (1-based); null for Dailymotion
- * @property {string | null} partTitle the part's own title (`pages[].part`); null when there is
- *   none
+ * @property {"dailymotion" | "bilibili" | "bilibilitv"} site
+ * @property {string} id the Dailymotion xid, the Bilibili bvid (`av…` when the page gave none),
+ *   the Bilibili.tv aid or ep_id
+ * @property {string} title the video's title (a Bilibili.tv episode's `title_display`)
+ * @property {number | null} part the Bilibili part (1-based), a Bilibili.tv episode's position;
+ *   null for Dailymotion
+ * @property {string | null} partTitle the part's own title (`pages[].part`), a Bilibili.tv
+ *   episode's own title when the resolver keeps it apart from `title`; null when there is none
  * @property {number | null} [partCount] how many parts the video has (`pages.length`); absent or
  *   null when unknown — then a `part` above 1 still means a multi-part video
+ * @property {string | null} [seasonId] Bilibili.tv: the episode's season
+ * @property {string | null} [episodeId] Bilibili.tv: set for an episode, null for a user video
+ * @property {string | null} [seriesTitle] Bilibili.tv: the series' title when known
  */
 
 /**
@@ -200,11 +212,36 @@ export function isMultiPart(target) {
 }
 
 /**
+ * Whether a Bilibili.tv target is an episode of a series (it has an episode id or a season), not
+ * a user video.
+ * @param {NamingTarget} target
+ * @returns {boolean}
+ */
+export function isEpisode(target) {
+  return target.site === "bilibilitv" && Boolean(target.episodeId || target.seasonId);
+}
+
+/**
+ * The folder of a Bilibili.tv episode: the series' title, else `season <season_id>`, at most
+ * {@link MAX_FOLDER_LEN}.
+ * @param {NamingTarget} target
+ * @returns {string}
+ */
+export function seriesFolder(target) {
+  const title = (target.seriesTitle ?? "").trim();
+  const name = title || `${SEASON_FOLDER_PREFIX} ${target.seasonId || UNTITLED}`;
+  return chromeSafeFilename(name, MAX_FOLDER_LEN);
+}
+
+/**
  * The path Chrome saves a target at, relative to its Downloads folder (forward slashes, as
  * `downloads.download` takes them on every platform): `StreamFetch/Dailymotion/<title> [<id>].mp4`,
  * `StreamFetch/Bilibili/<title> [<bvid>].mp4`, or for a part of a multi-part video
  * `StreamFetch/Bilibili/<title> [<bvid>]/P<nn> - <part title>.mp4` (`P<nn>.mp4` when the part has
- * no title of its own). Throws for an unknown site.
+ * no title of its own); `StreamFetch/Bilibili.tv/<title> [<aid>].mp4` for a user video and
+ * `StreamFetch/Bilibili.tv/<series title or "season <season_id>">/<title> [<ep_id>].mp4` for an
+ * episode (its own title: `partTitle` when the resolver keeps one, else `title`). Throws for an
+ * unknown site.
  * @param {NamingTarget} target
  * @param {{ rootFolder?: string }} [settings] the user's settings record; the only key read is
  *   an optional `rootFolder` (default {@link ROOT_FOLDER}) — nothing in the 1.0 settings changes
@@ -215,6 +252,11 @@ export function targetPath(target, settings = {}) {
   const site = SITE_FOLDERS[target.site];
   if (site === undefined) throw new Error(`unknown site ${JSON.stringify(target.site)}`);
   const root = settings.rootFolder || ROOT_FOLDER;
+  if (isEpisode(target)) {
+    const title = (target.partTitle ?? "").trim() || target.title;
+    const stem = videoStem(title, target.episodeId || target.id);
+    return `${root}/${site}/${seriesFolder(target)}/${stem}.mp4`;
+  }
   if (!isMultiPart(target)) return `${root}/${site}/${videoStem(target.title, target.id)}.mp4`;
   const folder = videoStem(target.title, target.id, MAX_FOLDER_LEN);
   const stem = partStem(target.part ?? 1, target.partTitle, target.title);

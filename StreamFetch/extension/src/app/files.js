@@ -210,7 +210,9 @@ export class WorkFiles {
     /** @type {string[]} */
     const names = [];
     for await (const [name] of dir.entries()) if (name.startsWith(prefix)) names.push(name);
-    for (const name of names) await dir.removeEntry(name, { recursive: true }).catch(() => undefined);
+    for (const name of names) {
+      await dir.removeEntry(name, { recursive: true }).catch(() => undefined);
+    }
     return names.length;
   }
 
@@ -235,7 +237,9 @@ export class WorkFiles {
       const modified = file?.lastModified ?? 0;
       if (modified < limit) stale.push(name);
     }
-    for (const name of stale) await dir.removeEntry(name, { recursive: true }).catch(() => undefined);
+    for (const name of stale) {
+      await dir.removeEntry(name, { recursive: true }).catch(() => undefined);
+    }
     return stale.length;
   }
 

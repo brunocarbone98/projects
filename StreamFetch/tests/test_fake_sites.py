@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,11 +30,16 @@ from fake_sites import (
     B23_CODE,
     BILI_MAIN,
     BILI_PREMIUM_QUALITY,
+    BILI_SHARE,
+    BILI_TITLES,
+    BILI_UNICODE,
     BSTAR_FROM,
     BTV_AID,
     BTV_EPISODES,
     BTV_SEASON,
     BTV_SEASON_TITLE,
+    CLAIMED_SECONDS,
+    CUT_LINGER_S,
     DM_FMP4_ID,
     DM_TITLES,
     DM_TS_ID,
@@ -43,18 +49,35 @@ from fake_sites import (
     FakeSites,
     applies,
     bili_cid,
+    parts_of,
 )
 from media_fixtures import (
+    COVER_JPEG_SIZE,
+    COVER_PNG_SIZE,
+    COVER_WEBP_SIZE,
+    COVR_JPEG,
     LOW_HEIGHT,
+    MEDIA_PATHS,
     SOURCE_HEIGHT,
+    SOURCE_SECONDS,
     MediaSet,
+    assert_cover,
+    assert_no_cover,
+    assert_primed_or_same,
     assert_same_audio,
-    assert_same_media,
+    assert_saved_media,
+    attached_pictures,
+    av_framemd5,
     duration_of,
+    ffmpeg,
     ffprobe,
+    fixture_framemd5,
     framemd5,
+    image_size,
     is_progressive,
+    mp4_metadata,
     streams_of,
+    title_tag,
     video_height,
 )
 
@@ -150,7 +173,105 @@ def test_the_media_fixtures_are_the_clips_spec_9_describes(media: MediaSet):
         assert "moof" not in kinds and kinds.index("mdat") < kinds.index("moov"), kinds
         assert not is_progressive(path)
     assert framemd5(media.progressive_video) == framemd5(media.src)
-    assert media.cover.read_bytes()[:2] == b"\xff\xd8"
+    # the covers: a JPEG, a PNG and a WebP, three sizes
+    for path, codec, size in (
+        (media.cover, "mjpeg", COVER_JPEG_SIZE),
+        (media.cover_png, "png", COVER_PNG_SIZE),
+        (media.cover_webp, "webp", COVER_WEBP_SIZE),
+    ):
+        (image,) = ffprobe(path)["streams"]
+        assert (image["codec_name"], image["width"], image["height"]) == (codec, *size), path
+    assert image_size(media.cover.read_bytes()) == COVER_JPEG_SIZE
+    assert image_size(media.cover_png.read_bytes()) == COVER_PNG_SIZE
+    with pytest.raises(ValueError, match="neither a JPEG nor a PNG"):
+        image_size(media.cover_webp.read_bytes())
+
+
+def test_every_media_path_gives_the_writer_the_source_but_one_priming_frame(media: MediaSet):
+    """What the writer gets on each path (B.1): the source's pictures, and its audio with the
+    priming frame ffmpeg's segmenter/fragmenter keep — or without it (the progressive audio.mp4
+    keeps the edit list that hides it)."""
+    source_audio = framemd5(media.src, "a:0")
+    for name in MEDIA_PATHS:
+        expected = media.expected(name)
+        assert expected.source == media.src
+        assert expected.video == (media.low if name.endswith("-low") else media.src), name
+        given = fixture_framemd5(expected.audio, "a:0")
+        assert_primed_or_same(given, source_audio, name)
+        primed = name.removesuffix("-low") != "btv-progressive"
+        assert len(given) == len(source_audio) + primed, name
+    # the joined HLS streams are the segments in playlist order: the source's pictures
+    assert media.hls_ts.joined.read_bytes() == b"".join(
+        path.read_bytes() for path in media.hls_ts.segments
+    )
+    assert media.hls_fmp4.init is not None
+    assert media.hls_fmp4.joined.read_bytes().startswith(media.hls_fmp4.init.read_bytes())
+    for joined in (media.hls_ts.joined, media.hls_fmp4.joined):
+        assert framemd5(joined, "v:0") == framemd5(media.src, "v:0"), joined
+    with pytest.raises(AssertionError, match="audio frames differ"):
+        assert_primed_or_same(source_audio[1:], source_audio, "a frame missing")
+    with pytest.raises(AssertionError, match="audio frames differ"):
+        assert_primed_or_same(["0" * 32, "1" * 32, *source_audio], source_audio, "two extra")
+
+
+def _remux(media: MediaSet, out: Path, *args: str) -> Path:
+    """`ffmpeg -c copy` of the DASH pair (plus `args`) into `out`: a file shaped like one
+    StreamFetch saves, made without the extension."""
+    inputs = ["-i", str(media.dash_video), "-i", str(media.dash_audio)]
+    ffmpeg([*inputs, *args, "-c", "copy", "-movflags", "+faststart", str(out)])
+    return out
+
+
+def test_the_saved_file_verification_on_files_ffmpeg_makes(media: MediaSet, tmp_path: Path):
+    expected = media.expected("dash")
+    plain = _remux(media, tmp_path / "plain.mp4", "-map", "0:v", "-map", "1:a")
+    probed = assert_saved_media(plain, expected)
+    assert_no_cover(plain, probed)
+    assert mp4_metadata(plain).cover is None
+    # with a cover and a non-ASCII title, as StreamFetch embeds them (B.2)
+    title = BILI_TITLES[BILI_UNICODE]
+    covered = tmp_path / "covered.mp4"
+    ffmpeg(
+        [
+            *("-i", str(plain), "-i", str(media.cover), "-map", "0", "-map", "1", "-c", "copy"),
+            *("-disposition:v:1", "attached_pic", "-metadata", f"title={title}"),
+            *("-movflags", "+faststart", str(covered)),
+        ]
+    )
+    probed = assert_saved_media(covered, expected)
+    assert [s["codec_name"] for s in attached_pictures(probed)] == ["mjpeg"]
+    assert [s["codec_name"] for s in streams_of(probed, "video")] == ["h264"]
+    assert title_tag(probed) == title
+    meta = assert_cover(covered, probed, media.cover)
+    assert (meta.title, meta.cover_type, meta.cover) == (title, COVR_JPEG, media.cover.read_bytes())
+    assert av_framemd5(covered, "video") == av_framemd5(plain, "video")
+    assert av_framemd5(covered, "audio") == av_framemd5(plain, "audio")
+    with pytest.raises(AssertionError, match="attached pictures"):
+        assert_cover(plain, ffprobe(plain), media.cover)
+    with pytest.raises(AssertionError, match="not the served"):
+        assert_cover(covered, probed, media.cover_png)
+    with pytest.raises(AssertionError, match="attached_pic"):
+        assert_no_cover(covered, probed)
+    # what the verification refuses: other pictures, another audio, a cut, a fragmented file
+    with pytest.raises(AssertionError, match="video frames differ"):
+        assert_saved_media(plain, media.expected("dash-low"))
+    with pytest.raises(AssertionError, match="differ from the writer's input"):
+        assert_saved_media(plain, media.expected("btv-progressive"))  # its audio has no priming
+    short = _remux(media, tmp_path / "short.mp4", "-map", "0:v", "-map", "1:a", "-t", "5")
+    with pytest.raises(AssertionError, match="duration"):
+        assert_saved_media(short, expected)
+    fragmented = tmp_path / "fragmented.mp4"
+    ffmpeg(
+        [
+            *("-i", str(plain), "-c", "copy"),
+            *("-movflags", "frag_keyframe+empty_moov+default_base_moof", str(fragmented)),
+        ]
+    )
+    with pytest.raises(AssertionError, match="not progressive"):
+        assert_saved_media(fragmented, expected)
+    video_only = _remux(media, tmp_path / "video-only.mp4", "-map", "0:v")
+    with pytest.raises(AssertionError, match="audio"):
+        assert_saved_media(video_only, expected)
 
 
 def test_the_verification_accepts_the_source_and_one_priming_frame_only(media: MediaSet):
@@ -161,7 +282,7 @@ def test_the_verification_accepts_the_source_and_one_priming_frame_only(media: M
     assert_same_audio(media.dash_audio, media.src)
     # other pictures, or a fragmented file, are refused
     with pytest.raises(AssertionError, match="video frames differ"):
-        assert_same_media(media.low, media.src)
+        assert_saved_media(media.low, media.expected("btv-progressive"))
     assert not is_progressive(media.src)  # ffmpeg writes mdat first: not what StreamFetch saves
 
 
@@ -278,6 +399,16 @@ def test_dailymotion_refusal_options(media: MediaSet):
         assert fetch(sites.url("/dm/cdn/manifest/xgeo001.m3u8")).status == 200  # others: fine
 
 
+def test_dailymotion_claims_longer_option_changes_only_the_metadata_duration(media: MediaSet):
+    with FakeSites(media, dm_claims_longer=frozenset({"xlong01"})) as sites:
+        longer = fetch(sites.url("/dm/player/metadata/video/xlong01")).json()
+        assert longer["duration"] == CLAIMED_SECONDS > SOURCE_SECONDS
+        assert "error" not in longer and longer["qualities"]["auto"]
+        assert fetch(sites.url("/dm/player/metadata/video/xother1")).json()["duration"] == 6
+        playlist = fetch(sites.url("/dm/cdn/xlong01/media-1080.m3u8")).text
+        assert "#EXT-X-ENDLIST" in playlist  # the same 6 s clip as every other video
+
+
 def test_dailymotion_expired_segment_once_and_truncated_segment_once(media: MediaSet):
     with FakeSites(
         media,
@@ -301,6 +432,7 @@ def test_dailymotion_expired_segment_once_and_truncated_segment_once(media: Medi
             (200, False),
         ]
         assert records[2].sent_bytes == len(full) // 2
+        assert records[2].finished - records[2].started >= CUT_LINGER_S  # bytes, then the drop
         assert records[3].sent_bytes == len(full)
 
 
@@ -664,6 +796,70 @@ def test_the_log_tells_hosts_apart_and_options_change_while_running(sites: FakeS
     for path in covers:
         assert fetch(sites.url(path)).status == 200
     assert [r.site for r in sites.cover_requests()] == ["dailymotion", "bilibili", "bilibilitv"]
+
+
+def test_covers_png_webp_refused_and_one_extension_each(media: MediaSet):
+    png, webp, gone, limited = BILI_MAIN, BTV_AID, "xcv404m", BILI_UNICODE
+    with FakeSites(
+        media,
+        cover_png=frozenset({png}),
+        cover_webp=frozenset({webp, DM_TS_ID}),
+        cover_status=((gone, 404), (limited, 429)),
+    ) as sites:
+        # the URLs the sites' documents give
+        _, state = _bili_page(sites, png)
+        assert state["videoData"]["pic"] == sites.url(f"/bili/cover/{png}.png")
+        page = fetch(sites.url(f"/btv/en/video/{webp}")).text
+        cover = embedded_json(page, "__INITIAL_DATA__")["UgcVideo"]["videoData"]["cover"]
+        assert cover == sites.url(f"/btv-cover/{webp}.webp")
+        assert f'content="{cover}"' in page  # og:image
+        info = fetch(sites.url(f"/dm/player/metadata/video/{DM_TS_ID}")).json()
+        assert all(path_of(url).endswith(f"/{DM_TS_ID}.webp") for url in info["posters"].values())
+        # the answers
+        answer = fetch(sites.url(f"/bili/cover/{png}.png"))
+        assert answer.status == 200 and answer.headers["Content-Type"] == "image/png"
+        assert answer.body == media.cover_png.read_bytes()
+        answer = fetch(cover)
+        assert answer.headers["Content-Type"] == "image/webp"
+        assert answer.body == media.cover_webp.read_bytes()
+        assert fetch(sites.url(f"/dm/poster/{DM_TS_ID}.webp?h=720")).status == 200
+        assert fetch(sites.url(f"/bili/cover/{png}.jpg")).status == 404  # not its extension
+        assert fetch(sites.url(f"/btv-cover/{webp}.jpg")).status == 404
+        assert fetch(sites.url(f"/dm/poster/{gone}.jpg?h=720")).status == 404
+        refused = fetch(sites.url(f"/bili/cover/{limited}.jpg"))
+        assert refused.status == 429 and b"cover refused" in refused.body
+        default = fetch(sites.url(f"/dm/poster/{DM_FMP4_ID}.jpg?h=360"))
+        assert default.headers["Content-Type"] == "image/jpeg"
+        assert default.body == media.cover.read_bytes()
+        episodes = fetch(
+            sites.url(f"/btv-api/intl/gateway/web/v2/ogv/play/episodes?season_id={BTV_SEASON}")
+        ).json()
+        covers = [e["cover"] for s in episodes["data"]["sections"] for e in s["episodes"]]
+        assert all(url.endswith(".jpg") for url in covers)
+        answered = [(r.route, r.status) for r in sites.cover_requests()]
+        assert answered == [
+            ("bili-cover", 200),
+            ("btv-cover", 200),
+            ("dm-poster", 200),
+            ("bili-cover", 404),
+            ("btv-cover", 404),
+            ("dm-poster", 404),
+            ("bili-cover", 429),
+            ("dm-poster", 200),
+        ], answered
+
+
+def test_part_counts_per_video(media: MediaSet):
+    with FakeSites(media, bili_parts=2, bili_parts_of=((BILI_SHARE, 1),)) as sites:
+        assert parts_of(sites.options, BILI_MAIN) == 2
+        assert parts_of(sites.options, BILI_SHARE) == 1
+        _, state = _bili_page(sites, BILI_SHARE, "/?vd_source=0123&spm_id_from=333.788")
+        assert [p["page"] for p in state["videoData"]["pages"]] == [1]
+        assert state["videoData"]["title"] == BILI_TITLES[BILI_SHARE]
+        _, state = _bili_page(sites)
+        assert [p["page"] for p in state["videoData"]["pages"]] == [1, 2]
+        _, state = _bili_page(sites, BILI_SHARE, "?p=2")  # no part 2: part 1 is shown
+        assert state["p"] == 1
 
 
 def test_base_urls_for_the_test_settings(sites: FakeSites):

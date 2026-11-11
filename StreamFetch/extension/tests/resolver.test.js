@@ -18,6 +18,7 @@ import {
   resolve,
   selectStream,
 } from "../src/app/resolver.js";
+import { isRefused, parseLine } from "../src/lib/urls.js";
 
 /** @type {string[]} */
 const HOSTS = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"))
@@ -237,15 +238,25 @@ test("Dailymotion: the quality cap and the codec preference choose the variant",
   assert.equal(cappedStreams.variant.name, "360");
 });
 
-test("Dailymotion: a playlist parameter is ignored and said so", async () => {
-  const net = network({
+test("Dailymotion: a playlist parameter is ignored and said so (the item's playlistIgnored)", async () => {
+  const routes = {
     [METADATA]: { body: metadata() },
     [MASTER]: { body: MASTER_TEXT },
     [`${CDN}/1080/media.m3u8`]: { body: mediaText() },
-  });
-  const original = `https://www.dailymotion.com/video/${DM_ID}?playlist=x6hynp`;
-  const [target] = targetsOf(await resolve(item({ site: "dailymotion", id: DM_ID, original }), context(net.fetch).ctx));
+  };
+  /** @param {string} line */
+  const pasted = (line) => {
+    const parsed = parseLine(line);
+    assert.ok(!isRefused(parsed), line);
+    return /** @type {ResolveItem} */ (/** @type {unknown} */ (parsed));
+  };
+  const withPlaylist = pasted(`https://www.dailymotion.com/video/${DM_ID}?playlist=x6hynp`);
+  assert.equal(withPlaylist.playlistIgnored, true);
+  const [target] = targetsOf(await resolve(withPlaylist, context(network(routes).fetch).ctx));
   assert.deepEqual(target?.hints, [{ code: "playlist_ignored", params: {} }]);
+  const plain = pasted(`https://www.dailymotion.com/video/${DM_ID}?autoplay=1`);
+  const [other] = targetsOf(await resolve(plain, context(network(routes).fetch).ctx));
+  assert.deepEqual(other?.hints, [], "no playlist named: no hint");
 });
 
 test("Dailymotion refusals: geo-blocked and gone are unavailable after one request", async () => {
@@ -263,7 +274,7 @@ test("Dailymotion refusals: geo-blocked and gone are unavailable after one reque
   const removed = failureOf(await resolve(item({ site: "dailymotion", id: DM_ID }), context(gone.fetch).ctx));
   assert.equal(removed.status, "failed-unavailable");
   assert.equal(removed.failure.code, "deleted");
-  assert.equal(removed.failure.params["site_message"], "This video has been removed");
+  assert.equal(removed.failure.params["site_message"], "Dailymotion says: This video has been removed");
   const junk = network({ [METADATA]: { body: "<html>verify you are human</html>", headers: { "content-type": "text/html" } } });
   const notJson = failureOf(await resolve(item({ site: "dailymotion", id: DM_ID }), context(junk.fetch).ctx));
   assert.equal(notJson.failure.code, "not_a_video");
@@ -646,6 +657,61 @@ test("Bilibili.tv: a series — season_info, episodes, then one page and playurl
   assert.deepEqual(targets.map((target) => target.seasonId), [season, season, season]);
   assert.deepEqual(targets.map((target) => target.episodeId), ["11", "12", "13"]);
   assert.equal(targets[0]?.pageUrl, `https://www.bilibili.tv/en/play/${season}/11`);
+  assert.deepEqual(
+    targets.map((target) => target.partTitle),
+    ["E1 - Start", "E2 - Middle", "E3 - End"],
+    "an episode's own title is the list's title_display",
+  );
+});
+
+test("Bilibili.tv: a series whose episode list the site refuses fails with the site's code", async () => {
+  const season = "2090002";
+  const info = `${API}/v2/ogv/play/season_info?season_id=${season}&platform=web`;
+  const list = `${API}/v2/ogv/play/episodes?season_id=${season}&platform=web`;
+  const series = item({ site: "bilibilitv", id: season, kind: "series", key: `bilibilitv:series:${season}` });
+  for (const [code, expected] of /** @type {const} */ ([
+    [10004001, "geo_blocked"],
+    [10004004, "login_required"],
+  ])) {
+    const net = network({
+      [info]: { body: JSON.stringify({ code, message: String(code) }) },
+      [list]: { body: JSON.stringify({ code, message: String(code) }) },
+    });
+    const failed = failureOf(await resolve(series, context(net.fetch).ctx));
+    assert.equal(failed.failure.code, expected, String(code));
+    assert.equal(failed.status, "failed-unavailable");
+    assert.equal(net.calls.length, 2, "no episode page, no playurl request");
+  }
+  const empty = network({
+    [info]: { body: JSON.stringify({ code: 0, data: { season: { title: "Empty" } } }) },
+    [list]: { body: JSON.stringify({ code: 0, data: { sections: [] } }) },
+  });
+  const none = failureOf(await resolve(series, context(empty.fetch).ctx));
+  assert.equal(none.failure.code, "no_streams");
+  assert.equal(none.status, "failed-unavailable");
+  assert.equal(none.title, "Empty");
+  const junk = network({ [info]: { status: 404 }, [list]: { body: "<html>", headers: { "content-type": "text/html" } } });
+  const notJson = failureOf(await resolve(series, context(junk.fetch).ctx));
+  assert.equal(notJson.failure.code, "not_a_video");
+});
+
+test("Bilibili.tv: a single episode keeps its season; its row title is the page's", async () => {
+  const page = `https://www.bilibili.tv/en/play/2090001/13000003`;
+  const api = `${API}/playurl?platform=web&ep_id=13000003`;
+  const net = network({ [page]: { body: btvPage("E3 - The end") }, [api]: { body: playurl() } });
+  const episode = item({
+    site: "bilibilitv",
+    id: "13000003",
+    kind: "episode",
+    seasonId: "2090001",
+    key: "bilibilitv:episode:13000003",
+  });
+  const [target] = targetsOf(await resolve(episode, context(net.fetch).ctx));
+  assert.deepEqual(net.calls.map((call) => call.url), [page, api]);
+  assert.equal(target?.title, "E3 - The end");
+  assert.equal(target?.partTitle, null);
+  assert.equal(target?.seasonId, "2090001");
+  assert.equal(target?.episodeId, "13000003");
 });
 
 // --------------------------------------------------------------------------- the rest
@@ -698,4 +764,5 @@ test("bases: the real origins, or the fake sites' in test mode; onBase maps a pa
   assert.equal(onBase("https://www.bilibili.com/video/BV1?p=2", "https://www.bilibili.com", bases.bilibili), "http://127.0.0.1:8123/bili/video/BV1?p=2");
   assert.equal(bilibilitvPage("http://127.0.0.1:1/btv/", { aid: AID }), `http://127.0.0.1:1/btv/en/video/${AID}`);
   assert.equal(bilibilitvPage("https://www.bilibili.tv", { epId: "7", seasonId: "9" }), "https://www.bilibili.tv/en/play/9/7");
+  assert.equal(bilibilitvPage("https://www.bilibili.tv", { epId: "7", seasonId: null }), null, "no season: no page");
 });

@@ -3,9 +3,10 @@
  * MP4 reading for StreamFetch: the ISO BMFF box reader and writers, the init (`moov`) and
  * fragment (`moof`) parsers, the DRM walk, the readers that turn a downloaded file into
  * {@link TrackPlan}s for the progressive writer (`remux.js`) — fragmented files (DASH m4s, fMP4
- * HLS) through `collectFmp4`, any layout through `collectMp4` — and `probe`, the check of a
- * finished file. Pure: bytes in, bytes out, Uint8Array everywhere, DataView big-endian; no
- * `chrome.*`, no DOM, no dependency — it runs in Node (`node --test`) and in the extension alike.
+ * HLS) through `collectFmp4`, any layout through `collectMp4` — `readMetadata` (the embedded
+ * title and cover) and `probe`, the check of a finished file. Pure: bytes in, bytes out,
+ * Uint8Array everywhere, DataView big-endian; no `chrome.*`, no DOM, no dependency — it runs in
+ * Node (`node --test`) and in the extension alike.
  *
  * Files are read through a {@link Mp4File} (`{ name, size, slice(start, end) }`) in bounded
  * windows: box headers, the `moov` and each `moof` are read, an `mdat` never is (its samples are
@@ -87,10 +88,23 @@
  *   durationS: number, sampleCount: number }} ProbeTrack
  */
 /**
+ * The cover image of a file's iTunes metadata (`moov/udta/meta/ilst/covr`): its type (from the
+ * `data` atom's type — 13 JPEG, 14 PNG — or, for any other type, from the image's own signature)
+ * and a copy of its bytes.
+ * @typedef {{ type: "jpeg" | "png" | "other", bytes: Uint8Array }} ProbeCover
+ */
+/**
+ * What the iTunes metadata of a `moov` holds: the title (`©nam`) and the cover (`covr`), each
+ * null when absent.
+ * @typedef {{ title: string | null, cover: ProbeCover | null }} Mp4Metadata
+ */
+/**
  * What `probe` says of a finished file. `progressive`: `moov` before the first `mdat`, no `moof`
- * and no `mvex`; `truncated`: a top-level box runs past the end of the file.
+ * and no `mvex`; `truncated`: a top-level box runs past the end of the file; `title` and `cover`:
+ * the embedded iTunes metadata ({@link readMetadata}).
  * @typedef {{ tracks: ProbeTrack[], durationS: number, progressive: boolean, fragmented: boolean,
- *   encrypted: boolean, truncated: boolean }} ProbeResult
+ *   encrypted: boolean, truncated: boolean, title: string | null,
+ *   cover: ProbeCover | null }} ProbeResult
  */
 /** @typedef {"invalid" | "truncated" | "encrypted" | "unsupported"} Mp4ErrorCode */
 
@@ -140,6 +154,15 @@ const PER_SAMPLE_FIELDS = [
 /** Sample flags: `sample_is_non_sync_sample` and `sample_depends_on == 1` (depends on others). */
 export const SAMPLE_FLAG_NON_SYNC = 0x00010000;
 export const SAMPLE_FLAG_DEPENDS_YES = 0x01000000;
+/** The well-known types of an iTunes metadata `data` atom (the 24 bits after its version). */
+export const DATA_TYPE = Object.freeze({ UTF8: 1, UTF16: 2, JPEG: 13, PNG: 14 });
+/** The `ilst` item of the title: `©nam` (0xA9 'n' 'a' 'm'). */
+export const TITLE_ITEM = "©nam";
+/** The `ilst` item of the cover image. */
+export const COVER_ITEM = "covr";
+/** The first bytes of a JPEG (SOI then a marker) and of a PNG (its 8-byte signature). */
+const JPEG_SIGNATURE = [0xff, 0xd8, 0xff];
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 /** Boxes whose children start after a few bytes of their own (full-box fields, entry count). */
 const CHILD_OFFSETS = /** @type {ReadonlyMap<string, number>} */ (
@@ -1544,6 +1567,97 @@ export async function collectMp4(file) {
   return plans;
 }
 
+// ------------------------------------------------------------------------ iTunes metadata
+
+/**
+ * What an image's first bytes say it is: `jpeg` (FF D8 FF), `png` (the 8-byte PNG signature) or
+ * null. Never throws.
+ * @param {Uint8Array} bytes
+ * @returns {"jpeg" | "png" | null}
+ */
+export function imageType(bytes) {
+  if (!(bytes instanceof Uint8Array)) return null;
+  /** @param {readonly number[]} signature */
+  const starts = (signature) =>
+    bytes.length >= signature.length && signature.every((byte, index) => bytes[index] === byte);
+  if (starts(JPEG_SIGNATURE)) return "jpeg";
+  if (starts(PNG_SIGNATURE)) return "png";
+  return null;
+}
+
+/**
+ * The payload of the first `data` atom of an `ilst` item: its type (the 24 bits after the
+ * version) and its bytes (after the 4-byte locale), or null.
+ * @param {Uint8Array} bytes
+ * @param {Box} item
+ * @returns {{ type: number, payload: Uint8Array } | null}
+ */
+function firstData(bytes, item) {
+  const data = childBoxes(bytes, item).find((child) => child.type === "data");
+  if (data === undefined) return null;
+  const body = data.start + data.headerSize;
+  if (data.end - body < 8) return null;
+  const type = new ByteReader(bytes).u32(body, "a data atom") & 0xffffff;
+  return { type, payload: bytes.subarray(body + 8, data.end) };
+}
+
+/**
+ * The iTunes metadata of a `moov` (the buffer starts with the `moov` box, as `probe` reads it):
+ * the title of `udta/meta/ilst/©nam` (a UTF-8 or UTF-16 `data` atom) and the cover of `covr`
+ * (data type 13 → `jpeg`, 14 → `png`, any other type → the image's own signature, else `other`;
+ * the bytes copied). Reads the ISO `meta` (a full box) and the QuickTime one (no version and
+ * flags) alike. Metadata never decides whether a file is good: a missing or malformed `udta`
+ * gives nulls, never an error.
+ * @param {Uint8Array} moov
+ * @returns {Mp4Metadata}
+ */
+export function readMetadata(moov) {
+  /** @type {Mp4Metadata} */
+  const none = { title: null, cover: null };
+  try {
+    const moovBox = readBoxes(moov).find((found) => found.type === "moov");
+    if (moovBox === undefined) return none;
+    const udta = childBoxes(moov, moovBox).find((found) => found.type === "udta");
+    if (udta === undefined) return none;
+    const meta = childBoxes(moov, udta).find((found) => found.type === "meta");
+    if (meta === undefined) return none;
+    const reader = new ByteReader(moov);
+    const body = meta.start + meta.headerSize;
+    // QuickTime's `meta` has no version and flags: its first child's type is right at body + 4.
+    const quickTime = meta.end - body >= 8 && reader.str4(body + 4) === "hdlr";
+    const children = readBoxes(moov, quickTime ? body : body + 4, meta.end);
+    const ilst = children.find((found) => found.type === "ilst");
+    if (ilst === undefined) return none;
+    /** @type {Mp4Metadata} */
+    const result = { title: null, cover: null };
+    for (const item of childBoxes(moov, ilst)) {
+      if (item.type === TITLE_ITEM && result.title === null) {
+        const data = firstData(moov, item);
+        if (data?.type === DATA_TYPE.UTF8) {
+          result.title = new TextDecoder("utf-8").decode(data.payload);
+        }
+        if (data?.type === DATA_TYPE.UTF16) {
+          result.title = new TextDecoder("utf-16be").decode(data.payload);
+        }
+      }
+      if (item.type === COVER_ITEM && result.cover === null) {
+        const data = firstData(moov, item);
+        if (data === null || data.payload.length === 0) continue;
+        const type =
+          data.type === DATA_TYPE.JPEG
+            ? "jpeg"
+            : data.type === DATA_TYPE.PNG
+              ? "png"
+              : (imageType(data.payload) ?? "other");
+        result.cover = { type, bytes: data.payload.slice() };
+      }
+    }
+    return result;
+  } catch {
+    return none;
+  }
+}
+
 // -------------------------------------------------------------------------------- the probe
 
 /**
@@ -1581,7 +1695,8 @@ function progressiveTotals(moov, trak, track) {
  * before the first `mdat`, no `moof`, no `mvex`), fragmented, encrypted (`encv`, `enca`, `pssh`,
  * `senc`), truncated (it ends inside a box). Reads only box headers, the `moov` and, for a
  * fragmented file, each `moof`. A track's duration is its leading empty edit plus its media
- * duration (sum of `stts` or `trun` durations) minus the edit's `media_time`. A `Uint8Array` is
+ * duration (sum of `stts` or `trun` durations) minus the edit's `media_time`. `title` and `cover`
+ * are the `moov`'s iTunes metadata ({@link readMetadata}; null when absent). A `Uint8Array` is
  * probed as an in-memory file. A file without a `moov` is `invalid`.
  * @param {Mp4File | Uint8Array} input
  * @returns {Promise<ProbeResult>}
@@ -1631,6 +1746,7 @@ export async function probe(input) {
   const moovIndex = walk.boxes.findIndex((found) => found.type === "moov");
   const mdatIndex = walk.boxes.findIndex((found) => found.type === "mdat");
   const topPssh = walk.boxes.some((found) => found.type === "pssh");
+  const metadata = readMetadata(moov);
   return {
     tracks,
     durationS: tracks.reduce((longest, track) => Math.max(longest, track.durationS), 0),
@@ -1638,5 +1754,7 @@ export async function probe(input) {
     fragmented,
     encrypted: encrypted || topPssh || info.encrypted || drmProblem(moov) !== null,
     truncated: walk.truncated,
+    title: metadata.title,
+    cover: metadata.cover,
   };
 }

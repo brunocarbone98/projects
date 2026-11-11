@@ -34,7 +34,8 @@ export async function openApp(links) {
     }
     return;
   }
-  await chrome.tabs.create({ url: links ? `${appUrl}?links=${encodeURIComponent(links)}` : appUrl });
+  const url = links ? `${appUrl}?links=${encodeURIComponent(links)}` : appUrl;
+  await chrome.tabs.create({ url });
 }
 
 /**

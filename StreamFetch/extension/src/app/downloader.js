@@ -35,10 +35,10 @@ import {
   render,
   statusForFailure,
 } from "../lib/messages.js";
-import { Mp4Error, collectMp4, drmProblem, probe } from "../lib/mp4.js";
-import { targetPath } from "../lib/naming.js";
+import { Mp4Error, collectMp4, drmProblem, imageType, probe } from "../lib/mp4.js";
+import { partLabel, targetPath } from "../lib/naming.js";
 import { MAX_RETRIES, mediaPauseMs, retryBackoffS } from "../lib/pacing.js";
-import { writeProgressiveMp4 } from "../lib/remux.js";
+import { coverProblem, writeProgressiveMp4 } from "../lib/remux.js";
 import { TsDemuxer, tracksFromDemux } from "../lib/ts.js";
 
 /**
@@ -78,8 +78,12 @@ import { TsDemuxer, tracksFromDemux } from "../lib/ts.js";
  * @property {{ done: number, total: number } | null} segments HLS: segments done / total
  * @property {number} bytesPerS
  *
- * @typedef {{ code: "no_audio" | "browser_unreadable", params: Record<string, unknown> }} Note
- *   An informational line of a finished row.
+ * @typedef {{ code: "no_audio" | "browser_unreadable" | "cover", params: Record<string, unknown> }}
+ *   Note An informational line of a finished row (`cover`: the file was saved without its cover,
+ *   `params.reason` says why).
+ *
+ * @typedef {import("../lib/remux.js").Mp4Meta} Mp4Meta
+ * @typedef {{ bytes: Uint8Array, type: "jpeg" | "png" }} Cover
  *
  * @typedef {object} Verify What the verification found (the report and the history keep it).
  * @property {boolean} progressive
@@ -87,6 +91,16 @@ import { TsDemuxer, tracksFromDemux } from "../lib/ts.js";
  * @property {number} duration_s
  * @property {number | null} expected_duration_s
  * @property {number | null} browser_duration_s
+ * @property {string | null} title the `©nam` the file carries
+ * @property {{ type: string, bytes: number } | null} cover the `covr` the file carries
+ *
+ * @typedef {object} ImageTools What {@link jpegFromImage} needs of the browser (the page's own
+ *   `createImageBitmap` and `OffscreenCanvas`; fakes in the unit tests).
+ * @property {(blob: Blob) => Promise<{ width: number, height: number, close?: () => void }>}
+ *   createImageBitmap
+ * @property {new (width: number, height: number) => {
+ *   getContext(kind: "2d"): { drawImage(image: unknown, x: number, y: number): void } | null,
+ *   convertToBlob(options: { type: string, quality: number }): Promise<Blob> }} OffscreenCanvas
  *
  * @typedef {object} Result The outcome of one target.
  * @property {Status} status
@@ -111,6 +125,12 @@ import { TsDemuxer, tracksFromDemux } from "../lib/ts.js";
  * @property {() => Promise<void>} pagePause before a playlist request the download makes itself
  * @property {(blob: Blob) => Promise<number | null>} [browserCheck] the browser's own reading of
  *   the file's duration (informational)
+ * @property {"embed" | "none"} [cover] the `cover` setting: `embed` (the default) asks for the
+ *   target's cover once its media is complete and embeds it with the title; `none` asks for no
+ *   cover (the title is still embedded)
+ * @property {(image: Blob) => Promise<Uint8Array>} [toJpeg] converts a cover the MP4 cannot carry
+ *   as served (WebP, …) to JPEG — {@link jpegFromImage} in the page; without it such a cover is
+ *   left out (and the row says why)
  * @property {(progress: Progress) => void} [onProgress]
  * @property {(status: Status) => void} [onStatus]
  * @property {() => number} [now] milliseconds (`Date.now`)
@@ -165,6 +185,13 @@ export const BROWSER_CHECK_TIMEOUT_S = 10;
 /** The duration tolerance: max(3 s, 5 %) of the site's duration. */
 export const DURATION_TOLERANCE_S = 3;
 export const DURATION_TOLERANCE_RATIO = 0.05;
+/** How far `mp4.probe`'s reading of a written track may be from what the writer wrote. */
+export const WRITER_TOLERANCE_S = 0.002;
+/** The largest cover image read (a bigger one is left out; an embedded one must still fit
+ * `lib/remux.MAX_COVER_BYTES`, after a conversion to JPEG if one is needed). */
+export const MAX_COVER_DOWNLOAD_BYTES = 16 * 1024 * 1024;
+/** The JPEG quality of a cover converted from another format (WebP, …). */
+export const COVER_JPEG_QUALITY = 0.92;
 
 // ---------------------------------------------------------------------------- errors
 
@@ -492,7 +519,7 @@ export async function readBody(opened, net, onChunk, options = {}) {
         if (net.signal.aborted) throw net.signal.reason ?? new StopRequested();
         const stalled = error instanceof Error && error.message === "stalled";
         attempt.received_bytes = received;
-        attempt.outcome = stalled ? `stalled after ${received} bytes` : `cut after ${received} bytes`;
+        attempt.outcome = `${stalled ? "stalled" : "cut"} after ${received} bytes`;
         if (stalled) {
           throw new StepFailure(
             failure("no_response", { detail: `no data for ${Math.round(net.stallMs / 1000)} s` }),
@@ -589,7 +616,9 @@ export async function withRetries(step, net) {
 export async function fetchBytes(url, kind, net, attempts, options = {}) {
   const byteRange = options.byteRange ?? null;
   const range =
-    byteRange === null ? null : `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}`;
+    byteRange === null
+      ? null
+      : `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}`;
   return withRetries(async () => {
     /** @type {{ range: string | null, accept?: string }} */
     const requestOptions = { range };
@@ -637,7 +666,10 @@ export async function fetchBytes(url, kind, net, attempts, options = {}) {
  * @returns {Promise<{ text: string, url: string, contentType: string, attempt: Attempt }>}
  */
 export async function fetchText(url, kind, net, attempts, options = {}) {
-  const answer = await fetchBytes(url, kind, net, attempts, { ...options, maxBytes: MAX_TEXT_BYTES });
+  const answer = await fetchBytes(url, kind, net, attempts, {
+    ...options,
+    maxBytes: MAX_TEXT_BYTES,
+  });
   return {
     text: new TextDecoder("utf-8").decode(answer.bytes),
     url: answer.url,
@@ -855,6 +887,204 @@ export function browserDuration(blob, timeoutS = BROWSER_CHECK_TIMEOUT_S) {
   });
 }
 
+// ---------------------------------------------------------------------- cover and title
+
+/**
+ * The URL a cover is asked for: as given, or — for an `http:` URL the manifest does not cover
+ * whose `https:` twin it does (Bilibili's `pic` is often `http://i0.hdslb.com/…`) — that twin, the
+ * same image over TLS. Any other URL as given (the host check then refuses it).
+ * @param {string} url
+ * @param {readonly string[]} patterns the manifest's host permissions
+ * @returns {string}
+ */
+export function coverUrl(url, patterns) {
+  if (hostCovered(url, patterns) || !/^http:\/\//i.test(url)) return url;
+  const secure = `https://${url.slice("http://".length)}`;
+  return hostCovered(secure, patterns) ? secure : url;
+}
+
+/**
+ * The browser's own image tools of the page (`createImageBitmap`, `OffscreenCanvas`), or null
+ * where there are none (Node).
+ * @returns {ImageTools | null}
+ */
+function pageImageTools() {
+  const scope = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis));
+  const decode = scope["createImageBitmap"];
+  const canvas = scope["OffscreenCanvas"];
+  if (typeof decode !== "function" || typeof canvas !== "function") return null;
+  return /** @type {ImageTools} */ (
+    /** @type {unknown} */ ({ createImageBitmap: decode.bind(globalThis), OffscreenCanvas: canvas })
+  );
+}
+
+/**
+ * An image converted to JPEG by the browser itself — decoded with `createImageBitmap`, drawn on an
+ * `OffscreenCanvas` of its own size, encoded with `convertToBlob({ type: "image/jpeg", quality:
+ * 0.92 })` — for a cover served in a format the MP4's `covr` cannot carry (WebP, AVIF, GIF…).
+ * Throws when the browser cannot decode or encode it.
+ * @param {Blob} image
+ * @param {ImageTools | null} [tools] the page's own by default
+ * @returns {Promise<Uint8Array>}
+ */
+export async function jpegFromImage(image, tools = pageImageTools()) {
+  if (tools === null) throw new Error("this page cannot convert images");
+  const bitmap = await tools.createImageBitmap(image);
+  try {
+    const canvas = new tools.OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    if (context === null) throw new Error("no 2D canvas to convert the image");
+    context.drawImage(bitmap, 0, 0);
+    const jpeg = await canvas.convertToBlob({ type: "image/jpeg", quality: COVER_JPEG_QUALITY });
+    return new Uint8Array(await jpeg.arrayBuffer());
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+/**
+ * Why a cover request gave no image, in a few words (the row's `; cover: <reason>`): the site's
+ * refusal of a cover is never a stop, so its run-stopping wording is not used.
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function coverFailureReason(error) {
+  if (!(error instanceof StepFailure)) return oneLine(error);
+  const params = error.failure.params;
+  switch (error.failure.code) {
+    case "host_not_covered":
+      return (
+        `the image is on ${String(params["host"])}, ` +
+        "a host the extension has no permission for"
+      );
+    case "redirect_refused":
+      return `a redirect led to ${String(params["host"])}`;
+    case "http_status":
+      return `HTTP ${String(params["status"])}`;
+    case "rate_limited":
+    case "blocked":
+      return String(params["detail"] ?? error.failure.code).replace(/\s*\(cover\)$/, "");
+    case "no_response":
+      return `no answer (${String(params["detail"] ?? "?")})`;
+    case "truncated_body":
+      return "the transfer was cut short";
+    default:
+      return oneLine(error);
+  }
+}
+
+/**
+ * The title a target's file carries (`©nam`): a Bilibili.tv episode's own title, a Bilibili part's
+ * `<title> — P<nn> <part title>`, else the video's title.
+ * @param {Target} target
+ * @returns {string}
+ */
+export function embeddedTitle(target) {
+  if (target.site === "bilibilitv") return (target.partTitle || target.title || target.id).trim();
+  const title = (target.title || target.id).trim();
+  if (target.site !== "bilibili" || target.part === null || (target.partCount ?? 2) < 2) {
+    return title;
+  }
+  const own = (target.partTitle ?? "").trim();
+  const label = partLabel(target.part);
+  return own && own !== title ? `${title} — ${label} ${own}` : `${title} — ${label}`;
+}
+
+/**
+ * The cover of a target for its MP4: ONE request, after a media pause, outside the media budget —
+ * never retried, and a refusal of it (a 429, a 403) is no stop and records no cooldown —, a JPEG
+ * or PNG embedded as served, anything else converted to JPEG (`ctx.toJpeg`); at most
+ * {@link MAX_COVER_DOWNLOAD_BYTES} read and `lib/remux.MAX_COVER_BYTES` (5 MiB) embedded
+ * (`lib/remux.coverProblem` says why a cover cannot be). Resolves to the
+ * cover, or to the reason there is none; only the run's Stop is thrown.
+ * @param {string} url the cover the page or the metadata names
+ * @param {DownloadContext} ctx
+ * @param {Attempt[]} attempts the download's requests (the report lists the cover's too)
+ * @param {{ count: number }} counter
+ * @returns {Promise<{ cover: Cover } | { reason: string }>}
+ */
+export async function fetchCoverImage(url, ctx, attempts, counter) {
+  try {
+    await mediaPause(ctx, counter);
+    const opened = await request(coverUrl(url, ctx.net.hostPatterns), "cover", ctx.net, attempts, {
+      accept: "image/*",
+    });
+    const contentType = opened.attempt.content_type ?? "";
+    /** @type {Uint8Array[]} */
+    const chunks = [];
+    let total = 0;
+    await readBody(
+      opened,
+      ctx.net,
+      (chunk) => {
+        chunks.push(chunk.slice());
+        total += chunk.length;
+      },
+      { maxBytes: MAX_COVER_DOWNLOAD_BYTES + 1 },
+    );
+    if (total > MAX_COVER_DOWNLOAD_BYTES) {
+      return { reason: `the image is larger than ${MAX_COVER_DOWNLOAD_BYTES} bytes` };
+    }
+    if (total === 0) return { reason: "the image is empty" };
+    let bytes = joinChunks(chunks, total);
+    let type = imageType(bytes);
+    if (type === null) {
+      if (ctx.toJpeg === undefined) return { reason: "the image cannot be converted to JPEG here" };
+      const served = /** @type {BlobPart} */ (bytes);
+      try {
+        bytes = await ctx.toJpeg(new Blob([served], { type: contentType }));
+      } catch (error) {
+        const what = contentType.split(";")[0]?.trim() || "the image";
+        return { reason: `${what} could not be converted to JPEG (${oneLine(error)})` };
+      }
+      type = imageType(bytes) === "jpeg" ? "jpeg" : null;
+      if (type === null) return { reason: "the conversion to JPEG gave no JPEG image" };
+    }
+    /** @type {Cover} */
+    const cover = { bytes, type };
+    const problem = coverProblem(cover);
+    return problem === null ? { cover } : { reason: problem };
+  } catch (error) {
+    if (isStop(error, ctx.net)) throw error;
+    return { reason: coverFailureReason(error) };
+  }
+}
+
+/**
+ * What the file of a target carries besides its media: the title always, the cover when the
+ * `cover` setting embeds it and the target names one (a cover that could not be had becomes a
+ * `cover` note: the video is still saved).
+ * @param {Target} target
+ * @param {DownloadContext} ctx
+ * @param {Attempt[]} attempts
+ * @param {{ count: number }} counter
+ * @param {Note[]} notes
+ * @returns {Promise<Mp4Meta>}
+ */
+async function fileMeta(target, ctx, attempts, counter, notes) {
+  /** @type {Mp4Meta} */
+  const meta = {};
+  const title = embeddedTitle(target);
+  if (title) meta.title = title;
+  if ((ctx.cover ?? "embed") !== "embed" || !target.cover) return meta;
+  const got = await fetchCoverImage(target.cover, ctx, attempts, counter);
+  if ("cover" in got) meta.cover = got.cover;
+  else notes.push({ code: "cover", params: { reason: got.reason } });
+  return meta;
+}
+
+/**
+ * Whether the source of a target carries audio, as far as the site said before the download: a
+ * DASH audio file, a separate HLS audio rendition, or an audio codec in the variant's `CODECS`.
+ * @param {HlsChoice | DashChoice} streams
+ * @returns {boolean}
+ */
+export function audioExpected(streams) {
+  if (streams.kind === "dash") return streams.audio !== null;
+  if (streams.audio !== null && streams.audio.url !== null) return true;
+  return /(?:^|,)\s*(?:mp4a|ac-3|ec-3|opus)\b/i.test(streams.variant.codecs ?? "");
+}
+
 // ------------------------------------------------------------------------ the download
 
 /** What the download's own requests are traced as, by target key (the report's attempts). */
@@ -875,7 +1105,7 @@ export function traceOf(target) {
  * @returns {import("../lib/naming.js").NamingTarget}
  */
 export function namingTarget(target) {
-  const fields = {
+  return {
     site: target.site,
     id: target.id,
     title: target.title,
@@ -886,7 +1116,6 @@ export function namingTarget(target) {
     episodeId: target.episodeId,
     seriesTitle: target.seriesTitle,
   };
-  return /** @type {import("../lib/naming.js").NamingTarget} */ (/** @type {unknown} */ (fields));
 }
 
 /**
@@ -1002,9 +1231,11 @@ async function fetchMediaPlaylist(url, ctx, attempts) {
  * @param {{ key: string, name: (part: string) => string }} work
  * @param {Attempt[]} attempts
  * @param {{ count: number }} counter
+ * @param {{ corrupt: string | null }} health what the MPEG-TS demuxer found wrong (the first
+ *   `corrupt_stream` detail): the download goes on and the verification decides
  * @returns {Promise<TrackPlan[]>}
  */
-async function downloadHls(target, ctx, work, attempts, counter) {
+async function downloadHls(target, ctx, work, attempts, counter, health) {
   let streams = /** @type {HlsChoice} */ (target.streams);
   let raw = /** @type {HlsRaw} */ (target.raw);
   let keyMethod = raw.keyMethod;
@@ -1089,29 +1320,27 @@ async function downloadHls(target, ctx, work, attempts, counter) {
   const plans = [];
   for (const source of sources) {
     if (source.media.container === "ts") {
-      plans.push(...(await demuxSource(source, work, fetchPart, meter)));
+      plans.push(...(await demuxSource(source, work, fetchPart, meter, attempts, health)));
     } else {
       const name = work.name(source.role === "main" ? "hls.m4s" : "hls-audio.m4s");
       const writer = await ctx.files.appendWriter(name);
       try {
         let first = true;
         if (source.media.init !== null) {
-          const init = await fetchPart(
-            source,
-            (current) => /** @type {{ url: string, byteRange: HlsByteRange | null }} */ (current.init),
-            "segment",
-          );
+          /** @param {HlsMedia} current */
+          const pickInit = (current) =>
+            /** @type {{ url: string, byteRange: HlsByteRange | null }} */ (current.init);
+          const init = await fetchPart(source, pickInit, "segment");
           const drm = drmProblem(init);
           if (drm !== null) throw new StepFailure(failure("encrypted", { detail: drm }));
           await writer.write(init);
           first = false;
         }
         for (let index = 0; index < source.media.segments.length; index += 1) {
-          const bytes = await fetchPart(
-            source,
-            (current) => /** @type {import("../lib/hls.js").HlsSegment} */ (current.segments[index]),
-            "segment",
-          );
+          /** @param {HlsMedia} current */
+          const pickSegment = (current) =>
+            /** @type {import("../lib/hls.js").HlsSegment} */ (current.segments[index]);
+          const bytes = await fetchPart(source, pickSegment, "segment");
           if (first) {
             const drm = drmProblem(bytes);
             if (drm !== null) throw new StepFailure(failure("encrypted", { detail: drm }));
@@ -1126,11 +1355,23 @@ async function downloadHls(target, ctx, work, attempts, counter) {
         throw error;
       }
       const tracks = await collectMp4(await ctx.files.slicer(name));
-      const wanted = source.role === "main" ? tracks : tracks.filter((plan) => plan.kind === "audio");
+      const wanted =
+        source.role === "main" ? tracks : tracks.filter((plan) => plan.kind === "audio");
       plans.push(...wanted);
     }
   }
   return pickTracks(plans);
+}
+
+/**
+ * The failure of a stream whose codec the demuxer cannot handle (`unsupported_codec`).
+ * @param {{ code: string, params: Record<string, unknown> }} problem
+ * @returns {StepFailure}
+ */
+function unsupportedCodec(problem) {
+  return new StepFailure(
+    failure("unsupported_codec", { stream_type: problem.params["stream_type"] }),
+  );
 }
 
 /**
@@ -1141,11 +1382,14 @@ async function downloadHls(target, ctx, work, attempts, counter) {
  * @param {(source: HlsTrackSource, pick: (media: HlsMedia) => { url: string,
  *   byteRange: HlsByteRange | null }, kind: RequestKind) => Promise<Uint8Array>} fetchPart
  * @param {ProgressMeter} meter
+ * @param {Attempt[]} attempts the segment whose bytes were found damaged says so in its outcome
+ * @param {{ corrupt: string | null }} health
  * @returns {Promise<TrackPlan[]>}
  */
-async function demuxSource(source, work, fetchPart, meter) {
+async function demuxSource(source, work, fetchPart, meter, attempts, health) {
   const files = meter.ctx.files;
-  /** @type {Map<"video" | "audio", { writer: AppendWriter, offset: number, pending: Uint8Array[] }>} */
+  /** @type {Map<"video" | "audio", { writer: AppendWriter | null, offset: number,
+   *   pending: Uint8Array[] }>} */
   const sinks = new Map();
   const nameOf = (/** @type {"video" | "audio"} */ kind) =>
     work.name(source.role === "audio" ? "rendition.bin" : `${kind}.bin`);
@@ -1155,7 +1399,7 @@ async function demuxSource(source, work, fetchPart, meter) {
     (kind, bytes) => {
       let sink = sinks.get(kind);
       if (sink === undefined) {
-        sink = { writer: /** @type {AppendWriter} */ (/** @type {unknown} */ (null)), offset: 0, pending: [] };
+        sink = { writer: null, offset: 0, pending: [] };
         sinks.set(kind, sink);
       }
       const at = sink.offset;
@@ -1165,6 +1409,11 @@ async function demuxSource(source, work, fetchPart, meter) {
     },
     (code, params) => {
       if (code === "unsupported_codec" && unsupported === null) unsupported = { code, params };
+      if (code === "corrupt_stream" && health.corrupt === null) {
+        health.corrupt = String(params["detail"] ?? "damaged MPEG-TS data");
+        const attempt = attempts.at(-1);
+        if (attempt !== undefined) attempt.outcome = `${attempt.outcome}; ${health.corrupt}`;
+      }
     },
   );
   const demuxer = new TsDemuxer(collector.hooks);
@@ -1182,20 +1431,14 @@ async function demuxSource(source, work, fetchPart, meter) {
         "segment",
       );
       demuxer.push(bytes);
-      if (unsupported !== null) {
-        const found = /** @type {{ code: string, params: Record<string, unknown> }} */ (unsupported);
-        throw new StepFailure(failure("unsupported_codec", { stream_type: found.params["stream_type"] }));
-      }
+      if (unsupported !== null) throw unsupportedCodec(unsupported);
       await flush();
       meter.segmentDone();
     }
     demuxer.flush();
-    if (unsupported !== null) {
-      const found = /** @type {{ code: string, params: Record<string, unknown> }} */ (unsupported);
-      throw new StepFailure(failure("unsupported_codec", { stream_type: found.params["stream_type"] }));
-    }
+    if (unsupported !== null) throw unsupportedCodec(unsupported);
     await flush();
-    for (const sink of sinks.values()) await sink.writer.close();
+    for (const sink of sinks.values()) await sink.writer?.close();
   } catch (error) {
     for (const sink of sinks.values()) if (sink.writer !== null) await sink.writer.abort();
     throw error;
@@ -1225,7 +1468,8 @@ function pickTracks(plans) {
  * the `moov` checked for DRM as soon as it is complete.
  * @param {"video" | "audio"} role
  * @param {DownloadContext} ctx
- * @param {{ target: Target, streams: () => DashChoice, refresh: (cause: StepFailure) => Promise<void> }} owner
+ * @param {{ target: Target, streams: () => DashChoice,
+ *   refresh: (cause: StepFailure) => Promise<void> }} owner
  * @param {AppendWriter} writer
  * @param {Attempt[]} attempts
  * @param {{ count: number }} counter
@@ -1408,8 +1652,9 @@ async function downloadDash(target, ctx, work, attempts, counter) {
 }
 
 /**
- * The failure an error of a stage becomes: a step's own, an MP4 the reader refuses (`encrypted`
- * stays `encrypted`), else the stage's code with the error as its reason.
+ * The failure an error of a stage becomes: a step's own; an `Mp4Error` of the reader or the
+ * writer `encrypted` when it says so, else `remux_failed` with its message as the reason; else the
+ * stage's code with the error as its reason.
  * @param {unknown} error
  * @param {"download" | "finish" | "verify" | "save"} stage
  * @returns {Failure}
@@ -1419,9 +1664,7 @@ function failureOf(error, stage) {
   if (error instanceof Mp4Error && error.code === "encrypted") {
     return failure("encrypted", { detail: oneLine(error) });
   }
-  if (stage === "download" && error instanceof Mp4Error) {
-    return failure("not_a_video", { content_type: `a file MP4 cannot read (${oneLine(error)})` });
-  }
+  if (error instanceof Mp4Error) return failure("remux_failed", { reason: oneLine(error) });
   if (stage === "download") return failure("no_response", { detail: oneLine(error) });
   if (stage === "finish") return failure("remux_failed", { reason: oneLine(error) });
   if (stage === "verify") return failure("verify_failed", { reason: oneLine(error) });
@@ -1497,18 +1740,33 @@ export async function download(target, ctx) {
     await ctx.applyReferer(target.site);
     ctx.onStatus?.("downloading");
     const counter = { count: 0 };
-    const plans =
+    /** @type {{ corrupt: string | null }} */
+    const health = { corrupt: null };
+    const collected =
       target.streams.kind === "hls"
-        ? await downloadHls(target, ctx, work, attempts, counter)
+        ? await downloadHls(target, ctx, work, attempts, counter, health)
         : await downloadDash(target, ctx, work, attempts, counter);
     result.contacted = true;
     stage = "finish";
-    ctx.onStatus?.("finishing");
+    /** @param {string} reason */
+    const told = (reason) =>
+      health.corrupt === null
+        ? reason
+        : `${reason}; the MPEG-TS stream was damaged: ${health.corrupt}`;
+    // a track without a sample is never handed to the writer
+    const plans = collected.filter((plan) => plan.samples.length > 0);
     const video = plans.find((plan) => plan.kind === "video");
-    if (video === undefined || video.samples.length === 0) {
-      return fail(failure("remux_failed", { reason: "the source has no video track" }));
+    if (video === undefined) {
+      return fail(failure("remux_failed", { reason: told("the source has no video samples") }));
     }
     const audio = plans.find((plan) => plan.kind === "audio");
+    const streams = /** @type {HlsChoice | DashChoice} */ (target.streams);
+    if (audio === undefined && audioExpected(streams)) {
+      const reason = told("the source announced audio but carried no audio sample");
+      return fail(failure("remux_failed", { reason }));
+    }
+    const meta = await fileMeta(target, ctx, attempts, counter, result.notes);
+    ctx.onStatus?.("finishing");
     const finalName = work.name("final.mp4");
     const sink = await ctx.files.appendWriter(finalName);
     /** @type {Map<string, Mp4File>} */
@@ -1527,6 +1785,7 @@ export async function download(target, ctx) {
           return source.slice(ref.offset, ref.offset + size);
         },
         sink,
+        { meta },
       );
       await sink.close();
     } catch (error) {
@@ -1536,26 +1795,37 @@ export async function download(target, ctx) {
     stage = "verify";
     ctx.onStatus?.("verifying");
     const probed = await probe(await ctx.files.slicer(finalName));
+    /** @param {string} reason */
+    const refuse = (reason) => fail(failure("remux_failed", { reason: told(reason) }));
     if (!probed.progressive || probed.truncated || probed.encrypted) {
-      return fail(failure("remux_failed", { reason: "the written file is not a complete progressive MP4" }));
+      return refuse("the written file is not a complete progressive MP4");
     }
     const videoTracks = probed.tracks.filter((track) => track.kind === "video");
     const audioTracks = probed.tracks.filter((track) => track.kind === "audio");
     const expectedAudio = audio === undefined ? 0 : 1;
     if (videoTracks.length !== 1 || audioTracks.length !== expectedAudio) {
-      return fail(failure("remux_failed", {
-        reason: `the written file has ${videoTracks.length} video and ${audioTracks.length} audio tracks`,
-      }));
+      const counts = `${videoTracks.length} video and ${audioTracks.length} audio tracks`;
+      return refuse(`the written file has ${counts}`);
     }
-    for (const plan of plans) {
-      const track = probed.tracks.find((one) => one.kind === plan.kind);
-      if (track !== undefined && track.sampleCount !== plan.samples.length) {
-        return fail(failure("remux_failed", {
-          reason: `${plan.kind}: ${track.sampleCount} samples written of ${plan.samples.length}`,
-        }));
+    for (const track of written.tracks) {
+      const found = probed.tracks.find((one) => one.kind === track.kind);
+      if (found === undefined) return refuse(`${track.kind}: the written file lacks the track`);
+      if (found.sampleCount !== track.samples) {
+        return refuse(`${track.kind}: ${found.sampleCount} samples written of ${track.samples}`);
+      }
+      if (Math.abs(found.durationS - track.durationS) > WRITER_TOLERANCE_S) {
+        const read = `${found.durationS.toFixed(3)} s`;
+        const wrote = `${track.durationS} s`;
+        return refuse(`${track.kind}: the file says ${read}, the writer wrote ${wrote}`);
       }
     }
-    if (audio === undefined) result.notes.push({ code: "no_audio", params: {} });
+    if (meta.title !== undefined && probed.title !== meta.title) {
+      return refuse("the written file does not carry its title");
+    }
+    if (meta.cover !== undefined && probed.cover === null) {
+      return refuse("the written file does not carry its cover");
+    }
+    if (audio === undefined) result.notes.unshift({ code: "no_audio", params: {} });
     result.verify = {
       progressive: probed.progressive,
       tracks: probed.tracks.map((track) => ({
@@ -1567,18 +1837,37 @@ export async function download(target, ctx) {
       duration_s: probed.durationS,
       expected_duration_s: target.durationS,
       browser_duration_s: null,
+      title: probed.title,
+      cover:
+        probed.cover === null
+          ? null
+          : { type: probed.cover.type, bytes: probed.cover.bytes.length },
     };
     if (target.durationS !== null && !durationMatches(probed.durationS, target.durationS)) {
-      return fail(failure("verify_failed", {
-        reason: `duration ${oneDecimal(probed.durationS)} s, expected ${oneDecimal(target.durationS)} s`,
-      }));
+      const actual = oneDecimal(probed.durationS);
+      const reason = `duration ${actual} s, expected ${oneDecimal(target.durationS)} s`;
+      return fail(failure("verify_failed", { reason: told(reason) }));
+    }
+    // every track complete, not only the longest: a DASH audio file that ended early leaves a
+    // file whose duration is still the video's
+    const reference = target.durationS ?? videoTracks[0]?.durationS ?? null;
+    for (const track of probed.tracks) {
+      if (reference === null || durationMatches(track.durationS, reference)) continue;
+      const against = target.durationS === null ? "the video's" : "expected";
+      const actual = `${track.kind} track ${oneDecimal(track.durationS)} s`;
+      const reason = `${actual}, ${against} ${oneDecimal(reference)} s`;
+      return fail(failure("verify_failed", { reason: told(reason) }));
     }
     const blob = await ctx.files.file(finalName);
     if (ctx.browserCheck) {
       const seen = await ctx.browserCheck(blob).catch(() => null);
       result.verify.browser_duration_s = seen;
       if (seen === null) {
-        result.notes.push({ code: "browser_unreadable", params: { codec: videoTracks[0]?.codec ?? "?" } });
+        const codec = videoTracks[0]?.codec ?? "?";
+        const at = result.notes.findIndex((note) => note.code === "cover");
+        const note = /** @type {Note} */ ({ code: "browser_unreadable", params: { codec } });
+        if (at === -1) result.notes.push(note);
+        else result.notes.splice(at, 0, note);
       }
     }
     stage = "save";

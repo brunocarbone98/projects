@@ -13,16 +13,25 @@
  * `ctts` (version 0) holds `cts + shift` and an `elst` media edit starts at `media_time = shift`,
  * so the presentation is unchanged. The earliest track's first decode time is time zero; a track
  * whose first `dts` is later starts with an empty edit of that gap, which keeps A/V sync.
+ *
+ * Metadata (`opts.meta`): the title and the cover go into `moov/udta/meta` (iTunes style: a full
+ * `meta` box, an `hdlr` of handler `mdir`, then an `ilst` with `©nam` and `covr`), after the
+ * `trak`s. The `udta` is part of the planned `moov`, so every chunk offset accounts for it; the
+ * sample data is the same bytes with or without it.
  */
 
 import {
+  COVER_ITEM,
+  DATA_TYPE,
   ENCRYPTED_SAMPLE_ENTRIES,
   Mp4Error,
+  TITLE_ITEM,
   box,
   concat,
   fullBox,
   i32,
   i64,
+  imageType,
   readBoxes,
   str4,
   u16,
@@ -42,13 +51,22 @@ import {
 /**
  * What `planMoov` decides: the `ftyp`, `moov` and `mdat` header bytes, where the `mdat` box
  * starts (`mdatOffset`, its payload follows the header), the chunks in output order, the plans in
- * track-id order (video then audio), the sizes, the durations, and whether chunk offsets needed
- * `co64`.
+ * track-id order (video then audio), the sizes, the durations, whether chunk offsets needed
+ * `co64`, and the size of the metadata `udta` inside the `moov` (0 without one).
  * @typedef {{ ftyp: Uint8Array, moov: Uint8Array, mdatHeader: Uint8Array, mdatOffset: number,
  *   payloadBytes: number, totalBytes: number, order: ChunkPlan[], plans: TrackPlan[],
- *   durationS: number, tracks: TrackSummary[], co64: boolean }} MoovPlan
+ *   durationS: number, tracks: TrackSummary[], co64: boolean, udtaBytes: number }} MoovPlan
  */
-/** @typedef {{ chunkS?: number }} WriteOptions */
+/**
+ * A cover image embedded as served: a JPEG (`covr` data type 13) or a PNG (data type 14).
+ * @typedef {{ bytes: Uint8Array, type: "jpeg" | "png" }} Cover
+ */
+/**
+ * The metadata written into the file: the title (`©nam`, UTF-8; an empty one is not written)
+ * and the cover (`covr`, at most {@link MAX_COVER_BYTES}).
+ * @typedef {{ title?: string, cover?: Cover }} Mp4Meta
+ */
+/** @typedef {{ chunkS?: number, meta?: Mp4Meta }} WriteOptions */
 /** @typedef {{ file: string, offset: number }} DataRef */
 /**
  * Reads `size` bytes of the work file `ref.file` at `ref.offset`.
@@ -62,6 +80,8 @@ export const DEFAULT_CHUNK_S = 1;
 export const MOVIE_TIMESCALE = 1000;
 /** Contiguous samples of one chunk are read in one call, up to this many bytes. */
 export const MAX_READ_BYTES = 8 * 1024 * 1024;
+/** The largest cover embedded in a file: 5 MiB (a site's cover is tens to hundreds of KB). */
+export const MAX_COVER_BYTES = 5 * 1024 * 1024;
 
 const U32_MAX = 0xffffffff;
 const I32_MAX = 0x7fffffff;
@@ -483,13 +503,15 @@ function trak(track, chunkOffsets, wideOffsets) {
 }
 
 /**
- * The `moov` for the prepared tracks and their chunk offsets.
+ * The `moov` for the prepared tracks and their chunk offsets, the metadata `udta` (when there is
+ * one) after the `trak`s.
  * @param {readonly Prepared[]} tracks
  * @param {readonly (readonly number[])[]} offsets per track
  * @param {boolean} wide
+ * @param {Uint8Array | null} udta
  * @returns {Uint8Array}
  */
-function buildMoov(tracks, offsets, wide) {
+function buildMoov(tracks, offsets, wide, udta) {
   const duration = Math.max(...tracks.map((track) => track.emptyMovie + track.presentedMovie));
   const mvhdWide = duration > U32_MAX;
   const mvhd = fullBox(
@@ -508,7 +530,7 @@ function buildMoov(tracks, offsets, wide) {
     u32(tracks.length + 1),
   );
   const traks = tracks.map((track, index) => trak(track, offsets[index] ?? [], wide));
-  return box("moov", mvhd, ...traks);
+  return box("moov", mvhd, ...traks, ...(udta === null ? [] : [udta]));
 }
 
 /**
@@ -521,6 +543,106 @@ function ftyp(videoEntry) {
   return box("ftyp", str4("isom"), u32(0x200), ...brands.map((brand) => str4(brand)));
 }
 
+// ----------------------------------------------------------------------------- the metadata
+
+/**
+ * Why a cover cannot be embedded, with the error code the writer throws, or null when it can.
+ * @param {unknown} cover
+ * @returns {{ code: "invalid" | "unsupported", reason: string } | null}
+ */
+function checkCover(cover) {
+  if (typeof cover !== "object" || cover === null) {
+    return { code: "invalid", reason: "the cover is not { bytes, type }" };
+  }
+  const type = Reflect.get(cover, "type");
+  const bytes = Reflect.get(cover, "bytes");
+  if (type !== "jpeg" && type !== "png") {
+    const named = typeof type === "string" ? JSON.stringify(type) : typeof type;
+    return { code: "invalid", reason: `the cover type must be "jpeg" or "png", not ${named}` };
+  }
+  if (!(bytes instanceof Uint8Array)) return { code: "invalid", reason: "the cover has no bytes" };
+  if (bytes.length === 0) return { code: "invalid", reason: "the cover is empty" };
+  if (bytes.length > MAX_COVER_BYTES) {
+    return {
+      code: "unsupported",
+      reason: `the cover is ${bytes.length} bytes, over the 5 MiB limit (${MAX_COVER_BYTES} bytes)`,
+    };
+  }
+  const actual = imageType(bytes);
+  if (actual !== type) {
+    const seen = actual === null ? "" : ` (its bytes are a ${actual.toUpperCase()} image)`;
+    return { code: "invalid", reason: `the cover is not a ${type.toUpperCase()} image${seen}` };
+  }
+  return null;
+}
+
+/**
+ * Why `cover` cannot be embedded — not `{ bytes, type }`, a type other than `jpeg`/`png`, empty,
+ * over {@link MAX_COVER_BYTES}, or bytes whose signature is not the declared type — or null when
+ * it can. The reason is the one {@link writeProgressiveMp4} would throw, so a caller can drop a
+ * bad cover (and say why) before writing instead of failing the file.
+ * @param {unknown} cover
+ * @returns {string | null}
+ */
+export function coverProblem(cover) {
+  return checkCover(cover)?.reason ?? null;
+}
+
+/**
+ * An iTunes metadata `data` atom: version 0, the 24-bit type, locale 0, the payload.
+ * @param {number} type
+ * @param {Uint8Array} payload
+ * @returns {Uint8Array}
+ */
+function dataAtom(type, payload) {
+  return box("data", u32(type), u32(0), payload);
+}
+
+/**
+ * The `udta` that carries `meta` — `udta` › `meta` (full box, version 0, flags 0) › `hdlr`
+ * (handler `mdir`, reserved `appl` then zeros, an empty name) and `ilst` › `©nam` (a `data` atom
+ * of type 1, the title in UTF-8) and `covr` (type 13 for a JPEG, 14 for a PNG, the image as
+ * given) — or null when there is nothing to write (no meta, an empty title and no cover). Throws
+ * an `Mp4Error` for a meta that is not an object, a title that is not a string, or a cover
+ * {@link coverProblem} refuses (`unsupported` over {@link MAX_COVER_BYTES}, else `invalid`).
+ * @param {Mp4Meta | undefined} meta
+ * @returns {Uint8Array | null}
+ */
+export function metadataUdta(meta) {
+  if (meta === undefined || meta === null) return null;
+  if (typeof meta !== "object" || Array.isArray(meta)) {
+    throw new Mp4Error("invalid", "the metadata must be an object { title?, cover? }");
+  }
+  /** @type {Uint8Array[]} */
+  const items = [];
+  const title = /** @type {unknown} */ (meta.title);
+  if (title !== undefined) {
+    if (typeof title !== "string") throw new Mp4Error("invalid", "the title must be a string");
+    if (title !== "") {
+      items.push(box(TITLE_ITEM, dataAtom(DATA_TYPE.UTF8, new TextEncoder().encode(title))));
+    }
+  }
+  const cover = /** @type {unknown} */ (meta.cover);
+  if (cover !== undefined) {
+    const problem = checkCover(cover);
+    if (problem !== null) throw new Mp4Error(problem.code, problem.reason);
+    const { bytes, type } = /** @type {Cover} */ (cover);
+    items.push(box(COVER_ITEM, dataAtom(type === "jpeg" ? DATA_TYPE.JPEG : DATA_TYPE.PNG, bytes)));
+  }
+  if (items.length === 0) return null;
+  const hdlr = fullBox(
+    "hdlr",
+    0,
+    0,
+    u32(0),
+    str4("mdir"),
+    str4("appl"),
+    new Uint8Array(8),
+    new Uint8Array(1),
+  );
+  return box("udta", fullBox("meta", 0, 0, hdlr, box("ilst", ...items)));
+}
+
 // --------------------------------------------------------------------------------- the plan
 
 /**
@@ -531,7 +653,9 @@ function ftyp(videoEntry) {
  * offset is non-zero), `stsc`, `stsz`, `stco` — `co64` for every track once any chunk offset is
  * at or beyond 2^32) and the `mdat` header (64-bit largesize when the payload, the sum of every
  * sample size, does not fit in 32 bits), and orders the chunks: per `chunkS` seconds of decode
- * time the video chunk, then the audio chunk, each chunk's samples contiguous.
+ * time the video chunk, then the audio chunk, each chunk's samples contiguous. `opts.meta` adds
+ * the title and cover `udta` ({@link metadataUdta}) at the end of the `moov`; it is part of the
+ * planned size, so the chunk offsets account for it.
  * @param {readonly TrackPlan[]} tracks
  * @param {WriteOptions} [opts]
  * @returns {MoovPlan}
@@ -541,6 +665,7 @@ export function planMoov(tracks, opts = {}) {
   if (typeof chunkS !== "number" || !Number.isFinite(chunkS) || chunkS <= 0) {
     throw new Mp4Error("invalid", `chunkS must be a positive number of seconds, not ${chunkS}`);
   }
+  const udta = metadataUdta(opts.meta);
   const plans = orderTracks(tracks);
   const prepared = plans.map((plan, index) => prepare(plan, index + 1));
   const zero = Math.min(...prepared.map((track) => track.startS));
@@ -582,14 +707,14 @@ export function planMoov(tracks, opts = {}) {
   /** @param {boolean} wide @returns {{ moov: Uint8Array, offsets: number[][] }} */
   const layout = (wide) => {
     const placeholder = prepared.map((track) => track.chunks.map(() => 0));
-    const size = buildMoov(prepared, placeholder, wide).length;
+    const size = buildMoov(prepared, placeholder, wide, udta).length;
     let cursor = fileType.length + size + mdatHeader.length;
     for (const chunk of order) {
       chunk.offset = cursor;
       cursor += chunk.size;
     }
     const offsets = prepared.map((track) => track.chunks.map((chunk) => chunk.offset));
-    const moov = buildMoov(prepared, offsets, wide);
+    const moov = buildMoov(prepared, offsets, wide, udta);
     if (moov.length !== size) throw new Mp4Error("invalid", "the moov size changed between passes");
     return { moov, offsets };
   };
@@ -618,6 +743,7 @@ export function planMoov(tracks, opts = {}) {
       durationS: (track.emptyMovie + track.presentedMovie) / MOVIE_TIMESCALE,
     })),
     co64,
+    udtaBytes: udta === null ? 0 : udta.length,
   };
 }
 
@@ -629,8 +755,10 @@ export function planMoov(tracks, opts = {}) {
  * order. `read` is called chunk by chunk in output order, contiguous samples of a chunk in one
  * call (up to {@link MAX_READ_BYTES}), so each source track is read sequentially; it must resolve
  * to exactly the bytes asked for. Returns the exact byte count written (checked against the
- * plan), the movie duration and each track's sample count and duration. Throws an `Mp4Error`
- * when the tracks cannot be written (the message is the reason a report shows).
+ * plan), the movie duration and each track's sample count and duration. `opts.meta` embeds the
+ * title and the cover (`moov/udta/meta`, see {@link metadataUdta}); the sample bytes are the
+ * same with or without it. Throws an `Mp4Error` when the tracks or the meta cannot be written —
+ * before anything reaches `sink` (the message is the reason a report shows).
  * @param {readonly TrackPlan[]} tracks
  * @param {SampleReader} read
  * @param {Sink} sink

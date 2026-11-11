@@ -75,9 +75,10 @@ function installChrome(options = {}) {
   return local;
 }
 
-test("the defaults: best quality, compatible codec, the pacing floors, the report on", () => {
+test("the defaults: best quality, compatible codec, the pacing floors, the report on, covers embedded", () => {
   assert.equal(DEFAULT_SETTINGS.quality, "best");
   assert.equal(DEFAULT_SETTINGS.codec, "compatible");
+  assert.equal(DEFAULT_SETTINGS.cover, "embed");
   assert.deepEqual(DEFAULT_SETTINGS.videoPauseS, [...PACING_DEFAULTS.videoPauseS]);
   assert.deepEqual(DEFAULT_SETTINGS.pagePauseS, [...PACING_DEFAULTS.pagePauseS]);
   assert.deepEqual(DEFAULT_SETTINGS.mediaPauseMs, [...PACING_DEFAULTS.mediaPauseMs]);
@@ -93,6 +94,8 @@ test("settingsProblem: unknown values refused; pauses below the floors only in t
   assert.equal(settingsProblem({ ...base, quality: "4k" }, false), "unknown quality");
   assert.equal(settingsProblem({ ...base, codec: "av1" }, false), "unknown codec preference");
   assert.equal(settingsProblem({ ...base, language: "fr" }, false), "unknown language");
+  assert.equal(settingsProblem({ ...base, cover: "thumbnail" }, false), "unknown cover choice");
+  assert.equal(settingsProblem({ ...base, cover: "none" }, false), null);
   assert.equal(settingsProblem({ ...base, report: "yes" }, false), "the report switch must be on or off");
   const lighter = { ...base, videoPauseS: [1, 2] };
   assert.match(String(settingsProblem(lighter, false)), /pauses may only be made longer/);
@@ -102,9 +105,11 @@ test("settingsProblem: unknown values refused; pauses below the floors only in t
 });
 
 test("normalizeSettings keeps what validates and never a pause below the floor", () => {
-  const stored = { quality: "720", codec: "best", videoPauseS: [0, 0], report: false, junk: 1 };
+  const stored = { quality: "720", codec: "best", videoPauseS: [0, 0], report: false, cover: "none", junk: 1 };
   const settings = normalizeSettings(stored, false);
   assert.equal(settings.quality, "720");
+  assert.equal(settings.cover, "none");
+  assert.equal(normalizeSettings({ cover: 7 }, false).cover, "embed", "a bad cover choice keeps the default");
   assert.equal(settings.codec, "best");
   assert.equal(settings.report, false);
   assert.deepEqual(settings.videoPauseS, [3, 6], "the lighter pause is dropped");

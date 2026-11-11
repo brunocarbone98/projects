@@ -83,6 +83,11 @@ const VIDEO_CODEC_FAMILIES = /** @type {Record<string, CodecFamily>} */ ({
   dvhe: "hevc",
   av01: "av1",
 });
+/**
+ * The order `compatible` prefers the codecs offered at the chosen height in (Addendum B.1): H.264
+ * plays everywhere, HEVC on most Windows machines, AV1 on fewer.
+ */
+const COMPATIBLE_FAMILIES = /** @type {readonly CodecFamily[]} */ (["avc", "hevc", "av1"]);
 /** Codecs that carry audio only (a `CODECS` list made solely of these names no video variant). */
 const AUDIO_ONLY_CODECS = new Set(["mp4a", "ec-3", "ac-3", "flac", "mp3", "aac"]);
 
@@ -407,9 +412,10 @@ export function isAudioOnlyCodecs(codecs) {
 
 /**
  * The variant to download: the highest height not above `maxHeight` (no cap when null), and
- * among the variants at that height the highest bandwidth; in `compatible` mode the `avc1`
- * variants at that height win when the height is offered in several codecs (every Windows Chrome
- * plays H.264; HEVC and AV1 depend on the machine). When every variant is taller than the cap, the
+ * among the variants at that height the highest bandwidth; in `compatible` mode, when the height
+ * is offered in several codecs, the `avc1` variants at that height win, else the HEVC ones, else
+ * the AV1 ones (every Windows Chrome plays H.264; HEVC and AV1 depend on the machine) — the
+ * resolution is never lowered to get H.264. When every variant is taller than the cap, the
  * lowest height is taken (the cap is a preference, not a reason to fail). Variants without a
  * RESOLUTION rank below every variant with one and are chosen only when nothing else exists (by
  * bandwidth); audio-only variants are never chosen. Null for an empty list.
@@ -434,8 +440,13 @@ export function chooseVariant(variants, preferences) {
   const chosenHeight = fitting.length > 0 ? Math.max(...fitting) : Math.min(...heights);
   let atHeight = known.filter((variant) => variant.height === chosenHeight);
   if (preferences.codec === "compatible") {
-    const avc = atHeight.filter((variant) => codecFamily(variant.codecs) === "avc");
-    if (avc.length > 0) atHeight = avc;
+    for (const family of COMPATIBLE_FAMILIES) {
+      const some = atHeight.filter((variant) => codecFamily(variant.codecs) === family);
+      if (some.length > 0) {
+        atHeight = some;
+        break;
+      }
+    }
   }
   return byBandwidth(atHeight)[0] ?? null;
 }

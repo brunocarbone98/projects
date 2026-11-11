@@ -16,7 +16,7 @@
 
 import { cooldownMessageParams } from "../lib/cooldown.js";
 import { codecFamily } from "../lib/hls.js";
-import { NOT_DOWNLOADED_STATUSES } from "../lib/messages.js";
+import { NOT_DOWNLOADED_STATUSES, hintSubstitutions, isHintCode } from "../lib/messages.js";
 import { fileBaseName, reportPath } from "../lib/naming.js";
 import { mediaPauseMs, pagePauseS, sleepSeconds, stallTimeoutS } from "../lib/pacing.js";
 import { buildReport, hasFailures, reportJson } from "../lib/report.js";
@@ -27,7 +27,9 @@ import {
   StopRequested,
   applyRefererRule,
   browserDuration,
+  coverUrl,
   download,
+  jpegFromImage,
   oneLine,
   readBody,
   request,
@@ -40,6 +42,7 @@ import {
   displayLanguage,
   loadCatalogs,
   localize,
+  messageKey,
   refusalLabel,
   renderFailure,
   setLanguage,
@@ -102,7 +105,8 @@ import {
  * @property {string | null} started_at
  * @property {string | null} finished_at
  * @property {string | null} stop_reason
- * @property {{ rows: number, done: number, skipped: number, failed: number, stopped: number }} counts
+ * @property {{ rows: number, done: number, skipped: number, failed: number,
+ *   stopped: number }} counts
  * @property {string[]} retry_inputs the pasted lines of the rows that did not download
  */
 
@@ -110,8 +114,9 @@ import {
 export const ENGINE_LOCK = "streamfetch-engine";
 /** The progress text of a row is written at most this often (4×/s). */
 export const PROGRESS_INTERVAL_MS = 250;
-/** The largest cover read. */
-export const MAX_COVER_BYTES = 2 * 1024 * 1024;
+/** The largest list thumbnail read (the cover embedded in a file has its own limits:
+ * `downloader.MAX_COVER_DOWNLOAD_BYTES`, `lib/remux.MAX_COVER_BYTES`). */
+export const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024;
 
 // ------------------------------------------------------------------------- pure helpers
 
@@ -174,7 +179,9 @@ export function progressFraction(progress) {
   if (progress.segments !== null && progress.segments.total > 0) {
     return progress.segments.done / progress.segments.total;
   }
-  if (progress.total !== null && progress.total > 0) return Math.min(1, progress.received / progress.total);
+  if (progress.total !== null && progress.total > 0) {
+    return Math.min(1, progress.received / progress.total);
+  }
   return null;
 }
 
@@ -194,7 +201,8 @@ export function fourcc(codecs) {
 /**
  * The label of one video stream in the row's selector: `1080p · avc1 · 2.3 Mbit/s` (the bandwidth
  * in Mbit/s, one decimal; left out when unknown).
- * @param {{ height: number | null, width: number | null, codecs: string | null, bandwidth: number }} stream
+ * @param {{ height: number | null, width: number | null, codecs: string | null,
+ *   bandwidth: number }} stream
  * @returns {string}
  */
 export function streamLabel(stream) {
@@ -216,7 +224,9 @@ export function qualityLabel(streams) {
   if (streams === null) return "";
   const chosen = streams.kind === "hls" ? streams.variant : streams.video;
   const height =
-    chosen.height !== null && chosen.width !== null ? Math.min(chosen.height, chosen.width) : chosen.height;
+    chosen.height !== null && chosen.width !== null
+      ? Math.min(chosen.height, chosen.width)
+      : chosen.height;
   return `${height === null ? "?p" : `${height}p`} ${fourcc(chosen.codecs)}`;
 }
 
@@ -252,7 +262,12 @@ export function qualityOptions(streams, premiumText) {
   streams.available.forEach((rep, index) => {
     options.push({
       value: String(index),
-      label: streamLabel({ height: rep.height, width: rep.width, codecs: rep.codecs, bandwidth: rep.bandwidth }),
+      label: streamLabel({
+        height: rep.height,
+        width: rep.width,
+        codecs: rep.codecs,
+        bandwidth: rep.bandwidth,
+      }),
       selected: rep === streams.video,
       disabled: false,
     });
@@ -429,34 +444,64 @@ function hostPatterns() {
 // ------------------------------------------------------------------------------ the rows
 
 /**
- * @param {RowView} view
- * @returns {string} the row's message: its failure, its hints and notes, or where it was saved
+ * The text of a row's hint (`hint_<code>` with `lib/messages.hintSubstitutions`: the same
+ * parameters, in the same order, as the English `lib/messages.hintText`).
+ * @param {string} code
+ * @param {Record<string, unknown>} [params]
+ * @returns {string}
  */
-function messageOf(view) {
+function hintLine(code, params = {}) {
+  return isHintCode(code) ? t(messageKey("hint", code), hintSubstitutions(code, params)) : code;
+}
+
+/**
+ * The message of a row (the `.message` cell): its failure, its hints and notes, where it was
+ * saved — `·`-separated — and, last, `; cover: <reason>` when the file was saved without its
+ * cover (Addendum B.2).
+ * @param {{ failure: Failure | null, site: string, hints: readonly { code: string,
+ *   params: Record<string, unknown> }[], notes: readonly Note[], path: string | null,
+ *   status: string }} row
+ * @returns {string}
+ */
+export function rowMessage(row) {
   const lang = currentLanguage();
   /** @type {string[]} */
   const parts = [];
-  if (view.failure !== null) parts.push(renderFailure(view.failure.code, view.failure.params, lang));
-  const site = view.target?.site ?? view.item?.site ?? "";
-  if (view.failure?.code === "login_required" && site === "bilibilitv") {
-    parts.push(t("hint_login_or_premium"));
+  if (row.failure !== null) parts.push(renderFailure(row.failure.code, row.failure.params, lang));
+  if (row.failure?.code === "login_required" && row.site === "bilibilitv") {
+    parts.push(hintLine("login_or_premium"));
   }
-  for (const hint of view.target?.hints ?? []) {
-    if (hint.code === "premium") {
-      const labels = Array.isArray(hint.params["labels"]) ? hint.params["labels"].join(", ") : "";
-      parts.push(t("hint_premium", labels));
-    } else if (hint.code === "playlist_ignored") {
-      parts.push(t("hint_playlist_ignored"));
+  for (const hint of row.hints) parts.push(hintLine(hint.code, hint.params));
+  /** @type {string | null} */
+  let cover = null;
+  for (const note of row.notes) {
+    if (note.code === "no_audio") parts.push(t("note_no_audio"));
+    else if (note.code === "browser_unreadable") {
+      parts.push(t("note_browser_unreadable", String(note.params["codec"] ?? "?")));
+    } else if (note.code === "cover") {
+      cover = t("note_cover", String(note.params["reason"] ?? "?"));
     }
   }
-  for (const note of view.notes) {
-    if (note.code === "no_audio") parts.push(t("note_no_audio"));
-    else if (note.code === "browser_unreadable") parts.push(t("note_browser_unreadable", String(note.params["codec"] ?? "?")));
+  if (row.path !== null && (row.status === "done" || row.status === "skipped-exists")) {
+    parts.push(t("savedAs", fileBaseName(row.path)));
   }
-  if (view.path !== null && (view.status === "done" || view.status === "skipped-exists")) {
-    parts.push(t("savedAs", fileBaseName(view.path)));
-  }
-  return parts.join(" · ");
+  const text = parts.join(" · ");
+  return cover === null ? text : `${text}; ${cover}`;
+}
+
+/**
+ * @param {RowView} view
+ * @returns {string} the row's message ({@link rowMessage})
+ */
+function messageOf(view) {
+  return rowMessage({
+    failure: view.failure,
+    site: view.target?.site ?? view.item?.site ?? "",
+    hints: view.target?.hints ?? [],
+    notes: view.notes,
+    path: view.path,
+    status: view.status,
+  });
 }
 
 /**
@@ -481,7 +526,8 @@ function renderProgress(view) {
   if (cell === undefined) return;
   const bar = el("progress");
   const progress = view.progress;
-  const fraction = progress === null ? (view.status === "done" ? 1 : null) : progressFraction(progress);
+  const fraction =
+    progress === null ? (view.status === "done" ? 1 : null) : progressFraction(progress);
   if (view.status === "done") bar.value = 1;
   else if (fraction !== null) bar.value = fraction;
   else bar.removeAttribute("value");
@@ -534,7 +580,8 @@ function makeRow(key, kind, source) {
   tr.dataset["key"] = key;
   /** @type {Record<string, HTMLElement>} */
   const cells = {};
-  for (const name of ["cover", "title", "site", "duration", "quality", "status", "progress", "message"]) {
+  const names = ["cover", "title", "site", "duration", "quality", "status", "progress", "message"];
+  for (const name of names) {
     const cell = el("td", name);
     cells[name] = cell;
     tr.append(cell);
@@ -577,19 +624,22 @@ function fillRow(view) {
   link.rel = "noopener noreferrer";
   cells["title"]?.replaceChildren(link);
   if (cells["site"]) cells["site"].textContent = siteName(site);
-  if (cells["duration"]) cells["duration"].textContent = target === null ? "" : formatDuration(target.durationS);
+  if (cells["duration"]) {
+    cells["duration"].textContent = target === null ? "" : formatDuration(target.durationS);
+  }
   renderQuality(view);
   renderStatus(view);
   renderProgress(view);
 }
 
 /**
- * A target's title as its row shows it: `P02 · <part title>` for a part of a multi-part video, the
- * episode's own title for a series episode.
- * @param {Target} target
+ * A target's title as its row shows it: `P02 · <part title> — <title>` for a part of a multi-part
+ * Bilibili video, a Bilibili.tv episode's own title (`E3 - …`), else the video's title.
+ * @param {Pick<Target, "site" | "id" | "title" | "part" | "partTitle">} target
  * @returns {string}
  */
-function rowTitle(target) {
+export function rowTitle(target) {
+  if (target.site === "bilibilitv") return target.partTitle || target.title || target.id;
   if (target.partTitle && target.part !== null) {
     return `P${String(target.part).padStart(2, "0")} · ${target.partTitle} — ${target.title}`;
   }
@@ -630,7 +680,8 @@ function makeGroupRow(itemKey, targets) {
 
 /** Put the rows of {@link app.order} into the table, in order. */
 function renderTable() {
-  const body = /** @type {HTMLElement} */ ($("items-table").querySelector("tbody") ?? $("items-table"));
+  const table = $("items-table");
+  const body = /** @type {HTMLElement} */ (table.querySelector("tbody") ?? table);
   /** @type {HTMLElement[]} */
   const rows = [];
   for (const key of app.order) {
@@ -866,6 +917,8 @@ function engineContext(controller) {
         refresh: (stale) => refreshStreams(stale, resolveCtx),
         pagePause: resolveCtx.pagePause,
         browserCheck: (blob) => browserDuration(blob, browserTimeout),
+        cover: app.settings.cover,
+        toJpeg: (image) => jpegFromImage(image),
         onProgress,
         onStatus,
       }),
@@ -915,7 +968,9 @@ function onEngineEvent(event) {
       if (event.failure !== undefined) view.failure = event.failure;
       renderStatus(view);
       renderQuality(view);
-      if (event.status === "downloading") setText($("activity"), t("activityDownloading", rowTitle(event.target)));
+      if (event.status === "downloading") {
+        setText($("activity"), t("activityDownloading", rowTitle(event.target)));
+      }
       break;
     }
     case "target-progress": {
@@ -943,7 +998,13 @@ function onEngineEvent(event) {
       break;
     }
     case "pause":
-      setText($("activity"), t(event.kind === "video" ? "activityPauseVideo" : "activityPausePage", event.seconds.toFixed(1)));
+      setText(
+        $("activity"),
+        t(
+          event.kind === "video" ? "activityPauseVideo" : "activityPausePage",
+          event.seconds.toFixed(1),
+        ),
+      );
       break;
     case "cooldown":
       void refreshCooldown();
@@ -972,7 +1033,9 @@ function updateButtons() {
   button("stop-button").disabled = app.job === null;
   const status = $("app-status");
   status.dataset["state"] = app.job !== null ? "running" : app.owner ? "idle" : "readonly";
-  status.textContent = t(app.job !== null ? "appStatusRunning" : app.owner ? "appStatusIdle" : "appStatusReadonly");
+  status.textContent = t(
+    app.job !== null ? "appStatusRunning" : app.owner ? "appStatusIdle" : "appStatusReadonly",
+  );
 }
 
 /**
@@ -1081,7 +1144,8 @@ function clearFailedBlock() {
 /** The failed block: the rows the last run did not download, with Retry and the report. */
 function renderFailedBlock() {
   const block = $("failed-block");
-  const body = /** @type {HTMLElement} */ ($("failed-table").querySelector("tbody") ?? $("failed-table"));
+  const table = $("failed-table");
+  const body = /** @type {HTMLElement} */ (table.querySelector("tbody") ?? table);
   if (app.failed.length === 0) {
     block.hidden = true;
     body.replaceChildren();
@@ -1101,7 +1165,9 @@ function renderFailedBlock() {
         el("td", "title", [row.title ?? row.input]),
         el("td", "site", [siteName(row.site)]),
         status,
-        el("td", "message", [row.failure === null ? "" : renderFailure(row.failure.code, row.failure.params, lang)]),
+        el("td", "message", [
+          row.failure === null ? "" : renderFailure(row.failure.code, row.failure.params, lang),
+        ]),
       );
       return tr;
     }),
@@ -1121,9 +1187,11 @@ async function endOfRun(run) {
   renderTable();
   renderFailedBlock();
   if (app.failed.length > 0 && app.settings.report && hasFailures(run)) await saveReport();
-  await appendHistory(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (historyEntry(run))));
+  const entry = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (historyEntry(run)));
+  await appendHistory(entry);
   await renderHistory();
-  setText($("activity"), t("activityFinished", [run.rows.filter((row) => row.status === "done").length, run.rows.length]), "ok");
+  const done = run.rows.filter((row) => row.status === "done").length;
+  setText($("activity"), t("activityFinished", [done, run.rows.length]), "ok");
 }
 
 /** Save the last run's report under `StreamFetch/reports/`; the outcome under the block. */
@@ -1213,7 +1281,8 @@ function tickCooldown() {
     return;
   }
   banner.hidden = false;
-  $("cooldown-text").textContent = t("cooldownText", [params.until, params.minutes_left, params.reason]);
+  const substitutions = [params.until, params.minutes_left, params.reason];
+  $("cooldown-text").textContent = t("cooldownText", substitutions);
 }
 
 // ------------------------------------------------------------------------------ settings
@@ -1230,6 +1299,7 @@ function fillSettings() {
   input("setting-media-pause-min").value = String(settings.mediaPauseMs[0]);
   input("setting-media-pause-max").value = String(settings.mediaPauseMs[1]);
   input("setting-report").checked = settings.report;
+  select("setting-cover").value = settings.cover;
   select("setting-language").value = settings.language;
 }
 
@@ -1247,6 +1317,7 @@ function formSettings() {
     pagePauseS: [number("setting-page-pause-min"), number("setting-page-pause-max")],
     mediaPauseMs: [number("setting-media-pause-min"), number("setting-media-pause-max")],
     report: input("setting-report").checked,
+    cover: select("setting-cover").value,
     language: select("setting-language").value,
   };
 }
@@ -1289,7 +1360,8 @@ export class CoverLoader {
   /**
    * @param {{ allowed: () => boolean, fetchCover: (url: string) => Promise<Blob | null>,
    *   pause: () => Promise<void>, objectUrl?: (blob: Blob) => string,
-   *   watcher?: (callback: (entries: readonly { target: Element, isIntersecting: boolean }[]) => void) =>
+   *   watcher?: (callback: (entries: readonly { target: Element,
+   *     isIntersecting: boolean }[]) => void) =>
    *     { observe: (target: Element) => void, unobserve: (target: Element) => void } }} options
    */
   constructor(options) {
@@ -1307,7 +1379,8 @@ export class CoverLoader {
     this.visible = new Set();
     /** @type {string[]} rows in view, in the order they came into view */
     this.queue = [];
-    /** @type {{ observe: (target: Element) => void, unobserve: (target: Element) => void } | null} */
+    /** @type {{ observe: (target: Element) => void,
+     *   unobserve: (target: Element) => void } | null} */
     this.watcher = null;
     /** @type {Promise<void> | null} */
     this.running = null;
@@ -1352,7 +1425,9 @@ export class CoverLoader {
 
   /** @returns {string | null} the next cover to fetch: a row in view, not asked yet */
   next() {
-    return this.queue.find((key) => this.visible.has(key) && !this.asked.has(key) && this.cells.has(key)) ?? null;
+    const wanted = (/** @type {string} */ key) =>
+      this.visible.has(key) && !this.asked.has(key) && this.cells.has(key);
+    return this.queue.find(wanted) ?? null;
   }
 
   /** @returns {Promise<void>} once no cover request is in flight */
@@ -1393,7 +1468,7 @@ export class CoverLoader {
 
 /**
  * One cover GET of the extension's own (the manifest's hosts, the session's cookies), at most
- * {@link MAX_COVER_BYTES}; null for anything that is not an image.
+ * {@link MAX_THUMBNAIL_BYTES}; null for anything that is not an image.
  * @param {string} url
  * @returns {Promise<Blob | null>}
  */
@@ -1409,11 +1484,15 @@ async function fetchCover(url) {
     sleep: (seconds) => sleepSeconds(seconds, controller.signal),
   };
   try {
-    const opened = await request(url, "cover", net, [], { accept: "image/*" });
+    const opened = await request(coverUrl(url, net.hostPatterns), "cover", net, [], {
+      accept: "image/*",
+    });
     const type = opened.attempt.content_type ?? "";
     /** @type {Uint8Array[]} */
     const chunks = [];
-    await readBody(opened, net, (chunk) => void chunks.push(chunk.slice()), { maxBytes: MAX_COVER_BYTES });
+    await readBody(opened, net, (chunk) => void chunks.push(chunk.slice()), {
+      maxBytes: MAX_THUMBNAIL_BYTES,
+    });
     if (!type.toLowerCase().startsWith("image/")) return null;
     return new Blob(/** @type {BlobPart[]} */ (chunks), { type });
   } catch {
@@ -1438,7 +1517,8 @@ async function setupTestMode() {
   textarea("test-settings").value = JSON.stringify(app.testSettings);
   button("test-settings-save").addEventListener("click", async () => {
     try {
-      app.testSettings = await saveTestSettings(JSON.parse(textarea("test-settings").value || "{}"));
+      const raw = JSON.parse(textarea("test-settings").value || "{}");
+      app.testSettings = await saveTestSettings(raw);
       textarea("test-settings").value = JSON.stringify(app.testSettings);
       setText($("test-settings-status"), `saved: ${JSON.stringify(app.testSettings)}`, "ok");
     } catch (error) {
@@ -1501,7 +1581,9 @@ async function main() {
     if (sender.id !== chrome.runtime.id) return; // only this extension's own code
     if (message !== null && typeof message === "object") {
       const record = /** @type {Record<string, unknown>} */ (message);
-      if (record["type"] === "streamfetch:links" && typeof record["links"] === "string") addLinks(record["links"]);
+      if (record["type"] === "streamfetch:links" && typeof record["links"] === "string") {
+        addLinks(record["links"]);
+      }
     }
   });
   setInterval(tickCooldown, 1000);

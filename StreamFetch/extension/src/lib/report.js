@@ -28,10 +28,10 @@ import {
 export const REPORT_VERSION = 1;
 /** The report's own one-line description (`what_this_is`). */
 export const WHAT_THIS_IS =
-  "The videos of one StreamFetch run that did not download, what StreamFetch asked Dailymotion " +
-  "or Bilibili and what came back. It holds the sites' metadata as served to your session " +
-  "(titles, ids, hosts, qualities) with every URL's query string removed, and never a cookie, " +
-  "a token or a request header. Read it before sharing it.";
+  "The videos of one StreamFetch run that did not download, what StreamFetch asked Dailymotion, " +
+  "Bilibili.tv or Bilibili and what came back. It holds the sites' metadata as served to your " +
+  "session (titles, ids, hosts, qualities) with every URL's query string removed, and never a " +
+  "cookie, a token or a request header. Read it before sharing it.";
 
 /**
  * @typedef {object} Attempt One HTTP step of a target, as the resolver or the downloader recorded
@@ -54,9 +54,11 @@ export const WHAT_THIS_IS =
  *
  * @typedef {object} RowInput One target of the run, as the engine recorded it.
  * @property {string} input the pasted line that named it (`Item.original`)
- * @property {string} site
+ * @property {string} site `dailymotion`, `bilibili` or `bilibilitv`
  * @property {string} id
  * @property {number | null} part
+ * @property {string | null} [seasonId] Bilibili.tv: the episode's (or the series') season
+ * @property {string | null} [episodeId] Bilibili.tv: the episode
  * @property {string | null} title
  * @property {string} status
  * @property {import("./messages.js").Failure | null} failure
@@ -83,6 +85,7 @@ export const WHAT_THIS_IS =
  * @typedef {object} CauseRow What {@link probableCause} reads of a row.
  * @property {string} status
  * @property {import("./messages.js").Failure | null} failure
+ * @property {string} [site] the row's site: some causes read differently per site
  */
 
 /** Keys of the raw metadata that may hold a credential: dropped, whatever their value. */
@@ -177,7 +180,9 @@ export const PROBABLE_CAUSES = Object.freeze({
     "Chrome's download settings, then retry",
   stopped: "not attempted: the run stopped before this video",
   unsupported_link:
-    "the link is not a single video of Dailymotion or Bilibili; paste the video's own link",
+    "the link is not a single video of Dailymotion, Bilibili.tv or Bilibili; paste the video's " +
+    "own link (for Bilibili.tv, the full bilibili.tv/…/video/… or …/play/… link from the " +
+    "address bar, not a bili.im share link)",
   no_streams:
     "the site offered no stream this session may play; check that the video plays in a normal " +
     "tab (logged in, if it needs a login), then retry",
@@ -192,9 +197,41 @@ export const PROBABLE_CAUSES = Object.freeze({
 });
 
 /**
- * The probable cause of a row that did not download: {@link PROBABLE_CAUSES} by failure code, an
- * `http_status` refined by its status (403, 404 / 410, 5xx), a `stopped` row without a failure as
- * `stopped`. English, stored like every engine text, never shown in the UI.
+ * The causes that read differently for a Bilibili.tv row (its playurl API's codes, Addendum A.1):
+ * by failure code, they replace {@link PROBABLE_CAUSES}' sentence.
+ * @type {Readonly<Partial<Record<import("./messages.js").FailureCode, string>>>}
+ */
+export const BILIBILITV_PROBABLE_CAUSES = Object.freeze({
+  geo_blocked:
+    "Bilibili.tv does not serve this video in your country (its API answered code 10004001); " +
+    "StreamFetch never bypasses geo-restrictions",
+  login_required:
+    "Bilibili.tv answered that this video needs a login (codes 10004004, 10004005 or 10023006): " +
+    "either this browser is not logged in to Bilibili.tv, or the episode is premium-only and the " +
+    "account has no premium membership; log in to Bilibili.tv in a normal tab of this Chrome " +
+    "profile, then retry — a premium episode stays unavailable, StreamFetch never bypasses a " +
+    "paywall",
+  premium_only:
+    "Bilibili.tv lists this video's qualities but serves none of them to this session (premium " +
+    "only); StreamFetch never bypasses a paywall",
+  deleted:
+    "Bilibili.tv refused this video with its own code and message (failure.params.site_code and " +
+    "site_message): it was removed, is region- or account-restricted, or is not served to this " +
+    "session; nothing to retry until that changes",
+  no_streams:
+    "Bilibili.tv's playurl answer listed no video file for this session; check that the video " +
+    "plays in a normal tab (logged in, if it needs a login), then retry",
+  host_not_covered:
+    "Bilibili.tv served its media from a host the extension has no permission for (its media " +
+    "hosts are not documented), so nothing was requested there; send this report so a later " +
+    "version can add the host",
+});
+
+/**
+ * The probable cause of a row that did not download: {@link PROBABLE_CAUSES} by failure code —
+ * {@link BILIBILITV_PROBABLE_CAUSES} first for a Bilibili.tv row —, an `http_status` refined by
+ * its status (403, 404 / 410, 5xx), a `stopped` row without a failure as `stopped`. English,
+ * stored like every engine text, never shown in the UI.
  * @param {CauseRow} row
  * @returns {string}
  */
@@ -202,6 +239,10 @@ export function probableCause(row) {
   const code = row.failure?.code ?? (row.status === STOPPED ? "stopped" : null);
   if (code === null) return "no failure was recorded for this row";
   if (!isFailureCode(code)) return `unknown failure code ${JSON.stringify(code)}`;
+  if (row.site === "bilibilitv") {
+    const cause = BILIBILITV_PROBABLE_CAUSES[code];
+    if (cause !== undefined) return cause;
+  }
   if (code === "http_status") {
     const status = Number(row.failure?.params["status"]);
     if (status === 403) {
@@ -271,6 +312,8 @@ export function rowEntry(row) {
     site: row.site,
     id: row.id,
     part: row.part,
+    season_id: row.seasonId ?? null,
+    episode_id: row.episodeId ?? null,
     title: row.title === null ? null : stripUrlQueriesInText(row.title),
     status: row.status,
     failure: failure === null || params === null ? null : { code: failure.code, params },
@@ -278,7 +321,7 @@ export function rowEntry(row) {
       failure === null || params === null
         ? statusLabel(row.status)
         : render(failure.code, params),
-    probable_cause: probableCause({ status: row.status, failure }),
+    probable_cause: probableCause({ status: row.status, failure, site: row.site }),
     attempts: (row.attempts ?? []).map(attemptEntry),
     streams: row.streams === undefined || row.streams === null ? null : sanitize(row.streams),
     page:

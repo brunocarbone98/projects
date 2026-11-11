@@ -64,7 +64,7 @@ td.title a { color: inherit; }
 tr.group td { font-weight: 600; background: var(--bg); }
 /* the thumbnail's frame is there from the start, so no row jumps when it loads */
 img.cover { width: 72px; height: 42px; object-fit: cover; border-radius: 4px; background: var(--badge); display: block; }
-img.cover.placeholder { visibility: hidden; }
+img.cover.placeholder { background: var(--badge); opacity: 0.6; } /* the neutral frame: no cover yet, or none */
 td.cover { width: 80px; }
 td.progress progress { width: 90px; vertical-align: middle; }
 td.progress .progress-text { display: block; color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
