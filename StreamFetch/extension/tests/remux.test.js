@@ -7,7 +7,11 @@
  * interleaving checked against `ffprobe -show_packets`; `co64` and the largesize `mdat` header
  * on a synthetic plan past 4 GiB; the refusals; the embedded title and cover (`moov/udta/meta`:
  * the boxes byte for byte, the 5 MiB cover limit, ffprobe's attached picture and title tag, the
- * audio and video framemd5 and the sample bytes unchanged by the metadata).
+ * audio and video framemd5 and the sample bytes unchanged by the metadata); every codec the
+ * sites serve (`helpers/media.js` `SITE_CODECS`) from fragmented and from progressive inputs,
+ * with and without the cover and title: the codecs and durations ffprobe reads, both streams
+ * decoded framemd5-equal to the input's, every sample's bytes and timing kept, `probe` and the
+ * downloader's verification satisfied.
  *
  * The ffmpeg helpers at the bottom are a private copy (the shared `tests/helpers/media.js` is
  * written in parallel); fixtures are built once per process under `fixtures/generated/remux/`.
@@ -48,6 +52,15 @@ import {
   planMoov,
   writeProgressiveMp4,
 } from "../src/lib/remux.js";
+import { WRITER_TOLERANCE_S, durationMatches, mediaGap } from "../src/app/downloader.js";
+import {
+  CODEC_SECONDS,
+  SITE_CODECS,
+  codecFixture,
+  ffprobe as probeStreams,
+  framemd5 as decodedFrames,
+  md5Hex,
+} from "./helpers/media.js";
 
 const NODE = /** @type {NodeProcess} */ (Reflect.get(globalThis, "process"));
 const CHILD = /** @type {ChildProcessModule} */ (NODE.getBuiltinModule("node:child_process"));
@@ -350,7 +363,11 @@ test("DASH audio keeping the AAC priming edit → framemd5 = src.mp4", MEDIA, as
   await assertProgressive(media, out, result, path);
   assert.deepEqual(framemd5(path, "v"), framemd5(media.path("src.mp4"), "v"));
   assert.deepEqual(framemd5(path, "a"), framemd5(media.path("src.mp4"), "a"));
-  assert.deepEqual(editsOf(out, tablesOf(out, 1).get("elst")), [[6016, 1024]]);
+  // src.mp4's own audio edit: 6000 ms from media_time 1024 — the last AAC frame keeps the 256
+  // ticks the source gives it (its trun's `lastDuration`), not the 1024 of the frame before
+  assert.deepEqual(editsOf(out, tablesOf(out, 1).get("elst")), [[6000, 1024]]);
+  const src = media.bytes("src.mp4");
+  assert.deepEqual(editsOf(src, tablesOf(src, 1).get("elst")), [[6000, 1024]]);
   assert.equal(tablesOf(out, 1).get("ctts"), undefined, "every offset is 0 after the shift");
 });
 
@@ -408,12 +425,13 @@ test("a track whose first tfdt is later gets an empty edit (start_time)", MEDIA,
   assert.equal(Number(streams[0]?.start_time), 0);
   const audioStart = Number(streams[1]?.start_time);
   assert.ok(Math.abs(audioStart - 0.5) < 0.001, `audio start ${audioStart}`);
+  // 6021 ms: 282 frames of 1024 ticks and the last one's 256 at 48 kHz, as audio.m4s says
   assert.deepEqual(editsOf(out, tablesOf(out, 1).get("elst")), [
     [500, -1],
-    [6037, 0],
+    [6021, 0],
   ]);
   assert.equal(tablesOf(out, 0).get("elst"), undefined, "the earliest track needs no edit");
-  assert.equal(result.durationS, 6.537);
+  assert.equal(result.durationS, 6.521);
   assert.deepEqual(framemd5(outPath, "a"), framemd5(path, "a"));
   assert.deepEqual(framemd5(outPath, "v"), framemd5(media.path("src.mp4"), "v"));
 });
@@ -469,9 +487,11 @@ test("negative composition offsets → ctts v0 shifted + elst media_time", MEDIA
   assert.ok(ctts);
   assert.equal(out[ctts.start + 8], 0, "ctts version 0");
   assert.deepEqual(words(out, ctts), [4, 1, 0, 1, 1536, 1, 512, 1, 1024]);
-  assert.deepEqual(editsOf(out, tables.get("elst")), [[80, 1024]]);
+  // presented until the last sample SHOWN ends: dts 1536 + cts 0 + 512 = 2048 ticks = 160 ms
+  // (the media duration minus the shift, 80 ms, would cut the last two samples off)
+  assert.deepEqual(editsOf(out, tables.get("elst")), [[160, 1024]]);
   assert.deepEqual(words(out, tables.get("stts")), [1, 4, 512]);
-  assert.equal(plan.tracks[0]?.durationS, 0.08);
+  assert.equal(plan.tracks[0]?.durationS, 0.16);
 });
 
 test("chunks interleave per second, checked against ffprobe positions", MEDIA, async () => {
@@ -654,6 +674,47 @@ test("the moov: ids, mvhd, tkhd, hdlr, language, stts, stss only when needed", a
   const single = planMoov([syntheticPlan("video", { count: 1 })]);
   const lone = concat(single.ftyp, single.moov);
   assert.deepEqual(words(lone, tablesOf(lone, 0).get("stts")), [1, 1, 0]);
+});
+
+test("B-frames: the edit lasts until the last frame shown ends; the last duration as stated", async () => {
+  // ffmpeg's progressive H.264/HEVC: ctts 1024, 2560, 1024, 0, 512 and an edit from 1024 — read
+  // as these offsets; shown in the order 0, 3, 2, 4, 1, so the last frame SHOWN is the second
+  const video = syntheticPlan("video", { count: 5, step: 512, timescale: 12800 });
+  [0, 1536, 0, -1024, -512].forEach((cts, index) => {
+    /** @type {SampleRef} */ (video.samples[index]).cts = cts;
+  });
+  const audio = { ...syntheticPlan("audio", { count: 4, step: 1024, timescale: 48000 }) };
+  audio.lastDuration = 256;
+  const plan = planMoov([video, audio]);
+  const out = concat(plan.ftyp, plan.moov);
+  // 5 frames of 40 ms from media_time 1024: 200 ms (the media duration minus the shift, 120 ms,
+  // would cut the last two frames shown)
+  assert.deepEqual(editsOf(out, tablesOf(out, 0).get("elst")), [[200, 1024]]);
+  assert.deepEqual(words(out, tablesOf(out, 0).get("stts")), [1, 5, 512]);
+  // the audio's last frame: 256 ticks, as its source said, not the 1024 of the one before
+  assert.deepEqual(words(out, tablesOf(out, 1).get("stts")), [2, 3, 1024, 1, 256]);
+  assert.deepEqual(plan.tracks, [
+    { kind: "video", samples: 5, durationS: 0.2 },
+    { kind: "audio", samples: 4, durationS: 0.069 },
+  ]);
+  const probed = await probe(concat(out, plan.mdatHeader, new Uint8Array(plan.payloadBytes)));
+  assert.deepEqual(
+    probed.tracks.map((track) => track.durationS),
+    [0.2, (3 * 1024 + 256) / 48000],
+    "probe reads the same presentation",
+  );
+  // without lastDuration the previous duration repeats (the MPEG-TS path)
+  const untimed = syntheticPlan("audio", { count: 4, step: 1024, timescale: 48000 });
+  const repeated = planMoov([video, untimed]);
+  const plain = concat(repeated.ftyp, repeated.moov);
+  assert.deepEqual(words(plain, tablesOf(plain, 1).get("stts")), [1, 4, 1024]);
+  for (const bad of [0, -256, 1.5, 2 ** 32, Number.NaN]) {
+    await refuses(
+      () => planMoov([video, { ...audio, lastDuration: bad }]),
+      "invalid",
+      /last duration .* is not valid/,
+    );
+  }
 });
 
 test("TS-like starts: the earliest first dts is time zero, the later track gets a gap", () => {
@@ -977,6 +1038,196 @@ test("cover + title embedded: ffprobe's attached pic and title; A/V untouched", 
     assert.deepEqual(probed.cover?.bytes, images[type]);
   }
 });
+
+// ------------------------------------------------------- every codec the sites serve
+
+/**
+ * Video + audio pairs over every codec of `SITE_CODECS` (each written from its fragmented DASH
+ * files and from its progressive files): HEVC as hvc1 and hev1, AV1 and H.264 with B-frames;
+ * FLAC 24-bit 96 kHz, E-AC-3 5.1, AC-3, Opus and AAC.
+ */
+const CODEC_PAIRS = /** @type {const} */ ([
+  ["hvc1", "fLaC"],
+  ["hev1", "ec-3"],
+  ["av01", "ac-3"],
+  ["avc1", "Opus"],
+  ["hvc1", "mp4a"],
+]);
+
+/**
+ * What a written file holds, per track: each sample's timing and the MD5 of its bytes.
+ * @param {TrackPlan[]} plans
+ * @param {(file: string) => Uint8Array} bytesOf
+ */
+function sampleDigest(plans, bytesOf) {
+  return plans.map((plan) => ({
+    kind: plan.kind,
+    stsd: [...plan.stsd],
+    lastDuration: plan.lastDuration,
+    samples: plan.samples.map((sample) => {
+      const data = bytesOf(sample.data.file);
+      const bytes = data.subarray(sample.data.offset, sample.data.offset + sample.size);
+      return [sample.dts, sample.cts, sample.size, sample.sync, md5Hex(bytes)];
+    }),
+  }));
+}
+
+/**
+ * Where a stream's presentation ends, by ffprobe: start time plus duration.
+ * @param {import("./helpers/media.js").ProbedStream | undefined} stream
+ */
+const streamEnd = (stream) => (stream?.start_time ?? 0) + (stream?.duration ?? 0);
+
+for (const [videoEntry, audioEntry] of CODEC_PAIRS) {
+  for (const layout of /** @type {const} */ (["fragmented", "progressive"])) {
+    const v = SITE_CODECS[videoEntry];
+    const a = SITE_CODECS[audioEntry];
+    const name = `${v?.what} + ${a?.what}, ${layout} → one progressive MP4, every sample kept`;
+    test(name, MEDIA, async () => {
+      assert.ok(v && a);
+      const video = codecFixture(videoEntry);
+      const audio = codecFixture(audioEntry);
+      const inputs = [video[layout], audio[layout]];
+      /** @type {Map<string, Uint8Array>} */
+      const sources = new Map();
+      /** @type {TrackPlan[]} */
+      const plans = [];
+      for (const input of inputs) {
+        const bytes = new Uint8Array(readFileSync(input));
+        sources.set(input, bytes);
+        plans.push(...(await collectMp4(memoryFile(input, bytes))));
+      }
+      const sourceBytes = (/** @type {string} */ file) => sources.get(file) ?? new Uint8Array(0);
+
+      // the downloader's checks before the writer: a video and an audio track (the audio the
+      // source announced is there), no hole in either
+      assert.deepEqual(
+        plans.map((plan) => plan.kind),
+        ["video", "audio"],
+      );
+      for (const plan of plans) assert.equal(mediaGap(plan, false), null, `${plan.kind}: no hole`);
+
+      const images = coverImages(fixtures());
+      const cover = { bytes: images.jpeg, type: /** @type {const} */ ("jpeg") };
+      const meta = { title: TITLE, cover };
+      const plain = await writeToMemory(plans, sources);
+      const withMeta = await writeToMemory(plans, sources, { meta });
+      const tag = `${videoEntry}-${audioEntry}-${layout}`;
+      const plainPath = fixtures().write(`codec-${tag}.mp4`, plain.out);
+      const metaPath = fixtures().write(`codec-${tag}-meta.mp4`, withMeta.out);
+
+      // ffmpeg applies an edit's leading cut (the encoder delay) to a progressive file only: a
+      // fragmented input with one (AC-3, E-AC-3 behind delay_moov) decodes its first frame whole,
+      // the written file — like the codec's progressive source — without the delay
+      /** @param {import("./helpers/media.js").CodecFixture} fixture @param {number} index */
+      const reference = (fixture, index) => {
+        const edit = parseInit(sourceBytes(inputs[index] ?? "")).tracks[0]?.edit;
+        return layout === "fragmented" && (edit?.mediaTime ?? 0) !== 0
+          ? fixture.progressive
+          : fixture[layout];
+      };
+      const expected = {
+        v: decodedFrames(reference(video, 0), { stream: "v:0" }),
+        a: decodedFrames(reference(audio, 1), { stream: "a:0" }),
+      };
+      assert.ok(expected.v.length >= 50 && expected.a.length > 20, "frames decoded");
+      const inputStreams = inputs.map((input) => probeStreams(input).streams[0]);
+
+      for (const [out, path, result, label] of /** @type {const} */ ([
+        [plain.out, plainPath, plain.result, "plain"],
+        [withMeta.out, metaPath, withMeta.result, "with cover and title"],
+      ])) {
+        assert.equal(result.bytes, out.length, label);
+        assert.deepEqual(
+          readBoxes(out).map((found) => found.type),
+          ["ftyp", "moov", "mdat"],
+          `${label}: moov before mdat, no moof`,
+        );
+
+        // ffprobe: the codecs and tags as served, each stream ending where the input's ends
+        const info = probeStreams(path);
+        assert.deepEqual(
+          info.streams.slice(0, 2).map((s) => [s.codec_type, s.codec_name, s.codec_tag_string]),
+          [
+            ["video", v.codecName, videoEntry],
+            ["audio", a.codecName, audioEntry],
+          ],
+          label,
+        );
+        info.streams.slice(0, 2).forEach((stream, index) => {
+          const want = streamEnd(inputStreams[index]);
+          const got = streamEnd(stream);
+          const what = `${label} ${stream.codec_type}: ${got} vs ${want}`;
+          assert.ok(Math.abs(got - want) < 0.002, what);
+        });
+
+        // decode both: the same frames as the input's (and every sample decodes the same
+        // without the edit lists)
+        assert.deepEqual(decodedFrames(path, { stream: "v:0" }), expected.v, `${label}: video`);
+        assert.deepEqual(decodedFrames(path, { stream: "a:0" }), expected.a, `${label}: audio`);
+        for (const [stream, input] of /** @type {const} */ ([["v:0", 0], ["a:0", 1]])) {
+          const raw = { stream, ignoreEditList: true };
+          assert.deepEqual(
+            decodedFrames(path, raw),
+            decodedFrames(inputs[input] ?? "", raw),
+            `${label} ${stream}: without edit lists`,
+          );
+        }
+
+        // the samples: the same bytes, timing, sync flags and last duration as given
+        const back = await collectMp4(memoryFile(path, out));
+        assert.deepEqual(
+          sampleDigest(back, () => out),
+          sampleDigest(plans, sourceBytes),
+          `${label}: every sample as given`,
+        );
+
+        // probe and the downloader's verification: progressive, the writer's tracks, the codecs,
+        // the durations the writer reported and ffprobe reads
+        const probed = await probe(out);
+        assert.equal(probed.progressive, true, label);
+        assert.equal(probed.fragmented || probed.encrypted || probed.truncated, false, label);
+        assert.deepEqual(
+          probed.tracks.map((track) => [track.kind, track.codec, track.sampleCount]),
+          plans.map((plan) => [
+            plan.kind,
+            plan.kind === "video" ? videoEntry : audioEntry,
+            plan.samples.length,
+          ]),
+          label,
+        );
+        probed.tracks.forEach((track, index) => {
+          const wrote = result.tracks[index];
+          assert.ok(wrote);
+          assert.equal(track.sampleCount, wrote.samples, label);
+          const off = Math.abs(track.durationS - wrote.durationS);
+          const versus = `${track.durationS} vs ${wrote.durationS}`;
+          assert.ok(off <= WRITER_TOLERANCE_S, `${label} ${track.kind}: ${versus}`);
+          const ffprobed = streamEnd(info.streams[index]);
+          const near = Math.abs(track.durationS - ffprobed) < 0.002;
+          assert.ok(near, `${label} ${track.kind}: ffprobe ${ffprobed}`);
+          assert.ok(durationMatches(track.durationS, CODEC_SECONDS), `${label} ${track.kind}`);
+          assert.ok(Math.abs(track.durationS - CODEC_SECONDS) < 0.1, `${label} ${track.kind}`);
+        });
+        assert.ok(durationMatches(probed.durationS, CODEC_SECONDS), label);
+        assert.equal(probed.title, label === "plain" ? null : TITLE, label);
+        assert.equal(probed.cover?.type, label === "plain" ? undefined : "jpeg", label);
+      }
+
+      // the cover and title change nothing else: the same frames, the same sample bytes
+      const tagged = ffprobeAll(metaPath);
+      assert.deepEqual(tagged.streams[2]?.disposition?.attached_pic, 1, "the cover is a picture");
+      assert.equal(tagged.format.tags?.title, TITLE);
+      const plainPlan = planMoov(plans);
+      const metaPlan = planMoov(plans, { meta });
+      assert.deepEqual(
+        withMeta.out.subarray(metaPlan.mdatOffset + metaPlan.mdatHeader.length),
+        plain.out.subarray(plainPlan.mdatOffset + plainPlan.mdatHeader.length),
+        "the same mdat payload",
+      );
+    });
+  }
+}
 
 // ----------------------------------------------------------------------------- tfdt shifting
 

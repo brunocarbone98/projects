@@ -537,15 +537,17 @@ const BTV_CDN = "https://upos-bstar1-mirrorakam.akamaized.net/iupxcodeboss";
 /**
  * A playurl answer.
  * @param {number} [code]
+ * @param {number} [durationMs] the answer's `playurl.duration` (none when omitted)
  * @returns {string}
  */
-function playurl(code = 0) {
+function playurl(code = 0, durationMs) {
   if (code !== 0) return JSON.stringify({ code, message: `code ${code}` });
   return JSON.stringify({
     code: 0,
     message: "0",
     data: {
       playurl: {
+        ...(durationMs === undefined ? {} : { duration: durationMs }),
         video: [
           { video_resource: { url: `${BTV_CDN}/1080.mp4?e=1`, codecs: "avc1.640032", width: 1920, height: 1080, bandwidth: 2000000, size: 1000 }, stream_info: { quality: 80, desc_words: "1080P" } },
           { video_resource: { url: `${BTV_CDN}/480.mp4?e=1`, codecs: "avc1.64001e", width: 852, height: 480, bandwidth: 500000, size: 400 }, stream_info: { quality: 32, desc_words: "480P" } },
@@ -591,6 +593,25 @@ test("Bilibili.tv: a user video — its page, then its playurl answer, the aid a
   assert.equal(streams.video.height, 1080);
   assert.equal(streams.audio?.bandwidth, 192000);
   assert.ok(net.calls.every((call) => call.init?.credentials === "include"));
+});
+
+test("Bilibili.tv: a page that states no duration — the playurl answer's is the one checked", async () => {
+  const page = `https://www.bilibili.tv/en/video/${AID}`;
+  const api = `${API}/playurl?platform=web&aid=${AID}`;
+  const ogOnly = `<html><head><meta property="og:title" content="Only og tags"></head></html>`;
+  /**
+   * @param {{ body?: string, status?: number }} pageAnswer
+   * @param {number} [durationMs]
+   */
+  const durationOf = async (pageAnswer, durationMs) => {
+    const net = network({ [page]: pageAnswer, [api]: { body: playurl(0, durationMs) } });
+    const [target] = targetsOf(await resolve(item({ site: "bilibilitv", id: AID }), context(net.fetch).ctx));
+    return target?.durationS;
+  };
+  assert.equal(await durationOf({ body: ogOnly }, 95500), 95.5, "the answer's milliseconds");
+  assert.equal(await durationOf({ status: 404 }, 95500), 95.5, "an unreadable page too");
+  assert.equal(await durationOf({ body: btvPage("Stated") }, 95500), 6, "the page's own comes first");
+  assert.equal(await durationOf({ body: ogOnly }), null, "neither states one");
 });
 
 test("Bilibili.tv: a page that cannot be read is not fatal; a 403 on the API is a block", async () => {

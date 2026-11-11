@@ -7,7 +7,8 @@ WebP here) is converted to JPEG; a cover that cannot be had (a 404, a 429, a 403
 saved without one, its row's message ending `; cover: <reason>` — a cover is never worth a stop or
 a cooldown. ffprobe sees the cover as an attached picture and the title as the `title` tag (`©nam`,
 UTF-8: one title here is not ASCII). The same downloads with the setting `cover: "none"` ask for
-no cover and save the same audio and video, sample for sample.
+no cover and save the same audio and video, sample for sample — on every media path that embeds a
+cover here: TS-HLS, fMP4-HLS, Bilibili's DASH and bilibili.tv's progressive files.
 
 Thumbnails and the embed request are the extension's own `fetch` of the same URL; the window is
 tall enough for every row to be in view, so every thumbnail is asked for after Analyze
@@ -22,7 +23,16 @@ from pathlib import Path
 
 from e2e_checks import NEEDS_CHROMIUM, assert_sequential
 from extension_harness import ExtensionHarness
-from fake_sites import BILI_TITLES, BILI_UNICODE, BTV_AID, BTV_TITLES, DM_TS_ID, FakeSites, dm_title
+from fake_sites import (
+    BILI_TITLES,
+    BILI_UNICODE,
+    BTV_AID,
+    BTV_TITLES,
+    DM_FMP4_ID,
+    DM_TS_ID,
+    FakeSites,
+    dm_title,
+)
 from media_fixtures import (
     MediaSet,
     assert_cover,
@@ -44,6 +54,13 @@ VIDEOS: dict[str, tuple[str, str, str, str | None, str]] = {
         f"https://www.dailymotion.com/video/{DM_TS_ID}",
         f"StreamFetch/Dailymotion/{dm_title(DM_TS_ID)} [{DM_TS_ID}].mp4",
         "ts-hls",
+        "cover",
+        "dm-poster",
+    ),
+    DM_FMP4_ID: (
+        f"https://www.dailymotion.com/video/{DM_FMP4_ID}",
+        f"StreamFetch/Dailymotion/{dm_title(DM_FMP4_ID)} [{DM_FMP4_ID}].mp4",
+        "fmp4-hls",
         "cover",
         "dm-poster",
     ),
@@ -85,6 +102,7 @@ VIDEOS: dict[str, tuple[str, str, str, str | None, str]] = {
 }
 TITLES = {
     DM_TS_ID: dm_title(DM_TS_ID),
+    DM_FMP4_ID: dm_title(DM_FMP4_ID),
     COVER_429: dm_title(COVER_429),
     BILI_UNICODE: BILI_TITLES[BILI_UNICODE],
     BTV_AID: BTV_TITLES[BTV_AID],
@@ -118,6 +136,7 @@ def test_covers_and_titles_are_embedded_and_the_audio_and_video_are_untouched(
 ):
     with FakeSites(
         media,
+        dm_fmp4=frozenset({DM_FMP4_ID}),
         cover_webp=frozenset({BILI_UNICODE}),
         cover_png=frozenset({BTV_AID}),
     ) as sites:
@@ -146,6 +165,7 @@ def test_covers_and_titles_are_embedded_and_the_audio_and_video_are_untouched(
             ]
             assert fetched == [
                 ("dm-poster", "jpg", 200),
+                ("dm-poster", "jpg", 200),
                 ("dm-poster", "jpg", 429),
                 ("bili-cover", "webp", 200),
                 ("btv-cover", "png", 200),
@@ -163,6 +183,12 @@ def test_covers_and_titles_are_embedded_and_the_audio_and_video_are_untouched(
 
         # -- `cover: "none"`: no cover request, the same audio and video ----------------------
         covered = [video_id for video_id in ids if VIDEOS[video_id][3] is not None]
+        assert {VIDEOS[video_id][2] for video_id in covered} == {
+            "ts-hls",
+            "fmp4-hls",
+            "dash",
+            "btv-progressive",
+        }
         with ExtensionHarness(tmp_path / "none", sites, viewport=TALL) as ext:
             ext.update_settings(cover="none")
             _download(ext, sites, covered)

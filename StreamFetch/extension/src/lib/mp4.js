@@ -17,7 +17,12 @@
  * is the composition OFFSET (presentation time minus `dts`, possibly negative) — what `ts.js`
  * emits as `pts − dts`. A source's edit list is folded in: a leading empty edit delays every
  * `dts`, the first media edit's `media_time` is subtracted from every `cts`. The writer turns the
- * offsets back into a non-negative `ctts` plus an `elst`, so the presentation is unchanged.
+ * offsets back into a non-negative `ctts` plus an `elst`, so the presentation is unchanged. The
+ * last sample's duration, which no later `dts` tells, travels as the plan's `lastDuration`.
+ *
+ * Codec-agnostic: the sample entry (`avc1`, `hvc1`, `hev1`, `av01`, `mp4a`, `fLaC`, `ec-3`,
+ * `ac-3`, `Opus` …) is copied with its configuration box (`avcC`, `hvcC`, `av1C`, `esds`, `dfLa`,
+ * `dec3`, `dac3`, `dOps`) byte for byte and the samples are never opened.
  */
 
 // --------------------------------------------------------------------------------- the model
@@ -33,10 +38,13 @@
  */
 /**
  * What the progressive writer needs of one track: the sample entry box (`stsd`, built or copied
- * byte for byte), the timescale and the samples in decode order.
+ * byte for byte), the timescale and the samples in decode order. `lastDuration` is the decode
+ * duration of the last sample when the source states it (an MP4's `stts` or `trun`: the last AAC
+ * or FLAC frame is often shorter than the others); without it — the MPEG-TS path — the writer
+ * repeats the previous sample's.
  * @typedef {{ kind: "video" | "audio", timescale: number, stsd: Uint8Array, width: number | null,
  *   height: number | null, sampleRate: number | null, channelCount: number | null,
- *   language: string, samples: SampleRef[] }} TrackPlan
+ *   language: string, samples: SampleRef[], lastDuration?: number }} TrackPlan
  */
 /**
  * A file read in windows: `slice(start, end)` resolves to exactly `end − start` bytes.
@@ -1233,6 +1241,18 @@ function emptyPlan(track) {
 }
 
 /**
+ * Records `duration` as the plan's {@link TrackPlan} `lastDuration` (called for each sample in
+ * decode order, so the last call wins); a duration of 0 states nothing — the writer then repeats
+ * the previous sample's.
+ * @param {TrackPlan} plan
+ * @param {number} duration
+ */
+function setLastDuration(plan, duration) {
+  if (duration > 0) plan.lastDuration = duration;
+  else delete plan.lastDuration;
+}
+
+/**
  * The decode-time delay of a track's leading empty edit, in the track's timescale.
  * @param {TrackInfo} track
  * @param {number} movieTimescale
@@ -1324,6 +1344,7 @@ export async function collectFmp4(file) {
           data: { file: file.name, offset: sample.offset },
         });
         dts += sample.duration;
+        setLastDuration(builder.plan, sample.duration);
       }
       checkSampleCount(builder.plan, file);
       builder.nextDts = dts;
@@ -1535,7 +1556,26 @@ function progressivePlan(moov, trak, track, movieTimescale, file) {
   if (sample !== count) {
     throw new Mp4Error("invalid", `${where}: the chunks hold ${sample} of ${count} samples`);
   }
+  if (count > 0) setLastDuration(plan, lastRunValue(reader, stts));
   return plan;
+}
+
+/**
+ * The value of the last run of an `stts` that holds samples (the last sample's duration), 0
+ * when no run does.
+ * @param {ByteReader} reader
+ * @param {Box} stts
+ * @returns {number}
+ */
+function lastRunValue(reader, stts) {
+  const body = stts.start + stts.headerSize;
+  const entries = reader.u32(body + 4, "the stts");
+  for (let entry = entries - 1; entry >= 0; entry -= 1) {
+    if (reader.u32(body + 8 + 8 * entry, "the stts") > 0) {
+      return reader.u32(body + 12 + 8 * entry, "the stts");
+    }
+  }
+  return 0;
 }
 
 /**
@@ -1664,32 +1704,68 @@ export function readMetadata(moov) {
 // -------------------------------------------------------------------------------- the probe
 
 /**
- * The sample count and media duration (track timescale) of one progressive track's tables.
+ * The sample count and presentation end (track timescale) of one progressive track's tables:
+ * the latest `decode time + composition offset + duration` of its samples, decode times counted
+ * from its first sample (`stts`, `ctts` v0/v1 read signed). Without a `ctts` that is the sum of
+ * the `stts` durations; with B-frames it is later, by the composition offset of the sample shown
+ * last. Without an `stts` the `mdhd` duration stands.
  * @param {Uint8Array} moov
  * @param {Box} trak
  * @param {TrackInfo} track
- * @returns {{ count: number, duration: number }}
+ * @returns {{ count: number, end: number }}
  */
 function progressiveTotals(moov, trak, track) {
   const reader = new ByteReader(moov);
   const stbl = findBox(moov, ["mdia", "minf", "stbl"], contentStart(trak), trak.end);
-  if (stbl === null) return { count: 0, duration: track.durationTs };
+  if (stbl === null) return { count: 0, end: track.durationTs };
   let count = 0;
-  let duration = 0;
-  let sawStts = false;
+  /** @type {Box | undefined} */
+  let stts;
+  /** @type {Box | undefined} */
+  let ctts;
   for (const child of childBoxes(moov, stbl)) {
     const body = child.start + child.headerSize;
     if (child.type === "stsz" || child.type === "stz2") count = reader.u32(body + 8, "the stsz");
-    if (child.type === "stts" && !sawStts) {
-      sawStts = true;
-      const entries = reader.u32(body + 4, "the stts");
-      reader.need(body + 8, entries * 8, "the stts");
-      for (let entry = 0; entry < entries; entry += 1) {
-        duration += reader.u32(body + 8 + 8 * entry) * reader.u32(body + 12 + 8 * entry);
+    if (child.type === "stts" && stts === undefined) stts = child;
+    if (child.type === "ctts" && ctts === undefined) ctts = child;
+  }
+  if (stts === undefined) return { count, end: track.durationTs };
+  const sttsBody = stts.start + stts.headerSize;
+  const entries = reader.u32(sttsBody + 4, "the stts");
+  reader.need(sttsBody + 8, entries * 8, "the stts");
+  const cttsBody = ctts === undefined ? 0 : ctts.start + ctts.headerSize;
+  const cttsEntries = ctts === undefined ? 0 : reader.u32(cttsBody + 4, "the ctts");
+  if (ctts !== undefined) reader.need(cttsBody + 8, cttsEntries * 8, "the ctts");
+  let cttsEntry = 0;
+  let cttsLeft = 0;
+  let offset = 0;
+  let dts = 0;
+  let end = 0;
+  for (let entry = 0; entry < entries; entry += 1) {
+    const runLength = reader.u32(sttsBody + 8 + 8 * entry);
+    const delta = reader.u32(sttsBody + 12 + 8 * entry);
+    if (runLength > MAX_SAMPLES_PER_TRACK) {
+      throw new Mp4Error("unsupported", `more than ${MAX_SAMPLES_PER_TRACK} samples in a track`);
+    }
+    if (cttsEntry >= cttsEntries && cttsLeft === 0) {
+      // no (more) composition offsets: the run's last sample ends latest
+      if (runLength > 0) end = Math.max(end, dts + runLength * delta);
+      dts += runLength * delta;
+      continue;
+    }
+    for (let run = 0; run < runLength; run += 1) {
+      while (cttsLeft === 0 && cttsEntry < cttsEntries) {
+        cttsLeft = reader.u32(cttsBody + 8 + 8 * cttsEntry);
+        offset = reader.i32(cttsBody + 12 + 8 * cttsEntry);
+        cttsEntry += 1;
       }
+      if (cttsLeft === 0) offset = 0;
+      else cttsLeft -= 1;
+      end = Math.max(end, dts + offset + delta);
+      dts += delta;
     }
   }
-  return { count, duration: sawStts ? duration : track.durationTs };
+  return { count, end };
 }
 
 /**
@@ -1697,8 +1773,11 @@ function progressiveTotals(moov, trak, track) {
  * duration, sample count), the longest track's duration, whether it is progressive (`moov`
  * before the first `mdat`, no `moof`, no `mvex`), fragmented, encrypted (`encv`, `enca`, `pssh`,
  * `senc`), truncated (it ends inside a box). Reads only box headers, the `moov` and, for a
- * fragmented file, each `moof`. A track's duration is its leading empty edit plus its media
- * duration (sum of `stts` or `trun` durations) minus the edit's `media_time`. `title` and `cover`
+ * fragmented file, each `moof`. A track's duration is where its presentation ends: its leading
+ * empty edit plus the latest `decode time + composition offset + duration` of its samples
+ * (decode times from its first sample; `stts` + `ctts`, or the `trun`s and `tfdt`s) minus the
+ * edit's `media_time` — without composition offsets that is the sum of the sample durations,
+ * with B-frames it also counts the frames shown after the last one decoded. `title` and `cover`
  * are the `moov`'s iTunes metadata ({@link readMetadata}; null when absent). A `Uint8Array` is
  * probed as an in-memory file. A file without a `moov` is `invalid`.
  * @param {Mp4File | Uint8Array} input
@@ -1708,16 +1787,31 @@ export async function probe(input) {
   const file = input instanceof Uint8Array ? memoryFile("buffer", input) : input;
   /** @type {InitInfo | null} */
   let init = null;
-  /** @type {Map<number, { count: number, duration: number }>} */
+  /**
+   * Per track id: the sample count, the presentation end (from the first sample's decode time),
+   * the first decode time and the next one (for a fragment without `tfdt`).
+   * @type {Map<number, { count: number, end: number, first: number | null, next: number }>}
+   */
   const fragmentTotals = new Map();
   let encrypted = false;
   const walk = await walkTopLevel(new WindowReader(file), (moof, at, moov) => {
     if (init === null) init = parseInit(moov);
     if (drmProblem(moof) !== null) encrypted = true;
     for (const fragment of parseFragments(moof, at, init.tracks)) {
-      const totals = fragmentTotals.get(fragment.trackId) ?? { count: 0, duration: 0 };
+      const totals = fragmentTotals.get(fragment.trackId) ?? {
+        count: 0,
+        end: 0,
+        first: null,
+        next: 0,
+      };
       totals.count += fragment.samples.length;
-      for (const sample of fragment.samples) totals.duration += sample.duration;
+      let dts = fragment.baseDecodeTime ?? totals.next;
+      for (const sample of fragment.samples) {
+        if (totals.first === null) totals.first = dts;
+        totals.end = Math.max(totals.end, dts - totals.first + sample.cts + sample.duration);
+        dts += sample.duration;
+      }
+      totals.next = dts;
       fragmentTotals.set(fragment.trackId, totals);
     }
   });
@@ -1732,11 +1826,11 @@ export async function probe(input) {
   const tracks = info.tracks.map((track, index) => {
     const trak = traks[index];
     const totals = fragmented
-      ? (fragmentTotals.get(track.id) ?? { count: 0, duration: 0 })
+      ? (fragmentTotals.get(track.id) ?? { count: 0, end: 0 })
       : trak === undefined
-        ? { count: 0, duration: track.durationTs }
+        ? { count: 0, end: track.durationTs }
         : progressiveTotals(moov, trak, track);
-    const presented = Math.max(0, totals.duration - track.edit.mediaTime) / track.timescale;
+    const presented = Math.max(0, totals.end - track.edit.mediaTime) / track.timescale;
     return {
       id: track.id,
       kind: track.kind,

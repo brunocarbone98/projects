@@ -1,5 +1,6 @@
 """Bilibili.tv end to end (addendum A.5): a user video served as PROGRESSIVE files and an episode
-served as FRAGMENTED files both download and verify; a series link becomes one row per episode
+served as FRAGMENTED files both download and verify — a fragmented transfer cut short resumes with
+`Range` from where it stopped and the file is saved whole; a series link becomes one row per episode
 under a group header and downloads in order; the playurl API's geo / login / premium codes fail
 the row without any media request, in English and in Spanish; a media URL on a host the extension
 has no permission for is never requested and the row and the report name the host; the per-row
@@ -24,6 +25,7 @@ import pytest
 from e2e_checks import (
     NEEDS_CHROMIUM,
     assert_media_headers,
+    assert_range_only_after_cut,
     assert_sequential,
 )
 from extension_harness import ExtensionHarness, Row
@@ -37,6 +39,7 @@ from fake_sites import (
 )
 from media_fixtures import (
     LOW_HEIGHT,
+    SOURCE_HEIGHT,
     MediaSet,
     assert_cover,
     assert_saved_media,
@@ -49,6 +52,8 @@ pytestmark = [NEEDS_CHROMIUM]
 VIDEO = "https://www.bilibili.tv/en/video/{}"
 GEO, LOGIN, PREMIUM = "4801520000000101", "4801520000000102", "4801520000000103"
 UNCOVERED, MISSING = "4801520000000201", "4801520000000202"
+#: A user video served as fragmented files whose video transfer is cut short once.
+CUT = "4801520000000301"
 _PLACEHOLDER = re.compile(r"\$[A-Za-z0-9_@]+\$|\$\d")
 #: Scroll the last item row into the middle of the window (the history and the settings are below
 #: the table: the page's bottom is not the table's).
@@ -117,6 +122,41 @@ def test_an_episode_served_as_fragmented_files_downloads_and_verifies(
         assert _btv_media(sites, ep_id) == ["btv-video 80.mp4", "btv-audio audio-30280.mp4"]
         playurl = sites.by_route("btv-playurl")
         assert playurl and all(r.query == {"platform": "web", "ep_id": ep_id} for r in playurl)
+
+
+def test_a_cut_fragmented_transfer_resumes_with_range_and_the_whole_file_is_saved(
+    media: MediaSet, tmp_path: Path
+):
+    """B.1 "complete": the fragmented video file stops half way (the connection drops after half
+    the body); the download asks for the rest of the SAME file with `Range: bytes=<received>-`
+    (never from the start, never another quality), then the audio, and the saved file is the
+    whole source clip — every frame, the audio as served, the source's durations."""
+    with (
+        FakeSites(media, btv_fragmented=frozenset({CUT}), btv_cut_once=frozenset({CUT})) as sites,
+        ExtensionHarness(tmp_path, sites) as ext,
+    ):
+        ext.download_all(VIDEO.format(CUT))
+        assert ext.row_of(CUT).status == "done", ext.row_of(CUT)
+        (name,) = ext.wait_saved(1)
+        assert name == f"StreamFetch/Bilibili.tv/Fake Bstation video {CUT} [{CUT}].mp4"
+        saved = ext.saved_path(name)
+        probed = assert_saved_media(saved, media.expected("btv-fragmented"))
+        assert_cover(saved, probed, media.cover)
+        assert video_height(saved) == SOURCE_HEIGHT
+        btv = sites.media_requests("bilibilitv")
+        assert [(r.route, r.path.rsplit("/", 1)[-1], r.cut, r.status) for r in btv] == [
+            ("btv-video", "80.mp4", True, 200),
+            ("btv-video", "80.mp4", False, 206),
+            ("btv-audio", "audio-30280.mp4", False, 200),
+        ], btv
+        assert assert_range_only_after_cut(btv) == 1
+        cut, resumed = btv[0], btv[1]
+        assert resumed.range == f"bytes={cut.sent_bytes}-", (resumed.range, cut.sent_bytes)
+        assert cut.sent_bytes + resumed.sent_bytes == len(media.dash_video.read_bytes())
+        assert resumed.query.get("sign") == cut.query.get("sign")  # the same signed URL
+        assert_media_headers(sites, btv)
+        assert_sequential(sites.site_requests())
+        assert ext.reports() == [] and ext.failed_rows() == []
 
 
 def test_a_series_link_lists_every_episode_under_a_header_and_downloads_them_in_order(

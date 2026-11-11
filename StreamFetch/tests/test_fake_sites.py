@@ -28,6 +28,8 @@ from encrypted_mp4 import (
 )
 from fake_sites import (
     B23_CODE,
+    BILI_DOLBY_AUDIO,
+    BILI_FLAC_AUDIO,
     BILI_MAIN,
     BILI_PREMIUM_QUALITY,
     BILI_SHARE,
@@ -41,6 +43,7 @@ from fake_sites import (
     CLAIMED_SECONDS,
     CUT_LINGER_S,
     DM_FMP4_ID,
+    DM_LOW_VARIANT,
     DM_TITLES,
     DM_TS_ID,
     EXPIRING_SEGMENT,
@@ -56,6 +59,8 @@ from media_fixtures import (
     COVER_PNG_SIZE,
     COVER_WEBP_SIZE,
     COVR_JPEG,
+    DURATION_TOLERANCE_S,
+    HEVC_TAG,
     LOW_HEIGHT,
     MEDIA_PATHS,
     SOURCE_HEIGHT,
@@ -68,6 +73,7 @@ from media_fixtures import (
     assert_saved_media,
     attached_pictures,
     av_framemd5,
+    decoded_pcm,
     duration_of,
     ffmpeg,
     ffprobe,
@@ -76,8 +82,12 @@ from media_fixtures import (
     image_size,
     is_progressive,
     mp4_metadata,
+    packet_hashes,
+    sample_entry,
+    start_edit,
     streams_of,
     title_tag,
+    unapplied_start_skip,
     video_height,
 )
 
@@ -167,6 +177,38 @@ def test_the_media_fixtures_are_the_clips_spec_9_describes(media: MediaSet):
         kinds = top_level_types(path.read_bytes())
         assert kinds[:2] == ["ftyp", "moov"] and "moof" in kinds, (path, kinds)
         assert [s["codec_type"] for s in ffprobe(path)["streams"]] == [kind]
+    # the lower HLS variant's renditions: the 160x90 clip, segmented the same way
+    for low, high in ((media.hls_ts_low, media.hls_ts), (media.hls_fmp4_low, media.hls_fmp4)):
+        assert low.container == high.container and len(low.segments) == len(high.segments)
+        assert video_height(low.joined) == LOW_HEIGHT
+        assert framemd5(low.joined, "v:0") == framemd5(media.low, "v:0")
+        assert framemd5(low.joined, "a:0") == framemd5(high.joined, "a:0")  # the same sound
+    assert media.hls_fmp4_low.init is not None and media.hls_fmp4.init is not None
+    assert media.hls_fmp4_low.init.read_bytes() != media.hls_fmp4.init.read_bytes()
+    # the other codecs B.1 chooses between: HEVC (hvc1, B-frames), FLAC, E-AC-3 — one fragmented
+    # track each, the source's length, other frames than the H.264 / AAC tracks'
+    (hevc,) = ffprobe(media.dash_video_hevc)["streams"]
+    assert (hevc["codec_name"], hevc["codec_tag_string"]) == ("hevc", HEVC_TAG)
+    assert (hevc["width"], hevc["height"]) == (320, SOURCE_HEIGHT)
+    assert int(hevc["has_b_frames"]) > 0  # composition offsets for the writer to keep
+    hevc_frames = framemd5(media.dash_video_hevc, "v:0")
+    assert len(hevc_frames) == len(framemd5(media.src, "v:0")) == 25 * SOURCE_SECONDS
+    assert hevc_frames != framemd5(media.dash_video, "v:0")
+    for path, codec, tag in (
+        (media.dash_audio_flac, "flac", "fLaC"),
+        (media.dash_audio_eac3, "eac3", "ec-3"),
+    ):
+        (stream,) = ffprobe(path)["streams"]
+        assert (stream["codec_name"], stream["codec_tag_string"]) == (codec, tag), path
+        assert stream["sample_rate"] == "48000", path
+        assert abs(float(stream["duration"]) - SOURCE_SECONDS) <= DURATION_TOLERANCE_S, stream
+        assert framemd5(path, "a:0") != framemd5(media.dash_audio, "a:0"), path
+    for path in (media.dash_video_hevc, media.dash_audio_flac, media.dash_audio_eac3):
+        kinds = top_level_types(path.read_bytes())
+        assert kinds[:2] == ["ftyp", "moov"] and "moof" in kinds, (path, kinds)
+    assert sample_entry(media.dash_video_hevc, "video")[4:8] == HEVC_TAG.encode()
+    assert sample_entry(media.dash_audio_flac, "audio")[4:8] == b"fLaC"
+    assert sample_entry(media.dash_audio_eac3, "audio")[4:8] == b"ec-3"
     # progressive: no moof, mdat BEFORE moov (ffmpeg's default; not "progressive" for spec 9)
     for path in (media.progressive_video, media.progressive_video_low, media.progressive_audio):
         kinds = top_level_types(path.read_bytes())
@@ -195,11 +237,36 @@ def test_every_media_path_gives_the_writer_the_source_but_one_priming_frame(medi
     for name in MEDIA_PATHS:
         expected = media.expected(name)
         assert expected.source == media.src
-        assert expected.video == (media.low if name.endswith("-low") else media.src), name
+        low = name.endswith("-low")
+        served_video = {
+            "ts-hls": (media.hls_ts_low if low else media.hls_ts).joined,
+            "fmp4-hls": (media.hls_fmp4_low if low else media.hls_fmp4).joined,
+            "dash": media.dash_video_low if low else media.dash_video,
+            "btv-progressive": media.progressive_video_low if low else media.progressive_video,
+            "btv-fragmented": media.dash_video_low if low else media.dash_video,
+        }.get(name.removesuffix("-low"), media.dash_video_hevc)
+        assert expected.served_video == served_video, name
+        if name.startswith("dash-hevc"):  # Bilibili's other codecs: the served tracks
+            assert (expected.video, expected.video_codec) == (media.dash_video_hevc, "hevc")
+            audio = {
+                "dash-hevc": (media.dash_audio, "aac"),
+                "dash-hevc-flac": (media.dash_audio_flac, "flac"),
+                "dash-hevc-eac3": (media.dash_audio_eac3, "eac3"),
+            }[name]
+            assert (expected.audio, expected.audio_codec) == audio, name
+            if expected.audio_codec != "aac":
+                continue
+        else:
+            assert expected.video == (media.low if name.endswith("-low") else media.src), name
+            assert (expected.video_codec, expected.audio_codec) == ("h264", "aac"), name
         given = fixture_framemd5(expected.audio, "a:0")
         assert_primed_or_same(given, source_audio, name)
         primed = name.removesuffix("-low") != "btv-progressive"
         assert len(given) == len(source_audio) + primed, name
+    assert media.expected("ts-hls-low").audio == media.hls_ts_low.joined
+    assert media.expected("fmp4-hls-low").audio == media.hls_fmp4_low.joined
+    with pytest.raises(ValueError, match="no media path"):
+        media.expected("dash-av1")
     # the joined HLS streams are the segments in playlist order: the source's pictures
     assert media.hls_ts.joined.read_bytes() == b"".join(
         path.read_bytes() for path in media.hls_ts.segments
@@ -272,6 +339,83 @@ def test_the_saved_file_verification_on_files_ffmpeg_makes(media: MediaSet, tmp_
     video_only = _remux(media, tmp_path / "video-only.mp4", "-map", "0:v")
     with pytest.raises(AssertionError, match="audio"):
         assert_saved_media(video_only, expected)
+    # the same frames out of sync: the audio 40 ms late (one video frame) is refused
+    late = tmp_path / "late-audio.mp4"
+    delayed = ["-i", str(media.dash_video), "-itsoffset", "0.04", "-i", str(media.dash_audio)]
+    ffmpeg(
+        [*delayed, "-map", "0:v", "-map", "1:a", "-c", "copy", "-movflags", "+faststart", str(late)]
+    )
+    with pytest.raises(AssertionError, match=r"the video starts -40\.0 ms from the audio"):
+        assert_saved_media(late, expected)
+
+    # the other codecs, verified against the served tracks: files ffmpeg makes from them on the
+    # served timeline (`-copyts`: the HEVC track's first picture is presented 80 ms in — its
+    # B-frame delay, no edit list —, the audio at 0; without it ffmpeg moves each input to 0)
+    def with_hevc(out: Path, audio: Path, *codec: str, copyts: bool = True) -> Path:
+        inputs = ["-copyts"] if copyts else []
+        inputs += ["-i", str(media.dash_video_hevc), "-i", str(audio), "-map", "0:v", "-map", "1:a"]
+        ffmpeg([*inputs, *codec, "-tag:v", HEVC_TAG, "-movflags", "+faststart", str(out)])
+        return out
+
+    # E-AC-3 copied as served: every packet, and the edit list that skips its encoder delay
+    eac3 = with_hevc(tmp_path / "hevc-eac3.mp4", media.dash_audio_eac3, "-c", "copy")
+    assert start_edit(eac3, "audio") == (256, 48000)
+    assert packet_hashes(eac3, "audio") == packet_hashes(media.dash_audio_eac3, "audio")
+    assert_saved_media(eac3, media.expected("dash-hevc-eac3"))
+    # FLAC encoded afresh from the source (deterministic: the served frames; ffmpeg 6's `-c copy`
+    # of the fragmented FLAC track drops its last, short frame — below)
+    flac = with_hevc(tmp_path / "hevc-flac.mp4", media.src, "-c:v", "copy", "-c:a", "flac")
+    assert_saved_media(flac, media.expected("dash-hevc-flac"))
+    assert sample_entry(flac, "video")[4:8] == HEVC_TAG.encode()  # ffmpeg rewrites the entry
+    assert sample_entry(flac, "audio")[4:8] == b"fLaC"
+    with pytest.raises(AssertionError, match="video"):
+        assert_saved_media(flac, expected)  # HEVC where H.264 is expected
+    with pytest.raises(AssertionError, match="video"):
+        assert_saved_media(plain, media.expected("dash-hevc"))  # H.264 where HEVC is expected
+    with pytest.raises(AssertionError, match="audio"):
+        assert_saved_media(eac3, media.expected("dash-hevc-flac"))  # E-AC-3, not FLAC
+    # a track one frame short is refused, whatever its duration says
+    short = with_hevc(tmp_path / "hevc-flac-short.mp4", media.dash_audio_flac, "-c", "copy")
+    with pytest.raises(AssertionError, match="audio frames differ"):
+        assert_saved_media(short, media.expected("dash-hevc-flac"))
+    # without `-copyts` ffmpeg reads the fragmented E-AC-3 track from its first packet (its
+    # demuxer does not apply the edit list there) and writes no edit: every packet, but the 256
+    # samples of encoder delay the served track hides would play — refused
+    no_edit = with_hevc(
+        tmp_path / "hevc-eac3-no-edit.mp4", media.dash_audio_eac3, "-c", "copy", copyts=False
+    )
+    assert packet_hashes(no_edit, "audio") == packet_hashes(media.dash_audio_eac3, "audio")
+    assert start_edit(no_edit, "audio")[0] == 0
+    with pytest.raises(AssertionError, match="does not play as the served"):
+        assert_saved_media(no_edit, media.expected("dash-hevc-eac3"))
+    # ...and with FLAC (no edit to lose) the same command moves the HEVC track to 0: out of sync
+    moved = with_hevc(
+        tmp_path / "hevc-flac-moved.mp4", media.src, "-c:v", "copy", "-c:a", "flac", copyts=False
+    )
+    with pytest.raises(AssertionError, match=r"the video starts \+0\.0 ms from the audio"):
+        assert_saved_media(moved, media.expected("dash-hevc-flac"))
+
+
+def test_start_edits_ffmpeg_does_not_apply_to_a_fragmented_track(media: MediaSet):
+    """E-AC-3's fragmented track starts its presentation 256 samples in (its `elst`); ffmpeg
+    decodes it from sample 0 — the frames a player plays are the PCM from sample 256 on. No
+    other served track declares a start edit, and a progressive file's edits ffmpeg applies."""
+    assert start_edit(media.dash_audio_eac3, "audio") == (256, 48000)
+    assert unapplied_start_skip(media.dash_audio_eac3) == 256
+    for track in (
+        media.dash_audio,
+        media.dash_audio_flac,
+        media.hls_fmp4.joined,
+        media.hls_ts.joined,
+    ):
+        assert unapplied_start_skip(track) == 0, track
+    assert unapplied_start_skip(media.progressive_audio) == 0  # progressive: ffmpeg applies it
+    assert start_edit(media.dash_video_hevc, "video") == (0, 12800)
+    with pytest.raises(ValueError, match="no video track"):
+        start_edit(media.dash_audio, "video")
+    pcm = decoded_pcm(media.dash_audio_eac3)
+    assert len(pcm) == 4 * 288_768  # mono f32le: 188 frames of 1536 samples
+    assert len(packet_hashes(media.dash_audio_eac3, "audio")) == 188
 
 
 def test_the_verification_accepts_the_source_and_one_priming_frame_only(media: MediaSet):
@@ -356,19 +500,40 @@ def test_dailymotion_metadata_master_media_playlist_and_segments(sites: FakeSite
     assert fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/seg000.m4s")).status == 404  # TS, not fMP4
     assert fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/init.mp4")).status == 404
     assert fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/media-720.m3u8")).status == 404
+    # the 480 variant is OTHER media: the 160x90 clip's segments, under `480/`
+    low = fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/media-480.m3u8?gen=2")).text
+    assert "#EXT-X-ENDLIST" in low
+    low_segments = [line for line in low.splitlines() if line and not line.startswith("#")]
+    assert low_segments == [f"{DM_LOW_VARIANT}/seg00{n}.ts?gen=2" for n in range(3)]
+    for index, name in enumerate(low_segments):
+        answer = fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/{name}"))
+        assert answer.status == 200 and answer.headers["Content-Type"] == "video/mp2t"
+        assert answer.body == media.hls_ts_low.segments[index].read_bytes()
+        assert answer.body != media.hls_ts.segments[index].read_bytes()
+    assert fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/720/seg000.ts")).status == 404
+    assert fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/480/init.mp4")).status == 404  # TS: no init
     assert fetch(sites.url("/dm/player/metadata/video/BAD!")).status == 404
     assert fetch(sites.url("/elsewhere")).status == 404
 
 
 def test_dailymotion_fmp4_option_serves_an_init_and_m4s_segments(media: MediaSet):
     with FakeSites(media, dm_fmp4=frozenset({DM_FMP4_ID})) as sites:
-        playlist = fetch(sites.url(f"/dm/cdn/{DM_FMP4_ID}/media-480.m3u8")).text
+        playlist = fetch(sites.url(f"/dm/cdn/{DM_FMP4_ID}/media-1080.m3u8")).text
         assert '#EXT-X-MAP:URI="init.mp4?gen=1"' in playlist
-        assert "seg000.m4s?gen=1" in playlist
+        assert "\nseg000.m4s?gen=1" in playlist
         init = fetch(sites.url(f"/dm/cdn/{DM_FMP4_ID}/init.mp4?gen=1"))
         assert init.status == 200 and init.body == media.hls_fmp4.init.read_bytes()
         segment = fetch(sites.url(f"/dm/cdn/{DM_FMP4_ID}/seg001.m4s?gen=1"))
         assert segment.body == media.hls_fmp4.segments[1].read_bytes()
+        # the 480 variant: the 160x90 clip's own init and segments
+        low = fetch(sites.url(f"/dm/cdn/{DM_FMP4_ID}/media-480.m3u8")).text
+        assert f'#EXT-X-MAP:URI="{DM_LOW_VARIANT}/init.mp4?gen=1"' in low
+        assert f"\n{DM_LOW_VARIANT}/seg000.m4s?gen=1" in low
+        assert media.hls_fmp4_low.init is not None
+        init = fetch(sites.url(f"/dm/cdn/{DM_FMP4_ID}/{DM_LOW_VARIANT}/init.mp4?gen=1"))
+        assert init.status == 200 and init.body == media.hls_fmp4_low.init.read_bytes()
+        segment = fetch(sites.url(f"/dm/cdn/{DM_FMP4_ID}/{DM_LOW_VARIANT}/seg001.m4s"))
+        assert segment.body == media.hls_fmp4_low.segments[1].read_bytes()
         # another id keeps MPEG-TS
         assert "seg000.ts" in fetch(sites.url(f"/dm/cdn/{DM_TS_ID}/media-480.m3u8")).text
 
@@ -478,8 +643,16 @@ def test_bilibili_page_embeds_the_state_and_the_playinfo(sites: FakeSites, media
     referer = {"Referer": sites.expected_referer("bilibili")}
     assert sites.expected_referer("bilibili") == sites.url("/bili/")
     assert fetch(first["baseUrl"], referer).body == media.dash_video.read_bytes()
+    hevc = dash["video"][1]
+    assert fetch(hevc["baseUrl"], referer).body == media.dash_video_hevc.read_bytes()
+    assert hevc["bandwidth"] < first["bandwidth"]  # by default: half its AVC's
     assert fetch(dash["video"][3]["baseUrl"], referer).body == media.dash_video_low.read_bytes()
     assert fetch(dash["audio"][0]["baseUrl"], referer).body == media.dash_audio.read_bytes()
+    assert dash["dolby"] == {"type": 0, "audio": None} and dash["flac"] is None
+    # an audio id the page does not offer is not served (FLAC and Dolby are options)
+    for audio_id in (BILI_FLAC_AUDIO[0], BILI_DOLBY_AUDIO[0], 30232):
+        missing = dash["audio"][0]["baseUrl"].replace("audio-30280", f"audio-{audio_id}")
+        assert fetch(missing, referer).status == 404, audio_id
     assert fetch(first["backupUrl"][0], referer).status == 200
     assert fetch(sites.url(f"/bili/cover/{BILI_MAIN}.jpg")).status == 200
     assert fetch(sites.url("/bili/video/not-a-bvid")).status == 404
@@ -624,6 +797,47 @@ def test_bilibili_cdn_options(media: MediaSet):
         assert record.cut and record.sent_bytes == received and record.range is None
 
 
+def test_bilibili_codec_options_flac_dolby_and_a_top_bandwidth_hevc(media: MediaSet):
+    flac_dolby, dolby_only = "BV1Fl4C1aD7b", "BV1Do5L1bY8e"
+    with FakeSites(
+        media,
+        bili_flac=frozenset({flac_dolby}),
+        bili_dolby=frozenset({flac_dolby, dolby_only}),
+        bili_hevc_top_bandwidth=frozenset({flac_dolby}),
+        bili_qualities=((80, "avc"), (80, "hevc"), (64, "hevc")),
+    ) as sites:
+        referer = {"Referer": sites.expected_referer("bilibili")}
+
+        def dash_of(bvid: str) -> dict[str, Any]:
+            answer, _ = _bili_page(sites, bvid)
+            return embedded_json(answer.text, "__playinfo__")["data"]["dash"]
+
+        dash = dash_of(flac_dolby)
+        avc, hevc, low_hevc = dash["video"]
+        assert (avc["codecs"][:4], hevc["codecs"][:4]) == ("avc1", "hev1")
+        assert hevc["bandwidth"] == avc["bandwidth"] * 3 // 2  # the highest at 1080P
+        assert fetch(hevc["baseUrl"], referer).body == media.dash_video_hevc.read_bytes()
+        assert fetch(low_hevc["baseUrl"], referer).status == 404  # no HEVC below 80
+        flac = dash["flac"]
+        assert flac["display"] is True
+        assert (flac["audio"]["id"], flac["audio"]["codecs"]) == (BILI_FLAC_AUDIO[0], "fLaC")
+        assert flac["audio"]["bandwidth"] == BILI_FLAC_AUDIO[1]
+        assert fetch(flac["audio"]["baseUrl"], referer).body == media.dash_audio_flac.read_bytes()
+        assert fetch(flac["audio"]["backupUrl"][0], referer).status == 200
+        (dolby,) = dash["dolby"]["audio"]
+        assert dash["dolby"]["type"] == 2
+        assert (dolby["id"], dolby["codecs"]) == (BILI_DOLBY_AUDIO[0], "ec-3")
+        assert fetch(dolby["baseUrl"], referer).body == media.dash_audio_eac3.read_bytes()
+        assert [a["id"] for a in dash["audio"]] == [30280, 30216]  # the AAC tracks stay
+        # Dolby alone: no FLAC entry, its id not served; the HEVC at its default bandwidth
+        dash = dash_of(dolby_only)
+        assert dash["flac"] is None and dash["dolby"]["audio"][0]["id"] == BILI_DOLBY_AUDIO[0]
+        assert dash["video"][1]["bandwidth"] == dash["video"][0]["bandwidth"] // 2
+        flac_url = dash["audio"][0]["baseUrl"].replace("audio-30280", "audio-30251")
+        assert fetch(flac_url, referer).status == 404
+        assert fetch(dash["dolby"]["audio"][0]["baseUrl"]).status == 403  # no Referer
+
+
 def test_bilibili_qualities_option(media: MediaSet):
     with FakeSites(media, bili_qualities=((64, "avc"), (32, "avc"))) as sites:
         answer, _ = _bili_page(sites)
@@ -750,6 +964,36 @@ def test_bilibilitv_playurl_options(media: MediaSet):
         assert all(v["video_resource"]["url"] for v in videos[1:])
         url = _playurl(sites, f"aid={uncovered}")["data"]["playurl"]["video"][0]["video_resource"]
         assert url["url"].startswith(f"http://localhost:{sites.port}/btv-cdn/{uncovered}/")
+
+
+def test_bilibilitv_cut_once_cuts_the_first_video_request_only(media: MediaSet):
+    cut, other = "4801520000000301", "4801520000000302"
+    with FakeSites(
+        media, btv_cut_once=frozenset({cut}), btv_fragmented=frozenset({cut, other})
+    ) as sites:
+        referer = {"Referer": sites.expected_referer("bilibilitv")}
+        playurl = _playurl(sites, f"aid={cut}")["data"]["playurl"]
+        video = playurl["video"][0]["video_resource"]["url"]
+        whole = media.dash_video.read_bytes()
+        with pytest.raises(http.client.IncompleteRead) as error:
+            fetch(video, referer)
+        received = len(error.value.partial)
+        assert received == len(whole) // 2
+        resumed = fetch(video, {**referer, "Range": f"bytes={received}-"})
+        assert resumed.status == 206 and error.value.partial + resumed.body == whole
+        assert fetch(video, referer).body == whole  # once only
+        audio = fetch(playurl["audio_resource"][0]["url"], referer)
+        assert audio.body == media.dash_audio.read_bytes()  # the audio is never cut
+        other_video = _playurl(sites, f"aid={other}")["data"]["playurl"]["video"][0]
+        assert fetch(other_video["video_resource"]["url"], referer).body == whole
+        records = sites.by_route("btv-video")
+        assert [(r.cut, r.range, r.status) for r in records] == [
+            (True, None, 200),
+            (False, f"bytes={received}-", 206),
+            (False, None, 200),
+            (False, None, 200),
+        ]
+        assert records[0].sent_bytes == received
 
 
 # -- the request log -----------------------------------------------------------------------------

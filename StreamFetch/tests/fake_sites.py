@@ -27,15 +27,19 @@ Dailymotion (`/dm`, base `baseUrls.dailymotion`; CDN `/dm/cdn`, `baseUrls.dmcdn`
   /dm/cdn/<xid>/media-<name>.m3u8     the media playlist (ffmpeg's own, its URIs rewritten to carry
                                       `gen`): MPEG-TS segments, or fMP4 (`#EXT-X-MAP`) for
                                       `dm_fmp4`; `#EXT-X-KEY:METHOD=AES-128` for
-                                      `dm_key_protected`; no `#EXT-X-ENDLIST` for `dm_live`. Both
-                                      variants list the source clip's segments
-  /dm/cdn/<xid>/seg<n>.ts|.m4s        a segment; `dm_expire_segment_once`: 403 on segment
+                                      `dm_key_protected`; no `#EXT-X-ENDLIST` for `dm_live`. The
+                                      two variants are DIFFERENT media: `1080` lists the source
+                                      clip's segments (`seg<n>…`), `480` (`DM_LOW_VARIANT`) the
+                                      160x90 clip's (`480/seg<n>…`, `480/init.mp4`) — a saved
+                                      file's pictures tell which variant was downloaded
+  /dm/cdn/<xid>/[480/]seg<n>.ts|.m4s  a segment of the source clip (of the 160x90 clip under
+                                      `480/`); `dm_expire_segment_once`: 403 on segment
                                       `EXPIRING_SEGMENT` the first time it is asked for (a fresh
                                       master serves new URLs: a new `gen`);
                                       `dm_truncate_segment`: segment `TRUNCATED_SEGMENT` cut short
                                       once (full `Content-Length`, half the body, the connection
                                       dropped `CUT_LINGER_S` later)
-  /dm/cdn/<xid>/init.mp4              the fMP4 init segment
+  /dm/cdn/<xid>/[480/]init.mp4        the fMP4 init segment of that variant's clip
   /dm/cdn/<xid>/key.bin               404: StreamFetch never asks for a key (the log shows it if it
                                       did)
   /dm/poster/<xid>.jpg                a poster (the cover rules below)
@@ -46,7 +50,11 @@ Bilibili (`/bili`, base `baseUrls.bilibili`; short links `/b23`, `baseUrls.b23`)
                                       `bili_parts` pages — `bili_parts_of` sets one video's
                                       count —, `upData`) and `window.__playinfo__ =
                                       {...}` for part N (default 1): DASH `video[]` per
-                                      `bili_qualities`, `audio[]` 30280 + 30216, `support_formats`,
+                                      `bili_qualities` (an HEVC entry at half its AVC's bandwidth;
+                                      at 1.5 times it for `bili_hevc_top_bandwidth`),
+                                      `audio[]` 30280 + 30216 (AAC), `dolby.audio[]` 30250
+                                      (E-AC-3) for `bili_dolby`, `flac.audio` 30251 (FLAC) for
+                                      `bili_flac`, `support_formats`,
                                       `accept_quality`, `accept_description`, `timelength`; every
                                       media URL `{base}/bili/cdn/<cid>/…?deadline=<now+1h>&upsig=…`
                                       plus a backup URL (`&mirror=2`). Sets a `SESSDATA` cookie
@@ -62,7 +70,9 @@ Bilibili (`/bili`, base `baseUrls.bilibili`; short links `/b23`, `baseUrls.b23`)
   /b23/<code>                         302 to `/bili/video/<bvid>?share_source=copy_web`
                                       (`B23_CODES`)
   /bili/cdn/<cid>/<q>[-hevc].m4s      a DASH video track (a complete fragmented MP4: the source clip
-                                      for q >= 80, the 160x90 clip below); `Range` (206,
+                                      for q >= 80, the 160x90 clip below; `-hevc`: the source's
+                                      pictures encoded as HEVC, `hvc1` — HEVC below 80 is not
+                                      served, a 404); `Range` (206,
                                       `Content-Range`; 416 when unsatisfiable); 403 unless the
                                       `Referer` is `{base}/bili/` (the real CDN wants
                                       `https://www.bilibili.com/`) or when `deadline` has passed;
@@ -70,7 +80,9 @@ Bilibili (`/bili`, base `baseUrls.bilibili`; short links `/b23`, `baseUrls.b23`)
                                       `bili_drm`: the video served encrypted (`encv` + `pssh`);
                                       `bili_cut_once`: the first request of part 1's chosen video
                                       file is cut short (half the body, then the connection drops)
-  /bili/cdn/<cid>/audio-<id>.m4s      a DASH audio track; same rules; `bili_expire_once`: 403 the
+  /bili/cdn/<cid>/audio-<id>.m4s      a DASH audio track: AAC for 30280 / 30216, E-AC-3 for 30250
+                                      (`bili_dolby` only), FLAC for 30251 (`bili_flac` only), a 404
+                                      for any other id; same rules; `bili_expire_once`: 403 the
                                       first time (expired: the extension re-reads the page)
   /bili/cover/<bvid>.jpg              the cover (`videoData.pic`; the cover rules below)
 
@@ -93,7 +105,10 @@ Bilibili.tv (`/btv` pages, base `baseUrls.bilibilitv`; API `/btv-api`, `baseUrls
   /btv-api/intl/gateway/web/v2/ogv/play/episodes?season_id=…   two sections, three episodes
   /btv-api/intl/gateway/web/v2/ogv/play/season_info?season_id=… `data.season.title`
   /btv-cdn/<id>/<q>.mp4, /btv-cdn/<id>/audio-<q>.mp4             the media; `Range`; 403 unless
-                                      the `Referer` is `{base}/btv/`, or once `deadline` passed
+                                      the `Referer` is `{base}/btv/`, or once `deadline` passed;
+                                      `btv_cut_once`: the first request of the video file (any
+                                      quality) is cut short (half the body, then the connection
+                                      drops), as `bili_cut_once`
   /btv-cover/<id>.jpg                 the cover (the cover rules below)
 
 Covers (B.2: StreamFetch embeds the cover in the MP4; its rows show it as a lazy thumbnail): every
@@ -128,7 +143,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from media_fixtures import SOURCE_SECONDS, MediaSet
+from media_fixtures import SOURCE_SECONDS, HlsFixture, MediaSet
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -145,8 +160,10 @@ DM_TITLES = {
     DM_SHORT_ID: "Fake Dailymotion short link clip",
 }
 DM_ID_RE = re.compile(r"^(?:x[0-9a-z]+|k[0-9A-Za-z]+)$")
-#: The master's variants: NAME, RESOLUTION, BANDWIDTH. Both list the source clip's segments.
+#: The master's variants: NAME, RESOLUTION, BANDWIDTH. `1080` lists the source clip's segments,
+#: `DM_LOW_VARIANT` the 160x90 clip's (under `/dm/cdn/<xid>/480/`).
 DM_VARIANTS = (("1080", "1920x1080", 5_000_000), ("480", "854x480", 1_200_000))
+DM_LOW_VARIANT = "480"
 #: `dm_expire_segment_once` refuses this segment (`seg002`) the first time.
 EXPIRING_SEGMENT = 2
 #: `dm_truncate_segment` cuts this segment (`seg001`) short once.
@@ -182,6 +199,10 @@ BILI_QUALITY_INFO: dict[int, tuple[int, int, str]] = {
 }
 BILI_CODECS = {"avc": ("avc1.64001F", 7), "hevc": ("hev1.1.6.L120.90", 12)}
 BILI_AUDIO = ((30280, 192_000), (30216, 64_000))
+#: `dash.flac.audio` (`bili_flac`) and `dash.dolby.audio[]` (`bili_dolby`): (id, bandwidth), as
+#: the extension's `bilibili-page-premium.html` fixture shapes them.
+BILI_FLAC_AUDIO = (30251, 1_150_000)
+BILI_DOLBY_AUDIO = (30250, 384_000)
 DEFAULT_BILI_QUALITIES: tuple[tuple[int, str], ...] = ((80, "avc"), (80, "hevc"), (64, "avc"))
 DEFAULT_BILI_QUALITIES += ((32, "avc"),)
 #: The premium quality `bili_missing_premium` names in `support_formats` (never in `dash.video`).
@@ -229,8 +250,11 @@ ANY = "*"
 _DM_METADATA = re.compile(r"^/dm/player/metadata/video/(?P<id>[^/]+)$")
 _DM_MASTER = re.compile(r"^/dm/cdn/manifest/(?P<id>[^/]+)\.m3u8$")
 _DM_MEDIA = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/media-(?P<name>[0-9a-z]+)\.m3u8$")
-_DM_SEGMENT = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/seg(?P<n>\d+)\.(?P<ext>ts|m4s)$")
-_DM_INIT = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/init\.mp4$")
+_DM_VARIANT_DIR = r"(?:(?P<variant>\d+)/)?"
+_DM_SEGMENT = re.compile(
+    rf"^/dm/cdn/(?P<id>[^/]+)/{_DM_VARIANT_DIR}seg(?P<n>\d+)\.(?P<ext>ts|m4s)$"
+)
+_DM_INIT = re.compile(rf"^/dm/cdn/(?P<id>[^/]+)/{_DM_VARIANT_DIR}init\.mp4$")
 _DM_KEY = re.compile(r"^/dm/cdn/(?P<id>[^/]+)/key\.bin$")
 _COVER_EXT = r"\.(?P<ext>jpg|png|webp)"
 _DM_POSTER = re.compile(rf"^/dm/poster/(?P<id>[^/]+){_COVER_EXT}$")
@@ -311,6 +335,14 @@ class FakeOptions:
     #: Not in spec 9's list: a cut transfer on the Bilibili CDN, so the batch scenario can prove
     #: that `Range` is sent only after a cut ("the Bilibili CDN hit with Range only after a cut").
     bili_cut_once: frozenset[str] = frozenset()
+    #: B.1's audio order (`best`: FLAC, then Dolby, then AAC): the page also offers a FLAC track
+    #: (`dash.flac.audio`, 30251) / a Dolby E-AC-3 track (`dash.dolby.audio[]`, 30250).
+    bili_flac: frozenset[str] = frozenset()
+    bili_dolby: frozenset[str] = frozenset()
+    #: The HEVC entries advertise 1.5 times their AVC's bandwidth (a high-bitrate HEVC
+    #: rendition): `codec: "best"` — the highest bandwidth at the chosen height — takes them, while
+    #: `compatible` keeps H.264. By default an HEVC entry has half its AVC's bandwidth.
+    bili_hevc_top_bandwidth: frozenset[str] = frozenset()
     # Bilibili.tv (aids or episode ids)
     btv_geo: frozenset[str] = frozenset()
     btv_login: frozenset[str] = frozenset()
@@ -319,6 +351,8 @@ class FakeOptions:
     btv_fragmented: frozenset[str] = frozenset()
     btv_missing_quality: frozenset[str] = frozenset()
     btv_uncovered_host: frozenset[str] = frozenset()
+    #: A cut transfer on the bilibili.tv CDN: the first request of the video file is cut short.
+    btv_cut_once: frozenset[str] = frozenset()
     # Covers (xids, bvids, aids, episode ids)
     cover_png: frozenset[str] = frozenset()
     cover_webp: frozenset[str] = frozenset()
@@ -396,6 +430,7 @@ class _State:
     bili_expired: set[str] = field(default_factory=set)  # cids
     bili_cut: set[str] = field(default_factory=set)  # bvids
     btv_serves: dict[str, int] = field(default_factory=dict)
+    btv_cut: set[str] = field(default_factory=set)  # aids or episode ids
 
 
 class FakeSitesServer(ThreadingHTTPServer):
@@ -555,15 +590,28 @@ def dm_master(xid: str, generation: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def dm_media_playlist(media: MediaSet, xid: str, options: FakeOptions, generation: int) -> str:
-    """ffmpeg's media playlist with its URIs carrying `gen`, edited per option."""
-    fixture = media.hls_fmp4 if applies(options.dm_fmp4, xid) else media.hls_ts
+def dm_hls_fixture(media: MediaSet, xid: str, options: FakeOptions, variant: str) -> HlsFixture:
+    """The ffmpeg rendition a variant serves: the source clip's for `1080`, the 160x90 clip's
+    for `DM_LOW_VARIANT`; MPEG-TS, or fMP4 for `dm_fmp4`."""
+    fmp4 = applies(options.dm_fmp4, xid)
+    if variant == DM_LOW_VARIANT:
+        return media.hls_fmp4_low if fmp4 else media.hls_ts_low
+    return media.hls_fmp4 if fmp4 else media.hls_ts
+
+
+def dm_media_playlist(
+    media: MediaSet, xid: str, options: FakeOptions, generation: int, variant: str = "1080"
+) -> str:
+    """ffmpeg's media playlist of `variant` with its URIs carrying `gen` (and, for the low
+    variant, under `480/`), edited per option."""
+    fixture = dm_hls_fixture(media, xid, options, variant)
+    folder = f"{DM_LOW_VARIANT}/" if variant == DM_LOW_VARIANT else ""
     out: list[str] = []
     for line in fixture.playlist.splitlines():
         if line.startswith("#EXT-X-MAP:"):
-            out.append(f'#EXT-X-MAP:URI="init.mp4?gen={generation}"')
+            out.append(f'#EXT-X-MAP:URI="{folder}init.mp4?gen={generation}"')
         elif line and not line.startswith("#"):
-            out.append(f"{line}?gen={generation}")
+            out.append(f"{folder}{line}?gen={generation}")
         elif applies(options.dm_live, xid) and line.startswith(
             ("#EXT-X-ENDLIST", "#EXT-X-PLAYLIST-TYPE")
         ):
@@ -652,11 +700,14 @@ def bili_playinfo(base: str, bvid: str, part: int, options: FakeOptions) -> dict
         return f"{base}/bili/cdn/{cid}/{name}.m4s?{query}"
 
     video = []
+    hevc_on_top = applies(options.bili_hevc_top_bandwidth, bvid)
     for quality, codec in options.bili_qualities:
         width, height, _ = BILI_QUALITY_INFO[quality]
         codecs, codecid = BILI_CODECS[codec]
         name = str(quality) if codec == "avc" else f"{quality}-{codec}"
-        bandwidth = (2_000_000 if quality >= 80 else 900_000) // (2 if codec == "hevc" else 1)
+        bandwidth = 2_000_000 if quality >= 80 else 900_000
+        if codec == "hevc":
+            bandwidth = bandwidth * 3 // 2 if hevc_on_top else bandwidth // 2
         video.append(
             {
                 "id": quality,
@@ -675,8 +726,9 @@ def bili_playinfo(base: str, bvid: str, part: int, options: FakeOptions) -> dict
                 "codecid": codecid,
             }
         )
-    audio = [
-        {
+
+    def audio_entry(audio_id: int, bandwidth: int, codecs: str) -> dict[str, Any]:
+        return {
             "id": audio_id,
             "baseUrl": url(f"audio-{audio_id}"),
             "base_url": url(f"audio-{audio_id}"),
@@ -685,11 +737,17 @@ def bili_playinfo(base: str, bvid: str, part: int, options: FakeOptions) -> dict
             "bandwidth": bandwidth,
             "mimeType": "audio/mp4",
             "mime_type": "audio/mp4",
-            "codecs": "mp4a.40.2",
+            "codecs": codecs,
             "codecid": 0,
         }
-        for audio_id, bandwidth in BILI_AUDIO
-    ]
+
+    audio = [audio_entry(audio_id, bandwidth, "mp4a.40.2") for audio_id, bandwidth in BILI_AUDIO]
+    dolby: dict[str, Any] = {"type": 0, "audio": None}
+    if applies(options.bili_dolby, bvid):
+        dolby = {"type": 2, "audio": [audio_entry(*BILI_DOLBY_AUDIO, "ec-3")]}
+    flac: dict[str, Any] | None = None
+    if applies(options.bili_flac, bvid):
+        flac = {"display": True, "audio": audio_entry(*BILI_FLAC_AUDIO, "fLaC")}
     data: dict[str, Any] = {
         "from": "local",
         "result": "suee",
@@ -718,8 +776,8 @@ def bili_playinfo(base: str, bvid: str, part: int, options: FakeOptions) -> dict
             "minBufferTime": 1.5,
             "video": video,
             "audio": audio,
-            "dolby": {"type": 0, "audio": None},
-            "flac": None,
+            "dolby": dolby,
+            "flac": flac,
         }
     return {"code": 0, "message": "0", "ttl": 1, "data": data, "session": "fake0123456789"}
 
@@ -1036,16 +1094,23 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             with server.lock:
                 generation = server.state.dm_generation.get(xid, 1)
-            self._playlist(dm_media_playlist(media, xid, options, generation))
+            self._playlist(dm_media_playlist(media, xid, options, generation, name))
         elif match := _DM_SEGMENT.match(path):
             self._route = "dm-segment"
-            self._dm_segment(match.group("id"), int(match.group("n")), match.group("ext"))
-        elif match := _DM_INIT.match(path):
-            self._route = "dm-init"
-            if media.hls_fmp4.init is None or not applies(options.dm_fmp4, match.group("id")):
+            variant = match.group("variant") or "1080"
+            if variant not in {"1080", DM_LOW_VARIANT}:
                 self._not_found()
                 return
-            self._media(server.file(media.hls_fmp4.init), "video/mp4", ranges=False)
+            number = int(match.group("n"))
+            self._dm_segment(match.group("id"), number, match.group("ext"), variant)
+        elif match := _DM_INIT.match(path):
+            self._route = "dm-init"
+            xid, variant = match.group("id"), match.group("variant") or "1080"
+            fixture = dm_hls_fixture(media, xid, options, variant)
+            if variant not in {"1080", DM_LOW_VARIANT} or fixture.init is None:
+                self._not_found()
+                return
+            self._media(server.file(fixture.init), "video/mp4", ranges=False)
         elif _DM_KEY.match(path):
             self._route = "dm-key"
             self._not_found()
@@ -1055,10 +1120,10 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._not_found()
 
-    def _dm_segment(self, xid: str, number: int, ext: str) -> None:
+    def _dm_segment(self, xid: str, number: int, ext: str, variant: str) -> None:
         server, options = self.server, self.server.options
         fmp4 = applies(options.dm_fmp4, xid)
-        fixture = server.media.hls_fmp4 if fmp4 else server.media.hls_ts
+        fixture = dm_hls_fixture(server.media, xid, options, variant)
         if (ext == "m4s") != fmp4 or number >= len(fixture.segments):
             self._not_found()
             return
@@ -1116,15 +1181,31 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif match := _BILI_AUDIO.match(path):
             self._route = "bili-audio"
-            self._bili_cdn(match.group("cid"), query, video=None)
+            self._bili_cdn(match.group("cid"), query, video=None, audio_id=int(match.group("q")))
         elif match := _BILI_COVER.match(path):
             self._route = "bili-cover"
             self._cover(match.group("id"), match.group("ext"))
         else:
             self._not_found()
 
+    def _bili_audio_track(self, bvid: str, audio_id: int) -> Path | None:
+        """The file an audio id stands for on `bvid`'s page: AAC, E-AC-3 (`bili_dolby`), FLAC
+        (`bili_flac`); None for an id the page does not offer."""
+        options, media = self.server.options, self.server.media
+        if audio_id in {audio for audio, _ in BILI_AUDIO}:
+            return media.dash_audio
+        if audio_id == BILI_DOLBY_AUDIO[0] and applies(options.bili_dolby, bvid):
+            return media.dash_audio_eac3
+        if audio_id == BILI_FLAC_AUDIO[0] and applies(options.bili_flac, bvid):
+            return media.dash_audio_flac
+        return None
+
     def _bili_cdn(
-        self, cid: str, query: dict[str, str], video: tuple[str, str | None] | None
+        self,
+        cid: str,
+        query: dict[str, str],
+        video: tuple[str, str | None] | None,
+        audio_id: int = 0,
     ) -> None:
         server, options, media = self.server, self.server.options, self.server.media
         with server.lock:
@@ -1144,6 +1225,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(403, b"Forbidden: expired")
             return
         if video is None:
+            track = self._bili_audio_track(bvid, audio_id)
+            if track is None:
+                self._not_found()
+                return
             if applies(options.bili_expire_once, bvid):
                 with server.lock:
                     first = cid not in server.state.bili_expired
@@ -1151,14 +1236,16 @@ class _Handler(BaseHTTPRequestHandler):
                 if first:
                     self._send(403, b"Forbidden: expired")
                     return
-            self._media(server.file(media.dash_audio), "video/mp4", ranges=True)
+            self._media(server.file(track), "video/mp4", ranges=True)
             return
         quality, codec = int(video[0]), video[1] or "avc"
-        if (quality, codec) not in options.bili_qualities:
+        if (quality, codec) not in options.bili_qualities or (codec == "hevc" and quality < 80):
             self._not_found()
             return
         if applies(options.bili_drm, bvid):
             source = media.dash_video_encrypted
+        elif codec == "hevc":
+            source = media.dash_video_hevc
         else:
             source = media.dash_video if quality >= 80 else media.dash_video_low
         cut = False
@@ -1214,7 +1301,12 @@ class _Handler(BaseHTTPRequestHandler):
                 source = media.dash_video if fragmented else media.progressive_video
             else:
                 source = media.dash_video_low if fragmented else media.progressive_video_low
-            self._media(server.file(source), "video/mp4", ranges=True)
+            cut = False
+            if applies(options.btv_cut_once, video_id):
+                with server.lock:
+                    cut = video_id not in server.state.btv_cut
+                    server.state.btv_cut.add(video_id)
+            self._media(server.file(source), "video/mp4", ranges=True, cut=cut)
         elif match := _BTV_AUDIO.match(path):
             self._route = "btv-audio"
             video_id = match.group("id")

@@ -11,8 +11,16 @@
  * Timing: a sample's presentation time is `dts + cts` (`cts` is the composition offset). Per
  * track, every offset is made non-negative by one shift (`shift = −min(cts)` when negative): the
  * `ctts` (version 0) holds `cts + shift` and an `elst` media edit starts at `media_time = shift`,
- * so the presentation is unchanged. The earliest track's first decode time is time zero; a track
- * whose first `dts` is later starts with an empty edit of that gap, which keeps A/V sync.
+ * so the presentation is unchanged. The edit lasts until the last frame SHOWN ends (with
+ * B-frames that is not the last one decoded), so no frame is cut off. The earliest track's first
+ * decode time is time zero; a track whose first `dts` is later starts with an empty edit of that
+ * gap, which keeps A/V sync. Each sample lasts until the next one's `dts`; the last one as long
+ * as the plan's `lastDuration` says (the source's own `stts` / `trun` value), else as long as the
+ * one before it (the MPEG-TS path, where nothing says).
+ *
+ * Codec-agnostic: H.264, HEVC (`hvc1` / `hev1`) and AV1 video, AAC, FLAC, AC-3, E-AC-3 and Opus
+ * audio are written the same way — the sample entry with its configuration box as given, the
+ * sample bytes as read (proven against ffmpeg's decoders in `tests/remux.test.js`).
  *
  * Metadata (`opts.meta`): the title and the cover go into `moov/udta/meta` (iTunes style: a full
  * `meta` box, an `hdlr` of handler `mdir`, then an `ilst` with `©nam` and `covr`), after the
@@ -167,8 +175,11 @@ function isSafe(value) {
 }
 
 /**
- * Validates one plan and computes its decode durations (`next dts − dts`, the last one repeats
- * the previous one), its composition shift and its media duration.
+ * Validates one plan and computes its decode durations (`next dts − dts`; the last one is the
+ * plan's `lastDuration` when the source stated it, else the previous one again), its composition
+ * shift, its media duration and how long it is presented: from the edit's start to where the
+ * last sample shown ends — the latest `dts − first dts + cts + duration`, which with B-frames
+ * is a frame or two after the last decoded one (the `elst` media edit must not cut them off).
  * @param {TrackPlan} plan
  * @param {number} id
  * @returns {Prepared}
@@ -177,6 +188,13 @@ function prepare(plan, id) {
   const { kind } = plan;
   if (!isSafe(plan.timescale) || plan.timescale <= 0 || plan.timescale > U32_MAX) {
     throw new Mp4Error("invalid", `the ${kind} track's timescale ${plan.timescale} is not valid`);
+  }
+  const lastDuration = /** @type {unknown} */ (plan.lastDuration);
+  if (
+    lastDuration !== undefined &&
+    (!isSafe(lastDuration) || lastDuration <= 0 || lastDuration > U32_MAX)
+  ) {
+    throw new Mp4Error("invalid", `the ${kind} track's last duration ${lastDuration} is not valid`);
   }
   const entry = checkStsd(plan.stsd, kind);
   const samples = plan.samples;
@@ -214,7 +232,8 @@ function prepare(plan, id) {
       deltas[index - 1] = delta;
     }
   }
-  deltas[count - 1] = count > 1 ? (deltas[count - 2] ?? 0) : 0;
+  deltas[count - 1] =
+    typeof lastDuration === "number" ? lastDuration : count > 1 ? (deltas[count - 2] ?? 0) : 0;
   const shift = minCts < 0 ? -minCts : 0;
   /** @type {Float64Array | null} */
   let offsets = null;
@@ -232,6 +251,13 @@ function prepare(plan, id) {
   const first = /** @type {SampleRef} */ (samples[0]);
   const last = /** @type {SampleRef} */ (samples[count - 1]);
   const mediaDuration = last.dts - first.dts + (deltas[count - 1] ?? 0);
+  // presentation times run from the media edit's start (`media_time = shift`): dts − first + cts
+  let presentedEnd = 0;
+  for (let index = 0; index < count; index += 1) {
+    const sample = /** @type {SampleRef} */ (samples[index]);
+    const end = sample.dts - first.dts + sample.cts + (deltas[index] ?? 0);
+    if (end > presentedEnd) presentedEnd = end;
+  }
   let width = 0;
   let height = 0;
   if (kind === "video") {
@@ -254,9 +280,7 @@ function prepare(plan, id) {
     mediaDuration,
     startS: first.dts / plan.timescale,
     emptyMovie: 0,
-    presentedMovie: Math.round(
-      (Math.max(0, mediaDuration - shift) * MOVIE_TIMESCALE) / plan.timescale,
-    ),
+    presentedMovie: Math.round((presentedEnd * MOVIE_TIMESCALE) / plan.timescale),
     width,
     height,
     chunks: [],

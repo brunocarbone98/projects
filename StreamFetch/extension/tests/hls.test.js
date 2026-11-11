@@ -329,6 +329,9 @@ test("codec families and audio-only codec lists", () => {
   assert.equal(codecFamily(""), "unknown");
   assert.equal(isAudioOnlyCodecs("mp4a.40.2"), true);
   assert.equal(isAudioOnlyCodecs("mp4a.40.2,ec-3"), true);
+  assert.equal(isAudioOnlyCodecs("Opus"), true, "RFC 6381 writes it Opus");
+  assert.equal(isAudioOnlyCodecs("fLaC,opus"), true);
+  assert.equal(isAudioOnlyCodecs("avc1.640028,Opus"), false);
   assert.equal(isAudioOnlyCodecs("avc1.640028,mp4a.40.2"), false);
   assert.equal(isAudioOnlyCodecs(null), false);
   assert.equal(isAudioOnlyCodecs(""), false);

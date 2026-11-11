@@ -89,7 +89,7 @@ const VIDEO_CODEC_FAMILIES = /** @type {Record<string, CodecFamily>} */ ({
  */
 const COMPATIBLE_FAMILIES = /** @type {readonly CodecFamily[]} */ (["avc", "hevc", "av1"]);
 /** Codecs that carry audio only (a `CODECS` list made solely of these names no video variant). */
-const AUDIO_ONLY_CODECS = new Set(["mp4a", "ec-3", "ac-3", "flac", "mp3", "aac"]);
+const AUDIO_ONLY_CODECS = new Set(["mp4a", "ec-3", "ac-3", "flac", "opus", "mp3", "aac"]);
 
 /**
  * The lines of a playlist, trailing `\r` and surrounding whitespace removed, empty lines kept

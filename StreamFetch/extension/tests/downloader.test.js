@@ -1069,6 +1069,35 @@ test("cover and title helpers: the https twin, the reasons, the embedded title, 
   assert.equal(audioExpected({ ...hls, variant: { ...hls.variant, codecs: null } }), false);
 });
 
+test("audioExpected: every audio codec a site can name in CODECS is audio; video codecs alone are not", () => {
+  const target = hlsTarget("#EXTM3U\n", "https://x.dailymotion.com/m.m3u8");
+  const hls = /** @type {import("../src/app/resolver.js").HlsChoice} */ (target.streams);
+  /** @param {string} codecs */
+  const expected = (codecs) => audioExpected({ ...hls, variant: { ...hls.variant, codecs } });
+  for (const codecs of [
+    "avc1.640028,mp4a.40.2",
+    "hvc1.1.6.L120.90,ec-3",
+    "hev1.1.6.L120.90,ac-3",
+    "av01.0.08M.08,Opus",
+    "av01.0.08M.08,opus",
+    "avc1.640028,fLaC",
+    "hvc1.1.6.L120.90, flac",
+    "mp4a.40.2,avc1.640028",
+  ]) {
+    assert.equal(expected(codecs), true, codecs);
+  }
+  for (const codecs of [
+    "avc1.640028",
+    "hvc1.1.6.L120.90",
+    "hev1.1.6.L120.90",
+    "av01.0.08M.08",
+    "",
+    "avc1.640028,stpp.ttml.im1t",
+  ]) {
+    assert.equal(expected(codecs), false, codecs);
+  }
+});
+
 test("jpegFromImage: decoded, drawn at its own size, encoded as JPEG 0.92 by the browser's tools", async () => {
   /** @type {unknown[][]} */
   const calls = [];

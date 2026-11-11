@@ -25,10 +25,11 @@ with `.site`, `.title` (a link), `.duration`, `.quality` (`select.quality-select
 (`span.badge[data-status]`), `.progress`, `.message`, `img.cover`; group headers
 `tr.group[data-group]`), `#summary-line`, `#failed-block` (`#failed-heading`, `#failed-table`,
 `#retry-button`, `#report-button`, `#failed-report`), `#history-list`, `#cooldown-banner`,
-`#settings-form` (`#setting-report`, `#setting-language`, `#save-settings-button`, …),
-`#version`, `#legal-notice`. Storage keys: `history` (the last runs, most recent first), `cooldown`,
-`settings`, `testSettings`. A setting without a form id in the spec (B.2's `cover: "embed" |
-"none"`) is changed in the stored `settings` (`update_settings`), then the page is reloaded.
+`#settings-form` (`#setting-quality`, `#setting-codec`, `#setting-report`, `#setting-cover`,
+`#setting-language`, `#save-settings-button`, …), `#version`, `#legal-notice`. Storage keys:
+`history` (the last runs, most recent first), `cooldown`, `settings`, `testSettings`. Settings are
+chosen in the form and saved as a user does (`save_settings_form`, `set_report_setting`), or
+changed in the stored `settings` (`update_settings`), then the page is reloaded.
 
 Covers: a row's thumbnail (A.4) and the cover B.2 embeds in a saved file are both the extension's
 own `fetch` of the same URL. Thumbnails are asked for only for rows in view, once each, never
@@ -630,6 +631,20 @@ class ExtensionHarness:
         stored = self.stored_settings()
         assert all(stored.get(k) == v for k, v in changes.items()), (
             f"the app dropped the settings {changes} at start: {stored}"
+        )
+
+    def save_settings_form(self, **choices: str) -> None:
+        """Choose options in the settings form as a user does — `quality` (`#setting-quality`:
+        `best`, `1080`, `720`, `480`), `codec` (`#setting-codec`: `compatible`, `best`), `cover`,
+        `language` — press **Save settings** and wait until the app has stored them (it uses
+        them from then on, without a reload)."""
+        for name, value in choices.items():
+            self.page.locator(f"#setting-{name}").select_option(value=value)
+        self.page.click("#save-settings-button")
+        self.wait_for(
+            lambda: all(self.stored_settings().get(k) == v for k, v in choices.items()),
+            10,
+            f"the settings form did not store {choices}: {self.text('#settings-problem')!r}",
         )
 
     def set_report_setting(self, on: bool) -> None:

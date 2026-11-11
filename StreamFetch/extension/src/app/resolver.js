@@ -769,11 +769,12 @@ function fetchJson(url, ctx, attempts) {
 }
 
 /**
- * The streams of one Bilibili.tv video or episode: the playurl API (`aid` or `ep_id`, as text).
+ * The streams of one Bilibili.tv video or episode: the playurl API (`aid` or `ep_id`, as text),
+ * with the duration the answer states (`timelengthS`, null when it states none).
  * @param {{ aid?: string, epId?: string }} ids
  * @param {ResolveContext} ctx
  * @param {Attempt[]} attempts
- * @returns {Promise<{ ok: true, streams: DashChoice, raw: unknown } |
+ * @returns {Promise<{ ok: true, streams: DashChoice, timelengthS: number | null, raw: unknown } |
  *   { ok: false, failure: Failure, status: Status, raw: unknown }>}
  */
 async function bilibilitvStreams(ids, ctx, attempts) {
@@ -791,7 +792,7 @@ async function bilibilitvStreams(ids, ctx, attempts) {
     return { ok: false, ...withStatus(fail, FAILED_UNAVAILABLE), raw: json };
   }
   const streams = dashChoice(selection, play.videos ?? [], play.audios ?? []);
-  return { ok: true, streams, raw: json };
+  return { ok: true, streams, timelengthS: play.timelengthS, raw: json };
 }
 
 /**
@@ -880,6 +881,8 @@ function bilibilitvFields(what, fallbackPage) {
 
 /**
  * One Bilibili.tv video or episode: its page (title, cover, duration), then its playurl answer.
+ * The duration the file is checked against is the page's, else the series list's, else the
+ * playurl answer's — so a page that states none still leaves one when the answer has it.
  * @param {ResolveItem} item
  * @param {BilibilitvWhat} what
  * @param {ResolveContext} ctx
@@ -900,7 +903,7 @@ async function bilibilitvTarget(item, what, ctx, shared) {
   const fields = {
     ...base,
     title: info.title ?? base.title,
-    durationS: info.durationS ?? what.durationS,
+    durationS: info.durationS ?? what.durationS ?? (streams.ok ? streams.timelengthS : null),
     cover: info.cover ?? what.cover,
     page: info.page,
     raw: streams.raw,

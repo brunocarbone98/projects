@@ -1103,14 +1103,15 @@ async function fileMeta(target, ctx, attempts, counter, notes) {
 
 /**
  * Whether the source of a target carries audio, as far as the site said before the download: a
- * DASH audio file, a separate HLS audio rendition, or an audio codec in the variant's `CODECS`.
+ * DASH audio file, a separate HLS audio rendition, or an audio codec in the variant's `CODECS`
+ * (`mp4a.…`, `ac-3`, `ec-3`, `Opus`, `fLaC` — any case).
  * @param {HlsChoice | DashChoice} streams
  * @returns {boolean}
  */
 export function audioExpected(streams) {
   if (streams.kind === "dash") return streams.audio !== null;
   if (streams.audio !== null && streams.audio.url !== null) return true;
-  return /(?:^|,)\s*(?:mp4a|ac-3|ec-3|opus)\b/i.test(streams.variant.codecs ?? "");
+  return /(?:^|,)\s*(?:mp4a|ac-3|ec-3|opus|flac)\b/i.test(streams.variant.codecs ?? "");
 }
 
 // ------------------------------------------------------------------------ the download

@@ -18,7 +18,12 @@
  *   [{url, codecs, bandwidth, size, mime_type, quality}]}}}` lists video-only and audio-only files
  *   (complete MP4s, fragmented or not). `code` 0 is ok; `10004001` geo-restricted; `10004004`,
  *   `10004005`, `10023006` a login (or a premium episode); any other code an error with the site's
- *   `message`. An entry without `url` is not served to this session.
+ *   `message`. An entry without `url` is not served to this session. `playurl.duration` (in
+ *   milliseconds, as `tests/fixtures/btv-playurl-ok.json` and the fake site carry it) is NOT a
+ *   verified fact: yt-dlp 2026.10.26 does not read it and the spec does not list it. It is read
+ *   only as the duration of a video whose page states none, so the saved file is still checked
+ *   against a length the site gave; absent, nothing changes. The owner's first real run confirms
+ *   it.
  * - Metadata: the page embeds `window.__INITIAL_DATA__ = {...}` or `window.__INITIAL_STATE__ =
  *   {...}` (or Nuxt's `__initialState`: read here only when it is a JSON object literal — the
  *   function form yt-dlp substitutes arguments into would need running the page's code, which
@@ -60,7 +65,8 @@ import { isRecord, safeParse } from "./json.js";
  *
  * @typedef {PlayInfo & { ok: true }} BilibilitvPlay What a playurl answer offers this session, in
  *   `lib/bilibili.js`'s `PlayInfo` shape (no Dolby, no FLAC, never a trial or a legacy stream);
- *   `supportFormats` lists every quality the answer names, served or not.
+ *   `supportFormats` lists every quality the answer names, served or not; `timelengthS` is
+ *   `playurl.duration` in seconds, when the answer has one.
  *
  * @typedef {"video" | "episode" | "series"} BilibilitvKind
  *
@@ -392,8 +398,9 @@ function representationOf(resource, id, kind, label) {
  * `lib/bilibili.js`'s `PlayInfo` shape, or the refusal. Video ids are `stream_info.quality` (else
  * the resource's own `quality`), labels `stream_info.desc_words`; an entry without a URL is not
  * downloadable but its quality still goes to `supportFormats` (a quality the session is not
- * served: the premium hint). Refusals: a non-zero `code` ({@link codeRefusal}); not a JSON object
- * → `not_a_video`; no `data.playurl` → `no_streams`; video entries that all lack a URL →
+ * served: the premium hint). `timelengthS` is `playurl.duration` (milliseconds) in seconds when
+ * it is a positive number, else null. Refusals: a non-zero `code` ({@link codeRefusal}); not a JSON
+ * object → `not_a_video`; no `data.playurl` → `no_streams`; video entries that all lack a URL →
  * `premium_only` with their labels; no video entry at all → `no_streams`. Never throws.
  * @param {unknown} json the answer, parsed (a string is parsed here)
  * @returns {BilibilitvPlay | BilibilitvRefusal}
@@ -458,6 +465,7 @@ export function parsePlayurl(json) {
     const params = { detail: "the playurl answer lists no video" };
     return { ok: false, code: "no_streams", params };
   }
+  const durationMs = numberOf(playurl["duration"]);
   return {
     ok: true,
     videos,
@@ -467,7 +475,7 @@ export function parsePlayurl(json) {
     supportFormats,
     acceptQuality: supportFormats.map((format) => format.quality),
     acceptDescription: [],
-    timelengthS: null,
+    timelengthS: durationMs !== null && durationMs > 0 ? durationMs / 1000 : null,
     trialOnly: false,
     legacy: false,
   };

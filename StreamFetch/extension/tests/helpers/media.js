@@ -393,6 +393,158 @@ export function makeDash(dir) {
   return { video, audio };
 }
 
+// ------------------------------------------------------------------- the sites' codecs
+
+/** The duration of every codec clip, seconds. */
+export const CODEC_SECONDS = 2;
+
+/**
+ * @typedef {object} SiteCodec One codec the sites serve at high quality, as an MP4 sample entry.
+ * @property {"video" | "audio"} kind
+ * @property {string} entry the sample entry type (`hvc1`, `fLaC`, `ec-3` …), also the fixture's
+ *   file name
+ * @property {string} codecName ffprobe's `codec_name`
+ * @property {string} config the codec configuration box inside the sample entry
+ * @property {string} what in words, for the test names
+ */
+
+/**
+ * The codecs of the sites' high-quality streams (spec section 3 and Addendum B.1): H.264 with
+ * B-frames (Bilibili.tv's progressive files, Bilibili's `avc1`), HEVC as `hvc1` and as `hev1`
+ * (Bilibili's `hev1.…` / `hvc1.…`), AV1 (`av01.…`); AAC, FLAC (Bilibili's Hi-Res `flac`),
+ * E-AC-3 (its Dolby `ec-3`), AC-3 and Opus.
+ * @type {Readonly<Record<string, SiteCodec>>}
+ */
+export const SITE_CODECS = Object.freeze({
+  avc1: siteCodec("video", "avc1", "h264", "avcC", "H.264 High with B-frames"),
+  hvc1: siteCodec("video", "hvc1", "hevc", "hvcC", "HEVC (hvc1)"),
+  hev1: siteCodec("video", "hev1", "hevc", "hvcC", "HEVC (hev1)"),
+  av01: siteCodec("video", "av01", "av1", "av1C", "AV1"),
+  mp4a: siteCodec("audio", "mp4a", "aac", "esds", "AAC-LC stereo"),
+  fLaC: siteCodec("audio", "fLaC", "flac", "dfLa", "FLAC 24-bit 96 kHz"),
+  "ec-3": siteCodec("audio", "ec-3", "eac3", "dec3", "E-AC-3 5.1"),
+  "ac-3": siteCodec("audio", "ac-3", "ac3", "dac3", "AC-3 stereo"),
+  Opus: siteCodec("audio", "Opus", "opus", "dOps", "Opus stereo"),
+});
+
+/**
+ * @param {"video" | "audio"} kind
+ * @param {string} entry
+ * @param {string} codecName
+ * @param {string} config
+ * @param {string} what
+ * @returns {SiteCodec}
+ */
+function siteCodec(kind, entry, codecName, config, what) {
+  return Object.freeze({ kind, entry, codecName, config, what });
+}
+
+/** @type {string | null} */
+let av1Encoder = null;
+
+/**
+ * The AV1 encoder ffmpeg has: `libsvtav1` (fast), else `libaom-av1`.
+ * @returns {string}
+ */
+function av1EncoderName() {
+  if (av1Encoder === null) {
+    const list = decoder.decode(ffmpeg(["-encoders"]));
+    av1Encoder = /\blibsvtav1\b/.test(list) ? "libsvtav1" : "libaom-av1";
+  }
+  return av1Encoder;
+}
+
+/**
+ * The ffmpeg input and encoder arguments of a codec clip: lavfi `testsrc` 160×96 at 25 fps (a
+ * keyframe every second) or a 440 Hz sine, {@link CODEC_SECONDS} long, at a tiny size and the
+ * fastest presets.
+ * @param {string} entry a key of {@link SITE_CODECS}
+ * @returns {string[]}
+ */
+function codecArgs(entry) {
+  const video = ["-f", "lavfi", "-i", "testsrc=size=160x96:rate=25", "-t", String(CODEC_SECONDS)];
+  /** @param {number} rate */
+  const sine = (rate) => [
+    "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=${rate}`, "-t", String(CODEC_SECONDS),
+  ]; // prettier-ignore
+  const picture = ["-pix_fmt", "yuv420p", "-g", "25"];
+  const x265 = ["-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error"];
+  switch (entry) {
+    case "avc1":
+      return [...video, "-c:v", "libx264", "-preset", "veryfast", "-bf", "2", ...picture];
+    case "hvc1":
+    case "hev1":
+      return [...video, ...x265, ...picture, "-tag:v", entry];
+    case "av01": {
+      const encoder = av1EncoderName();
+      const speed =
+        encoder === "libsvtav1" ? ["-preset", "12"] : ["-cpu-used", "8", "-row-mt", "1"];
+      return [...video, "-c:v", encoder, ...speed, ...picture];
+    }
+    case "mp4a":
+      return [...sine(48000), "-c:a", "aac", "-b:a", "128k", "-ac", "2"];
+    case "fLaC":
+      return [...sine(96000), "-c:a", "flac", "-sample_fmt", "s32", "-ac", "2"];
+    case "ec-3":
+      return [...sine(48000), "-c:a", "eac3", "-b:a", "384k", "-ac", "6"];
+    case "ac-3":
+      return [...sine(48000), "-c:a", "ac3", "-b:a", "192k", "-ac", "2"];
+    case "Opus":
+      return [...sine(48000), "-c:a", "libopus", "-b:a", "96k", "-ac", "2"];
+    default:
+      throw new Error(`no codec clip for ${entry}`);
+  }
+}
+
+/**
+ * @typedef {object} CodecFixture One codec in both layouts the sites serve, the same samples.
+ * @property {SiteCodec} codec
+ * @property {string} progressive `<dir>/codecs/<entry>.mp4`: ffmpeg's default layout, the `moov`
+ *   after the `mdat` (as Bilibili.tv's progressive files), with ffmpeg's edit list (B-frame delay,
+ *   encoder delay, Opus pre-skip)
+ * @property {string} fragmented `<dir>/codecs/<entry>.m4s`: the same samples (`-c copy`) as a
+ *   Bilibili DASH file — `-movflags frag_keyframe+empty_moov+default_base_moof`, plus
+ *   `delay_moov` for AC-3 and E-AC-3, whose `moov` ffmpeg cannot write before it read a frame
+ */
+
+/**
+ * Builds the fixture of one codec of {@link SITE_CODECS} in `<dir>/codecs/`.
+ * @param {string} dir
+ * @param {string} entry
+ * @returns {CodecFixture}
+ */
+export function makeCodecFixture(dir, entry) {
+  const codec = SITE_CODECS[entry];
+  if (codec === undefined) throw new Error(`unknown codec ${entry}`);
+  const folder = ensureDir(path.join(dir, "codecs"));
+  const progressive = path.join(folder, `${entry}.mp4`);
+  const fragmented = path.join(folder, `${entry}.m4s`);
+  ffmpeg([...codecArgs(entry), "-f", "mp4", progressive]);
+  const delay = entry === "ac-3" || entry === "ec-3" ? "+delay_moov" : "";
+  const flags = `frag_keyframe+empty_moov+default_base_moof${delay}`;
+  const only = codec.kind === "video" ? ["-an", "-c:v", "copy"] : ["-vn", "-c:a", "copy"];
+  const layout = ["-movflags", flags, "-frag_duration", "1000000", "-f", "mp4"];
+  ffmpeg(["-i", progressive, ...only, ...layout, fragmented]);
+  return { codec, progressive, fragmented };
+}
+
+/** @type {Map<string, CodecFixture>} */
+const codecFixtures = new Map();
+
+/**
+ * {@link makeCodecFixture} in {@link mediaRoot}, built once per process and codec.
+ * @param {string} entry
+ * @returns {CodecFixture}
+ */
+export function codecFixture(entry) {
+  let fixture = codecFixtures.get(entry);
+  if (fixture === undefined) {
+    fixture = makeCodecFixture(mediaRoot(), entry);
+    codecFixtures.set(entry, fixture);
+  }
+  return fixture;
+}
+
 // -------------------------------------------------------------------- MP4 structure edits
 
 /**
@@ -491,7 +643,7 @@ function childOffset(type) {
   if (CONTAINERS.has(type)) return 0;
   if (type === "stsd") return 8;
   if (["avc1", "avc3", "hvc1", "hev1", "encv", "av01"].includes(type)) return 78;
-  if (["mp4a", "enca", "ac-3", "ec-3", ".mp3"].includes(type)) return 28;
+  if (["mp4a", "enca", "ac-3", "ec-3", ".mp3", "fLaC", "Opus"].includes(type)) return 28;
   throw new Error(`no children known for ${type}`);
 }
 
@@ -716,8 +868,11 @@ function record(value) {
  * @property {number} index
  * @property {string | null} codec_type "video", "audio", …
  * @property {string | null} codec_name
+ * @property {string | null} codec_tag_string the MP4 sample entry type (`hvc1`, `fLaC` …)
  * @property {string | null} profile
+ * @property {number | null} start_time seconds
  * @property {number | null} duration seconds
+ * @property {number | null} duration_ts the duration in the stream's time base
  * @property {number | null} width
  * @property {number | null} height
  * @property {number | null} sample_rate
@@ -730,14 +885,17 @@ function record(value) {
  */
 
 /**
- * `ffprobe -show_streams -show_format` (and `-count_packets` when asked), numbers parsed.
+ * `ffprobe -show_streams -show_format` (and `-count_packets` when asked), numbers parsed;
+ * `ignoreEditList` reads an MP4 without its edit list (`-ignore_editlist 1`), so a stream's
+ * duration is its sample tables' total.
  * @param {string} file
- * @param {{ countPackets?: boolean }} [options]
+ * @param {{ countPackets?: boolean, ignoreEditList?: boolean }} [options]
  * @returns {ProbeResult}
  */
 export function ffprobe(file, options = {}) {
   const args = ["-v", "error", "-print_format", "json", "-show_streams", "-show_format"];
   if (options.countPackets) args.push("-count_packets");
+  if (options.ignoreEditList) args.push("-ignore_editlist", "1");
   /** @type {unknown} */
   const parsed = JSON.parse(decoder.decode(run("ffprobe", [...args, file])));
   const top = record(parsed);
@@ -750,8 +908,11 @@ export function ffprobe(file, options = {}) {
         index: numberOrNull(stream.index) ?? -1,
         codec_type: stringOrNull(stream.codec_type),
         codec_name: stringOrNull(stream.codec_name),
+        codec_tag_string: stringOrNull(stream.codec_tag_string),
         profile: stringOrNull(stream.profile),
+        start_time: numberOrNull(stream.start_time),
         duration: numberOrNull(stream.duration),
+        duration_ts: numberOrNull(stream.duration_ts),
         width: numberOrNull(stream.width),
         height: numberOrNull(stream.height),
         sample_rate: numberOrNull(stream.sample_rate),

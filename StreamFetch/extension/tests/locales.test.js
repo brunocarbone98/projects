@@ -128,14 +128,11 @@ test("the legal notice is verbatim in English, in the page's footer, and transla
   assert.ok(html.replace(/\s+/g, " ").includes(LEGAL_NOTICE), "app.html's footer");
 });
 
-test(
-  "the legal notice is the README's",
-  { skip: existsSync(README) ? false : "StreamFetch/README.md is not written yet (docs phase)" },
-  () => {
-    const readme = readFileSync(README, "utf8").replace(/\s+/g, " ");
-    assert.ok(readme.includes(LEGAL_NOTICE), "the README carries the notice verbatim");
-  },
-);
+test("the legal notice is the README's", () => {
+  assert.ok(existsSync(README), "StreamFetch/README.md exists");
+  const readme = readFileSync(README, "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes(LEGAL_NOTICE), "the README carries the notice verbatim");
+});
 
 test("every key the pages and the scripts use exists in both catalogs", () => {
   /** @type {Set<string>} */

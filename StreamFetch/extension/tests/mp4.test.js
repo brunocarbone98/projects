@@ -4,7 +4,9 @@
  * `parseFragments` over hand-built moofs (every tfhd / trun flag), `collectFmp4` and `collectMp4`
  * over ffmpeg-made files (every sample checked against `ffprobe -show_packets`), the progressive
  * reader's table variants (stz2, co64, ctts v0/v1, stss, stsc runs, elst) on hand-built files,
- * and `probe`.
+ * and `probe`; every codec the sites serve (`helpers/media.js` `SITE_CODECS`: H.264 with
+ * B-frames, HEVC as hvc1 and hev1, AV1, AAC, FLAC 96 kHz, E-AC-3 5.1, AC-3, Opus), fragmented and
+ * progressive, read as ffprobe reads it.
  *
  * The ffmpeg helpers at the bottom are a private copy (the shared `tests/helpers/media.js` is
  * written in parallel); fixtures are built once per process under `fixtures/generated/mp4/`.
@@ -51,6 +53,13 @@ import {
   u64,
   u8,
 } from "../src/lib/mp4.js";
+import {
+  SITE_CODECS,
+  codecFixture,
+  ffprobe as probeStreams,
+  ffprobePackets,
+  findBox as findPath,
+} from "./helpers/media.js";
 
 const NODE = /** @type {NodeProcess} */ (Reflect.get(globalThis, "process"));
 const CHILD = /** @type {ChildProcessModule} */ (NODE.getBuiltinModule("node:child_process"));
@@ -1137,6 +1146,112 @@ test("probe: the title and cover ffmpeg embeds (covr from an attached pic)", MED
     [["video", "avc1", 150]],
     "the cover is no track",
   );
+});
+
+// ------------------------------------------------------- every codec the sites serve
+
+test("every codec the sites serve, fragmented and progressive: parseInit, collectMp4 and probe = ffprobe", MEDIA, async () => {
+  for (const entry of Object.keys(SITE_CODECS)) {
+    const fixture = codecFixture(entry);
+    const { codec } = fixture;
+    for (const layout of /** @type {const} */ (["fragmented", "progressive"])) {
+      const path = fixture[layout];
+      const bytes = new Uint8Array(readFileSync(path));
+      const label = `${codec.what} (${entry}), ${layout}`;
+      const [stream] = probeStreams(path).streams;
+      assert.ok(stream, label);
+      assert.deepEqual([stream.codec_name, stream.codec_tag_string], [codec.codecName, entry]);
+
+      // the init: one track of the codec's sample entry, its configuration box, nothing encrypted
+      const init = parseInit(bytes);
+      assert.equal(init.fragmented, layout === "fragmented", label);
+      assert.equal(init.encrypted, false, label);
+      assert.equal(drmProblem(bytes), null, label);
+      assert.equal(init.tracks.length, 1, label);
+      const [track] = init.tracks;
+      assert.ok(track);
+      assert.deepEqual([track.kind, track.sampleEntryType, track.sampleEntryCount], [
+        codec.kind,
+        entry,
+        1,
+      ]);
+      const stsd = findBox(bytes, "moov/trak/mdia/minf/stbl/stsd");
+      assert.ok(stsd);
+      assert.deepEqual(track.stsd, bytes.slice(stsd.start, stsd.end), `${label}: the stsd as is`);
+      assert.ok(findPath(track.stsd, ["stsd", entry, codec.config]), `${label}: ${codec.config}`);
+      if (codec.kind === "video") {
+        assert.deepEqual([track.width, track.height], [stream.width, stream.height], label);
+      } else {
+        // a 96 kHz FLAC does not fit the entry's 16-bit rate: the timescale says it
+        const audio = [track.sampleRate, track.channelCount];
+        assert.deepEqual(audio, [stream.sample_rate, stream.channels], label);
+      }
+
+      // collectMp4: every sample is ffprobe's packet, and the last one keeps its duration
+      const plans = await collectMp4(memoryFile(entry, bytes));
+      assert.equal(plans.length, 1, label);
+      const [plan] = plans;
+      assert.ok(plan);
+      assert.equal(plan.kind, codec.kind, `${label}: the downloader finds the ${codec.kind}`);
+      const packets = ffprobePackets(path, codec.kind === "video" ? "v:0" : "a:0");
+      assert.equal(plan.samples.length, packets.length, label);
+      plan.samples.forEach((sample, index) => {
+        const packet = packets[index];
+        assert.ok(packet);
+        assert.deepEqual(
+          [sample.dts + sample.cts, sample.size, sample.data.offset],
+          [packet.pts, packet.size, packet.pos],
+          `${label}: sample ${index}`,
+        );
+        if (codec.kind === "video") assert.equal(sample.sync, packet.keyframe, `${label} ${index}`);
+      });
+      // the last sample's duration as the file states it (its stts or trun): what the tables'
+      // total — ffprobe's duration without the edit list — leaves after the last decode time
+      // (ffprobe's last PACKET duration is not that: ffmpeg re-times AC-3 frames from their size)
+      const [tables] = probeStreams(path, { ignoreEditList: true }).streams;
+      const span = (plan.samples.at(-1)?.dts ?? 0) - (plan.samples[0]?.dts ?? 0);
+      const stated = (tables?.duration_ts ?? 0) - span;
+      assert.ok(stated > 0, label);
+      assert.equal(plan.lastDuration, stated, `${label}: the last sample's duration`);
+
+      // probe: the codec, the samples and where ffprobe says the presentation ends
+      const probed = await probe(memoryFile(entry, bytes));
+      assert.equal(probed.fragmented, layout === "fragmented", label);
+      assert.equal(probed.progressive, false, `${label}: ffmpeg writes the moov last`);
+      assert.equal(probed.encrypted, false, label);
+      assert.equal(probed.truncated, false, label);
+      const [probedTrack] = probed.tracks;
+      assert.ok(probedTrack);
+      assert.deepEqual(
+        [probedTrack.kind, probedTrack.codec, probedTrack.sampleCount],
+        [codec.kind, entry, packets.length],
+        label,
+      );
+      const end = (stream.start_time ?? 0) + (stream.duration ?? 0);
+      assert.ok(
+        Math.abs(probedTrack.durationS - end) < 0.002,
+        `${label}: probe ${probedTrack.durationS} s, ffprobe ${end} s`,
+      );
+    }
+  }
+});
+
+test("probe: a B-frame track's duration runs to the end of the last frame shown, as ffprobe's", MEDIA, async () => {
+  // ffmpeg's progressive H.264 / HEVC with B-frames: ctts offsets and an edit from media_time
+  // 1024 (two frames); the frames shown last are decoded before the last one — the presentation
+  // ends 2 s after it starts, not 2 s − 1024 ticks
+  for (const entry of ["avc1", "hvc1"]) {
+    const { progressive } = codecFixture(entry);
+    const bytes = new Uint8Array(readFileSync(progressive));
+    const [track] = parseInit(bytes).tracks;
+    assert.deepEqual(track?.edit, { emptyDuration: 0, mediaTime: 1024 }, entry);
+    assert.ok(findBox(bytes, "moov/trak/mdia/minf/stbl/ctts"), `${entry} has composition offsets`);
+    const probed = await probe(bytes);
+    assert.equal(probed.tracks[0]?.durationS, 2, entry);
+    assert.equal(probed.durationS, 2, entry);
+    const [stream] = probeStreams(progressive).streams;
+    assert.equal(stream?.duration, 2, `${entry}: ffprobe agrees`);
+  }
 });
 
 // ------------------------------------------------------------------- samples against ffprobe

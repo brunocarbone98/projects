@@ -152,10 +152,30 @@ test("parsePlayurl: the ok answer — three video files, two audio files, labels
   assert.deepEqual(play.acceptQuality, [80, 64, 32]);
   assert.deepEqual(
     [play.dolby, play.flac, play.trialOnly, play.legacy, play.timelengthS],
-    [[], null, false, false, null],
+    [[], null, false, false, 95.5],
   );
   // a JSON text is parsed first
   assert.deepEqual(parsePlayurl(fixture("btv-playurl-ok.json")), play);
+});
+
+test("parsePlayurl: the answer's duration in milliseconds, or none — never a guess", () => {
+  const ok = /** @type {{ data: { playurl: Record<string, unknown> } }} */ (
+    json("btv-playurl-ok.json")
+  );
+  /** @param {unknown} duration */
+  const withDuration = (duration) => {
+    /** @type {Record<string, unknown>} */
+    const playurl = { ...ok.data.playurl };
+    delete playurl["duration"];
+    if (duration !== undefined) playurl["duration"] = duration;
+    return played({ code: 0, message: "0", data: { playurl } }).timelengthS;
+  };
+  assert.equal(withDuration(95500), 95.5);
+  assert.equal(withDuration(6000), 6, "milliseconds whatever the magnitude");
+  assert.equal(withDuration("1440000"), 1440, "a number written as text");
+  for (const none of [undefined, null, 0, -95500, "", "95 s", Number.NaN, {}, [95500], true]) {
+    assert.equal(withDuration(none), null, String(none));
+  }
 });
 
 test("parsePlayurl: the site's codes — geo, login (or premium), any other unavailable", () => {

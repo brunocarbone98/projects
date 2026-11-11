@@ -178,14 +178,14 @@ test("Bilibili refusals: bangumi, space, lists, audio, live, festival, cheese, s
     assert.equal(reason(url), "bangumi", url);
   }
   for (const url of [
-    "https://space.bilibili.com/3985676",
-    "https://space.bilibili.com/3985676/video",
-    "https://space.bilibili.com/3985676/upload/video",
+    "https://space.bilibili.com/4801520000000077",
+    "https://space.bilibili.com/4801520000000077/video",
+    "https://space.bilibili.com/4801520000000077/upload/video",
   ]) {
     assert.equal(reason(url), "space", url);
   }
   for (const url of [
-    "https://space.bilibili.com/3985676/favlist?fid=1234",
+    "https://space.bilibili.com/4801520000000077/favlist?fid=1234",
     "https://www.bilibili.com/list/1958703906?sid=547718&bvid=BV1DU4y1r7tz",
     "https://www.bilibili.com/list/watchlater?bvid=BV1DU4y1r7tz",
     "https://www.bilibili.com/medialist/play/ml1234",
@@ -198,7 +198,7 @@ test("Bilibili refusals: bangumi, space, lists, audio, live, festival, cheese, s
   for (const url of [
     "https://www.bilibili.com/audio/au1003142",
     "https://www.bilibili.com/audio/am10624",
-    "https://space.bilibili.com/3985676/audio",
+    "https://space.bilibili.com/4801520000000077/audio",
   ]) {
     assert.equal(reason(url), "audio", url);
   }
@@ -610,7 +610,7 @@ test("Bilibili: every share parameter is ignored; ?p= is the only one that selec
   // refused with a reason whatever the parameters
   const tail = `?${SHARE_PARAMS[0]}&${SHARE_PARAMS[1]}`;
   assert.equal(reason(`https://www.bilibili.com/bangumi/play/ep1234${tail}`), "bangumi");
-  assert.equal(reason(`https://space.bilibili.com/3985676${tail}`), "space");
+  assert.equal(reason(`https://space.bilibili.com/4801520000000077${tail}`), "space");
   assert.equal(reason(`https://www.bilibili.com/list/watchlater${tail}`), "list");
   assert.equal(reason(`https://www.bilibili.com/audio/au1003142${tail}`), "audio");
   assert.equal(reason(`https://live.bilibili.com/196${tail}`), "live");

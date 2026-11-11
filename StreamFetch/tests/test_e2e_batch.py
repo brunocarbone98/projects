@@ -11,8 +11,10 @@ Bilibili video file is cut short once on the CDN, so the download must resume it
 
 Every saved file passes B.1's proof for its media path (TS-HLS, fMP4-HLS, DASH m4s, bilibili.tv
 progressive MP4): H.264 + AAC with the source's durations, the video framemd5-equal to the source
-clip, the audio framemd5-equal to the track as served, a progressive layout — and carries B.2's
-cover (the served JPEG, as served) and the title tag. All ids are invented, of the real shapes.
+clip — the highest quality: every lower variant or quality the fakes offer is another, 160x90
+clip —, the audio framemd5-equal to the track as served, a progressive layout — and carries
+B.2's cover (the served JPEG, as served) and the title tag. All ids are invented, of the real
+shapes.
 """
 
 from __future__ import annotations
@@ -45,7 +47,15 @@ from fake_sites import (
     DM_TS_ID,
     FakeSites,
 )
-from media_fixtures import MediaSet, assert_cover, assert_saved_media, mp4_metadata, title_tag
+from media_fixtures import (
+    SOURCE_HEIGHT,
+    MediaSet,
+    assert_cover,
+    assert_saved_media,
+    mp4_metadata,
+    title_tag,
+    video_height,
+)
 
 pytestmark = [NEEDS_CHROMIUM]
 
@@ -194,6 +204,7 @@ def test_a_batch_of_links_is_analyzed_then_downloaded_and_every_file_verified(
         for name, (media_path, titles) in EXPECTED.items():
             saved = ext.saved_path(name)
             probed = assert_saved_media(saved, media.expected(media_path))
+            assert video_height(saved) == SOURCE_HEIGHT, name  # the highest quality served
             assert_cover(saved, probed, media.cover)  # the served JPEG, as served (B.2)
             title = title_tag(probed)
             assert title and any(t in title for t in titles), (name, title)

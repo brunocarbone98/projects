@@ -86,7 +86,8 @@ test("one version: the manifest's equals package.json's", () => {
   assert.equal(pkg["devDependencies"], undefined, "no npm dependency");
 });
 
-test("CHANGELOG.md has the version's entry", { skip: existsSync(CHANGELOG) ? false : "StreamFetch/CHANGELOG.md is not written yet (docs phase)" }, () => {
+test("CHANGELOG.md has the version's entry", () => {
+  assert.ok(existsSync(CHANGELOG), "StreamFetch/CHANGELOG.md exists");
   const text = readFileSync(CHANGELOG, "utf8");
   assert.match(text, new RegExp(`^## ${String(manifest["version"]).replace(/\./g, "\\.")} `, "m"));
 });
