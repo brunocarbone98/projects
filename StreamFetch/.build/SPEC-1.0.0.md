@@ -305,5 +305,5 @@ The owner (2026-11-11): "finish what I asked you to pause: the extension must re
 
 ## B.5 CI, docs, versions
 - The `streamfetch` CI job in `.github/workflows/ci.yml` is written by the repo-maintenance workflow, not by StreamFetch's docs writer (one owner per file tonight); StreamFetch's docs writer reads it and reports any mismatch with StreamFetch's real commands.
-- `CHANGELOG.md`: `## 1.0.0 — 2026-11-11`. `.build/` is deleted before the PR leaves draft (the coordinator does it).
+- `CHANGELOG.md`: `## 1.0.0 — 2026-11-11`. The build notes in `.build/` are deleted before the PR leaves draft (the coordinator does it). This spec stays, because the module comments and tests cite its sections and addenda.
 - Same bar as DramaFetch's definition of done: `node --test` (with `STREAMFETCH_REQUIRE_TOOLS=1`) and `tsc` green, the whole e2e suite green with `STREAMFETCH_REQUIRE_TOOLS=1` and `STREAMFETCH_CHROMIUM=/opt/pw-browsers/chromium`, `ruff check` + `ruff format --check` of `tests/` green; real counts reported; a skipped suite is "not run".

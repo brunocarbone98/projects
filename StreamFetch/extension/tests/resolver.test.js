@@ -612,6 +612,22 @@ test("Bilibili.tv: a page that states no duration — the playurl answer's is th
   assert.equal(await durationOf({ status: 404 }, 95500), 95.5, "an unreadable page too");
   assert.equal(await durationOf({ body: btvPage("Stated") }, 95500), 6, "the page's own comes first");
   assert.equal(await durationOf({ body: ogOnly }), null, "neither states one");
+  assert.equal(await durationOf({ body: ogOnly }, 1440), null, "seconds or milliseconds: none");
+});
+
+test("Bilibili.tv: an episode whose page states no duration — the series list's comes before the answer's", async () => {
+  const season = "2090003";
+  const net = network({
+    [`${API}/v2/ogv/play/season_info?season_id=${season}&platform=web`]: { body: JSON.stringify({ code: 0, data: { season: { title: "An invented series" } } }) },
+    [`${API}/v2/ogv/play/episodes?season_id=${season}&platform=web`]: {
+      body: JSON.stringify({ code: 0, data: { sections: [{ episodes: [{ episode_id: 21, title_display: "E1", duration_ms: 1440000 }] }] } }),
+    },
+    [`https://www.bilibili.tv/en/play/${season}/21`]: { status: 404 },
+    [`${API}/playurl?platform=web&ep_id=21`]: { body: playurl(0, 95500) },
+  });
+  const series = item({ site: "bilibilitv", id: season, kind: "series", key: `bilibilitv:series:${season}` });
+  const [target] = targetsOf(await resolve(series, context(net.fetch).ctx));
+  assert.equal(target?.durationS, 1440, "the list's 24 minutes, not the answer's unverified 95.5 s");
 });
 
 test("Bilibili.tv: a page that cannot be read is not fatal; a 403 on the API is a block", async () => {

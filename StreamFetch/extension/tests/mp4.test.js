@@ -705,7 +705,8 @@ test("collectMp4 (progressive): broken tables are refused with what is wrong", a
 
 // -------------------------------------------------------------------------------- media tests
 
-const MEDIA = TOOLS ? {} : { skip: SKIP_MESSAGE };
+// with STREAMFETCH_REQUIRE_TOOLS=1 a missing ffmpeg fails these proofs instead of skipping them
+const MEDIA = TOOLS || REQUIRE_TOOLS ? {} : { skip: SKIP_MESSAGE };
 
 test("media tools: ffmpeg and ffprobe are installed (STREAMFETCH_REQUIRE_TOOLS=1)", (t) => {
   if (TOOLS) return;

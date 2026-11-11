@@ -52,6 +52,7 @@ import {
   planMoov,
   writeProgressiveMp4,
 } from "../src/lib/remux.js";
+import { TsDemuxer, tracksFromDemux } from "../src/lib/ts.js";
 import { WRITER_TOLERANCE_S, durationMatches, mediaGap } from "../src/app/downloader.js";
 import {
   CODEC_SECONDS,
@@ -70,7 +71,8 @@ const REQUIRE_TOOLS = NODE.env["STREAMFETCH_REQUIRE_TOOLS"] === "1";
 const TOOLS = hasTool("ffmpeg") && hasTool("ffprobe");
 const FIXTURE_URL = new URL("./fixtures/generated/remux/", import.meta.url);
 const FIXTURE_DIR = decodeURIComponent(FIXTURE_URL.pathname);
-const MEDIA = TOOLS ? {} : { skip: SKIP_MESSAGE };
+// with STREAMFETCH_REQUIRE_TOOLS=1 a missing ffmpeg fails these proofs instead of skipping them
+const MEDIA = TOOLS || REQUIRE_TOOLS ? {} : { skip: SKIP_MESSAGE };
 
 /** @typedef {import("../src/lib/mp4.js").TrackPlan} TrackPlan */
 /** @typedef {import("../src/lib/mp4.js").SampleRef} SampleRef */
@@ -743,6 +745,39 @@ test("TS-like starts: the earliest first dts is time zero, the later track gets 
   );
 });
 
+test("MPEG-TS B-frames: the edit starts at the first frame shown, the earliest shown is zero", () => {
+  // decode order I0 P3 B1 B2 P6 B4 B5 at 25 fps (3600 ticks of 90 kHz), as a TS stream with
+  // B-frames carries it: every PTS at least its DTS, the first frame shown 40 ms after the first
+  // decode time
+  const video = syntheticPlan("video", { count: 7, step: 3600, timescale: 90000, start: 126000 });
+  [3600, 10800, 0, 0, 10800, 0, 0].forEach((cts, index) => {
+    /** @type {SampleRef} */ (video.samples[index]).cts = cts;
+  });
+  // the audio starts 100 ms before the video's first dts, so 140 ms before its first frame shown:
+  // 140 ms of nothing, then the 7 frames (280 ms) from the first one shown (media_time 3600); an
+  // edit from media_time 0 would show the picture 40 ms early in ffmpeg-based players
+  const early = syntheticPlan("audio", { count: 10, step: 1024, timescale: 48000, start: 62400 });
+  const first = planMoov([video, early]);
+  const out = concat(first.ftyp, first.moov);
+  assert.deepEqual(editsOf(out, tablesOf(out, 0).get("elst")), [
+    [140, -1],
+    [280, 3600],
+  ]);
+  assert.equal(tablesOf(out, 1).get("elst"), undefined, "the audio starts at time zero");
+  // the audio starts with the first frame shown (after the video's first dts): nothing empty
+  // before either track, the video's edit still from its first frame shown
+  const level = syntheticPlan("audio", { count: 10, step: 1024, timescale: 48000, start: 69120 });
+  const second = planMoov([video, level]);
+  const both = concat(second.ftyp, second.moov);
+  assert.deepEqual(editsOf(both, tablesOf(both, 0).get("elst")), [[280, 3600]]);
+  assert.equal(tablesOf(both, 1).get("elst"), undefined);
+  // the writer reports milliseconds: 7 frames of 40 ms, 10 AAC frames of 1024 at 48 kHz
+  assert.deepEqual(
+    second.tracks.map((track) => track.durationS),
+    [0.28, 0.213],
+  );
+});
+
 test("refusals: 3 tracks, audio-only, empty, two of a kind, broken samples, DRM", async () => {
   const video = syntheticPlan("video");
   const audio = syntheticPlan("audio");
@@ -968,6 +1003,60 @@ test("meta refusals: a cover over 5 MiB, not JPEG/PNG, wrong bytes, before any w
   assert.equal(written.length, 0);
 });
 
+test("MPEG-TS with B-frames, the audio first → the source's A/V offset, every frame", MEDIA, async () => {
+  const media = fixtures();
+  const tsPath = media.path("bframes-audio-first.mpegts");
+  // libx264's default B-frames (the first frame is shown after its decode time) and the audio
+  // 100 ms ahead of the video, the case where an edit from media_time 0 showed the picture early
+  ffmpeg(
+    ...options("-itsoffset 0.1 -f lavfi -i testsrc=size=320x180:rate=30"),
+    ...options("-f lavfi -i sine=frequency=440:sample_rate=48000"),
+    ...options("-t 4 -map 0:v -map 1:a -c:v libx264 -preset medium -g 30 -pix_fmt yuv420p"),
+    ...options("-c:a aac -b:a 64k -f mpegts"),
+    tsPath,
+  );
+  /** @type {Record<string, Uint8Array[]>} */
+  const parts = { video: [], audio: [] };
+  /** @type {Record<string, number>} */
+  const sizes = { video: 0, audio: 0 };
+  const collector = tracksFromDemux(
+    (kind, bytes) => {
+      const offset = sizes[kind] ?? 0;
+      sizes[kind] = offset + bytes.length;
+      parts[kind]?.push(bytes);
+      return { file: kind, offset };
+    },
+    (code) => assert.fail(`the demuxer met ${code}`),
+  );
+  const demuxer = new TsDemuxer(collector.hooks);
+  demuxer.push(new Uint8Array(readFileSync(tsPath)));
+  demuxer.flush();
+  const plans = collector.plans();
+  const sources = new Map(Object.entries(parts).map(([kind, list]) => [kind, concat(...list)]));
+  const video = plans.find((plan) => plan.kind === "video");
+  assert.ok(video && video.samples.some((sample) => sample.cts > 0), "the source has B-frames");
+  const { out } = await writeToMemory(plans, sources);
+  const outPath = media.write("bframes-audio-first.mp4", out);
+  /** @param {string} path */
+  const starts = (path) => {
+    const streams = ffprobe(path).streams;
+    const of = (/** @type {string} */ type) =>
+      Number(streams.find((stream) => stream.codec_type === type)?.start_time);
+    return { video: of("video"), audio: of("audio") };
+  };
+  const source = starts(tsPath);
+  const saved = starts(outPath);
+  const sourceOffset = source.video - source.audio;
+  const savedOffset = saved.video - saved.audio;
+  assert.ok(sourceOffset > 0.1, `the source's picture starts ${sourceOffset} s after its sound`);
+  assert.ok(
+    Math.abs(savedOffset - sourceOffset) < 0.001,
+    `picture after sound: ${savedOffset} s saved, ${sourceOffset} s in the source`,
+  );
+  assert.equal(Math.min(saved.video, saved.audio), 0, "nothing before the first sample shown");
+  assert.deepEqual(framemd5(outPath, "v"), framemd5(tsPath, "v"), "every frame, in order");
+});
+
 test("cover + title embedded: ffprobe's attached pic and title; A/V untouched", MEDIA, async () => {
   const media = fixtures();
   const images = coverImages(media);
@@ -1060,16 +1149,24 @@ const CODEC_PAIRS = /** @type {const} */ ([
  * @param {(file: string) => Uint8Array} bytesOf
  */
 function sampleDigest(plans, bytesOf) {
-  return plans.map((plan) => ({
-    kind: plan.kind,
-    stsd: [...plan.stsd],
-    lastDuration: plan.lastDuration,
-    samples: plan.samples.map((sample) => {
-      const data = bytesOf(sample.data.file);
-      const bytes = data.subarray(sample.data.offset, sample.data.offset + sample.size);
-      return [sample.dts, sample.cts, sample.size, sample.sync, md5Hex(bytes)];
-    }),
-  }));
+  return plans.map((plan) => {
+    const firstDts = plan.samples[0]?.dts ?? 0;
+    return {
+      kind: plan.kind,
+      stsd: [...plan.stsd],
+      lastDuration: plan.lastDuration,
+      // each sample's decode time from the track's first and its presentation time: the writer's
+      // edit starts at the first sample shown, which changes how a reader splits a presentation
+      // time into dts and cts (an empty edit adds to the dts, media_time comes off the cts), never
+      // the time itself
+      samples: plan.samples.map((sample) => {
+        const data = bytesOf(sample.data.file);
+        const bytes = data.subarray(sample.data.offset, sample.data.offset + sample.size);
+        const presented = sample.dts + sample.cts;
+        return [sample.dts - firstDts, presented, sample.size, sample.sync, md5Hex(bytes)];
+      }),
+    };
+  });
 }
 
 /**

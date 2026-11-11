@@ -18,12 +18,15 @@
  *   [{url, codecs, bandwidth, size, mime_type, quality}]}}}` lists video-only and audio-only files
  *   (complete MP4s, fragmented or not). `code` 0 is ok; `10004001` geo-restricted; `10004004`,
  *   `10004005`, `10023006` a login (or a premium episode); any other code an error with the site's
- *   `message`. An entry without `url` is not served to this session. `playurl.duration` (in
- *   milliseconds, as `tests/fixtures/btv-playurl-ok.json` and the fake site carry it) is NOT a
- *   verified fact: yt-dlp 2026.10.26 does not read it and the spec does not list it. It is read
- *   only as the duration of a video whose page states none, so the saved file is still checked
- *   against a length the site gave; absent, nothing changes. The owner's first real run confirms
- *   it.
+ *   `message`. An entry without `url` is not served to this session. `playurl.duration` is NOT a
+ *   verified fact: yt-dlp 2026.10.26 reads no duration from this answer and the spec does not list
+ *   it; cobalt reads a `duration` in milliseconds on each `video_resource` of it instead. It is
+ *   read here as milliseconds (as `tests/fixtures/btv-playurl-ok.json` and the fake site carry it),
+ *   only from {@link MILLISECONDS_FROM} on — a smaller number could as well be seconds, and a
+ *   guessed unit must never fail a complete file — and only as the duration of a video whose page
+ *   and series list state none, so the saved file is still checked against a length the site
+ *   gave; absent, nothing changes. The owner's first real run confirms it (and checks both
+ *   places).
  * - Metadata: the page embeds `window.__INITIAL_DATA__ = {...}` or `window.__INITIAL_STATE__ =
  *   {...}` (or Nuxt's `__initialState`: read here only when it is a JSON object literal — the
  *   function form yt-dlp substitutes arguments into would need running the page's code, which
@@ -31,7 +34,10 @@
  *   `OgvVideo.epDetail` (episodes), `UgcVideo.videoData` or `ugc.archive` (user videos):
  *   `title_display` / `title`, `cover`, a duration when present. Fallbacks: the
  *   `bstar-meta__title` element, `og:title` / `og:image`, JSON-LD `VideoObject` (`name`, ISO 8601
- *   `duration`, `thumbnailUrl`).
+ *   `duration`, `thumbnailUrl`). The durations are not yt-dlp's facts: it reads only the JSON-LD
+ *   one on these pages; the embedded state's and the series list's `duration` / `duration_ms` /
+ *   `video_duration` (unit by magnitude, {@link MILLISECONDS_FROM}) are this spec's reading, so
+ *   the first real run checks them like `playurl.duration`.
  * - Series: `…/web/v2/ogv/play/episodes?season_id=<id>&platform=web` →
  *   `data.sections[].episodes[]` (`episode_id`, `title_display`, `title`, `cover`) and
  *   `…/web/v2/ogv/play/season_info?season_id=<id>&platform=web` → `data.season.title`.
@@ -399,7 +405,8 @@ function representationOf(resource, id, kind, label) {
  * the resource's own `quality`), labels `stream_info.desc_words`; an entry without a URL is not
  * downloadable but its quality still goes to `supportFormats` (a quality the session is not
  * served: the premium hint). `timelengthS` is `playurl.duration` (milliseconds) in seconds when
- * it is a positive number, else null. Refusals: a non-zero `code` ({@link codeRefusal}); not a JSON
+ * it is at least {@link MILLISECONDS_FROM} (a smaller number could as well be seconds: a guess at
+ * an unverified unit never fails a complete file), else null. Refusals: a non-zero `code` ({@link codeRefusal}); not a JSON
  * object → `not_a_video`; no `data.playurl` → `no_streams`; video entries that all lack a URL →
  * `premium_only` with their labels; no video entry at all → `no_streams`. Never throws.
  * @param {unknown} json the answer, parsed (a string is parsed here)
@@ -475,7 +482,7 @@ export function parsePlayurl(json) {
     supportFormats,
     acceptQuality: supportFormats.map((format) => format.quality),
     acceptDescription: [],
-    timelengthS: durationMs !== null && durationMs > 0 ? durationMs / 1000 : null,
+    timelengthS: durationMs !== null && durationMs >= MILLISECONDS_FROM ? durationMs / 1000 : null,
     trialOnly: false,
     legacy: false,
   };

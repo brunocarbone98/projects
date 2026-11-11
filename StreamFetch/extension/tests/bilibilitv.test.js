@@ -171,10 +171,14 @@ test("parsePlayurl: the answer's duration in milliseconds, or none — never a g
     return played({ code: 0, message: "0", data: { playurl } }).timelengthS;
   };
   assert.equal(withDuration(95500), 95.5);
-  assert.equal(withDuration(6000), 6, "milliseconds whatever the magnitude");
+  assert.equal(withDuration(10000), 10, "from MILLISECONDS_FROM on: milliseconds");
   assert.equal(withDuration("1440000"), 1440, "a number written as text");
+  // below it the number could as well be seconds (a 24-minute episode is 1440): no length at all
   for (const none of [undefined, null, 0, -95500, "", "95 s", Number.NaN, {}, [95500], true]) {
     assert.equal(withDuration(none), null, String(none));
+  }
+  for (const ambiguous of [9999, 6000, 1440, 1, "1440"]) {
+    assert.equal(withDuration(ambiguous), null, `${ambiguous}: seconds or milliseconds`);
   }
 });
 

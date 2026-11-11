@@ -10,13 +10,17 @@
  *
  * Timing: a sample's presentation time is `dts + cts` (`cts` is the composition offset). Per
  * track, every offset is made non-negative by one shift (`shift = −min(cts)` when negative): the
- * `ctts` (version 0) holds `cts + shift` and an `elst` media edit starts at `media_time = shift`,
- * so the presentation is unchanged. The edit lasts until the last frame SHOWN ends (with
- * B-frames that is not the last one decoded), so no frame is cut off. The earliest track's first
- * decode time is time zero; a track whose first `dts` is later starts with an empty edit of that
- * gap, which keeps A/V sync. Each sample lasts until the next one's `dts`; the last one as long
- * as the plan's `lastDuration` says (the source's own `stts` / `trun` value), else as long as the
- * one before it (the MPEG-TS path, where nothing says).
+ * `ctts` (version 0) holds `cts + shift`, so the presentation is unchanged. The `elst` media edit
+ * starts at the first sample SHOWN (`media_time = shift + lead`, `lead` being how long after the
+ * first decode time that sample is shown: the B-frame delay of an MPEG-TS stream) and lasts until
+ * the last one shown ends (with B-frames neither is the first or last one decoded), so no frame
+ * is cut off and none is shown early: ffmpeg's demuxer (Chrome's file playback, VLC, mpv) moves a
+ * track's first shown sample onto its edit's start. The earliest first shown sample of all tracks
+ * is time zero; a track whose first shown sample comes later starts with an empty edit of that
+ * gap, which keeps the source's A/V sync — the edit lists ffmpeg's own `-c copy` writes. Each
+ * sample lasts until the next one's `dts`; the last one as long as the plan's `lastDuration` says
+ * (the source's own `stts` / `trun` value), else as long as the one before it (the MPEG-TS path,
+ * where nothing says).
  *
  * Codec-agnostic: H.264, HEVC (`hvc1` / `hev1`) and AV1 video, AAC, FLAC, AC-3, E-AC-3 and Opus
  * audio are written the same way — the sample entry with its configuration box as given, the
@@ -100,7 +104,8 @@ const EPSILON = 1e-9;
 /**
  * A track after validation, with everything the tables need.
  * @typedef {{ plan: TrackPlan, id: number, deltas: Float64Array, offsets: Float64Array | null,
- *   shift: number, mediaDuration: number, startS: number, emptyMovie: number,
+ *   shift: number, mediaDuration: number, startS: number, leadS: number, mediaTime: number,
+ *   emptyMovie: number,
  *   presentedMovie: number, width: number, height: number, chunks: ChunkPlan[] }} Prepared
  */
 
@@ -251,13 +256,19 @@ function prepare(plan, id) {
   const first = /** @type {SampleRef} */ (samples[0]);
   const last = /** @type {SampleRef} */ (samples[count - 1]);
   const mediaDuration = last.dts - first.dts + (deltas[count - 1] ?? 0);
-  // presentation times run from the media edit's start (`media_time = shift`): dts − first + cts
+  // presentation times, from the first decode time: dts − first + cts (the shift aside)
+  let presentedStart = Infinity;
   let presentedEnd = 0;
   for (let index = 0; index < count; index += 1) {
     const sample = /** @type {SampleRef} */ (samples[index]);
-    const end = sample.dts - first.dts + sample.cts + (deltas[index] ?? 0);
+    const start = sample.dts - first.dts + sample.cts;
+    if (start < presentedStart) presentedStart = start;
+    const end = start + (deltas[index] ?? 0);
     if (end > presentedEnd) presentedEnd = end;
   }
+  // the edit starts at the first sample SHOWN: ffmpeg (Chrome, VLC, mpv) moves a stream's first
+  // shown sample onto its edit's start, so a media_time before it would show the track early
+  const lead = Math.max(0, presentedStart);
   let width = 0;
   let height = 0;
   if (kind === "video") {
@@ -279,8 +290,10 @@ function prepare(plan, id) {
     shift,
     mediaDuration,
     startS: first.dts / plan.timescale,
+    leadS: lead / plan.timescale,
+    mediaTime: shift + lead,
     emptyMovie: 0,
-    presentedMovie: Math.round((presentedEnd * MOVIE_TIMESCALE) / plan.timescale),
+    presentedMovie: Math.round(((presentedEnd - lead) * MOVIE_TIMESCALE) / plan.timescale),
     width,
     height,
     chunks: [],
@@ -444,17 +457,17 @@ function packLanguage(code) {
 }
 
 /**
- * The `edts` of a track: an empty edit of its start gap, then the media edit from
- * `media_time = shift` — or nothing when neither is needed.
+ * The `edts` of a track: an empty edit of its start gap, then the media edit from the first
+ * sample shown (`media_time = shift + lead`) — or nothing when neither is needed.
  * @param {Prepared} track
  * @returns {Uint8Array[]}
  */
 function edts(track) {
-  if (track.emptyMovie === 0 && track.shift === 0) return [];
+  if (track.emptyMovie === 0 && track.mediaTime === 0) return [];
   /** @type {[number, number][]} */
   const entries = [];
   if (track.emptyMovie > 0) entries.push([track.emptyMovie, -1]);
-  entries.push([track.presentedMovie, track.shift]);
+  entries.push([track.presentedMovie, track.mediaTime]);
   const wide = entries.some(([duration, mediaTime]) => duration > U32_MAX || mediaTime > I32_MAX);
   const body = entries.map(([duration, mediaTime]) =>
     concat(
@@ -692,11 +705,12 @@ export function planMoov(tracks, opts = {}) {
   const udta = metadataUdta(opts.meta);
   const plans = orderTracks(tracks);
   const prepared = plans.map((plan, index) => prepare(plan, index + 1));
-  const zero = Math.min(...prepared.map((track) => track.startS));
+  const zero = Math.min(...prepared.map((track) => track.startS + track.leadS));
   /** @type {{ bucket: number, chunk: ChunkPlan }[][]} */
   const perTrack = prepared.map((track, index) => {
     const offsetS = track.startS - zero;
-    track.emptyMovie = Math.round(offsetS * MOVIE_TIMESCALE);
+    // never below zero: zero is the earliest first shown sample, up to a float's last bit
+    track.emptyMovie = Math.max(0, Math.round((offsetS + track.leadS) * MOVIE_TIMESCALE));
     const chunks = chunksOf(track, index, offsetS, chunkS);
     track.chunks = chunks.map((entry) => entry.chunk);
     return chunks;
