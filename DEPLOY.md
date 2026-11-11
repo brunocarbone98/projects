@@ -145,8 +145,12 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   Specs & Limits → Request Headers); `X-Forwarded-For` is not read. Tracking and quotes are limited
   per visitor; every 15 minutes a visitor gets 10 failed logins per account and 30 in all, 10
   registrations, 60 session refreshes and 60 sign-outs (a signed-in browser refreshes about once
-  every 15 minutes). Every limit counts per visitor, so nobody can lock anyone else out (the
-  public demo accounts included). The limits live in memory: a restart clears them. To check after a deploy:
+  every 15 minutes). Every limit counts per visitor address, so nobody can lock anyone else out of
+  an account (the public demo accounts included). Visitors who share one public address (an office
+  network, a mobile carrier's NAT) share its budget too: past 60 refreshes in 15 minutes from that
+  address, the next visitor whose access token expires is sent to the login page (a `429` is not
+  a lost session, so the cookies stay) and signing in again works, because login counts only
+  failures. The limits live in memory: a restart clears them. To check after a deploy:
   the 11th wrong password in a row for one account answers "Too many attempts", and the right
   password still signs in from another network (a phone on mobile data).
 - **Local dev is unchanged:** `docker compose up -d` (Postgres + the Python
@@ -160,12 +164,20 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   sign-in produces by rotation form a family. A token presented again more than 30 seconds after it
   was used or revoked is taken for a stolen copy: the live refresh token of its family is revoked, so
   that sign-in ends; the user's other sign-ins, and other visitors of a shared demo account, are not
-  touched. Access tokens already issued stay valid until they expire (`ACCESS_TOKEN_TTL`, at most 15
-  minutes). The API log says `reuse of a revoked refresh token of user <id>`. A refresh token that
-  can never work again (unknown, expired or replayed) gets `401 SESSION_ENDED`, and the web then
-  deletes the session cookies, so a browser stops sending it. The token family is a database column:
-  the migration `20261111120000_refresh_token_families` runs on the next deploy (`pnpm db:deploy` in
-  `start.sh`), and each token issued before it is a family of its own.
+  touched. Access tokens already issued stay valid until they expire (`ACCESS_TOKEN_TTL`, 15 minutes
+  by default). The API log says `reuse of a revoked refresh token of user <id>`. A refresh token that
+  can never work again (unknown, expired, or replayed past those 30 seconds) gets
+  `401 SESSION_ENDED`, and the web then deletes the session cookies, so a browser stops sending it.
+  Within the 30 seconds (two tabs of one browser refreshing at once) the answer is a plain
+  `401 INVALID_TOKEN`, nothing else is revoked and the cookies stay. The web shares one refresh
+  among the requests one browser sends at once, and hands the new pair only to requests from the
+  same address and `User-Agent`; a copy of the old token sent from anywhere else reaches the API
+  and is refused there. The token family is a database column: the migrations
+  `20261111120000_refresh_token_families` and `20261111130000_refresh_token_family_default` run on
+  the next deploy (`pnpm db:deploy` in `start.sh`), and each token issued before them is a family of
+  its own. The column has a database default, so the previous release keeps signing people in
+  while the new one boots, and again after a **rollback** (Railway's redeploy of an earlier
+  deployment, or a revert): migrations are never reverted, and nothing needs undoing by hand.
 - Railway is usage-based (a small trial credit, then pay-as-you-go); nothing sleeps.
 - **Notifications** (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see
   `FullStackHub/apps/api/.env.example`.

@@ -5,8 +5,9 @@ import {
   type AuthResponseDto,
 } from "@shipping-hub/shared";
 import jwt from "jsonwebtoken";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { hashRefreshToken } from "../src/auth/tokens.js";
+import { generateRefreshToken, hashRefreshToken } from "../src/auth/tokens.js";
 import { env } from "../src/env.js";
 import { prisma } from "../src/prisma.js";
 import { api, DEFAULT_PASSWORD, registerCustomer } from "./helpers.js";
@@ -151,6 +152,25 @@ describe("refresh token families", () => {
     expect(await familyOf(rotated.body.refreshToken)).toBe(family);
     expect(await familyOf(again.body.refreshToken)).toBe(family);
     expect(await familyOf(otherSignIn.tokens.refreshToken)).not.toBe(family);
+  });
+
+  it("gives a token stored without a family (the previous release's insert) one of its own", async () => {
+    const { user } = await registerCustomer("previous-release@example.com");
+    // The insert of the release before the families, which knows no familyId column: it still
+    // serves while a deploy boots and again after a rollback, so it must keep signing people in.
+    const tokens = [generateRefreshToken(), generateRefreshToken()];
+    for (const token of tokens) {
+      await prisma.$executeRaw`INSERT INTO "refresh_tokens" ("id", "tokenHash", "userId", "expiresAt") VALUES (${randomUUID()}, ${token.tokenHash}, ${user.id}, ${token.expiresAt})`;
+    }
+    const [first, second] = await Promise.all(tokens.map((token) => familyOf(token.token)));
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(second).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(second).not.toBe(first);
+
+    // The current release rotates such a token within its family.
+    const rotated = await refresh(tokens[0]?.token ?? "");
+    expect(rotated.status).toBe(200);
+    expect(await familyOf(rotated.body.refreshToken)).toBe(first);
   });
 });
 

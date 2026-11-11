@@ -2,6 +2,7 @@ import {
   AuthTokensSchema,
   isSessionEnded,
   REFRESH_REUSE_GRACE_MS,
+  refreshShareKey,
   visitorAddress,
   type AuthTokensDto,
 } from "@shipping-hub/shared";
@@ -60,20 +61,28 @@ async function refreshTokens(
 // share one refresh, and one that arrives a moment later (sent before the new cookies came back)
 // gets the same new tokens instead of a trip to the login page. The pair is kept for the API's whole
 // grace window (REFRESH_REUSE_GRACE_MS, 30 seconds, from @shipping-hub/shared): within it the API
-// would only refuse the old token, so every request a browser sends with it before the new cookies
-// arrive is answered here. A later use, which a browser that stored the new cookies never sends,
-// ends that sign-in: the API revokes its tokens and answers SESSION_ENDED, and the cookies go.
+// would only refuse the old token, so every request the browser sends with it before the new
+// cookies arrive is answered here. Only that browser's: the pair is shared under the token together
+// with the visitor's address and User-Agent (refreshShareKey), so a copy of the token sent from
+// elsewhere reaches the API and is refused there, never handed the new pair. A later use, which a
+// browser that stored the new cookies never sends, ends that sign-in: the API revokes its tokens and
+// answers SESSION_ENDED, and the cookies go.
 const refreshes = new Map<string, Promise<RefreshOutcome>>();
 
-function refreshOnce(refreshToken: string, visitor: string | undefined): Promise<RefreshOutcome> {
-  const pending = refreshes.get(refreshToken);
+function refreshOnce(
+  refreshToken: string,
+  visitor: string | undefined,
+  userAgent: string | null,
+): Promise<RefreshOutcome> {
+  const key = refreshShareKey(refreshToken, visitor, userAgent);
+  const pending = refreshes.get(key);
   if (pending) return pending;
   const refresh = refreshTokens(refreshToken, visitor).then((outcome) => {
-    if (outcome.tokens) setTimeout(() => refreshes.delete(refreshToken), REFRESH_REUSE_GRACE_MS);
-    else refreshes.delete(refreshToken);
+    if (outcome.tokens) setTimeout(() => refreshes.delete(key), REFRESH_REUSE_GRACE_MS);
+    else refreshes.delete(key);
     return outcome;
   });
-  refreshes.set(refreshToken, refresh);
+  refreshes.set(key, refresh);
   return refresh;
 }
 
@@ -89,7 +98,8 @@ export default async function middleware(req: NextRequest) {
     if (!valid) {
       const refreshToken = req.cookies.get(REFRESH_COOKIE)?.value;
       const visitor = visitorAddress(req.headers.get("x-real-ip"));
-      const outcome = refreshToken ? await refreshOnce(refreshToken, visitor) : null;
+      const userAgent = req.headers.get("user-agent");
+      const outcome = refreshToken ? await refreshOnce(refreshToken, visitor, userAgent) : null;
       const refreshed = outcome?.tokens ?? null;
       const refreshedClaims = refreshed ? decodeAccessToken(refreshed.accessToken) : null;
 
