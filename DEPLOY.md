@@ -39,8 +39,10 @@ JWT_ACCESS_SECRET  = <a long random string, at least 32 characters>
 
 > **`JWT_REFRESH_SECRET` is no longer read.** Refresh tokens are opaque random strings that the API
 > stores as SHA-256 hashes, so they never needed a key. A deployment that still has the variable
-> starts as before (the API ignores variables it does not read); delete it from the service's
-> **Variables** whenever convenient.
+> starts as before (the API ignores variables it does not read). **Keep it** as long as you may roll
+> back to a release from before this change: those releases refuse to start without it (at least 32
+> characters), so a rollback would never take traffic. Delete it from the service's **Variables**
+> once no rollback that far back can be needed.
 
 > **Get `DATABASE_URL` right — this is the #1 deploy gotcha.** `${{Postgres.…}}`
 > only resolves if `Postgres` is the **exact** name of your database service; if
@@ -149,8 +151,11 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   an account (the public demo accounts included). Visitors who share one public address (an office
   network, a mobile carrier's NAT) share its budget too: past 60 refreshes in 15 minutes from that
   address, the next visitor whose access token expires is sent to the login page (a `429` is not
-  a lost session, so the cookies stay) and signing in again works, because login counts only
-  failures. The limits live in memory: a restart clears them. To check after a deploy:
+  a lost session: the expiring access cookie goes, the refresh cookie stays, and the next visit
+  tries again) and signing in again works, because login counts only failures. Past 60 sign-outs
+  the browser's cookies are still deleted, but the API does not revoke that refresh token, which
+  then lapses on its own (`REFRESH_TOKEN_TTL_DAYS`). The limits live in memory: a restart clears
+  them. To check after a deploy:
   the 11th wrong password in a row for one account answers "Too many attempts", and the right
   password still signs in from another network (a phone on mobile data).
 - **Local dev is unchanged:** `docker compose up -d` (Postgres + the Python
@@ -168,16 +173,21 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   by default). The API log says `reuse of a revoked refresh token of user <id>`. A refresh token that
   can never work again (unknown, expired, or replayed past those 30 seconds) gets
   `401 SESSION_ENDED`, and the web then deletes the session cookies, so a browser stops sending it.
-  Within the 30 seconds (two tabs of one browser refreshing at once) the answer is a plain
-  `401 INVALID_TOKEN`, nothing else is revoked and the cookies stay. The web shares one refresh
-  among the requests one browser sends at once, and hands the new pair only to requests from the
-  same address and `User-Agent`; a copy of the old token sent from anywhere else reaches the API
-  and is refused there. The token family is a database column: the migrations
-  `20261111120000_refresh_token_families` and `20261111130000_refresh_token_family_default` run on
-  the next deploy (`pnpm db:deploy` in `start.sh`), and each token issued before them is a family of
-  its own. The column has a database default, so the previous release keeps signing people in
-  while the new one boots, and again after a **rollback** (Railway's redeploy of an earlier
-  deployment, or a revert): migrations are never reverted, and nothing needs undoing by hand.
+  The web shares one refresh among the requests one browser sends at once (two tabs included), and
+  hands the new pair only to requests from the same address and `User-Agent`. Any other use of the
+  old token within the 30 seconds (a copy sent from another address or `User-Agent`, or a request
+  the other container serves during a deploy) reaches the API and gets a plain
+  `401 INVALID_TOKEN`: nothing else is revoked, and the web keeps that browser's refresh cookie.
+  The token family is a database column: the migration `20261111120000_refresh_token_families`
+  runs on the next deploy (`pnpm db:deploy` in `start.sh`), and each token issued before it is a
+  family of its own. The column gets a database default in the same transaction, so the previous
+  release keeps signing people in while the new one boots, and again after a **rollback**
+  (Railway's redeploy of an earlier deployment, or a revert): migrations are never reverted, and
+  nothing in the database needs undoing by hand. A release from before this change also needs
+  `JWT_REFRESH_SECRET` in the service's Variables (see above). Each refresh the previous release
+  makes starts a family of its own, so a token from before such a refresh, replayed later, ends
+  nothing (the log says `revoked the 0 live refresh token(s)`); detection covers that sign-in again
+  from its next refresh on this release.
 - Railway is usage-based (a small trial credit, then pay-as-you-go); nothing sleeps.
 - **Notifications** (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — see
   `FullStackHub/apps/api/.env.example`.

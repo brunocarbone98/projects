@@ -1,8 +1,7 @@
 import {
   AuthTokensSchema,
   isSessionEnded,
-  REFRESH_REUSE_GRACE_MS,
-  refreshShareKey,
+  shareRefresh,
   visitorAddress,
   type AuthTokensDto,
 } from "@shipping-hub/shared";
@@ -26,8 +25,8 @@ const PROTECTED = /^\/(es|en)\/app(?:\/|$)/;
 /**
  * What a refresh got: a new token pair, or none, and then whether the API said the session has
  * ended for good (`SESSION_ENDED`: the token is unknown, expired or was revoked earlier). Only then
- * are the cookies deleted; a token used moments ago (`INVALID_TOKEN`), a rate limit or an outage
- * leaves them, because the browser may already hold the rotated pair.
+ * is the refresh cookie deleted; a token used moments ago (`INVALID_TOKEN`), a rate limit or an
+ * outage leaves it, because the browser may already hold the rotated pair or may retry later.
  */
 type RefreshOutcome = { tokens: AuthTokensDto } | { tokens: null; sessionEnded: boolean };
 
@@ -63,28 +62,14 @@ async function refreshTokens(
 // grace window (REFRESH_REUSE_GRACE_MS, 30 seconds, from @shipping-hub/shared): within it the API
 // would only refuse the old token, so every request the browser sends with it before the new
 // cookies arrive is answered here. Only that browser's: the pair is shared under the token together
-// with the visitor's address and User-Agent (refreshShareKey), so a copy of the token sent from
-// elsewhere reaches the API and is refused there, never handed the new pair. A later use, which a
-// browser that stored the new cookies never sends, ends that sign-in: the API revokes its tokens and
-// answers SESSION_ENDED, and the cookies go.
+// with the visitor's address and User-Agent (shareRefresh, keyed by refreshShareKey), so a copy of
+// the token sent from elsewhere reaches the API and is refused there, never handed the new pair. A
+// later use, which a browser that stored the new cookies never sends, ends that sign-in: the API
+// revokes its tokens and answers SESSION_ENDED, and the cookies go.
 const refreshes = new Map<string, Promise<RefreshOutcome>>();
-
-function refreshOnce(
-  refreshToken: string,
-  visitor: string | undefined,
-  userAgent: string | null,
-): Promise<RefreshOutcome> {
-  const key = refreshShareKey(refreshToken, visitor, userAgent);
-  const pending = refreshes.get(key);
-  if (pending) return pending;
-  const refresh = refreshTokens(refreshToken, visitor).then((outcome) => {
-    if (outcome.tokens) setTimeout(() => refreshes.delete(key), REFRESH_REUSE_GRACE_MS);
-    else refreshes.delete(key);
-    return outcome;
-  });
-  refreshes.set(key, refresh);
-  return refresh;
-}
+const later = (run: () => void, ms: number) => {
+  setTimeout(run, ms);
+};
 
 export default async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -99,7 +84,14 @@ export default async function middleware(req: NextRequest) {
       const refreshToken = req.cookies.get(REFRESH_COOKIE)?.value;
       const visitor = visitorAddress(req.headers.get("x-real-ip"));
       const userAgent = req.headers.get("user-agent");
-      const outcome = refreshToken ? await refreshOnce(refreshToken, visitor, userAgent) : null;
+      const outcome = refreshToken
+        ? await shareRefresh(
+            refreshes,
+            { refreshToken, visitor, userAgent },
+            () => refreshTokens(refreshToken, visitor),
+            later,
+          )
+        : null;
       const refreshed = outcome?.tokens ?? null;
       const refreshedClaims = refreshed ? decodeAccessToken(refreshed.accessToken) : null;
 
@@ -110,11 +102,13 @@ export default async function middleware(req: NextRequest) {
         loginUrl.pathname = `/${locale}/login`;
         loginUrl.search = `?next=${encodeURIComponent(pathname)}`;
         const res = NextResponse.redirect(loginUrl);
-        // A refresh token that can never work again is deleted, so the browser stops sending it.
-        if (outcome && !outcome.tokens && outcome.sessionEnded) {
-          res.cookies.delete(ACCESS_COOKIE);
-          res.cookies.delete(REFRESH_COOKIE);
-        }
+        // The access token is expired or about to be, so it goes: the login page sends any browser
+        // that still has one back here, which would bounce it between the two pages until the token
+        // expires. A refresh token that can never work again is deleted too, so the browser stops
+        // sending it; any other refusal (a rate limit, a token used moments ago, an outage) keeps
+        // it, and the next visit tries again.
+        res.cookies.delete(ACCESS_COOKIE);
+        if (outcome && !outcome.tokens && outcome.sessionEnded) res.cookies.delete(REFRESH_COOKIE);
         return res;
       }
 
