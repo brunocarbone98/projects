@@ -20,6 +20,8 @@ jobs:
   sync:
     name: Create or update the repository labels
     runs-on: ubuntu-latest
+    # A handful of API calls, normally seconds.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:

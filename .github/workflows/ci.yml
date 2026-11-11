@@ -15,9 +15,15 @@ defaults:
   run:
     working-directory: FullStackHub
 
+# Every job has a timeout-minutes at about three times its normal duration, so a job that hangs
+# ends red by itself instead of running for GitHub's default six hours: a run that has not finished
+# is only ever slow, never stuck. The merge gate relies on this (.claude/agents/merge-steward.md →
+# "After each merge": it waits up to 90 minutes and never reverts a run that is still going).
 jobs:
   lint-and-typecheck:
     runs-on: ubuntu-latest
+    # Normally under 1 minute (pnpm install from the cache, lint, format:check, typecheck).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -39,6 +45,8 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # Normally about 1 minute (PostgreSQL service, pnpm install, Vitest).
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -72,6 +80,9 @@ jobs:
 
   dramafetch:
     runs-on: ubuntu-latest
+    # Normally 5 to 10 minutes; up to about 26 when the runner's apt mirror is slow (2026-11-10:
+    # 16 minutes for ffmpeg, 5 for Chromium's download and OS dependencies).
+    timeout-minutes: 60
     env:
       # Every test that would skip for a tool this job installs (node, a full ffmpeg, Chromium)
       # fails instead, naming the tool: a green run never silently left a proof out.
@@ -104,9 +115,22 @@ jobs:
       - name: Mypy (strict)
         run: mypy
       - name: Install a full ffmpeg (the framemd5 proofs of the embedded covers)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        # Acquire::Retries: a dropped connection to the apt mirror is retried instead of failing the job.
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg
       - name: Unit tests (fixtures + local fake TikTok server, no network)
         run: pytest
+      - name: Read the installed Playwright version (the browser cache key)
+        id: playwright
+        run: echo "version=$(python -c 'from importlib.metadata import version; print(version("playwright"))')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      # On a cache hit the browser is already there: this only checks (and installs, when missing)
+      # Chromium's OS dependencies.
       - name: Install Chromium for the integration test
         run: playwright install --with-deps chromium
       - name: Point the integration test at the installed Chromium

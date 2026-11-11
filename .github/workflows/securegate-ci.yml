@@ -27,6 +27,10 @@ jobs:
   qa-suite:
     name: API + BDD + UI vs. local Shipping Hub
     runs-on: ubuntu-latest
+    # A job that hangs (a server that never answers, a stuck browser) ends red here instead of after
+    # GitHub's default six hours. Normally 2 to 10 minutes (install, web build, the API and UI
+    # suites, Newman, the reports); 30 leaves room for a cold cache.
+    timeout-minutes: 30
 
     services:
       postgres:
