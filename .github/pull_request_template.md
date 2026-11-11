@@ -38,6 +38,12 @@ Tick what you ran and paste the real results. Failing is failing (with the outpu
 - [ ] `DRAMAFETCH_CHROMIUM=<path to a Chromium binary> .venv/bin/pytest -m integration` — a real Chromium against the fake server; skipped (not passed) when no Chromium is available
 - [ ] Chrome extension, from `extension/` (Node 22, no npm dependencies): `node --test` — unit tests of every module plus the manifest (permissions) and locales tests — and `npx -y -p typescript@5.9.3 tsc -p jsconfig.json` (strict `checkJs`); its parity tests run inside `pytest`, its end-to-end scenarios inside `pytest -m integration`
 
+**StreamFetch** (Chrome extension, Node 22, no npm dependencies; `STREAMFETCH_REQUIRE_TOOLS=1` so a missing ffmpeg or Chromium fails instead of skipping)
+
+- [ ] From `StreamFetch/extension/`: `STREAMFETCH_REQUIRE_TOOLS=1 node --test` — unit tests of every module plus the manifest (permissions) and locales tests; ffmpeg and ffprobe for the media proofs — and `npx -y -p typescript@5.9.3 tsc -p jsconfig.json` (strict `checkJs`)
+- [ ] From `StreamFetch/`: `STREAMFETCH_CHROMIUM=<path to a Chromium binary> STREAMFETCH_REQUIRE_TOOLS=1 .venv/bin/pytest` — the end-to-end suite, a real Chromium against the local fake Dailymotion, Bilibili and Bilibili.tv; nothing reaches the real sites
+- [ ] From `StreamFetch/`: `.venv/bin/ruff check tests && .venv/bin/ruff format --check tests`
+
 **Not applicable**
 
 - [ ] Docs or configuration only — say which checks you still ran (for example `pnpm format:check` for anything under `FullStackHub/`)
