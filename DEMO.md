@@ -127,7 +127,7 @@ claude -p "$(cat .claude/shifts/sre-patrol.md)"         # run a shift by hand
 gh workflow run "Uptime patrol"                         # or the Run workflow button in Actions
 ```
 
-**Numbers** — 28 Karate API scenarios + 1 opt-in `@ratelimit`; 6 Serenity UI scenarios; Vitest: shared 23, api 54; pytest: pricing 41, labels 13; uptime probe scheduled every 30 min (GitHub runs it best-effort); SRE patrol every 6 h; nightly maintenance 08:40 UTC; weekly security review Mondays 10:20 UTC; merge gate daily 11:47 UTC.
+**Numbers** — 28 Karate API scenarios + 1 opt-in `@ratelimit`; 6 Serenity UI scenarios; Vitest: shared 27, api 54; pytest: pricing 41, labels 13; uptime probe scheduled every 30 min (GitHub runs it best-effort); SRE patrol every 6 h; nightly maintenance 08:40 UTC; weekly security review Mondays 10:20 UTC; merge gate daily 11:47 UTC.
 
 ## Guion rápido (ES)
 

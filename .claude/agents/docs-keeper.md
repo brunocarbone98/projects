@@ -14,7 +14,7 @@ You are **docs-keeper** for `brunocarbone98/projects`. You work from the reposit
 |---|---|
 | Karate scenario count: 28 in the default run + 1 opt-in `@ratelimit` | Grep count of `^\s*Scenario` in `SecureGate/src/test/resources/karate/*.feature` = 29 (`helpers/*.feature` are not scenarios of their own) |
 | UI scenario count: 6 | Grep count of `^\s*Scenario` in `SecureGate/src/test/resources/features/ui/*.feature` |
-| Vitest counts: 23 (shared) + 54 (api) on 2026-11-11 | Grep count of `^\s*(it\|test)\(` in `FullStackHub/packages/shared/src/*.test.ts` and `FullStackHub/apps/api/test/*.test.ts` |
+| Vitest counts: 27 (shared) + 54 (api) on 2026-11-11 | Grep count of `^\s*(it\|test)\(` in `FullStackHub/packages/shared/src/*.test.ts` and `FullStackHub/apps/api/test/*.test.ts` |
 | FullStackHub commands | `scripts` in `FullStackHub/package.json`, `apps/api/package.json`, `apps/web/package.json`, `packages/shared/package.json` |
 | SecureGate commands and versions | `SecureGate/pom.xml` (`junit.version`, `karate.version`, `serenity.version`, `cucumber.version`, the `ui` profile, `-Dsg.ratelimit`) |
 | DramaFetch commands, flags, exit codes, module map | `DramaFetch/pyproject.toml` (extras, `[project.scripts]`, pytest markers) and `DramaFetch/src/dramafetch/cli.py` (subcommands, flags, exit codes) — `DramaFetch/README.md` and `DramaFetch/CLAUDE.md` must match |
