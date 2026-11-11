@@ -1,0 +1,111 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "playurl": {
+      "duration": 95500,
+      "quality": 80,
+      "video": [
+        {
+          "video_resource": {
+            "id": 0,
+            "url": "",
+            "backup_url": null,
+            "bandwidth": 2900000,
+            "codecs": "avc1.640033",
+            "width": 1920,
+            "height": 1080,
+            "duration": 0,
+            "size": 0,
+            "md5": "",
+            "mime_type": "video/mp4",
+            "quality": 112
+          },
+          "stream_info": {
+            "quality": 112,
+            "desc_words": "1080P (HD+)",
+            "intact": true,
+            "need_login": false,
+            "need_vip": true,
+            "no_rexcode": false
+          }
+        },
+        {
+          "video_resource": {
+            "id": 0,
+            "url": "https://upos-bstar1-mirrorakam.example-cdn.test/iupxcodeboss/ab/cd/n241108ad0000000000000000000000001-1-64.mp4?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfq&deadline=1762600000&gen=playurlv2&os=akam&oi=0&trid=0123456789abcdef&platform=pc&upsig=0123456789abcdef0123456789abcdef&uparams=e,deadline&hdnts=exp=1762600000~hmac=0123456789",
+            "backup_url": null,
+            "bandwidth": 780000,
+            "codecs": "avc1.64001F",
+            "width": 1280,
+            "height": 720,
+            "duration": 0,
+            "size": 9310000,
+            "md5": "",
+            "mime_type": "video/mp4",
+            "quality": 64
+          },
+          "stream_info": {
+            "quality": 64,
+            "desc_words": "720P",
+            "intact": true,
+            "need_login": false,
+            "need_vip": false,
+            "no_rexcode": false
+          }
+        },
+        {
+          "video_resource": {
+            "id": 0,
+            "url": "https://upos-bstar1-mirrorakam.example-cdn.test/iupxcodeboss/ab/cd/n241108ad0000000000000000000000001-1-32.mp4?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfq&deadline=1762600000&gen=playurlv2&os=akam&oi=0&trid=0123456789abcdef&platform=pc&upsig=0123456789abcdef0123456789abcdef&uparams=e,deadline&hdnts=exp=1762600000~hmac=0123456789",
+            "backup_url": null,
+            "bandwidth": 410000,
+            "codecs": "avc1.64001E",
+            "width": 852,
+            "height": 480,
+            "duration": 0,
+            "size": 4890000,
+            "md5": "",
+            "mime_type": "video/mp4",
+            "quality": 32
+          },
+          "stream_info": {
+            "quality": 32,
+            "desc_words": "480P",
+            "intact": true,
+            "need_login": false,
+            "need_vip": false,
+            "no_rexcode": false
+          }
+        }
+      ],
+      "audio_resource": [
+        {
+          "url": "https://upos-bstar1-mirrorakam.example-cdn.test/iupxcodeboss/ab/cd/n241108ad0000000000000000000000001-1-audio-30280.mp4?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfq&deadline=1762600000&gen=playurlv2&os=akam&oi=0&trid=0123456789abcdef&platform=pc&upsig=0123456789abcdef0123456789abcdef&uparams=e,deadline&hdnts=exp=1762600000~hmac=0123456789",
+          "backup_url": null,
+          "bandwidth": 192000,
+          "codecs": "mp4a.40.2",
+          "duration": 0,
+          "size": 2292000,
+          "md5": "",
+          "mime_type": "audio/mp4",
+          "quality": 30280,
+          "id": 0
+        },
+        {
+          "url": "https://upos-bstar1-mirrorakam.example-cdn.test/iupxcodeboss/ab/cd/n241108ad0000000000000000000000001-1-audio-30216.mp4?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfq&deadline=1762600000&gen=playurlv2&os=akam&oi=0&trid=0123456789abcdef&platform=pc&upsig=0123456789abcdef0123456789abcdef&uparams=e,deadline&hdnts=exp=1762600000~hmac=0123456789",
+          "backup_url": null,
+          "bandwidth": 64000,
+          "codecs": "mp4a.40.2",
+          "duration": 0,
+          "size": 764000,
+          "md5": "",
+          "mime_type": "audio/mp4",
+          "quality": 30216,
+          "id": 0
+        }
+      ]
+    }
+  }
+}

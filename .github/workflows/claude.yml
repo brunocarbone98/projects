@@ -39,6 +39,9 @@ jobs:
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
+    # A long answer with the project checks (at most 60 turns) fits well inside an hour; a session
+    # that hangs ends red here instead of after GitHub's default six hours.
+    timeout-minutes: 60
     permissions:
       contents: write
       pull-requests: write

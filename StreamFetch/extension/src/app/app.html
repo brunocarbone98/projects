@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="appTitle">StreamFetch</title>
+<link rel="icon" href="../../icons/icon48.png">
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="top">
+  <img src="../../icons/icon48.png" alt="" width="36" height="36">
+  <div class="titles">
+    <div class="title-line"><h1 data-i18n="appTitle">StreamFetch</h1><span id="version" class="version"></span></div>
+    <p class="sub" data-i18n="appSubtitle">Dailymotion, Bilibili.tv and Bilibili videos as MP4 files, for offline viewing</p>
+  </div>
+  <span id="app-status" class="badge" data-state="loading" data-i18n="appStatusLoading">loading</span>
+</header>
+
+<main>
+  <section id="readonly-banner" class="banner" role="alert" hidden>
+    <span data-i18n="readonlyBanner">StreamFetch is already open in another tab: use that one (one engine at a time). This tab is read-only.</span>
+  </section>
+
+  <section id="cooldown-banner" class="banner" role="alert" hidden>
+    <strong data-i18n="cooldownTitle">A site refused a request: StreamFetch waits before asking again.</strong>
+    <span id="cooldown-text"></span>
+  </section>
+
+  <section class="card" id="input-card">
+    <h2 data-i18n="linksHeading">Links</h2>
+    <label for="links" data-i18n="linksLabel">Paste one video link per line (Dailymotion, Bilibili.tv, Bilibili)</label>
+    <textarea id="links" rows="5" spellcheck="false" autocomplete="off" data-i18n-placeholder="linksPlaceholder"></textarea>
+    <div class="buttons">
+      <button type="button" id="analyze-button" data-i18n="analyzeButton">Analyze</button>
+      <button type="button" id="download-all-button" class="primary" data-i18n="downloadAllButton">Download all</button>
+      <button type="button" id="stop-button" data-i18n="stopButton" disabled>Stop</button>
+      <button type="button" id="clear-button" data-i18n="clearButton">Clear</button>
+    </div>
+    <p class="hint" data-i18n="linksHint">Analyze reads every link first (title, duration, qualities) without downloading. Download all downloads every row, one after the other, with each row's quality. Keep this tab open while StreamFetch works.</p>
+    <ul id="input-notes" class="notes"></ul>
+    <p id="activity" class="status" role="status"></p>
+  </section>
+
+  <section class="card" id="items-card">
+    <p id="summary-line" class="meta"></p>
+    <div class="table-wrap">
+      <table id="items-table">
+        <thead>
+          <tr>
+            <th data-i18n="columnCover">Cover</th>
+            <th data-i18n="columnTitle">Title</th>
+            <th data-i18n="columnSite">Site</th>
+            <th data-i18n="columnDuration">Duration</th>
+            <th data-i18n="columnQuality">Quality</th>
+            <th data-i18n="columnStatus">Status</th>
+            <th data-i18n="columnProgress">Progress</th>
+            <th data-i18n="columnMessage">Message</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div id="failed-block" hidden>
+      <h3 id="failed-heading"></h3>
+      <div class="table-wrap">
+        <table id="failed-table">
+          <thead>
+            <tr>
+              <th data-i18n="columnTitle">Title</th>
+              <th data-i18n="columnSite">Site</th>
+              <th data-i18n="columnStatus">Status</th>
+              <th data-i18n="columnMessage">Message</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="buttons">
+        <button type="button" id="retry-button" class="primary" data-i18n="retryButton">Retry these</button>
+        <button type="button" id="report-button" data-i18n="reportButton">Save the report</button>
+      </div>
+      <p id="failed-report" class="status"></p>
+    </div>
+  </section>
+
+  <section class="card" id="history-card">
+    <h2 data-i18n="historyHeading">Last runs</h2>
+    <ul id="history-list" class="history"></ul>
+  </section>
+
+  <section class="card" id="settings-card">
+    <h2 data-i18n="settingsHeading">Settings</h2>
+    <form id="settings-form">
+      <div class="grid">
+        <label for="setting-quality" data-i18n="settingQuality">Quality</label>
+        <select id="setting-quality">
+          <option value="best" data-i18n="qualityBest">Best the session can play</option>
+          <option value="1080" data-i18n="quality1080">At most 1080p</option>
+          <option value="720" data-i18n="quality720">At most 720p</option>
+          <option value="480" data-i18n="quality480">At most 480p</option>
+        </select>
+        <label for="setting-codec" data-i18n="settingCodec">Video codec</label>
+        <select id="setting-codec">
+          <option value="compatible" data-i18n="codecCompatible">Compatible (H.264 when offered: plays everywhere)</option>
+          <option value="best" data-i18n="codecBest">Best (highest bandwidth: HEVC or AV1 may need a recent player)</option>
+        </select>
+        <label for="setting-video-pause-min" data-i18n="settingVideoPause">Pause between videos (s, min / max)</label>
+        <span class="pair"><input type="number" id="setting-video-pause-min" min="0" step="0.5"><input type="number" id="setting-video-pause-max" min="0" step="0.5"></span>
+        <label for="setting-page-pause-min" data-i18n="settingPagePause">Pause between page requests (s, min / max)</label>
+        <span class="pair"><input type="number" id="setting-page-pause-min" min="0" step="0.5"><input type="number" id="setting-page-pause-max" min="0" step="0.5"></span>
+        <label for="setting-media-pause-min" data-i18n="settingMediaPause">Pause between media requests (ms, min / max)</label>
+        <span class="pair"><input type="number" id="setting-media-pause-min" min="0" step="10"><input type="number" id="setting-media-pause-max" min="0" step="10"></span>
+        <label for="setting-report" data-i18n="settingReport">Save a report of what did not download at the end of a run</label>
+        <input type="checkbox" id="setting-report">
+        <label for="setting-cover" data-i18n="settingCover">Cover in each saved file</label>
+        <select id="setting-cover">
+          <option value="embed" data-i18n="coverEmbed">Embed the video's cover and title (one more request per file)</option>
+          <option value="none" data-i18n="coverNone">Title only, no cover request</option>
+        </select>
+        <label for="setting-language" data-i18n="settingLanguage">Language</label>
+        <select id="setting-language">
+          <option value="auto" data-i18n="languageAuto">Chrome's language</option>
+          <option value="en">English</option>
+          <option value="es">Español</option>
+        </select>
+      </div>
+      <p class="hint" id="pacing-hint" data-i18n="pacingHint">Pauses may only be made longer than the defaults: StreamFetch behaves like one person watching.</p>
+      <div class="buttons">
+        <button type="submit" id="save-settings-button" class="primary" data-i18n="saveSettingsButton">Save settings</button>
+      </div>
+      <p id="settings-problem" class="status" role="status"></p>
+    </form>
+    <div class="danger">
+      <p class="hint" data-i18n="clearCooldownHint">After a refusal StreamFetch waits 30 minutes. You may delete the wait here, at your own risk: asking again right away is what makes a site block you for longer.</p>
+      <button type="button" id="clear-cooldown-button" data-i18n="clearCooldownButton">Delete the cooldown (at your own risk)</button>
+    </div>
+  </section>
+
+  <section class="card" id="test-card" hidden>
+    <h2>Test settings</h2>
+    <textarea id="test-settings" rows="4" spellcheck="false"></textarea>
+    <div class="buttons"><button type="button" id="test-settings-save">Save test settings</button></div>
+    <p id="test-settings-status" class="status"></p>
+  </section>
+</main>
+
+<footer class="legal">
+  <p id="legal-notice" data-i18n="legalNotice">StreamFetch is a personal tool for saving, for your own offline viewing, videos that Dailymotion and Bilibili already play in your own browser session. It never bypasses DRM, paywalls, geo-restrictions, logins or any other access control, and it does not hide that it is a download tool. Downloading may be restricted by the sites' terms of service and by copyright law in your country; you are responsible for how you use it. Not affiliated with Dailymotion or Bilibili.</p>
+</footer>
+</body>
+</html>

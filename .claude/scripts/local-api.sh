@@ -30,7 +30,7 @@
 #   DATABASE_URL=postgresql://shipping:shipping@127.0.0.1:5432/shipping_hub?schema=public
 #   RUN_DIR=/tmp/shipping-hub-api           api.log and api.pid live here
 #   SKIP_SEED=1                             keep the current data (no db:seed)
-#   JWT_ACCESS_SECRET / JWT_REFRESH_SECRET  local-only throwaway values by default
+#   JWT_ACCESS_SECRET                       a local-only throwaway value by default
 # =============================================================================
 set -euo pipefail
 
@@ -47,7 +47,6 @@ DEMO_CODE="PTY-2026-001001-0"
 
 export DATABASE_URL="${DATABASE_URL:-postgresql://shipping:shipping@127.0.0.1:5432/shipping_hub?schema=public}"
 export JWT_ACCESS_SECRET="${JWT_ACCESS_SECRET:-local-access-secret-change-me-at-least-32-chars}"
-export JWT_REFRESH_SECRET="${JWT_REFRESH_SECRET:-local-refresh-secret-change-me-at-least-32-chars}"
 export PORT="$API_PORT"
 export CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:3000}"
 export PUBLIC_WEB_URL="${PUBLIC_WEB_URL:-http://localhost:3000}"

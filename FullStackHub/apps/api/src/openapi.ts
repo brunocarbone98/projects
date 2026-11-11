@@ -80,7 +80,8 @@ export const openapiDocument = {
           accessToken: { type: "string" },
           refreshToken: { type: "string" },
           tokenType: { type: "string", enum: ["Bearer"] },
-          expiresIn: { type: "integer" },
+          expiresIn: { type: "integer", description: "Access token lifetime in seconds" },
+          refreshExpiresIn: { type: "integer", description: "Refresh token lifetime in seconds" },
         },
       },
       Parcel: {
@@ -213,14 +214,31 @@ export const openapiDocument = {
       post: {
         tags: ["Auth"],
         summary: "Rotate the refresh token",
-        responses: { "200": { description: "OK" } },
+        description:
+          "Single use. A token used or revoked in the last 30 seconds answers 401 INVALID_TOKEN (a concurrent request may hold its successor). Any other refused token answers 401 SESSION_ENDED: it can never be used again; one revoked more than 30 seconds earlier also revokes the live refresh token of its sign-in (its token family).",
+        responses: {
+          "200": {
+            description: "OK",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/AuthTokens" } },
+            },
+          },
+          "401": {
+            description:
+              "INVALID_TOKEN: used or revoked in the last 30 seconds. SESSION_ENDED: unknown, expired or revoked earlier",
+          },
+          "429": { description: "Too many refresh requests from this client" },
+        },
       },
     },
     "/auth/logout": {
       post: {
         tags: ["Auth"],
         summary: "Revoke a refresh token",
-        responses: { "204": { description: "No content" } },
+        responses: {
+          "204": { description: "No content" },
+          "429": { description: "Too many logout requests from this client" },
+        },
       },
     },
     "/auth/me": {

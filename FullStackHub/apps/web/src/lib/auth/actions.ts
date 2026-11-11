@@ -1,6 +1,6 @@
 "use server";
 
-import type { AuthResponseDto, AuthTokensDto } from "@shipping-hub/shared";
+import { AuthTokensSchema, type AuthResponseDto, type AuthTokensDto } from "@shipping-hub/shared";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ApiError, serverApi } from "@/lib/server-api";
@@ -22,9 +22,12 @@ export interface AuthFormState {
 }
 
 async function persistTokens(tokens: AuthTokensDto): Promise<void> {
+  // serverApi only casts the body, and the cookies' lifetimes come from it: check it as the
+  // middleware does, so a malformed pair fails the sign-in instead of making a browser-session cookie.
+  const checked = AuthTokensSchema.parse(tokens);
   const store = await cookies();
-  store.set(ACCESS_COOKIE, tokens.accessToken, accessCookieOptions(tokens.expiresIn));
-  store.set(REFRESH_COOKIE, tokens.refreshToken, refreshCookieOptions());
+  store.set(ACCESS_COOKIE, checked.accessToken, accessCookieOptions(checked.expiresIn));
+  store.set(REFRESH_COOKIE, checked.refreshToken, refreshCookieOptions(checked.refreshExpiresIn));
 }
 
 export async function login(

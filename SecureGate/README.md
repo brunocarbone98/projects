@@ -147,7 +147,7 @@ CI does all of this automatically (API + web + Chrome) — see [`/.github/workfl
 |---|---|---|
 | Public tracking | contract · 400 · 404 · 429 | landing → result · not-found |
 | Quote | contract · validation | calculator → price |
-| Auth (login/refresh/me) | + JWT/authz negatives | sign-in · invalid-creds error |
+| Auth (register/login/refresh/me) | contract (incl. `refreshExpiresIn`) · refresh rotation: a reused token `INVALID_TOKEN`, an unknown one `SESSION_ENDED` · JWT/authz negatives | sign-in · invalid-creds error |
 | Shipments | CRUD · owner-scoped authz | — |
 | Wallet | ledger · top-up · idempotency | — |
 | Language (es/en) | — | header switch |

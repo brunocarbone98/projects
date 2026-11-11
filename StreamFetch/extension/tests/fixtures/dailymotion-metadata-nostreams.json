@@ -1,0 +1,34 @@
+{
+  "id": "x8nohls",
+  "title": "A video that offers no HLS master",
+  "owner": {
+    "id": "x1owner",
+    "screenname": "Example Channel"
+  },
+  "duration": 42,
+  "created_time": 1711496732,
+  "explicit": true,
+  "thumbnails": {
+    "360": "https://posters.example-dm.test/v/NoHls/x360-thumb.jpg"
+  },
+  "qualities": {
+    "auto": [
+      {
+        "type": "application/vnd.lumberjack.manifest",
+        "url": "https://www.example-dm.test/cdn/manifest/video/x8nohls.lumberjack?sec=AbCdEf0123456789"
+      }
+    ],
+    "720": [
+      {
+        "type": "video/mp4",
+        "url": "https://cdn.example-dm.test/sec(AbCdEf0123456789)/video/x8nohls/H264-1280x720.mp4"
+      }
+    ],
+    "380": [
+      {
+        "type": "video/mp4",
+        "url": "https://cdn.example-dm.test/sec(AbCdEf0123456789)/video/x8nohls/H264-640x380.mp4"
+      }
+    ]
+  }
+}

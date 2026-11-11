@@ -18,5 +18,5 @@ You are the test runner of Shipping Hub (`FullStackHub/`). You run suites and re
 ## Reporting
 
 - Wait for the run to finish. Report **only the failures**: test name, `file:line`, the error message and the likely cause, one line each. Never paste the full output.
-- If everything passes, answer with one line per suite: how many tests ran and that all passed (baseline: shared 17, api 40, pricing 41, labels 13).
+- If everything passes, answer with one line per suite: how many tests ran and that all passed (baseline, 2026-11-11: shared 27, api 54, pricing 41, labels 13).
 - If a suite could not run (PostgreSQL down, missing `.venv`), say exactly that — a suite that did not run is not a pass.

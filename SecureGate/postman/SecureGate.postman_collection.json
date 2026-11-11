@@ -187,6 +187,7 @@
                   "pm.test('returns a CUSTOMER + tokens', () => {",
                   "  pm.expect(b.user.role).to.eql('CUSTOMER');",
                   "  pm.expect(b.tokens.accessToken).to.be.a('string');",
+                  "  pm.expect(b.tokens.refreshExpiresIn).to.be.a('number').and.above(0);",
                   "});",
                   "pm.collectionVariables.set('accessToken', b.tokens.accessToken);"
                 ]

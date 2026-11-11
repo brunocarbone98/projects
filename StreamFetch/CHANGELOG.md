@@ -1,0 +1,17 @@
+# Changelog
+
+One version for the whole of StreamFetch for Chrome — `extension/manifest.json` (shown in `chrome://extensions` and next to the title of the StreamFetch tab) and `extension/package.json`. Every change users can see ships with a new number: a new feature raises the middle number (1.0.0 → 1.1.0), a fix the last one (1.0.0 → 1.0.1). Dates are the day the version was finished.
+
+## 1.0.0 — 2026-11-11
+
+The first version: a Chrome extension (Load unpacked, Windows first) that saves videos from Dailymotion, Bilibili.tv and Bilibili as MP4 files, for your own offline viewing, with your own browser session.
+
+- Paste several links at once, one per line: Dailymotion videos (`dailymotion.com/video/…`, `dai.ly/…`, embeds), Bilibili.tv user videos, episodes and whole series (`bilibili.tv/<lang>/video/…`, `…/play/…`, with or without the language and the `bstar_from` tracking parameter), and Bilibili videos (`bilibili.com/video/BV…`, `av…`, `b23.tv/…` short links, a single part with `?p=N`). The same video pasted twice is taken once; anything else is refused with the reason before anything starts.
+- A page like SnapAny's: **Analyze** shows every video with its cover, title, duration and a quality selector — one row per Bilibili part, one row per Bilibili.tv episode under the series' header — and **Download all** saves them one after the other.
+- The highest quality your session is served, by default: the best resolution first, H.264 preferred among streams of that resolution (**Compatible**), or the highest bandwidth whatever the codec (**Best**); the best AAC sound, or with **Best** Bilibili's FLAC or Dolby when your session gets them. Each row's selector can choose another quality; qualities that need a premium membership are shown, disabled, so you know they exist.
+- Complete files: picture and sound copied as served (nothing re-encoded) into one standard MP4 that every player opens, checked before it is saved — one video and one audio track, the duration within 3 s or 5 % of what the site says, and no piece of the picture or sound missing in between. A short, incomplete or trial file is never saved as the video; a segment the site sends back as an error page is retried, never used.
+- The video's title and cover embedded in every file (the cover can be turned off in Settings; a cover that cannot be had never stops the video from being saved).
+- Polite by design: one video and one request at a time, pauses you can only lengthen, a few retries with back-off, and a full stop with a 30-minute cooldown as soon as a site refuses — also when the refusal comes while a video's later parts or a series' later episodes are being read (nothing of that link is downloaded then), and on the list's thumbnails. The cooldown banner says why, in your language.
+- The videos that did not download are listed apart, with **Retry** and a JSON report (saved on its own at the end of such a run, or with **Save the report**) that says, for each one, what the site answered and the probable cause — never a cookie, a token or a signed address. A video whose media comes from a host StreamFetch does not cover yet says which host: send the report.
+- English and Spanish, the last 20 runs with their counts (each video kept as its plain address, without the parameters share links add), files named after the video in `Downloads/StreamFetch/<site>/`; a full disk is said as such.
+- Never bypasses DRM, paywalls, geo-restrictions or logins; encrypted media is refused and never saved.

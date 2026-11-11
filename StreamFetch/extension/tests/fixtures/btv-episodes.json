@@ -1,0 +1,42 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "sections": [
+      {
+        "title": "Season 1",
+        "episodes": [
+          {
+            "episode_id": 30010001,
+            "title": "The Beginning",
+            "title_display": "E1 - The Beginning",
+            "short_title_display": "E1",
+            "cover": "https://pic.bstarstatic.example/ogv/0000000000000000000000000000000000000001.png",
+            "duration": 1440000
+          },
+          {
+            "episode_id": 30010002,
+            "title": "A \"Quoted\" Middle",
+            "title_display": "E2 - A \"Quoted\" Middle",
+            "short_title_display": "E2",
+            "cover": "https://pic.bstarstatic.example/ogv/0000000000000000000000000000000000000002.png",
+            "duration": 1438000
+          }
+        ]
+      },
+      {
+        "title": "Specials",
+        "episodes": [
+          {
+            "episode_id": "30010003",
+            "title": "The End {special}",
+            "title_display": "E3 - The End {special}",
+            "short_title_display": "E3",
+            "cover": "https://pic.bstarstatic.example/ogv/0000000000000000000000000000000000000003.png"
+          }
+        ]
+      }
+    ]
+  }
+}

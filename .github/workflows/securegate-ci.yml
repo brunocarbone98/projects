@@ -27,6 +27,10 @@ jobs:
   qa-suite:
     name: API + BDD + UI vs. local Shipping Hub
     runs-on: ubuntu-latest
+    # A job that hangs (a server that never answers, a stuck browser) ends red here instead of after
+    # GitHub's default six hours. Normally 2 to 10 minutes (install, web build, the API and UI
+    # suites, Newman, the reports); 30 leaves room for a cold cache.
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -46,7 +50,6 @@ jobs:
     env:
       DATABASE_URL: postgresql://shipping:shipping@localhost:5432/shipping_hub?schema=public
       JWT_ACCESS_SECRET: ci-access-secret-change-me-at-least-32-chars
-      JWT_REFRESH_SECRET: ci-refresh-secret-change-me-at-least-32-chars
       PORT: "4000"
       CORS_ORIGINS: http://localhost:3000
       PUBLIC_WEB_URL: http://localhost:3000

@@ -1,0 +1,26 @@
+{
+  "id": "{{ID}}",
+  "title": "{{TITLE}}",
+  "channel": "news",
+  "owner": {
+    "id": "x1fakeowner",
+    "screenname": "Fake Channel",
+    "username": "fakechannel",
+    "url": "https://www.dailymotion.com/fakechannel",
+    "verified": false,
+    "accounttype": "partner"
+  },
+  "duration": 6,
+  "created_time": 1762560000,
+  "explicit": false,
+  "url": "https://www.dailymotion.com/video/{{ID}}",
+  "language": "en",
+  "views_total": 1234,
+  "tags": ["fixture"],
+  "is_created_for_kids": false,
+  "thumbnails": {},
+  "posters": {},
+  "qualities": {"auto": []},
+  "subtitles": {"enable": false, "data": {}},
+  "reporting": {"enabled": false}
+}

@@ -9,6 +9,7 @@ export type ErrorCode =
   | "EMAIL_TAKEN"
   | "INVALID_TRANSITION"
   | "INVALID_TOKEN"
+  | "SESSION_ENDED"
   | "RATE_LIMITED"
   | "INSUFFICIENT_FUNDS"
   | "ALREADY_PAID"

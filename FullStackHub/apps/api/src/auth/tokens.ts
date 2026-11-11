@@ -19,14 +19,24 @@ const AccessClaimsSchema = z.object({
   role: z.enum(USER_ROLES),
 });
 
+/**
+ * The one algorithm access tokens are signed and verified with. Verification accepts nothing else,
+ * so a token signed with another algorithm (HS384 or HS512 with the same key, `none`, an asymmetric
+ * one) is refused whatever its header says.
+ */
+export const ACCESS_TOKEN_ALGORITHM = "HS256";
+
 export function signAccessToken(claims: AccessClaims): string {
-  return jwt.sign(claims, env.JWT_ACCESS_SECRET, { expiresIn: env.ACCESS_TOKEN_TTL });
+  return jwt.sign(claims, env.JWT_ACCESS_SECRET, {
+    algorithm: ACCESS_TOKEN_ALGORITHM,
+    expiresIn: env.ACCESS_TOKEN_TTL,
+  });
 }
 
 export function verifyAccessToken(token: string): AccessClaims {
   let decoded: unknown;
   try {
-    decoded = jwt.verify(token, env.JWT_ACCESS_SECRET);
+    decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, { algorithms: [ACCESS_TOKEN_ALGORITHM] });
   } catch {
     throw new AppError(401, "INVALID_TOKEN", "Access token is invalid or expired");
   }
@@ -43,9 +53,12 @@ export interface GeneratedRefreshToken {
   expiresAt: Date;
 }
 
+/** How long a refresh token lives, in seconds; the API sends it as `refreshExpiresIn`. */
+export const REFRESH_TOKEN_TTL_SECONDS = env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60;
+
 export function generateRefreshToken(): GeneratedRefreshToken {
   const token = randomBytes(48).toString("base64url");
-  const expiresAt = new Date(Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_SECONDS * 1000);
   return { token, tokenHash: hashRefreshToken(token), expiresAt };
 }
 
