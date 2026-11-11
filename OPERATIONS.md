@@ -62,6 +62,15 @@ Subagents are Markdown files with YAML frontmatter (`name`, `description`, `tool
 
 A session started at the repository root lists only the root agents, so the shifts run these two as a `general-purpose` subagent told to follow the agent's file.
 
+### 2.5 StreamFetch — `StreamFetch/.claude/agents/`
+
+| Agent | Scope | Tools | Model |
+| --- | --- | --- | --- |
+| `code-reviewer` | Reviews StreamFetch changes — the Chrome extension's lib and app modules, manifest, locales, unit tests, the end-to-end suite and fake sites, docs — read-only, against the Scope and the owner's eight acceptance criteria in `StreamFetch/CLAUDE.md`: nothing decrypts, bypasses a paywall, geo or login restriction, forges a site's signature or injects into a page; the permissions contract and the one `Referer` / `Origin` rule; the three sites' link shapes (Bilibili.tv ids as strings); complete, verified progressive MP4s with audio and video in the highest quality served, cover and title embedded; every pacing floor and the cooldown; no cookie, token or query string in the report; both locales in step; cited site facts | Read, Grep, Glob, Bash (read-only `git diff`/`log`/`show`/`status` and the read-only checks) | inherit |
+| `test-runner` | StreamFetch's definition of done: the extension's `node --test` (ffmpeg/ffprobe for the media proofs) and `tsc`, the end-to-end `pytest` suite (the Chromium at `/opt/pw-browsers/chromium` or `STREAMFETCH_CHROMIUM`) and `ruff` over `tests/`, all under `STREAMFETCH_REQUIRE_TOOLS=1`; reports the counts and only the failures; a skipped suite is "not run" | Bash, Read | haiku |
+
+StreamFetch is not yet part of a shift (no upstream watch, no nightly step); a root session runs these two the same way, as a `general-purpose` subagent that follows the agent's file.
+
 ## 3. Shifts
 
 A shift is a scheduled job. Its prompt is a complete, standalone Markdown file in `.claude/shifts/`: identity and goal, environment notes (cloud network limits, the helper scripts), step-by-step, decision rules, exact outputs (branch, PR and issue titles with labels), the guardrails of section 5, and the report format. The Claude Code cloud scheduled task resumes the shift's standing session and tells it to sync the checkout, read `.claude/shifts/<name>.md` and follow it (the stored prompt is described in 4.2); the session clones the repository, does the work and ends. GitHub Actions workflows cover what the cloud cannot reach (the live app, a browser) and what must react to events (`@claude` mentions, PRs, pushes).
@@ -138,7 +147,7 @@ A shift is a scheduled job. Its prompt is a complete, standalone Markdown file i
 | `.github/workflows/labels.yml` | `Sync labels` | `workflow_dispatch`; push to `main` touching `.github/labels.json` or the workflow itself — creates or updates the eight labels from `.github/labels.json`, never deletes one |
 | `.github/dependabot.yml` | Dependabot | weekly Mondays 04:00 America/Panama (npm, pip, Maven — grouped minor/patch, DramaFetch one PR per floor; at most 5 open PRs per directory entry, 10 for `/DramaFetch`); GitHub Actions monthly, grouped |
 
-**Timeouts and caches.** Every job sets `timeout-minutes` at about three times its normal duration — `CI`: `lint-and-typecheck` 20, `test` 30, `dramafetch` 60; `SecureGate CI`: 30; `Uptime patrol`: 15; `Claude on-call`: 60; `Sync labels`: 10 — so a job that hangs ends red instead of running for GitHub's default six hours. The `dramafetch` job caches Playwright's browsers (`actions/cache`, `~/.cache/ms-playwright`, keyed on the runner OS and the Playwright version installed in the job; `playwright install --with-deps chromium` still runs and, on a hit, only checks the OS dependencies) and retries apt downloads (`apt-get -o Acquire::Retries=3`). Its slow day, 2026-11-10 (16 minutes of apt for ffmpeg, 5 for Chromium), is what made the old 25-minute post-merge wait revert a green merge (#92).
+**Timeouts and caches.** Every job sets `timeout-minutes` at about three times its normal duration — `CI`: `lint-and-typecheck` 20, `test` 30, `dramafetch` 60, `streamfetch` 60; `SecureGate CI`: 30; `Uptime patrol`: 15; `Claude on-call`: 60; `Sync labels`: 10 — so a job that hangs ends red instead of running for GitHub's default six hours. The `dramafetch` and `streamfetch` jobs cache Playwright's browsers (`actions/cache`, `~/.cache/ms-playwright`, keyed on the runner OS and the Playwright version installed in the job; `playwright install --with-deps chromium` still runs and, on a hit, only checks the OS dependencies) and retry apt downloads (`apt-get -o Acquire::Retries=3`). Its slow day, 2026-11-10 (16 minutes of apt for ffmpeg, 5 for Chromium), is what made the old 25-minute post-merge wait revert a green merge (#92).
 
 **Enabling Claude on-call.** The workflow needs one secret:
 
@@ -241,6 +250,7 @@ Verified behaviour behind rule 7: with no Shipping Hub reachable, `./mvnw -q ver
 | Shift sessions — the full transcript: every command, output and decision | the scheduled-task list in claude.ai/code → the task → its sessions |
 | SecureGate reports from CI | a SecureGate CI run → Artifacts → `securegate-reports` (Serenity HTML, Karate HTML, surefire XML) |
 | DramaFetch's Chrome extension as CI built it | a CI run → Artifacts → `dramafetch-extension` (`manifest.json`, `_locales`, `icons`, `src`: unzip and **Load unpacked**) |
+| StreamFetch's Chrome extension as CI built it | a CI run → Artifacts → `streamfetch-extension` (`manifest.json`, `_locales`, `icons`, `src`: unzip and **Load unpacked**) |
 | What changed upstream for DramaFetch — known vulnerabilities and newer releases of its dependencies, yt-dlp's TikTok changelog entries and extractor changes, Chrome Stable | `.claude/scripts/dramafetch-watch.sh` from the repository root: the Markdown report the nightly and weekly shifts start from (read-only, primary sources only, never TikTok; an unreachable source is listed, not fatal) |
 | Badges | the top of `README.md`: CI, SecureGate CI, Uptime patrol, Claude on-call |
 
