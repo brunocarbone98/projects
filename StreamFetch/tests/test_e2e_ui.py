@@ -118,20 +118,23 @@ def test_a_second_streamfetch_tab_is_read_only(media: MediaSet, tmp_path: Path):
             "the second tab can start a download",
         )
         assert not ext.enabled("#analyze-button", second)
-        # even a forced click there starts nothing
+        # even a forced click there — the buttons enabled by hand, so the clicks reach the page's
+        # own handlers (a disabled button swallows a click) — starts nothing
         second.evaluate(
-            "(link) => { const box = document.querySelector('#links'); box.value = link;"
-            " document.querySelector('#download-all-button').click();"
-            " document.querySelector('#analyze-button').click(); }",
+            "(link) => { document.querySelector('#links').value = link;"
+            " for (const id of ['#download-all-button', '#analyze-button']) {"
+            " const button = document.querySelector(id);"
+            " button.disabled = false; button.click(); } }",
             DM.format(DM_SHORT_ID),
         )
-        time.sleep(1.5)
-        assert sites.requests == []
-        # the first tab holds the engine and works
+        # the first tab holds the engine and works; its whole run is the window in which a run
+        # started by the second tab would have asked for the second tab's link
         ext.download_all(DM.format(DM_TS_ID))
         assert ext.row_of(DM_TS_ID).status == "done"
-        assert sites.about(DM_SHORT_ID) == []
-        assert not ext.enabled("#download-all-button", second)
+        assert sites.about(DM_SHORT_ID) == [], "the second tab started a run"
+        assert second.evaluate("document.querySelector('#app-status').dataset.state") == "readonly"
+        assert ext.rows(second) == [], "the second tab resolved something"
+        assert second.is_visible("#readonly-banner")
 
 
 def test_retry_runs_again_exactly_the_inputs_that_did_not_download(media: MediaSet, tmp_path: Path):

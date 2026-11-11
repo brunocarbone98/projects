@@ -29,13 +29,16 @@ import {
   hostCovered,
   jpegFromImage,
   keyMethodOf,
+  mediaGap,
   mediaProblem,
+  mp4SegmentProblem,
   oneLine,
   pathOf,
   pathRegex,
   refererRule,
   saveBlob,
   traceOf,
+  tsSegmentProblem,
 } from "../src/app/downloader.js";
 import { WorkFiles } from "../src/app/files.js";
 import { parseMedia } from "../src/lib/hls.js";
@@ -821,6 +824,204 @@ test("HLS: a key-protected or live playlist is refused before any media request"
   const live = hlsTarget("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\na.ts\n", "https://proxy-07.dailymotion.com/m.m3u8");
   assert.equal((await download(live, context(net.fetch).ctx)).failure?.code, "live_stream");
   assert.equal(net.calls.length, 0);
+});
+
+test("HLS: a refreshed playlist passes the same refusals — a key appearing after the refresh is refused before any request", { skip: mediaSkip() }, async () => {
+  const hls = hlsTsFixture();
+  const base = "https://proxy-07.dailymotion.com/sec(1)/hls";
+  const freshBase = "https://proxy-07.dailymotion.com/sec(2)/hls";
+  /** @type {Record<string, Handler>} */
+  const routes = {};
+  hls.segments.forEach((segment, index) => {
+    const name = `seg${String(index).padStart(3, "0")}.ts`;
+    routes[`${base}/${name}`] = index === 1 ? () => ({ status: 403 }) : servedFile(readFileSync(segment));
+    routes[`${freshBase}/${name}`] = servedFile(readFileSync(segment));
+  });
+  const net = network(routes);
+  const mediaText = readFileSync(hls.media, "utf8");
+  const keyed = mediaText.replace("#EXTINF", '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://k"\n#EXTINF');
+  const { ctx, saved, root } = context(net.fetch, {
+    refresh: async (stale) => {
+      const raw = /** @type {import("../src/app/resolver.js").HlsRaw} */ (stale.raw);
+      const media = parseMedia(keyed, `${freshBase}/media.m3u8`);
+      return { ok: true, streams: /** @type {import("../src/app/resolver.js").StreamChoice} */ (stale.streams), raw: { ...raw, media, keyMethod: "SAMPLE-AES" } };
+    },
+  });
+  const result = await download(hlsTarget(mediaText, `${base}/media.m3u8`), ctx);
+  assert.equal(result.failure?.code, "key_protected");
+  assert.equal(result.failure?.params["method"], "SAMPLE-AES");
+  assert.deepEqual(net.calls.map((call) => call.url.split("/").slice(-2).join("/")), ["hls/seg000.ts", "hls/seg001.ts"], "nothing of the protected stream requested");
+  assert.equal(saved.length, 0);
+  assert.deepEqual(leftovers(root), []);
+});
+
+test("HLS: the row's chosen variant is downloaded — its media playlist read again, then its segments", { skip: mediaSkip() }, async () => {
+  const hls = hlsTsFixture();
+  const base = "https://proxy-07.dailymotion.com/sec(1)/1080";
+  const chosenBase = "https://proxy-07.dailymotion.com/sec(1)/480";
+  const mediaText = readFileSync(hls.media, "utf8");
+  /** @type {Record<string, Handler>} */
+  const routes = { [`${chosenBase}/media.m3u8`]: () => ({ body: mediaText, headers: { "content-type": "application/vnd.apple.mpegurl" } }) };
+  hls.segments.forEach((segment, index) => {
+    routes[`${chosenBase}/seg${String(index).padStart(3, "0")}.ts`] = servedFile(readFileSync(segment));
+  });
+  const net = network(routes);
+  const { ctx, saved } = context(net.fetch);
+  const target = hlsTarget(mediaText, `${base}/media.m3u8`);
+  const streams = /** @type {import("../src/app/resolver.js").HlsChoice} */ (target.streams);
+  const chosen = { ...streams.variant, url: `${chosenBase}/media.m3u8`, height: 480, width: 854, name: "480" };
+  target.streams = { ...streams, variant: chosen, available: [streams.variant, chosen] };
+  const result = await download(target, ctx);
+  assert.equal(result.status, "done", JSON.stringify(result.failure));
+  assert.deepEqual(
+    net.calls.map((call) => call.url.split("/").slice(-2).join("/")),
+    ["480/media.m3u8", ...hls.segments.map((_s, index) => `480/seg${String(index).padStart(3, "0")}.ts`)],
+    "the chosen variant's playlist and segments, never the first variant's",
+  );
+  assertSameAsSource(/** @type {Uint8Array} */ (saved[0]?.bytes), "saved-hls-chosen.mp4");
+});
+
+test("HLS: an error page or an empty body served with a 200 where a segment belongs is retried, never demuxed or appended", { skip: mediaSkip() }, async () => {
+  for (const [kind, fixture] of /** @type {const} */ ([["ts", hlsTsFixture()], ["fmp4", hlsFmp4Fixture()]])) {
+    const base = `https://proxy-07.dailymotion.com/sec(1)/${kind}`;
+    const ext = kind === "ts" ? "ts" : "m4s";
+    /** @type {Record<string, Handler>} */
+    const routes = {};
+    if (fixture.init !== null) routes[`${base}/init.mp4`] = servedFile(readFileSync(fixture.init));
+    fixture.segments.forEach((segment, index) => {
+      const file = servedFile(readFileSync(segment));
+      // the middle segment: an error page the first time, an empty body the second, then itself
+      routes[`${base}/seg${String(index).padStart(3, "0")}.${ext}`] =
+        index !== 1
+          ? file
+          : (url, headers, count) =>
+              count === 1
+                ? { body: "<html><body>Service Unavailable</body></html>", headers: { "content-type": "text/html" } }
+                : count === 2
+                  ? { body: new Uint8Array(0), headers: { "content-length": "0" } }
+                  : file(url, headers, count);
+    });
+    const net = network(routes);
+    const { ctx, saved, sleeps } = context(net.fetch);
+    const result = await download(hlsTarget(readFileSync(fixture.media, "utf8"), `${base}/media.m3u8`), ctx);
+    assert.equal(result.status, "done", `${kind}: ${JSON.stringify(result.failure)}`);
+    const middle = result.attempts.filter((attempt) => attempt.url.endsWith(`seg001.${ext}`));
+    assert.deepEqual(middle.map((attempt) => attempt.outcome.split(":")[0]), ["refused", "refused", middle[2]?.outcome.split(":")[0]]);
+    assert.match(String(middle[0]?.outcome), /not (MPEG-TS|MP4 boxes)/);
+    assert.match(String(middle[1]?.outcome), /an empty body/);
+    assert.deepEqual(sleeps.filter((seconds) => seconds >= 1), [1, 2], `${kind}: the retry back-off`);
+    assertSameAsSource(/** @type {Uint8Array} */ (saved[0]?.bytes), `saved-hls-${kind}-retried.mp4`);
+  }
+  // an error page every time: the segment fails after its retries, nothing saved
+  const hls = hlsTsFixture();
+  const base = "https://proxy-07.dailymotion.com/sec(1)/broken";
+  /** @type {Record<string, Handler>} */
+  const routes = {};
+  hls.segments.forEach((segment, index) => {
+    routes[`${base}/seg${String(index).padStart(3, "0")}.ts`] =
+      index === 1 ? () => ({ body: "<html>busy</html>", headers: { "content-type": "text/html" } }) : servedFile(readFileSync(segment));
+  });
+  const net = network(routes);
+  const { ctx, saved } = context(net.fetch);
+  const result = await download(hlsTarget(readFileSync(hls.media, "utf8"), `${base}/media.m3u8`), ctx);
+  assert.deepEqual(result.failure, { code: "not_a_video", params: { content_type: "text/html (not MPEG-TS)" } });
+  assert.equal(net.calls.filter((call) => call.url.endsWith("seg001.ts")).length, 4, "the request and its three retries");
+  assert.equal(saved.length, 0);
+});
+
+test("HLS: a segment missing from the middle is a hole — verification fails although the duration matches", { skip: mediaSkip() }, async () => {
+  const hls = hlsTsFixture();
+  const base = "https://proxy-07.dailymotion.com/sec(1)/holed";
+  /** @type {Record<string, Handler>} */
+  const routes = {};
+  hls.segments.forEach((segment, index) => {
+    routes[`${base}/seg${String(index).padStart(3, "0")}.ts`] = servedFile(readFileSync(segment));
+  });
+  // a playlist that lacks its second segment: what a lost segment leaves in the track
+  const lines = readFileSync(hls.media, "utf8").split("\n");
+  const at = lines.findIndex((line) => line.startsWith("seg001.ts"));
+  lines.splice(at - 1, 2);
+  const net = network(routes);
+  const { ctx, saved, root } = context(net.fetch);
+  const result = await download(hlsTarget(lines.join("\n"), `${base}/media.m3u8`), ctx);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.code, "verify_failed");
+  assert.match(String(result.failure?.params["reason"]), /^video: 2\.\d s missing at 2\.\d s$/);
+  assert.equal(saved.length, 0, "never saved as the video");
+  assert.deepEqual(leftovers(root), []);
+});
+
+test("mediaGap: a step longer than four typical ones and half a second is a hole; after damage, 1.5 typical ones", () => {
+  /** @param {number[]} dts @param {number} timescale @returns {import("../src/lib/mp4.js").TrackPlan} */
+  const plan = (dts, timescale) => ({
+    kind: "video",
+    timescale,
+    stsd: new Uint8Array(0),
+    width: null,
+    height: null,
+    sampleRate: null,
+    channelCount: null,
+    language: "und",
+    samples: dts.map((value) => ({ dts: value, cts: value, size: 1, sync: true, data: { file: "f", offset: 0 } })),
+  });
+  const steady = Array.from({ length: 50 }, (_v, index) => index * 3600); // 25 fps at 90 kHz
+  assert.equal(mediaGap(plan(steady, 90000), false), null);
+  assert.equal(mediaGap(plan(steady, 90000), true), null);
+  // frames 0–19, then 70–99: two seconds (50 frames) lost after 0.8 s
+  const holed = [...Array.from({ length: 20 }, (_v, index) => index * 3600), ...Array.from({ length: 30 }, (_v, index) => (70 + index) * 3600)];
+  const gap = mediaGap(plan(holed, 90000), false);
+  assert.ok(gap !== null);
+  assert.equal(Math.round(gap.atS * 100) / 100, 0.8);
+  assert.equal(Math.round(gap.missingS * 100) / 100, 2);
+  // one lost frame: not a hole in a clean stream, a hole after the demuxer met damage
+  const oneLost = [...steady.slice(0, 10), ...steady.slice(11)];
+  assert.equal(mediaGap(plan(oneLost, 90000), false), null);
+  assert.deepEqual(mediaGap(plan(oneLost, 90000), true), { atS: 0.4, missingS: 0.04 });
+  // a low frame rate (1 fps): a 2 s step is not a hole, a 5 s one is
+  assert.equal(mediaGap(plan([0, 1, 2, 3, 5, 6, 7].map((s) => s * 1000), 1000), false), null);
+  assert.ok(mediaGap(plan([0, 1, 2, 3, 8, 9, 10].map((s) => s * 1000), 1000), false) !== null);
+  assert.equal(mediaGap(plan([0, 1], 1000), false), null, "too short to tell");
+});
+
+test("segment checks: a TS packet, an MP4 box; anything else or nothing is not media", () => {
+  const packet = new Uint8Array(188);
+  packet[0] = 0x47;
+  assert.equal(tsSegmentProblem(packet), null);
+  assert.equal(tsSegmentProblem(new Uint8Array(0)), "an empty body");
+  assert.equal(tsSegmentProblem(new TextEncoder().encode("<html><body>Service Unavailable</body></html>".repeat(5))), "not MPEG-TS");
+  const styp = new Uint8Array([0, 0, 0, 16, 0x73, 0x74, 0x79, 0x70, 0x6d, 0x73, 0x64, 0x68, 0, 0, 0, 0, 0, 0]);
+  assert.equal(mp4SegmentProblem(styp), null);
+  assert.equal(mp4SegmentProblem(styp.slice(0, 12)), "not MP4 boxes", "a box longer than the body");
+  assert.equal(mp4SegmentProblem(new TextEncoder().encode('{"error":"busy"}')), "not MP4 boxes");
+  assert.equal(mp4SegmentProblem(new TextEncoder().encode("<html><body>x</body></html>")), "not MP4 boxes");
+  assert.equal(mp4SegmentProblem(new Uint8Array(0)), "an empty body");
+});
+
+test("a full disk while the work files are written is save_failed, never a network failure", { skip: mediaSkip() }, async () => {
+  const dash = dashFixture();
+  const net = network({ [VIDEO_URL]: servedFile(readFileSync(dash.video)), [AUDIO_URL]: servedFile(readFileSync(dash.audio)) });
+  const { ctx, saved, root } = context(net.fetch);
+  const files = ctx.files;
+  const open = files.appendWriter.bind(files);
+  files.appendWriter = async (name) => {
+    const writer = await open(name);
+    return {
+      name: writer.name,
+      size: () => writer.size(),
+      write: async () => {
+        throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+      },
+      truncate: (size) => writer.truncate(size),
+      close: () => writer.close(),
+      abort: () => writer.abort(),
+    };
+  };
+  const result = await download(dashTarget([VIDEO_URL], [AUDIO_URL]), ctx);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.code, "save_failed");
+  assert.match(String(result.failure?.params["reason"]), /^not enough free disk space \(.*quota.*\)$/i);
+  assert.equal(saved.length, 0);
+  assert.deepEqual(leftovers(root), []);
 });
 
 test("Stop ends the current request and the download is stopped; the work files go", { skip: mediaSkip() }, async () => {

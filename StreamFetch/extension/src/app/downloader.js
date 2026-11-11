@@ -149,7 +149,10 @@ export const SITE_ORIGINS = Object.freeze(
 /**
  * The domains (and their subdomains) whose requests by the extension carry the site's `Referer`:
  * the media hosts of the manifest's host permissions (a Bilibili.tv rule also covers its API, which
- * wants the same `Referer`, and the shared Bilibili CDNs its media may come from).
+ * wants the same `Referer`, and the shared Bilibili CDNs its media may come from). Dailymotion's
+ * player metadata, HLS master and media playlists live on the same `dailymotion.com` domain as its
+ * media, so the extension's own requests for them carry the same `Referer` (and no `Origin`) —
+ * what the site's player sends when it asks for them; the rule never touches another initiator.
  */
 export const MEDIA_DOMAINS = Object.freeze(
   /** @type {Record<SiteName, readonly string[]>} */ ({
@@ -187,6 +190,18 @@ export const DURATION_TOLERANCE_S = 3;
 export const DURATION_TOLERANCE_RATIO = 0.05;
 /** How far `mp4.probe`'s reading of a written track may be from what the writer wrote. */
 export const WRITER_TOLERANCE_S = 0.002;
+/**
+ * The longest step between two consecutive samples of a track that is not a hole: a step longer
+ * than {@link GAP_FACTOR} typical steps and {@link GAP_TOLERANCE_S} is media the file lacks (a
+ * segment lost to an error page, a fragment that never came) — the file is never saved as the
+ * video, even when its end-to-end duration still matches the site's.
+ */
+export const GAP_TOLERANCE_S = 0.5;
+export const GAP_FACTOR = 4;
+/** After the MPEG-TS demuxer met damaged data, any step longer than 1.5 typical ones is a hole. */
+export const DAMAGED_GAP_FACTOR = 1.5;
+/** The size of an MPEG-TS packet; a TS segment starts with one (sync byte `0x47`). */
+const TS_PACKET_BYTES = 188;
 /** The largest cover image read (a bigger one is left out; an embedded one must still fit
  * `lib/remux.MAX_COVER_BYTES`, after a conversion to JPEG if one is needed). */
 export const MAX_COVER_DOWNLOAD_BYTES = 16 * 1024 * 1024;
@@ -610,7 +625,10 @@ export async function withRetries(step, net) {
  * @param {RequestKind} kind
  * @param {NetContext} net
  * @param {Attempt[]} attempts
- * @param {{ accept?: string, byteRange?: HlsByteRange | null, maxBytes?: number }} [options]
+ * @param {{ accept?: string, byteRange?: HlsByteRange | null, maxBytes?: number,
+ *   check?: (bytes: Uint8Array) => string | null }} [options] `check` names what is wrong with a
+ *   complete answer (an error page or an empty body served with a 200 where media belongs): the
+ *   answer is `not_a_video`, retried by the rules
  * @returns {Promise<{ bytes: Uint8Array, url: string, contentType: string, attempt: Attempt }>}
  */
 export async function fetchBytes(url, kind, net, attempts, options = {}) {
@@ -646,6 +664,16 @@ export async function fetchBytes(url, kind, net, attempts, options = {}) {
         failure("truncated_body", { received: bytes.length, expected: byteRange.length }),
         { retryable: true },
       );
+    }
+    const wrong = options.check?.(bytes) ?? null;
+    if (wrong !== null) {
+      opened.attempt.outcome = `refused: ${wrong}`;
+      const type = opened.attempt.content_type;
+      const shown = type ? `${type} (${wrong})` : wrong;
+      const contentType = bytes.length === 0 ? "an empty body" : shown;
+      throw new StepFailure(failure("not_a_video", { content_type: contentType }), {
+        retryable: true,
+      });
     }
     return {
       bytes,
@@ -1283,6 +1311,11 @@ async function downloadHls(target, ctx, work, attempts, counter, health) {
     target.streams = streams;
     target.raw = raw;
     const fresh = { main: raw.media, audio: raw.audioMedia };
+    // the refreshed playlists pass the same refusals as the first ones, before any request
+    for (const one of [fresh.main, fresh.audio]) {
+      const problem = one === null ? null : mediaProblem(one, raw.keyMethod);
+      if (problem !== null) throw new StepFailure(problem);
+    }
     for (const source of sources) {
       const next = fresh[source.role];
       if (next === null || next.segments.length !== source.media.segments.length) {
@@ -1307,6 +1340,7 @@ async function downloadHls(target, ctx, work, attempts, counter, health) {
         const answer = await fetchBytes(url, kind, ctx.net, attempts, {
           byteRange,
           maxBytes: MAX_SEGMENT_BYTES,
+          check: source.media.container === "ts" ? tsSegmentProblem : mp4SegmentProblem,
         });
         meter.add(answer.bytes.length);
         return answer.bytes;
@@ -1661,6 +1695,10 @@ async function downloadDash(target, ctx, work, attempts, counter) {
  */
 function failureOf(error, stage) {
   if (error instanceof StepFailure) return error.failure;
+  if (error instanceof Error && error.name === "QuotaExceededError") {
+    // OPFS out of room: the work files need about twice the video's size until it is saved
+    return failure("save_failed", { reason: `not enough free disk space (${oneLine(error)})` });
+  }
   if (error instanceof Mp4Error && error.code === "encrypted") {
     return failure("encrypted", { detail: oneLine(error) });
   }
@@ -1669,6 +1707,73 @@ function failureOf(error, stage) {
   if (stage === "finish") return failure("remux_failed", { reason: oneLine(error) });
   if (stage === "verify") return failure("verify_failed", { reason: oneLine(error) });
   return failure("save_failed", { reason: oneLine(error) });
+}
+
+/**
+ * What is wrong with an MPEG-TS segment as served, or null: a TS segment starts with a packet
+ * (sync byte `0x47`); an empty body or anything else — an error page served with a 200 — is not
+ * one, and never reaches the demuxer.
+ * @param {Uint8Array} bytes
+ * @returns {string | null}
+ */
+export function tsSegmentProblem(bytes) {
+  if (bytes.length === 0) return "an empty body";
+  if (bytes.length < TS_PACKET_BYTES || bytes[0] !== 0x47) return "not MPEG-TS";
+  return null;
+}
+
+/**
+ * What is wrong with an fMP4 segment or init section as served, or null: it starts with a whole
+ * ISO BMFF box whose type is four printable characters (`styp`, `moof`, `sidx`, `ftyp`, …); an
+ * empty body or anything else is not one.
+ * @param {Uint8Array} bytes
+ * @returns {string | null}
+ */
+export function mp4SegmentProblem(bytes) {
+  if (bytes.length === 0) return "an empty body";
+  if (bytes.length < 8) return "not MP4 boxes";
+  for (let at = 4; at < 8; at += 1) {
+    const char = /** @type {number} */ (bytes[at]);
+    if (char < 0x20 || char > 0x7e) return "not MP4 boxes";
+  }
+  const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
+  if (size === 0) return null; // the box runs to the end
+  if (size === 1) return bytes.length >= 16 ? null : "not MP4 boxes";
+  return size < 8 || size > bytes.length ? "not MP4 boxes" : null;
+}
+
+/**
+ * The first hole in a track's timeline, or null: a step between two consecutive decode times
+ * longer than {@link GAP_FACTOR} typical steps (the median) and {@link GAP_TOLERANCE_S} — or,
+ * `damaged` (the MPEG-TS demuxer met damaged data), longer than {@link DAMAGED_GAP_FACTOR}
+ * typical steps. `atS` is where the hole starts (from the track's first sample), `missingS` how
+ * much media it lacks.
+ * @param {TrackPlan} plan
+ * @param {boolean} damaged
+ * @returns {{ atS: number, missingS: number } | null}
+ */
+export function mediaGap(plan, damaged) {
+  const samples = plan.samples;
+  if (samples.length < 3 || !(plan.timescale > 0)) return null;
+  const steps = new Float64Array(samples.length - 1);
+  for (let index = 1; index < samples.length; index += 1) {
+    const here = /** @type {TrackPlan["samples"][number]} */ (samples[index]);
+    const before = /** @type {TrackPlan["samples"][number]} */ (samples[index - 1]);
+    steps[index - 1] = here.dts - before.dts;
+  }
+  const typical = /** @type {number} */ (Float64Array.from(steps).sort()[steps.length >> 1]);
+  if (!(typical > 0)) return null;
+  const limit = damaged
+    ? DAMAGED_GAP_FACTOR * typical
+    : Math.max(GAP_FACTOR * typical, GAP_TOLERANCE_S * plan.timescale);
+  const first = /** @type {TrackPlan["samples"][number]} */ (samples[0]).dts;
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = /** @type {number} */ (steps[index]);
+    if (step <= limit) continue;
+    const start = /** @type {TrackPlan["samples"][number]} */ (samples[index]).dts + typical;
+    return { atS: (start - first) / plan.timescale, missingS: (step - typical) / plan.timescale };
+  }
+  return null;
 }
 
 /**
@@ -1764,6 +1869,13 @@ export async function download(target, ctx) {
     if (audio === undefined && audioExpected(streams)) {
       const reason = told("the source announced audio but carried no audio sample");
       return fail(failure("remux_failed", { reason }));
+    }
+    // a hole inside a track (lost media) fails the file even when its duration still matches
+    for (const plan of plans) {
+      const gap = mediaGap(plan, health.corrupt !== null);
+      if (gap === null) continue;
+      const missing = `${oneDecimal(gap.missingS)} s missing at ${oneDecimal(gap.atS)} s`;
+      return fail(failure("verify_failed", { reason: told(`${plan.kind}: ${missing}`) }));
     }
     const meta = await fileMeta(target, ctx, attempts, counter, result.notes);
     ctx.onStatus?.("finishing");

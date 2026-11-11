@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { makeCooldown } from "../src/lib/cooldown.js";
 import { failure } from "../src/lib/messages.js";
 import { StopRequested } from "../src/app/downloader.js";
-import { analyzeBatch, runBatch, streamsSummary } from "../src/app/engine.js";
+import { analyzeBatch, cooldownReason, runBatch, streamsSummary } from "../src/app/engine.js";
 
 /**
  * @typedef {import("../src/app/resolver.js").ResolveItem} ResolveItem
@@ -208,8 +208,58 @@ test("a 429 stops the run at once, records the cooldown once, the rest is stoppe
   const cooldown = /** @type {import("../src/lib/cooldown.js").Cooldown} */ (written[0]);
   assert.equal(cooldown.source, "bilibili");
   assert.equal(cooldown.until, 1_800_000_000_000 + 30 * 60_000);
-  assert.match(cooldown.reason, /rate-limiting this session \(HTTP 429 \(segment\)\)/);
+  assert.equal(cooldown.reason, "HTTP 429 (segment)", "the refusal's detail, never a rendered sentence");
   assert.ok(events.some((event) => event.type === "cooldown"));
+});
+
+test("a refusal met while resolving a later part stops the run before any part of the item downloads", async () => {
+  const limited = failure("rate_limited", { detail: "HTTP 412 (page)" });
+  const { ctx, log, written, events } = engine({
+    resolutions: {
+      "bilibili:BV1:all": [
+        target("bilibili:BV1:1", { site: "bilibili" }),
+        target("bilibili:BV1:2", { site: "bilibili", failure: failure("no_streams", { detail: "none" }), status: "failed" }),
+        target("bilibili:BV1:3", { site: "bilibili", failure: limited, status: "failed-rate-limited" }),
+        target("bilibili:BV1:4", { site: "bilibili", failure: failure("stopped", { reason: "rate_limited" }), status: "stopped" }),
+      ],
+    },
+  });
+  const run = await runBatch([item("BV1", { key: "bilibili:BV1:all", site: "bilibili" }), item("x2")], ctx);
+  // the resolver's failures are recorded without a request; nothing is downloaded, nothing more resolved
+  assert.deepEqual(log.filter((line) => !line.startsWith("sleep")), [
+    "resolve bilibili:BV1:all",
+    "download bilibili:BV1:2",
+    "download bilibili:BV1:3",
+  ]);
+  assert.ok(!events.some((event) => event.type === "target-progress"), "no media request");
+  assert.deepEqual(run.rows.map((row) => [row.key, row.status, row.failure?.code]), [
+    ["bilibili:BV1:1", "stopped", "stopped"],
+    ["bilibili:BV1:2", "failed", "no_streams"],
+    ["bilibili:BV1:3", "failed-rate-limited", "rate_limited"],
+    ["bilibili:BV1:4", "stopped", "stopped"],
+    ["dailymotion:x2", "stopped", "stopped"],
+  ]);
+  assert.deepEqual(run.rows[0]?.failure, { code: "stopped", params: { reason: "rate_limited" } });
+  assert.equal(run.stopReason, "rate_limited");
+  assert.equal(written.length, 1, "the cooldown recorded once");
+  assert.equal(/** @type {import("../src/lib/cooldown.js").Cooldown} */ (written[0]).reason, "HTTP 412 (page)");
+  assert.equal(/** @type {import("../src/lib/cooldown.js").Cooldown} */ (written[0]).source, "bilibili");
+  // a login wall on a later episode: the same stop, without a cooldown
+  const wall = engine({
+    resolutions: {
+      "dailymotion:x1": [target("bilibilitv:episode:1"), target("bilibilitv:episode:2", { failure: failure("login_required"), status: "failed-unavailable" })],
+    },
+  });
+  const walled = await runBatch([item("x1")], wall.ctx);
+  assert.deepEqual(walled.rows.map((row) => row.status), ["stopped", "failed-unavailable"]);
+  assert.equal(walled.stopReason, "login_required");
+  assert.equal(wall.written.length, 0);
+  assert.ok(!wall.log.includes("download bilibilitv:episode:1"));
+});
+
+test("cooldownReason: the refusal's detail, else its code", () => {
+  assert.equal(cooldownReason(failure("rate_limited", { detail: "HTTP 429 (manifest)" })), "HTTP 429 (manifest)");
+  assert.equal(cooldownReason(failure("blocked", {})), "blocked");
 });
 
 test("a refusal while resolving (a 403 on a page) stops the run the same way", async () => {

@@ -293,8 +293,11 @@ export function onBase(url, origin, base) {
  * @param {string} masterUrl
  * @param {ResolveContext} ctx
  * @param {Attempt[]} attempts
- * @param {{ name: string | null, height: number | null, codecs: string | null } | null} keep
- *   a variant to keep (a refresh), else the preferences choose
+ * @param {Pick<HlsVariant, "name" | "width" | "height" | "codecs" | "frameRate"> | null} keep
+ *   the variant to keep (the one refresh): the same name, size, codecs and frame rate — or,
+ *   when the refreshed master names it differently, the one variant of the same size, codecs and
+ *   frame rate; never another rendition (its segments would be spliced onto the first's), so a
+ *   master without it is `no_streams`. Null: the preferences choose.
  * @returns {Promise<{ ok: true, streams: HlsChoice, raw: Omit<HlsRaw, "metadata"> } |
  *   { ok: false, failure: Failure }>}
  */
@@ -324,16 +327,25 @@ async function hlsStreams(masterUrl, ctx, attempts, keep) {
     return { ok: false, failure: failure("not_a_video", { content_type: master.contentType }) };
   }
   const video = variants.filter((variant) => !isAudioOnlyCodecs(variant.codecs));
-  let variant =
-    keep === null
-      ? null
-      : (video.find(
-          (one) =>
-            one.name === keep.name && one.height === keep.height && one.codecs === keep.codecs,
-        ) ??
-        video.find((one) => one.height === keep.height && one.codecs === keep.codecs) ??
-        null);
-  variant ??= chooseVariant(video, ctx.prefs);
+  /** @type {HlsVariant | null} */
+  let variant;
+  if (keep === null) {
+    variant = chooseVariant(video, ctx.prefs);
+  } else {
+    /** @param {HlsVariant} one */
+    const sameEncode = (one) =>
+      one.width === keep.width &&
+      one.height === keep.height &&
+      one.codecs === keep.codecs &&
+      one.frameRate === keep.frameRate;
+    const alike = video.filter(sameEncode);
+    variant =
+      alike.find((one) => one.name === keep.name) ?? (alike.length === 1 ? alike[0] : null) ?? null;
+    if (variant === null) {
+      const detail = "the refreshed master no longer offers the chosen quality";
+      return { ok: false, failure: failure("no_streams", { detail }) };
+    }
+  }
   if (variant === null) {
     const none = failure("no_streams", { detail: "no video variant in the master" });
     return { ok: false, failure: none };
@@ -1048,8 +1060,10 @@ export async function resolve(item, ctx) {
 
 /**
  * Fresh streams for a target whose media URLs the site refused (expired signed URLs): the same
- * documents read again, the same choice kept — the same HLS variant (name, height, codecs), the
- * same DASH representations (quality id and codecs). Used once per video by the downloader.
+ * documents read again, the same choice kept — the same HLS variant (name, size, codecs, frame
+ * rate), the same DASH representations (quality id and codecs); when the refreshed documents no
+ * longer offer it, `no_streams` (never another rendition). Used once per video by the downloader,
+ * which checks the refreshed playlists again (key, live, discontinuities) before any request.
  * @param {Target} target
  * @param {ResolveContext} ctx
  * @returns {Promise<RefreshResult>}
@@ -1067,12 +1081,9 @@ export async function refreshStreams(target, ctx) {
       const json = safeParse(metadata.text);
       const decided = dailymotionMetadata(json, target.id, metadata.contentType);
       if (!decided.ok) return { ok: false, failure: decided.failure, status: decided.status };
-      const { name, height, codecs } = streams.variant;
-      const fresh = await hlsStreams(decided.info.masterUrl, ctx, target.attempts, {
-        name,
-        height,
-        codecs,
-      });
+      const { name, width, height, codecs, frameRate } = streams.variant;
+      const keep = { name, width, height, codecs, frameRate };
+      const fresh = await hlsStreams(decided.info.masterUrl, ctx, target.attempts, keep);
       if (!fresh.ok) return { ok: false, ...withStatus(fresh.failure) };
       return { ok: true, streams: fresh.streams, raw: { metadata: json, ...fresh.raw } };
     }

@@ -10,7 +10,6 @@ Every scenario counts the fake sites' requests (`FakeSites.about`, `media_reques
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
 
 from e2e_checks import (
@@ -284,6 +283,28 @@ def test_a_412_from_the_bilibili_cdn_stops_the_run_and_starts_the_cooldown(
         assert ext.saved_files() == []
 
 
+def test_a_412_on_a_later_parts_page_stops_the_run_before_any_part_is_downloaded(
+    media: MediaSet, tmp_path: Path
+):
+    """Every part of a multi-part video is resolved before its downloads: when the page of part 2
+    answers 412, part 1 — resolved fine — is not downloaded either; the run stops at once and the
+    cooldown starts (spec 7: a 412 anywhere)."""
+    with (
+        FakeSites(media, bili_parts_of=((BILI_MAIN, 2),), bili_part_412=((BILI_MAIN, 2),)) as sites,
+        ExtensionHarness(tmp_path, sites) as ext,
+    ):
+        ext.download_all(f"{BILI.format(BILI_MAIN)}\n{DM.format(AFTER)}")
+        assert _statuses(ext, BILI_MAIN, AFTER) == ["stopped", "failed-rate-limited", "stopped"]
+        pages = [(r.route, r.status) for r in sites.about(BILI_MAIN)]
+        assert pages == [("bili-page", 200), ("bili-page", 412)], pages
+        assert sites.media_requests() == [], "a media request after the site refused the session"
+        assert sites.about(AFTER) == []
+        _assert_cooldown(ext)
+        record = ext.cooldown()
+        assert record is not None and record["reason"] == "HTTP 412 (page)", record
+        assert ext.saved_files() == []
+
+
 def test_encrypted_bilibili_media_is_refused_and_nothing_is_saved(media: MediaSet, tmp_path: Path):
     with (
         FakeSites(media, bili_drm=frozenset({DRM})) as sites,
@@ -385,12 +406,18 @@ def test_the_report_is_saved_once_not_with_the_setting_off_and_again_from_the_bu
         ext.set_report_setting(False)
         ext.download_all(DM.format(second))
         assert ext.row_of(second).status == "failed-unavailable"
-        time.sleep(2)  # a report would have been saved by now
-        assert ext.reports() == [first]
         assert not ext.text("#failed-report").startswith("Report saved: ")
 
+        # the positive end signal: the report saved on demand, AFTER the run — one the run had
+        # saved on its own would have been asked for before it, and be on disk by then too
         ext.page.click("#report-button")
-        reports = ext.wait_reports(2)
+        ext.wait_for(
+            lambda: ext.text("#failed-report").startswith("Report saved: "),
+            15,
+            "the report on demand was not saved",
+        )
+        reports = ext.reports()
+        assert len(reports) == 2, reports  # the first run's and the one on demand: no other
         (new,) = [path for path in reports if path != first]
         assert [row["id"] for row in load_report(new)["not_downloaded"]] == [second]
         assert_report_private(new)

@@ -56,7 +56,9 @@ Bilibili (`/bili`, base `baseUrls.bilibili`; short links `/b23`, `baseUrls.b23`)
                                       `v_voucher`), `bili_missing_premium` (`support_formats` names
                                       116, absent from `dash.video`), `bili_upower_no_dash`
                                       (`is_upower_exclusive`, no DASH), `bili_trial` (`试看` in
-                                      `accept_description`)
+                                      `accept_description`); `bili_part_412`: `(bvid, part)` pairs
+                                      whose page answers 412 `Request is blocked by server (412)`
+                                      (risk control met on a later part of a multi-part video)
   /b23/<code>                         302 to `/bili/video/<bvid>?share_source=copy_web`
                                       (`B23_CODES`)
   /bili/cdn/<cid>/<q>[-hevc].m4s      a DASH video track (a complete fragmented MP4: the source clip
@@ -304,6 +306,8 @@ class FakeOptions:
     bili_expire_once: frozenset[str] = frozenset()
     bili_upower_no_dash: frozenset[str] = frozenset()
     bili_trial: frozenset[str] = frozenset()
+    #: `(bvid, part)` pairs: that part's page answers 412 (the other parts' pages are served).
+    bili_part_412: tuple[tuple[str, int], ...] = ()
     #: Not in spec 9's list: a cut transfer on the Bilibili CDN, so the batch scenario can prove
     #: that `Range` is sent only after a cut ("the Bilibili CDN hit with Range only after a cut").
     bili_cut_once: frozenset[str] = frozenset()
@@ -1091,6 +1095,9 @@ class _Handler(BaseHTTPRequestHandler):
                 for n in range(1, parts + 1):
                     server.state.bili_cids[bili_cid(bvid, n)] = (bvid, n)
                 server.state.bili_page_serves[bvid] = server.state.bili_page_serves.get(bvid, 0) + 1
+            if (bvid, part) in options.bili_part_412:
+                self._send(412, b"Request is blocked by server (412)")
+                return
             html = bili_page_html(server.base_url, bvid, part, options)
             cookie = f"SESSDATA={FAKE_SESSDATA}; Path=/; HttpOnly; SameSite=Lax"
             self._html(html, {"Set-Cookie": cookie})

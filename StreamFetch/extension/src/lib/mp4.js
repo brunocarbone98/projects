@@ -979,7 +979,9 @@ function parseTraf(bytes, traf, moofStart, previousEnd, defaults) {
       if (index === 0 && firstFlags !== null) sampleFlags = firstFlags;
       let cts = 0;
       if (flags & TRUN.SAMPLE_COMPOSITION_TIME_OFFSET) {
-        cts = version === 0 ? reader.u32(field) : reader.i32(field);
+        // signed in both versions, as ffmpeg reads them: a version-0 offset of 2^31 ticks or
+        // more is a negative offset written under the wrong version, never a 13-hour delay
+        cts = reader.i32(field);
         field += 4;
       }
       if (duration === null) {
@@ -1006,8 +1008,9 @@ function parseTraf(bytes, traf, moofStart, previousEnd, defaults) {
  * → the moof's first byte, else the end of the previous traf's data; a `trun` data-offset is
  * added to that base, a `trun` without one continues after the previous run. Missing durations,
  * sizes and flags come from the `tfhd`, then from `defaults` (the init's `trex`, keyed by track
- * id, or the {@link TrackInfo}s of `parseInit`). `cts` is unsigned in `trun` version 0, signed in
- * version 1.
+ * id, or the {@link TrackInfo}s of `parseInit`). `cts` is read as signed in both `trun` versions
+ * (ISO/IEC 14496-12 says unsigned in version 0; some packagers write negative offsets there, and
+ * ffmpeg reads them signed too — as `ctts` is read below).
  * @param {Uint8Array} bytes
  * @param {number} [fileOffset]
  * @param {Map<number, Trex> | readonly TrackInfo[]} [defaults]

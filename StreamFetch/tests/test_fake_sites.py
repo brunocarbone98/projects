@@ -532,6 +532,16 @@ def test_bilibili_two_parts_and_the_part_query(media: MediaSet):
         assert state["p"] == 1
 
 
+def test_bilibili_part_412_refuses_one_part_page_only(media: MediaSet):
+    with FakeSites(media, bili_parts=2, bili_part_412=((BILI_MAIN, 2),)) as sites:
+        refused = fetch(sites.url(f"/bili/video/{BILI_MAIN}?p=2"))
+        assert refused.status == 412 and b"Request is blocked by server (412)" in refused.body
+        _, state = _bili_page(sites)
+        assert state["p"] == 1 and len(state["videoData"]["pages"]) == 2
+        _, state = _bili_page(sites, query="?p=1")
+        assert state["p"] == 1
+
+
 def test_b23_short_links_redirect_to_the_video_page(sites: FakeSites):
     answer = fetch(sites.url(f"/b23/{B23_CODE}"))
     assert answer.status == 302

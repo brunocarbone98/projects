@@ -22,6 +22,7 @@ from pathlib import Path
 
 from e2e_checks import (
     NEEDS_CHROMIUM,
+    SECRET_COOKIE,
     assert_media_headers,
     assert_one_at_a_time,
     assert_range_only_after_cut,
@@ -98,6 +99,10 @@ EXPECTED: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
 }
 DURATION_RE = re.compile(r"^0?0:06$")
+#: Every row's thumbnail: its `img.cover` source, class and decoded width.
+THUMBNAILS_JS = """() => [...document.querySelectorAll('#items-table tbody tr[data-key] img.cover')]
+  .map((img) => [img.getAttribute('src') ?? '', img.className,
+    img.complete ? img.naturalWidth : 0])"""
 #: A window tall enough for every row to be in view: their thumbnails all load after Analyze.
 TALL = {"width": 1280, "height": 2400}
 
@@ -115,6 +120,8 @@ def test_a_batch_of_links_is_analyzed_then_downloaded_and_every_file_verified(
         ) as sites,
         ExtensionHarness(tmp_path, sites, viewport=TALL) as ext,
     ):
+        # the user's own session: a cookie of the sites' host, which every request must carry
+        ext.add_cookie("SESSDATA", SECRET_COOKIE)
         # -- Analyze: titles, durations, qualities; no media request ---------------------------
         ext.analyze(LINKS, min_rows=len(EXPECTED))
         assert sites.media_requests() == [], "Analyze downloaded media"
@@ -125,6 +132,19 @@ def test_a_batch_of_links_is_analyzed_then_downloaded_and_every_file_verified(
         thumbnails = sites.cover_requests()
         assert min(r.started for r in thumbnails) >= max(r.finished for r in analysis)
         assert_sequential(thumbnails)
+
+        # ...and every row SHOWS its thumbnail: the served image, decoded, not the placeholder
+        def shown() -> bool:
+            thumbnails = ext.page.evaluate(THUMBNAILS_JS)
+            return len(thumbnails) == len(EXPECTED) and all(
+                src.startswith("blob:") and "placeholder" not in cls and width > 0
+                for src, cls, width in thumbnails
+            )
+
+        ext.wait_for(shown, 10, f"a row does not show its thumbnail: {ext.rows()}")
+        # every page, metadata, manifest and API request carried the session's cookies
+        for record in analysis:
+            assert "SESSDATA" in record.cookie_names, (record.route, record.cookie_names)
         for xid in (DM_TS_ID, DM_FMP4_ID, DM_SHORT_ID):
             row = ext.row_of(xid)
             assert row.site == "Dailymotion" and row.title == DM_TITLES[xid], row
@@ -132,9 +152,11 @@ def test_a_batch_of_links_is_analyzed_then_downloaded_and_every_file_verified(
             assert row.quality.startswith("1080p"), row
             assert row.href == f"https://www.dailymotion.com/video/{xid}", row
             assert row.target == "_blank", row
-            # one metadata request, one master, one media playlist each
+            # one metadata request, one master, one media playlist each — the highest variant's
             routes = [r.route for r in sites.about(xid)]
             assert routes == ["dm-metadata", "dm-master", "dm-media-playlist"], (xid, routes)
+            (playlist,) = [r.path for r in sites.about(xid) if r.route == "dm-media-playlist"]
+            assert playlist == f"/dm/cdn/{xid}/media-1080.m3u8", (xid, playlist)
         assert "playlist ignored" in ext.row_of(DM_FMP4_ID).message
         assert "playlist ignored" not in ext.row_of(DM_TS_ID).message
         parts = ext.rows_of(BILI_MAIN)
@@ -185,6 +207,9 @@ def test_a_batch_of_links_is_analyzed_then_downloaded_and_every_file_verified(
             assert not IGNORED_PARAMETERS & set(record.query), (record.path, record.query)
         media_requests = sites.media_requests()
         assert_media_headers(sites, media_requests)
+        assert all("SESSDATA" in r.cookie_names for r in media_requests), [
+            (r.route, r.cookie_names) for r in media_requests if "SESSDATA" not in r.cookie_names
+        ]
         # Dailymotion: every segment once (nothing failed), no key, no init for TS
         for xid in (DM_TS_ID, DM_SHORT_ID):
             segments = [r.path for r in sites.about(xid) if r.route == "dm-segment"]

@@ -8,9 +8,11 @@
  * or `failed-blocked` result stops the run at once and records the 30-minute cooldown (once), a
  * login wall stops it without one, three `failed` / `failed-unavailable` results in a row stop it,
  * Stop (the run's AbortSignal) ends the current request; every target the run did not reach is
- * `stopped` with the reason. A cooldown in force refuses the start, and one recorded meanwhile
- * stops the run right before its next request. {@link analyzeBatch} is the same resolution
- * without downloads (**Analyze**).
+ * `stopped` with the reason. A refusal met while an item resolves (a later part's page, an
+ * episode's playurl) stops the run before any target of that item downloads — the parts resolved
+ * before it are `stopped`, never fetched. A cooldown in force refuses the start, and one recorded
+ * meanwhile stops the run right before its next request. {@link analyzeBatch} is the same
+ * resolution without downloads (**Analyze**).
  *
  * The engine knows nothing of the DOM: it reports through `emit` and returns the run's record,
  * from which the report (`lib/report.js`) and the history are made.
@@ -22,7 +24,14 @@ import {
   cooldownStopReason,
   makeCooldown,
 } from "../lib/cooldown.js";
-import { FAILED, STOPPED, failure, render, statusForFailure } from "../lib/messages.js";
+import {
+  FAILED,
+  FAILED_BLOCKED,
+  FAILED_RATE_LIMITED,
+  STOPPED,
+  failure,
+  statusForFailure,
+} from "../lib/messages.js";
 import { afterResult, pagePauseS, videoPauseS } from "../lib/pacing.js";
 import { StopRequested, isStop, oneLine, traceOf } from "./downloader.js";
 
@@ -218,6 +227,18 @@ export function itemRow(item, status, fail, resolved) {
 }
 
 /**
+ * What a cooldown records as its reason: the refusal's short detail as the engine wrote it
+ * (`HTTP 429 (manifest)`, `risk control (v_voucher) (page)`), else the failure's code — never a
+ * rendered sentence, so the page shows it in its own language (`i18n.cooldownReasonLabel`).
+ * @param {Failure} fail
+ * @returns {string}
+ */
+export function cooldownReason(fail) {
+  const detail = fail.params["detail"];
+  return typeof detail === "string" && detail.trim() !== "" ? detail : fail.code;
+}
+
+/**
  * The engine's shared state of one run.
  */
 class RunState {
@@ -296,7 +317,7 @@ class RunState {
     if (decision.stop === null) return;
     if (decision.stop.cooldown && !this.cooldownRecorded && fail !== null) {
       this.cooldownRecorded = true;
-      const cooldown = makeCooldown(render(fail.code, fail.params), site, { now: this.now() });
+      const cooldown = makeCooldown(cooldownReason(fail), site, { now: this.now() });
       await this.ctx.writeCooldown(cooldown);
       this.emit({ type: "cooldown", cooldown });
     }
@@ -334,6 +355,58 @@ function stopTargets(state, targets) {
     const reason = stopFailure(state);
     state.run.rows.push(targetRow(target, STOPPED, reason, null));
     state.emit({ type: "target-status", target, status: STOPPED, failure: reason });
+  }
+}
+
+/**
+ * Whether a target the resolver already failed means the site refused this session — a 429 / 412
+ * / 403 or a risk-control page met on a later part's page or an episode's playurl, or a login wall
+ * — so that nothing of its item may be downloaded: the run stops before any media request.
+ * @param {Target} target
+ * @returns {boolean}
+ */
+export function refusesTheSession(target) {
+  if (target.failure === null) return false;
+  const status = target.status ?? statusForFailure(target.failure.code);
+  return (
+    status === FAILED_RATE_LIMITED ||
+    status === FAILED_BLOCKED ||
+    target.failure.code === "login_required"
+  );
+}
+
+/**
+ * An item whose resolution met a refusal of the site: the refusal is recorded first (the stop, and
+ * the cooldown once), then every target of the item gets its row without a request — the refused
+ * one its failure, one the resolver failed otherwise its own failure, the others `stopped` — so
+ * the parts or episodes resolved before the refusal are never downloaded.
+ * @param {RunState} state
+ * @param {Target[]} targets
+ * @param {Target} refusal the first target that {@link refusesTheSession}
+ */
+async function refuseItem(state, targets, refusal) {
+  /** @type {Map<Target, Result>} */
+  const results = new Map();
+  for (const target of targets) {
+    if (target.failure === null || target.status === STOPPED) continue;
+    // no request: the downloader records the resolver's failure as the target's result
+    results.set(target, await state.ctx.download(target, () => undefined, () => undefined));
+  }
+  const refused = /** @type {Result} */ (results.get(refusal));
+  await state.after(refused.status, refused.failure, refusal.site);
+  for (const target of targets) {
+    if (state.seen.has(target.key)) {
+      state.emit({ type: "target-duplicate", target });
+      continue;
+    }
+    state.seen.add(target.key);
+    const result = results.get(target);
+    if (result === undefined) {
+      stopTargets(state, [target]);
+      continue;
+    }
+    state.run.rows.push(targetRow(target, result.status, result.failure, result));
+    state.emit({ type: "target-done", target, result });
   }
 }
 
@@ -453,6 +526,11 @@ export async function runBatch(items, ctx) {
     if (isResolveFailure(resolved)) {
       state.run.rows.push(itemRow(item, resolved.status, resolved.failure, resolved));
       await state.after(resolved.status, resolved.failure, item.site);
+      continue;
+    }
+    const refusal = resolved.find(refusesTheSession);
+    if (refusal !== undefined) {
+      await refuseItem(state, resolved, refusal);
       continue;
     }
     for (const target of resolved) {

@@ -216,6 +216,80 @@
       }
     }
   },
+  "detail_duration": {
+    "message": "duración $ACTUAL$ s; se esperaban $EXPECTED$ s",
+    "description": "A verification reason: the file's duration against the site's",
+    "placeholders": {
+      "actual": {
+        "content": "$1"
+      },
+      "expected": {
+        "content": "$2"
+      }
+    }
+  },
+  "detail_track_expected": {
+    "message": "pista de $KIND$ de $ACTUAL$ s; se esperaban $EXPECTED$ s",
+    "description": "A verification reason: one track's duration against the site's",
+    "placeholders": {
+      "kind": {
+        "content": "$1"
+      },
+      "actual": {
+        "content": "$2"
+      },
+      "expected": {
+        "content": "$3"
+      }
+    }
+  },
+  "detail_track_video": {
+    "message": "pista de $KIND$ de $ACTUAL$ s; la de video dura $EXPECTED$ s",
+    "description": "A verification reason: one track's duration against the video track's",
+    "placeholders": {
+      "kind": {
+        "content": "$1"
+      },
+      "actual": {
+        "content": "$2"
+      },
+      "expected": {
+        "content": "$3"
+      }
+    }
+  },
+  "detail_missing": {
+    "message": "$KIND$: faltan $MISSING$ s a partir de los $AT$ s",
+    "description": "A verification reason: a hole inside a track (lost media)",
+    "placeholders": {
+      "kind": {
+        "content": "$1"
+      },
+      "missing": {
+        "content": "$2"
+      },
+      "at": {
+        "content": "$3"
+      }
+    }
+  },
+  "detail_ts_damaged": {
+    "message": "la transmisión MPEG-TS llegó dañada: $DETAIL$",
+    "description": "After a verification reason: what the MPEG-TS demuxer found (its detail stays in English)",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "media_kind_video": {
+    "message": "video",
+    "description": "A track kind in a verification reason"
+  },
+  "media_kind_audio": {
+    "message": "audio",
+    "description": "A track kind in a verification reason"
+  },
   "savedAs": {
     "message": "guardado como $NAME$",
     "description": "A done row",

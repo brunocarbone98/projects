@@ -16,6 +16,7 @@ import {
   formatDuration,
   fourcc,
   historyEntry,
+  historyLine,
   notDownloaded,
   parseHistoryEntry,
   progressFraction,
@@ -29,9 +30,10 @@ import {
   streamLabel,
   summaryCounts,
 } from "../src/app/app.js";
+import { StepFailure } from "../src/app/downloader.js";
 import { setCatalogs, setLanguage } from "../src/app/i18n.js";
 import { makeCooldown } from "../src/lib/cooldown.js";
-import { hintText } from "../src/lib/messages.js";
+import { failure, hintText } from "../src/lib/messages.js";
 
 /**
  * @typedef {import("../src/app/resolver.js").StreamChoice} StreamChoice
@@ -171,6 +173,71 @@ test("covers: only rows in view, one request at a time, never while not allowed,
   assert.equal(again.src, "blob:cover", "a cover already fetched is shown at once");
 });
 
+test("covers: a 429 or 412 on a thumbnail stops the loader for the page's life and reports the refusal", async () => {
+  /** @type {((entries: readonly { target: Element, isIntersecting: boolean }[]) => void) | null} */
+  let callback = null;
+  /** @type {string[]} */
+  const fetched = [];
+  /** @type {[import("../src/lib/messages.js").Failure, string][]} */
+  const refused = [];
+  const loader = new CoverLoader({
+    allowed: () => true,
+    fetchCover: async (url) => {
+      fetched.push(url);
+      if (url.includes("limited")) throw new StepFailure(failure("rate_limited", { detail: "HTTP 429 (cover)" }));
+      if (url.includes("gone")) throw new StepFailure(failure("http_status", { status: 404, what: "cover" }));
+      return new Blob(["img"]);
+    },
+    pause: async () => undefined,
+    objectUrl: () => "blob:cover",
+    onRefused: (fail, key) => void refused.push([fail, key]),
+    watcher: (handler) => {
+      callback = handler;
+      return { observe: () => undefined, unobserve: () => undefined };
+    },
+  });
+  /** @returns {HTMLImageElement} */
+  const image = () => /** @type {HTMLImageElement} */ (/** @type {unknown} */ ({ src: "", className: "cover placeholder" }));
+  const cells = [image(), image(), image(), image()];
+  const urls = ["https://pic.bstarstatic.com/gone.jpg", "https://pic.bstarstatic.com/limited.jpg", "https://pic.bstarstatic.com/c.jpg", "https://pic.bstarstatic.com/d.jpg"];
+  cells.forEach((cell, index) => loader.watch(cell, `bilibilitv:episode:${index + 1}`, /** @type {string} */ (urls[index])));
+  const show = /** @type {(entries: readonly { target: Element, isIntersecting: boolean }[]) => void} */ (/** @type {unknown} */ (callback));
+  show(cells.map((cell) => ({ target: /** @type {Element} */ (/** @type {unknown} */ (cell)), isIntersecting: true })));
+  while (loader.running !== null) await loader.running;
+  assert.deepEqual(fetched, urls.slice(0, 2), "a 404 is a broken cover; the 429 stops every later request");
+  assert.equal(loader.halted, true);
+  assert.deepEqual(refused, [[{ code: "rate_limited", params: { detail: "HTTP 429 (cover)" } }, "bilibilitv:episode:2"]]);
+  show([{ target: /** @type {Element} */ (/** @type {unknown} */ (cells[3])), isIntersecting: true }]);
+  loader.resume();
+  while (loader.running !== null) await loader.running;
+  assert.equal(fetched.length, 2, "nothing more for the page's life");
+  assert.ok(cells.every((cell) => cell.className === "cover placeholder"));
+});
+
+test("the history keeps canonical links, never a share link's parameters", () => {
+  assert.equal(
+    historyLine("https://www.bilibili.com/video/BV1aa411x7h7/?vd_source=0123abcd&buvid=XY-ab12&mid=42&share_source=copy_web"),
+    "https://www.bilibili.com/video/BV1aa411x7h7",
+  );
+  assert.equal(historyLine("https://m.bilibili.com/video/BV1aa411x7h7?p=2&spm_id_from=333.1&unique_k=abc"), "https://www.bilibili.com/video/BV1aa411x7h7?p=2");
+  assert.equal(historyLine("https://b23.tv/AbCdEf1?share_medium=android&share_tag=s_i"), "https://b23.tv/AbCdEf1");
+  assert.equal(historyLine("https://www.bilibili.tv/es/video/4801520000000001?bstar_from=bstar-web.ugc-video-detail.related-recommend.all"), "https://www.bilibili.tv/en/video/4801520000000001");
+  assert.equal(historyLine("https://www.dailymotion.com/video/xbq9z2k?playlist=x6hynp"), "https://www.dailymotion.com/video/xbq9z2k");
+  assert.equal(historyLine("https://dai.ly/xbq9z2k?t=10"), "https://www.dailymotion.com/video/xbq9z2k");
+  assert.equal(historyLine("not a link"), "not a link");
+  /** @param {string} input @returns {Row} */
+  const row = (input) => ({ key: input, itemKey: input, input, site: "bilibili", id: "x", part: null, title: null, status: "failed-unavailable", failure: null, attempts: [], streams: null, page: null, raw: null, seasonId: null, episodeId: null, path: null, notes: [], verify: null });
+  const entry = historyEntry({
+    startedAt: new Date("2026-11-08T10:00:00Z"),
+    finishedAt: null,
+    stopReason: null,
+    settings: null,
+    rows: [row("https://www.bilibili.com/video/BV1aa411x7h7/?vd_source=0123abcd&buvid=XY-ab12"), row("bilibili.com/video/BV1aa411x7h7?mid=7")],
+  });
+  assert.deepEqual(entry.retry_inputs, ["https://www.bilibili.com/video/BV1aa411x7h7"], "once each, canonical");
+  assert.doesNotMatch(JSON.stringify(entry), /vd_source|buvid|mid=/);
+});
+
 test("a row's message: failure, hints, notes, where it was saved, and `; cover: <reason>` last", () => {
   /** @param {string} lang @returns {import("../src/app/i18n.js").Catalog} */
   const catalog = (lang) => JSON.parse(readFileSync(new URL(`../_locales/${lang}/messages.json`, import.meta.url), "utf8"));
@@ -208,7 +275,18 @@ test("a row's message: failure, hints, notes, where it was saved, and `; cover: 
     rowMessage(gone),
     "the video is gone or not available to this session (Dailymotion says: Video not found — The video was removed)",
   );
+  /** @param {string} reason @returns {Parameters<typeof rowMessage>[0]} */
+  const unverified = (reason) => ({ failure: { code: "verify_failed", params: { reason } }, site: "dailymotion", hints: [], notes: [], path: null, status: "failed" });
+  assert.equal(rowMessage(unverified("audio track 1.2 s, the video's 6.0 s")), "the finished file failed verification (audio track 1.2 s, the video's 6.0 s); it was not saved");
   setLanguage("es");
+  // the downloader's verification reasons in Spanish too, the numbers and the demuxer's own words as written
+  assert.equal(rowMessage(unverified("duration 41.0 s, expected 60.0 s")), "el archivo terminado no pasó la verificación (duración 41.0 s; se esperaban 60.0 s); no se guardó");
+  assert.match(rowMessage(unverified("audio track 1.2 s, the video's 6.0 s")), /\(pista de audio de 1\.2 s; la de video dura 6\.0 s\)/);
+  assert.match(rowMessage(unverified("video track 3.0 s, expected 6.0 s")), /\(pista de video de 3\.0 s; se esperaban 6\.0 s\)/);
+  assert.match(
+    rowMessage(unverified("video: 2.0 s missing at 2.0 s; the MPEG-TS stream was damaged: lost MPEG-TS packet sync at byte 9")),
+    /\(video: faltan 2\.0 s a partir de los 2\.0 s; la transmisión MPEG-TS llegó dañada: lost MPEG-TS packet sync at byte 9\)/,
+  );
   assert.match(rowMessage(done), /; portada: HTTP 429$/);
   assert.match(rowMessage(done), /^lista ignorada/);
   assert.match(rowMessage(login), /inicia sesión en Bilibili\.tv/);

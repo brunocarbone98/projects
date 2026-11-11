@@ -149,13 +149,10 @@ def test_a_series_link_lists_every_episode_under_a_header_and_downloads_them_in_
         assert_media_headers(sites, sites.media_requests())
 
 
-def _spanish_failure(message: str, es: dict[str, str]) -> bool:
-    """Whether `message` holds every literal piece of one Spanish `failure_*` template."""
-    for name, template in es.items():
-        chunks = [c.strip() for c in _PLACEHOLDER.split(template) if len(c.strip()) >= 4]
-        if name.startswith("failure_") and chunks and all(c in message for c in chunks):
-            return True
-    return False
+def _holds(message: str, template: str) -> bool:
+    """Whether `message` holds every literal piece of one Spanish template."""
+    chunks = [c.strip() for c in _PLACEHOLDER.split(template) if len(c.strip()) >= 4]
+    return bool(chunks) and all(c in message for c in chunks)
 
 
 @pytest.mark.parametrize("language", ["en", "es"])
@@ -184,8 +181,16 @@ def test_geo_login_and_premium_codes_fail_the_row_without_a_media_request(
                 assert "log in" in rows[aid].message and "premium" in rows[aid].message, rows[aid]
         else:
             es = ext.messages("es")
+            # each row its own Spanish text: geo-blocking for GEO, the login text and the
+            # login-or-premium hint for LOGIN and PREMIUM — never the other one
+            geo, login = es["failure_geo_blocked"], es["failure_login_required"]
+            assert _holds(rows[GEO].message, geo), rows[GEO].message
+            assert not _holds(rows[GEO].message, login), rows[GEO].message
+            for aid in (LOGIN, PREMIUM):
+                message = rows[aid].message
+                assert _holds(message, login) and _holds(message, es["hint_login_or_premium"])
+                assert not _holds(message, geo), message
             for row in rows.values():
-                assert _spanish_failure(row.message, es), row.message
                 assert "not available" not in row.message and "log in" not in row.message
 
 
@@ -287,7 +292,14 @@ def test_covers_load_only_in_view_one_at_a_time_and_never_during_a_job(
         mark = ext.start("#download-all-button")
         ext.wait_for(lambda: sites.media_requests(), 60, "the job asked for no media")
         ext.page.evaluate(LAST_ROW_INTO_VIEW)
-        time.sleep(1.5)
+        # the job goes on for two more media answers with the last rows in view: a loader that
+        # ignored the job would have asked for their covers meanwhile
+        asked = len(sites.media_requests())
+        ext.wait_for(
+            lambda: len([r for r in sites.media_requests() if r.finished]) >= asked + 2,
+            30,
+            "the job did not go on",
+        )
         # Stop by script: a pointer click would scroll the button, and the window, back up
         ext.page.evaluate("() => document.querySelector('#stop-button').click()")
         ext.finish(mark, 60)

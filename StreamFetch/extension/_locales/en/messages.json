@@ -216,6 +216,80 @@
       }
     }
   },
+  "detail_duration": {
+    "message": "duration $ACTUAL$ s, expected $EXPECTED$ s",
+    "description": "A verification reason: the file's duration against the site's",
+    "placeholders": {
+      "actual": {
+        "content": "$1"
+      },
+      "expected": {
+        "content": "$2"
+      }
+    }
+  },
+  "detail_track_expected": {
+    "message": "$KIND$ track $ACTUAL$ s, expected $EXPECTED$ s",
+    "description": "A verification reason: one track's duration against the site's",
+    "placeholders": {
+      "kind": {
+        "content": "$1"
+      },
+      "actual": {
+        "content": "$2"
+      },
+      "expected": {
+        "content": "$3"
+      }
+    }
+  },
+  "detail_track_video": {
+    "message": "$KIND$ track $ACTUAL$ s, the video's $EXPECTED$ s",
+    "description": "A verification reason: one track's duration against the video track's",
+    "placeholders": {
+      "kind": {
+        "content": "$1"
+      },
+      "actual": {
+        "content": "$2"
+      },
+      "expected": {
+        "content": "$3"
+      }
+    }
+  },
+  "detail_missing": {
+    "message": "$KIND$: $MISSING$ s missing at $AT$ s",
+    "description": "A verification reason: a hole inside a track (lost media)",
+    "placeholders": {
+      "kind": {
+        "content": "$1"
+      },
+      "missing": {
+        "content": "$2"
+      },
+      "at": {
+        "content": "$3"
+      }
+    }
+  },
+  "detail_ts_damaged": {
+    "message": "the MPEG-TS stream was damaged: $DETAIL$",
+    "description": "After a verification reason: what the MPEG-TS demuxer found (its detail stays in English)",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "media_kind_video": {
+    "message": "video",
+    "description": "A track kind in a verification reason"
+  },
+  "media_kind_audio": {
+    "message": "audio",
+    "description": "A track kind in a verification reason"
+  },
   "savedAs": {
     "message": "saved as $NAME$",
     "description": "A done row",

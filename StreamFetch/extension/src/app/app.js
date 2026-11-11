@@ -14,16 +14,18 @@
  * codes) as data, so a language change re-renders every row.
  */
 
-import { cooldownMessageParams } from "../lib/cooldown.js";
+import { cooldownMessageParams, makeCooldown } from "../lib/cooldown.js";
 import { codecFamily } from "../lib/hls.js";
+import { stripUrlQueriesInText } from "../lib/json.js";
 import { NOT_DOWNLOADED_STATUSES, hintSubstitutions, isHintCode } from "../lib/messages.js";
 import { fileBaseName, reportPath } from "../lib/naming.js";
 import { mediaPauseMs, pagePauseS, sleepSeconds, stallTimeoutS } from "../lib/pacing.js";
 import { buildReport, hasFailures, reportJson } from "../lib/report.js";
-import { parseInput } from "../lib/urls.js";
+import { isRefused, parseInput, parseLine } from "../lib/urls.js";
 import {
   BROWSER_CHECK_TIMEOUT_S,
   DownloadsView,
+  StepFailure,
   StopRequested,
   applyRefererRule,
   browserDuration,
@@ -35,9 +37,10 @@ import {
   request,
   saveBlob,
 } from "./downloader.js";
-import { analyzeBatch, runBatch } from "./engine.js";
+import { analyzeBatch, cooldownReason, runBatch } from "./engine.js";
 import { WorkFiles } from "./files.js";
 import {
+  cooldownReasonLabel,
   currentLanguage,
   displayLanguage,
   loadCatalogs,
@@ -107,7 +110,8 @@ import {
  * @property {string | null} stop_reason
  * @property {{ rows: number, done: number, skipped: number, failed: number,
  *   stopped: number }} counts
- * @property {string[]} retry_inputs the pasted lines of the rows that did not download
+ * @property {string[]} retry_inputs the canonical links of the rows that did not download
+ *   ({@link historyLine}: no share-link parameter is stored)
  */
 
 /** The Web Lock that makes this tab the only engine of the browser. */
@@ -315,6 +319,20 @@ export function retryInputs(rows) {
 }
 
 /**
+ * What the history keeps of a pasted line (it stays in `chrome.storage.local` across restarts):
+ * the item's canonical link — a Bilibili `?p=N` kept, a `b23.tv` short link its own path, every
+ * other query parameter and fragment dropped, so the per-user identifiers of share links
+ * (`vd_source`, `buvid`, `mid`, `bstar_from`, …) are never stored; a line that names no item
+ * without the query strings of the URLs in it.
+ * @param {string} line
+ * @returns {string}
+ */
+export function historyLine(line) {
+  const parsed = parseLine(line);
+  return isRefused(parsed) ? stripUrlQueriesInText(line) : parsed.pageUrl;
+}
+
+/**
  * The history entry of a run.
  * @param {Run} run
  * @returns {HistoryEntry}
@@ -332,7 +350,7 @@ export function historyEntry(run) {
       failed,
       stopped: run.rows.filter((row) => row.status === "stopped").length,
     },
-    retry_inputs: retryInputs(notDownloaded(run)),
+    retry_inputs: retryInputs(notDownloaded(run).map((row) => ({ input: historyLine(row.input) }))),
   };
 }
 
@@ -1281,7 +1299,7 @@ function tickCooldown() {
     return;
   }
   banner.hidden = false;
-  const substitutions = [params.until, params.minutes_left, params.reason];
+  const substitutions = [params.until, params.minutes_left, cooldownReasonLabel(params.reason)];
   $("cooldown-text").textContent = t("cooldownText", substitutions);
 }
 
@@ -1355,11 +1373,15 @@ async function onSaveSettings(event) {
  * The cover thumbnails of the rows, fetched by the extension itself and only for rows in view:
  * one request at a time, each after a media pause, never while a job runs or a cooldown is in
  * force, only to a host the manifest covers; a broken or missing cover keeps the neutral frame.
+ * A 429 or 412 on a thumbnail (`fetchCover` rejects with that `rate_limited` step) is a refusal
+ * like anywhere else: the loader asks for nothing more for the page's life and `onRefused` records
+ * the cooldown. Only the one cover embedded in a file is exempt (Addendum B.2), not the list's.
  */
 export class CoverLoader {
   /**
    * @param {{ allowed: () => boolean, fetchCover: (url: string) => Promise<Blob | null>,
    *   pause: () => Promise<void>, objectUrl?: (blob: Blob) => string,
+   *   onRefused?: (failure: import("../lib/messages.js").Failure, key: string) => unknown,
    *   watcher?: (callback: (entries: readonly { target: Element,
    *     isIntersecting: boolean }[]) => void) =>
    *     { observe: (target: Element) => void, unobserve: (target: Element) => void } }} options
@@ -1384,6 +1406,8 @@ export class CoverLoader {
     this.watcher = null;
     /** @type {Promise<void> | null} */
     this.running = null;
+    /** a thumbnail was refused (429 / 412): nothing more is asked for the page's life */
+    this.halted = false;
   }
 
   /**
@@ -1437,7 +1461,8 @@ export class CoverLoader {
 
   /** Go on fetching (a row came into view, a job ended, a cooldown ran out); one loop at a time. */
   resume() {
-    if (this.running !== null || !this.options.allowed() || this.next() === null) return;
+    if (this.running !== null || this.halted || !this.options.allowed()) return;
+    if (this.next() === null) return;
     this.running = this.loop()
       .catch(() => undefined)
       .finally(() => {
@@ -1447,16 +1472,26 @@ export class CoverLoader {
 
   /** @returns {Promise<void>} */
   async loop() {
-    while (this.options.allowed() && this.next() !== null) {
+    while (!this.halted && this.options.allowed() && this.next() !== null) {
       await this.options.pause();
-      if (!this.options.allowed()) return; // asked again right before the request
+      if (this.halted || !this.options.allowed()) return; // asked again right before the request
       const key = this.next();
       if (key === null) return;
       this.asked.add(key);
       const cell = /** @type {{ image: HTMLImageElement, url: string }} */ (this.cells.get(key));
       this.cells.delete(key);
       this.watcher?.unobserve(cell.image);
-      const blob = await this.options.fetchCover(cell.url).catch(() => null);
+      /** @type {Blob | null} */
+      let blob = null;
+      try {
+        blob = await this.options.fetchCover(cell.url);
+      } catch (error) {
+        if (error instanceof StepFailure && error.failure.code === "rate_limited") {
+          this.halted = true;
+          await this.options.onRefused?.(error.failure, key);
+          return;
+        }
+      }
       if (blob === null) continue;
       const url = this.objectUrl(blob);
       this.loaded.set(key, url);
@@ -1468,7 +1503,8 @@ export class CoverLoader {
 
 /**
  * One cover GET of the extension's own (the manifest's hosts, the session's cookies), at most
- * {@link MAX_THUMBNAIL_BYTES}; null for anything that is not an image.
+ * {@link MAX_THUMBNAIL_BYTES}; null for anything that is not an image or did not arrive; a 429 or
+ * 412 rejects with its `rate_limited` step (the loader stops and the cooldown starts).
  * @param {string} url
  * @returns {Promise<Blob | null>}
  */
@@ -1495,14 +1531,28 @@ async function fetchCover(url) {
     });
     if (!type.toLowerCase().startsWith("image/")) return null;
     return new Blob(/** @type {BlobPart[]} */ (chunks), { type });
-  } catch {
+  } catch (error) {
+    if (error instanceof StepFailure && error.failure.code === "rate_limited") throw error;
     return null;
   }
+}
+
+/**
+ * A thumbnail the site refused (429 / 412): the cooldown is recorded, as for any refusal, and the
+ * banner shows it.
+ * @param {import("../lib/messages.js").Failure} refused
+ * @param {string} key the row's key (`<site>:…`)
+ */
+async function onCoverRefused(refused, key) {
+  const site = key.split(":")[0] ?? "";
+  await writeCooldown(makeCooldown(cooldownReason(refused), site));
+  await refreshCooldown();
 }
 
 const covers = new CoverLoader({
   allowed: () => app.job === null && app.cooldown === null && app.owner,
   fetchCover,
+  onRefused: onCoverRefused,
   pause: () => {
     const pacing = effectivePacing(app.settings, app.testSettings, app.testMode);
     return sleepSeconds(mediaPauseMs(pacing) / 1000);

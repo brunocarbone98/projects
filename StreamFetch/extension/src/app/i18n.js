@@ -166,17 +166,57 @@ const KIND_IN_DETAIL_RE =
   /\((page|short link|metadata|manifest|playlist|segment|media|cover|api)\)/g;
 /** The resolver's `<Site> says: ` before a site's own words (Dailymotion's error title). */
 const SITE_SAYS_RE = /^(Dailymotion|Bilibili\.tv|Bilibili) says: /;
+/**
+ * The verification reasons the downloader writes (`duration 41.0 s, expected 60.0 s`, `audio
+ * track 1.2 s, the video's 6.0 s`, `video: 2.0 s missing at 8.0 s`): the message key and the
+ * groups (a track kind first, translated through `media_kind_<kind>`) of each.
+ * @type {readonly [RegExp, string, boolean][]}
+ */
+const VERIFY_REASONS = [
+  [/^duration ([\d.]+) s, expected ([\d.]+) s/, "detail_duration", false],
+  [/^(video|audio) track ([\d.]+) s, expected ([\d.]+) s/, "detail_track_expected", true],
+  [/^(video|audio) track ([\d.]+) s, the video's ([\d.]+) s/, "detail_track_video", true],
+  [/^(video|audio): ([\d.]+) s missing at ([\d.]+) s/, "detail_missing", true],
+];
+/** What `downloader.download` appends when the MPEG-TS demuxer met damaged data. */
+const TS_DAMAGED_RE = /; the MPEG-TS stream was damaged: (.*)$/;
+
+/**
+ * A verification reason of the downloader in `lang` (the numbers and the demuxer's own detail as
+ * written), or the text as it is when it is none.
+ * @param {string} text
+ * @param {Lang} lang
+ * @returns {string}
+ */
+function localizeReason(text, lang) {
+  let out = text;
+  for (const [pattern, key, kindFirst] of VERIFY_REASONS) {
+    const match = pattern.exec(out);
+    if (match === null || !hasMessage(key, lang)) continue;
+    const groups = match.slice(1).map((group) => group ?? "");
+    if (kindFirst) {
+      const kind = messageKey("media_kind", groups[0] ?? "");
+      if (hasMessage(kind, lang)) groups[0] = t(kind, undefined, lang);
+    }
+    out = t(key, groups, lang) + out.slice(match[0].length);
+    break;
+  }
+  return out.replace(TS_DAMAGED_RE, (match, detail) =>
+    hasMessage("detail_ts_damaged", lang) ? `; ${t("detail_ts_damaged", detail, lang)}` : match,
+  );
+}
 
 /**
  * A detail text the engine wrote in English (`HTTP 429 (manifest)`), its request kind translated,
- * and a leading `Dailymotion says: ` as `site_says` (the site's own words stay as it wrote them).
+ * a leading `Dailymotion says: ` as `site_says` (the site's own words stay as it wrote them), and
+ * the downloader's verification reasons (`duration … s, expected … s`, a track's, a hole's).
  * @param {string} text
  * @param {Lang} lang
  * @returns {string}
  */
 export function localizeDetail(text, lang) {
   if (lang === "en") return text;
-  return text
+  return localizeReason(text, lang)
     .replace(SITE_SAYS_RE, (match, site) =>
       hasMessage("site_says", lang) ? `${t("site_says", site, lang)} ` : match,
     )
@@ -212,6 +252,8 @@ export function renderFailure(code, params = {}, lang = current) {
     if (hasMessage(kind, lang)) substitutions[1] = t(kind, undefined, lang);
   } else if (code === "encrypted" && (params["detail"] === undefined || params["detail"] === "")) {
     substitutions[0] = t("encrypted_default_detail", undefined, lang);
+  } else if (code === "cooldown") {
+    substitutions[2] = cooldownReasonLabel(String(params["reason"] ?? ""), lang);
   }
   return t(
     key,
@@ -232,6 +274,18 @@ export function stopReasonLabel(reason, lang = current) {
   if (until !== null) return t("stop_reason_cooldown_until", until[1] ?? "", lang);
   const key = messageKey("stop_reason", reason);
   return hasMessage(key, lang) ? t(key, undefined, lang) : reason;
+}
+
+/**
+ * The reason a cooldown recorded (`engine.cooldownReason`: the refusal's detail such as
+ * `HTTP 429 (manifest)`, or a code such as `rate_limited`), in `lang`: a code through its stop
+ * reason, a detail with its request kind translated.
+ * @param {string} reason
+ * @param {Lang} [lang]
+ * @returns {string}
+ */
+export function cooldownReasonLabel(reason, lang = current) {
+  return localizeDetail(stopReasonLabel(reason, lang), lang);
 }
 
 /**

@@ -21,14 +21,15 @@ export const COOLDOWN_STORAGE_KEY = "cooldown";
 export const COOLDOWN_SOURCES = Object.freeze(
   /** @type {const} */ (["dailymotion", "bilibili", "test"]),
 );
-/** The longest reason stored (a collapsed English failure text). */
+/** The longest reason stored (a collapsed detail of the refusal). */
 export const MAX_REASON_LEN = 200;
 
 /**
  * @typedef {object} Cooldown A recorded refusal: the site is not contacted again before `until`.
  * @property {number} until milliseconds since the epoch
- * @property {string} reason the English failure text that started it, collapsed and cut at 200
- *   characters
+ * @property {string} reason what started it: the refusal's short detail as the engine wrote it
+ *   (`HTTP 429 (manifest)`) or a failure code, collapsed and cut at 200 characters — never a
+ *   rendered sentence, so the page can show it in its own language
  * @property {string} source `dailymotion`, `bilibili` (or `test`)
  * @property {number | null} recordedAt milliseconds since the epoch when the site refused; null
  *   for a record built by hand
@@ -60,7 +61,7 @@ function asEpochMs(value) {
 
 /**
  * The cooldown a refusal starts — the record to store as it is: `until` = `now` + `minutes`.
- * @param {string} reason the failure's English text (`messages.render`)
+ * @param {string} reason the refusal's short detail (`HTTP 429 (manifest)`) or its code
  * @param {string} source {@link COOLDOWN_SOURCES}
  * @param {{ now?: number, minutes?: number }} [options] `now` in milliseconds (`Date.now()`)
  * @returns {Cooldown}

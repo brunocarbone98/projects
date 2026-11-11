@@ -742,6 +742,41 @@ test("refreshStreams keeps the chosen variant and the chosen representations", a
   assert.equal(again.streams.audio?.id, 30280);
 });
 
+test("refreshStreams never switches to another rendition: a renamed variant of the same encode is kept, a missing one is no_streams", async () => {
+  /** @type {string} */
+  let master = MASTER_TEXT;
+  const dm = network({
+    [METADATA]: { body: metadata() },
+    [MASTER]: () => ({ body: master }),
+    [`${CDN}/360/media.m3u8`]: { body: mediaText() },
+    [`${CDN}/1080/media.m3u8`]: { body: mediaText() },
+    [`${CDN}/1080b/media.m3u8`]: { body: mediaText() },
+  });
+  const { ctx } = context(dm.fetch);
+  const [target] = targetsOf(await resolve(item({ site: "dailymotion", id: DM_ID }), ctx));
+  assert.ok(target !== undefined && target.streams?.kind === "hls");
+  assert.equal(target.streams.variant.url, `${CDN}/1080/media.m3u8`, "the policy's 1080p avc1");
+  // the same encode under another NAME (and URL): kept
+  master = MASTER_TEXT.replace('NAME="1080"\n' + `${CDN}/1080/media.m3u8`, `NAME="1080p"\n${CDN}/1080b/media.m3u8`);
+  assert.notEqual(master, MASTER_TEXT);
+  const renamed = await refreshStreams(target, ctx);
+  assert.ok(renamed.ok && renamed.streams.kind === "hls");
+  assert.equal(renamed.streams.variant.url, `${CDN}/1080b/media.m3u8`);
+  // the chosen 1080p avc1 gone (only 360p and the HEVC 1080p left): never another rendition
+  master = MASTER_TEXT.split("\n").slice(0, 5).join("\n");
+  const before = dm.calls.length;
+  const gone = await refreshStreams(target, ctx);
+  assert.ok(!gone.ok);
+  assert.deepEqual(gone.failure, { code: "no_streams", params: { detail: "the refreshed master no longer offers the chosen quality" } });
+  assert.deepEqual(dm.calls.slice(before).map((call) => call.url.split("?")[0]), [METADATA.split("?")[0], MASTER.split("?")[0]], "no media playlist asked");
+  // the row's own choice (360p) is kept the same way
+  assert.ok(selectStream(target, 0));
+  master = MASTER_TEXT;
+  const chosen = await refreshStreams(target, ctx);
+  assert.ok(chosen.ok && chosen.streams.kind === "hls");
+  assert.equal(chosen.streams.variant.name, "360");
+});
+
 test("selectStream changes the row's video stream and re-picks nothing else; out of range changes nothing", () => {
   const rep = (/** @type {number} */ id) => ({ id, codecs: "avc1", codecFamily: /** @type {const} */ ("avc"), bandwidth: id, width: null, height: id, frameRate: null, urls: [`https://x.bilivideo.com/${id}`], mimeType: null, size: null, label: null });
   /** @type {Target} */

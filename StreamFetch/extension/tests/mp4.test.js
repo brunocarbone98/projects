@@ -290,9 +290,9 @@ const ALL_SAMPLE_FIELDS =
 const MOOF_DEFAULTS =
   TFHD.DEFAULT_BASE_IS_MOOF | TFHD.DEFAULT_SAMPLE_DURATION | TFHD.DEFAULT_SAMPLE_SIZE;
 
-test("parseFragments: default-base-is-moof, trun data offset, per-sample fields, v0 cts", () => {
+test("parseFragments: default-base-is-moof, trun data offset, per-sample fields, v0 cts (signed, as ffmpeg reads it)", () => {
   const samples = [
-    { duration: 10, size: 4, flags: 0x02000000, cts: 0 },
+    { duration: 10, size: 4, flags: 0x02000000, cts: 3000 },
     { duration: 11, size: 5, flags: 0x01010000, cts: 0xffffff00 },
   ];
   const traf = concat(
@@ -309,8 +309,8 @@ test("parseFragments: default-base-is-moof, trun data offset, per-sample fields,
   assert.equal(fragment.sampleDescriptionIndex, 1);
   const moofStart = 1000 + 12;
   assert.deepEqual(rows(fragment), [
-    [moofStart + 300, 4, 10, 0x02000000, 0],
-    [moofStart + 304, 5, 11, 0x01010000, 0xffffff00],
+    [moofStart + 300, 4, 10, 0x02000000, 3000],
+    [moofStart + 304, 5, 11, 0x01010000, -256],
   ]);
   assert.equal(fragment.dataStart, moofStart + 300);
   assert.equal(fragment.dataEnd, moofStart + 309);
