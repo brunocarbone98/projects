@@ -435,3 +435,44 @@ def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission
             state = upgraded.series_state(SERIES_ID)
             assert state is not None and state["complete_at"] is not None
             assert _media_counts(server) == [1, 1, 1, 1, 0]
+
+
+def test_e_a_series_whose_memory_is_gone_is_found_on_disk_and_not_downloaded_again(
+    tmp_path: Path,
+) -> None:
+    """The safety net under everything above: the progress of a series lost altogether (Chrome
+    repaired or recreated its store after a full disk) while the files and Chrome's download
+    history are intact. Run again, the series is listed, every episode is found at its place —
+    `already exists: …`, no video request, no `(1).mp4` — and its memory is written anew, the
+    complete mark included."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        first = ext.download_all(MAIN_LINK)
+        assert first["series"][0]["line"] == MAIN_LINE
+        assert _media_counts(server) == [1, 1, 1, 1, 0]
+        ext.page.evaluate("(key) => chrome.storage.local.remove(key)", f"series:{SERIES_ID}")
+        assert ext.series_state(SERIES_ID) is None
+
+        pages = len(server.series_page_requests)
+        again = ext.download_all(MAIN_LINK)
+        (series,) = again["series"]
+        rows = {row["number"]: row for row in series["rows"]}
+        assert [rows[n]["status"] for n in sorted(rows)] == [
+            "skipped-exists",
+            "skipped-exists",
+            "skipped-exists",
+            "skipped-exists",
+            "skipped-locked",
+        ]
+        for number in (1, 2, 3, 4):
+            assert rows[number]["message"] == (
+                f"already exists: {SERIES_NAME} - Episode {number:02d}.mp4"
+            )
+        assert series["line"] == "complete: 4 of 5 (4 already on disk) — 1 locked (5)"
+        assert len(server.series_page_requests) == pages + 1  # listed once: no memory to skip by
+        assert _media_counts(server) == [1, 1, 1, 1, 0]  # and nothing downloaded twice
+        assert sorted(_videos(ext)) == [
+            f"{SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2, 3, 4)
+        ]
+        state = ext.series_state(SERIES_ID)
+        assert state is not None and state["complete_at"] is not None
+        assert _on_disk(state) == dict.fromkeys((1, 2, 3, 4), "skipped-exists")
