@@ -718,7 +718,8 @@ function renderTable() {
   } else {
     // counted once and taken from the end: reading the live collection's length after each
     // removal would make the browser count every remaining row again
-    for (let extra = shown.length - kept; extra > 0; extra -= 1) body.removeChild(/** @type {Element} */ (body.lastElementChild));
+    for (let extra = shown.length - kept; extra > 0; extra -= 1)
+      body.removeChild(/** @type {Element} */ (body.lastElementChild));
     if (kept < rows.length) body.append(...rows.slice(kept));
   }
   renderSummary();
