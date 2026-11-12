@@ -2207,7 +2207,7 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       // the popup's "Download this series": nothing queued, the page says why and what to do
       const finished = element("app-status").dataset["finished"];
       page.message({ type: "dramafetch:load", input: SERIES_ID });
-      for (let turns = 0; turns < 20 && element("input-status").className !== "error"; turns += 1) await page.turn();
+      for (let turns = 0; turns < 20 && element("input-status").className !== "status error"; turns += 1) await page.turn();
       assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
       assert.deepEqual(queuedLabels(page), []);
       assert.equal(element("app-status").dataset["finished"], finished);
@@ -2219,14 +2219,14 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       local.set("cooldown", { until: stored, reason: "rate limited (HTTP 429) by the video server", source: "browser", recorded_at: stored - 1800 });
       element("input-status").className = "";
       page.message({ type: "dramafetch:load", input: SERIES_ID });
-      for (let turns = 0; turns < 20 && element("input-status").className !== "error"; turns += 1) await page.turn();
+      for (let turns = 0; turns < 20 && element("input-status").className !== "status error"; turns += 1) await page.turn();
       assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
       // a refusal by TikTok whose cooldown the storage refuses too: the advice names the wait's end, kept only in this browser session
       const recorded = await recordBlock(engine.cooldownStore, MEDIA_RATE_LIMIT_MESSAGE, "browser", { now: Date.now() / 1000 });
       assert.equal(/** @type {{until: number} | undefined} */ (local.get("cooldown"))?.until, stored); // not stored
       element("input-status").className = "";
       page.message({ type: "dramafetch:load", input: SERIES_ID });
-      for (let turns = 0; turns < 20 && element("input-status").className !== "error"; turns += 1) await page.turn();
+      for (let turns = 0; turns < 20 && element("input-status").className !== "status error"; turns += 1) await page.turn();
       const time = new Date(Math.floor(recorded.until) * 1000);
       const hhmm = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
       assert.equal(
@@ -2235,7 +2235,7 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       );
       // a reset of the settings the storage refuses says so, instead of failing silently
       element("settings-reset").fire("click");
-      for (let turns = 0; turns < 20 && element("settings-status").className !== "error"; turns += 1) await page.turn();
+      for (let turns = 0; turns < 20 && element("settings-status").className !== "status error"; turns += 1) await page.turn();
       assert.equal(element("settings-status").textContent, `Not saved: ${REFUSED}`);
       // the page holds the unsaved cooldown; while the disk is full its look stores nothing
       page.storageChanged("cooldown");
@@ -2279,7 +2279,7 @@ test("the page: a cooldown the storage refuses is a refused write — the job's 
       await clearCooldown(engine.cooldownStore);
       assert.equal((await module.coversAllowed()), false);
       page.message({ type: "dramafetch:load", input: SERIES_ID });
-      for (let turns = 0; turns < 20 && page.element("input-status").className !== "error"; turns += 1) await page.turn();
+      for (let turns = 0; turns < 20 && page.element("input-status").className !== "status error"; turns += 1) await page.turn();
       assert.deepEqual(queuedLabels(page), []);
       const status = String(page.element("input-status").textContent);
       assert.ok(status.startsWith(`DramaFetch stopped: ${UNSAVED}.`), status);
