@@ -84,3 +84,13 @@ test("the text box follows --from-file: comments, blank lines, BOM, duplicates, 
   assert.match(/** @type {{message: string}} */ (refused.errors[1]).message, /^line 4: Not a TikTok short-drama or video URL: 'nope'/);
   assert.deepEqual(parseSeriesList("\n# nothing\n"), { refs: [], notes: [], errors: [], lines: 0 });
 });
+
+test("no ceiling on the series of one batch: five thousand links are five thousand series, at once", () => {
+  const ids = Array.from({ length: 5000 }, (_, index) => String(7599400000000000000n + BigInt(index)));
+  const lines = ids.map((id, index) => (index % 2 === 0 ? id : `https://www.tiktok.com/shortdrama/episode/${id}/1`));
+  const started = performance.now();
+  const parsed = parseSeriesList([...lines, ...lines.slice(0, 100)].join("\n")); // and a hundred of them pasted twice
+  assert.ok(performance.now() - started < 2000);
+  assert.deepEqual(parsed.errors, []);
+  assert.deepEqual(parsed.refs.map((ref) => ref.seriesId), ids);
+});

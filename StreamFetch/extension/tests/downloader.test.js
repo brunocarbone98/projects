@@ -602,6 +602,20 @@ test("a target the resolver could not resolve fails with its own failure, withou
   assert.equal(net.calls.length, 0);
 });
 
+test("a download's trace belongs to its target: the same video resolved again (another run, a retry) starts without the last run's requests", async () => {
+  const net = network({ [VIDEO_URL]: () => ({ status: 403 }) });
+  const { ctx } = context(net.fetch, { refresh: async (stale) => ({ ok: true, streams: /** @type {import("../src/app/resolver.js").StreamChoice} */ (stale.streams), raw: null }) });
+  const target = dashTarget([VIDEO_URL], [AUDIO_URL]);
+  const result = await download(target, ctx);
+  assert.equal(result.status, "failed");
+  const requested = traceOf(target).filter((attempt) => attempt.requested);
+  assert.ok(requested.length >= 2 && requested.every((attempt) => attempt.http_status === 403), JSON.stringify(requested));
+  const again = { ...target, attempts: [] }; // resolved again: another target, the same key
+  assert.equal(again.key, target.key);
+  assert.deepEqual(traceOf(again), []);
+  assert.equal(traceOf(target).length, requested.length, "the first target keeps its own");
+});
+
 test("a media URL outside the manifest's hosts is never requested; the row names the host", async () => {
   const net = network({});
   const target = dashTarget(["https://cdn.unknown-mirror.example/80.m4s"], null);

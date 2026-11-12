@@ -55,7 +55,7 @@ import {
 } from "../src/app/discovery.js";
 import { Downloader, SaveError } from "../src/app/downloader.js";
 import { RedirectTracker, fetchFollowing } from "../src/app/redirects.js";
-import { StopRequested, resolve } from "../src/app/engine.js";
+import { STORAGE_REFUSED_PREFIX, StopRequested, resolve, storageRefusedReason } from "../src/app/engine.js";
 import { settingsProblem, DEFAULT_SETTINGS } from "../src/app/storage.js";
 
 /** @param {string} relative @returns {URL} */
@@ -689,6 +689,29 @@ test("the stops, the stopped rows, the not-started series and the batch table re
     es(`not started: batch stopped in Zafiro (2024) (rate limited (HTTP 429))`),
     "no iniciada: el lote se detuvo en Zafiro (2024) (demasiadas solicitudes (HTTP 429))",
   );
+});
+
+test("a run stopped because its progress could not be stored says so in Spanish; Chrome's own reason stays as it is", () => {
+  // what Chrome 153 answers on a full disk (the folder already cut to `...` by Chrome) and at the quota
+  for (const chrome of [
+    "IO error: .../000003.log: FILE_ERROR_NO_SPACE (ChromeMethodBFE: 3::WritableFileAppend::8)",
+    "Resource::kQuotaBytes quota exceeded",
+  ]) {
+    const reason = storageRefusedReason(new Error(chrome));
+    assert.equal(reason, `${STORAGE_REFUSED_PREFIX}${chrome}`);
+    assert.equal(es(reason), `no se pudo guardar el progreso: ${chrome}`);
+    assert.equal(es(`stopped: ${reason}`), `detenido: no se pudo guardar el progreso: ${chrome}`);
+    assert.equal(
+      es(`not started: batch stopped in Zafiro (2024) (${reason})`),
+      `no iniciada: el lote se detuvo en Zafiro (2024) (no se pudo guardar el progreso: ${chrome})`,
+    );
+    assert.equal(
+      es(batchStatus({ ref: { seriesId: SERIES_ID }, series: null, report: seriesReport(null, [], { seriesId: SERIES_ID, stopped: reason }), error: reason, errorKind: "storage" })),
+      `falló: no se pudo guardar el progreso: ${chrome}`,
+    );
+    for (const text of [reason, `stopped: ${reason}`]) assert.equal(en(text), text); // English as the engine wrote it
+  }
+  assert.equal(storageRefusedReason(new Error("first line\nsecond line")), `${STORAGE_REFUSED_PREFIX}first line`); // one line
 });
 
 test("the pacing in force and every pause announcement read in Spanish", () => {

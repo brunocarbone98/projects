@@ -20,7 +20,14 @@
  *   between two series that contact TikTok (or takes the long break there, before the resolve),
  *   and after any stop marks every remaining series `not started: batch stopped in <name>
  *   (<reason>)` with no request; a series complete less than 24 h ago with every file still there
- *   costs no request at all (whole-series runs only).
+ *   costs no request at all (whole-series runs only);
+ * - a write `chrome.storage.local` refuses (the disk that holds the Chrome profile is full or
+ *   failing) is a stop of the extension's own — the Python tool keeps its manifest in a file next
+ *   to the videos: what the result needed comes first (its row, the attempt counted, a refusal's
+ *   cooldown), then the rest is `stopped: the progress could not be saved: <Chrome's reason>` with
+ *   no request and no further write, and no series is listed while the page says a write was
+ *   refused (`engine.unsaved`; the page's listing throws {@link StorageRefusedError} instead of
+ *   making a request).
  *
  * Every pause is announced (`onPause`) and slept through the injected `sleep`; the state is saved
  * after every episode, so closing the tab loses nothing and the next run resumes. Timers in a
@@ -28,7 +35,7 @@
  */
 
 import { activeCooldown, cooldownMessage, cooldownStopReason, recordBlock } from "../lib/cooldown.js";
-import { FAILED_BLOCKED, FAILED_LOGIN, FAILED_RATE_LIMITED, isOk } from "../lib/messages.js";
+import { FAILED, FAILED_BLOCKED, FAILED_LOGIN, FAILED_RATE_LIMITED, isOk } from "../lib/messages.js";
 import { displayName, seriesFolder } from "../lib/naming.js";
 import {
   LONG_REST,
@@ -64,6 +71,12 @@ export const EXIT_RATE_LIMITED = 5;
 export const DOWNLOAD_SOURCE = "browser";
 /** The cooldown source of a refusal met while listing a series. */
 export const DISCOVERY_SOURCE = "discovery";
+/**
+ * How the stop of a run begins when `chrome.storage.local` refused to store its progress,
+ * followed by Chrome's reason ({@link storageRefusedReason}). The extension's own text: the Python
+ * tool has no such stop.
+ */
+export const STORAGE_REFUSED_PREFIX = "the progress could not be saved: ";
 
 /**
  * @typedef {import("../lib/catalog.js").Episode} Episode
@@ -114,7 +127,11 @@ export const DISCOVERY_SOURCE = "discovery";
  * @property {DownloadsView} view
  * @property {(seriesId: string) => Promise<unknown>} readState
  * @property {(state: SeriesState) => Promise<void>} writeState
- * @property {() => Promise<void>} [persist] save the pacing (after every attempt and pause)
+ * @property {() => Promise<void>} [persist] save the pacing (after every attempt and pause); never
+ *   throws — a refused write is what `unsaved` then answers
+ * @property {() => string | null} [unsaved] why `chrome.storage.local` refused a write of this page
+ *   (the pacing, a series' state), once it did ({@link storageRefusedReason}): the run stops before
+ *   its next request
  * @property {() => boolean} [stopRequested] the user pressed Stop: end at the next checkpoint
  * @property {(kind: string, seconds: number, text: string) => void} [onPause]
  * @property {(result: DownloadResult) => void} [onResult]
@@ -147,6 +164,65 @@ async function takePause(engine, kind, seconds, text) {
 }
 
 /**
+ * Why a run stops when `chrome.storage.local` refused a write: {@link STORAGE_REFUSED_PREFIX} and
+ * Chrome's reason on one line.
+ * @param {unknown} error what the refused write rejected with
+ * @returns {string}
+ */
+export function storageRefusedReason(error) {
+  return `${STORAGE_REFUSED_PREFIX}${oneLine(error)}`;
+}
+
+/**
+ * Store a series' state (`engine.writeState`). A refused write is no exception here: its reason
+ * comes back and the run stops with it at its next checkpoint, once what the result needed — its
+ * row, the attempt counted, the cooldown of a refusal — is done.
+ * @param {Engine} engine
+ * @param {SeriesState} state
+ * @returns {Promise<string | null>} why the state could not be stored, or null
+ */
+async function saveState(engine, state) {
+  try {
+    await engine.writeState(state);
+    return null;
+  } catch (error) {
+    return storageRefusedReason(error);
+  }
+}
+
+/**
+ * Asked right before a series' first request: can the run's progress be stored? The pacing is
+ * saved (`engine.persist`: a write, never a request), and a write the storage refused — just now
+ * or earlier in this page — is why the series is not listed.
+ * @param {Engine} engine
+ * @returns {Promise<string | null>} {@link storageRefusedReason}, or null
+ */
+async function unsavedBeforeNetwork(engine) {
+  await engine.persist?.();
+  return engine.unsaved?.() ?? null;
+}
+
+/**
+ * The run of a series whose progress could not be stored: refused before its first request.
+ * @param {SeriesRef} ref
+ * @param {string} reason {@link storageRefusedReason}
+ * @returns {SeriesRun}
+ */
+function storageRefusal(ref, reason) {
+  return {
+    ref,
+    series: null,
+    results: [],
+    report: seriesReport(null, [], { seriesId: ref.seriesId, stopped: reason }),
+    error: reason,
+    stop: true,
+    exitCode: EXIT_FAILED,
+    errorKind: "storage",
+    contacted: false,
+  };
+}
+
+/**
  * 0 when all ok; 3 on any login failure; 5 when blocked or rate limited; 2 on other failures
  * (`engine.exit_code`).
  * @param {readonly DownloadResult[]} results
@@ -174,7 +250,8 @@ export function episodeContext(series) {
  * Download the given episodes of a series, one at a time, ascending, resumably, paced
  * (`engine.download_series`). `state` is the series' state (loaded by the caller); every result
  * is recorded in it and saved. `beforeNetwork` (a selection job's rest) runs right before every
- * network attempt, after its pause. Returns the results and why the run stopped, if it did.
+ * network attempt, after its pause. Returns the results and why the run stopped, if it did — a
+ * state write the storage refused among the reasons ({@link storageRefusedReason}): never thrown.
  * @param {Engine} engine
  * @param {Series} series
  * @param {readonly Episode[]} episodes
@@ -192,11 +269,13 @@ export async function downloadSeries(engine, series, episodes, state, hooks = {}
   const results = [];
   /** @type {string | null} */
   let stopped = null;
+  /** @type {string | null} why the progress could not be stored, once a write was refused: nothing more is written */
+  let unsaved = null;
 
   /** @param {DownloadResult} result */
   const emit = async (result) => {
     results.push(result);
-    if (record(state, result, { exists, now: engine.wallClock() })) await engine.writeState(state);
+    if (record(state, result, { exists, now: engine.wallClock() }) && unsaved === null) unsaved = await saveState(engine, state);
     engine.onResult?.(result);
   };
   /**
@@ -227,6 +306,12 @@ export async function downloadSeries(engine, series, episodes, state, hooks = {}
   let previous = null;
   for (let index = 0; index < ordered.length; index += 1) {
     if (engine.stopRequested?.()) throw new StopRequested();
+    unsaved = unsaved ?? engine.unsaved?.() ?? null;
+    if (unsaved !== null) {
+      // the storage refused a write: not one more request whose outcome could not be recorded
+      await stop(ordered.slice(index), FAILED, unsaved, unsaved);
+      break;
+    }
     const episode = /** @type {Episode} */ (ordered[index]);
     const done = donePath(state, episode.number, exists);
     if (done !== null) {
@@ -255,8 +340,24 @@ export async function downloadSeries(engine, series, episodes, state, hooks = {}
         await stop(ordered.slice(index), FAILED_RATE_LIMITED, summary, summary);
         break;
       }
+      unsaved = engine.unsaved?.() ?? null; // the pacing is saved during a pause: refused, no request follows
+      if (unsaved !== null) {
+        await stop(ordered.slice(index), FAILED, unsaved, unsaved);
+        break;
+      }
     }
-    const result = await downloader.download(episode, context);
+    /** @type {DownloadResult} */
+    let result;
+    try {
+      result = await downloader.download(episode, context);
+    } catch (error) {
+      if (!(error instanceof StorageRefusedError)) throw error;
+      // the fresh list this episode needed was refused before any request: the storage stop,
+      // neither an attempt nor a failure of the streak
+      unsaved = unsaved ?? error.message;
+      await stop(ordered.slice(index), FAILED, unsaved, unsaved);
+      break;
+    }
     await emit(result);
     const outcome = afterResult(engine.pacing, pacing, clock, result);
     if (outcome.network) {
@@ -275,6 +376,7 @@ export async function downloadSeries(engine, series, episodes, state, hooks = {}
       break;
     }
   }
+  if (stopped === null) stopped = unsaved ?? engine.unsaved?.() ?? null; // refused at the series' last result
   return { results, stopped };
 }
 
@@ -372,8 +474,9 @@ export async function resolve(engine, ref) {
 /**
  * One series, start to finish, resolved right before its downloads (`engine.run_series`, a
  * whole-series run): the cooldown (refused: no request) → the complete skip (no request, no tab)
- * → `beforeNetwork` (the batch rests there) + the cooldown again → the resolve → the downloads →
- * the report, and the complete mark set or cleared.
+ * → `beforeNetwork` (the batch rests there) + the cooldown again → whether the progress can be
+ * stored (refused: no request) → the resolve → the downloads → the report, and the complete mark
+ * set or cleared.
  * @param {Engine} engine
  * @param {SeriesRef} ref
  * @param {{beforeNetwork?: (() => Promise<void>) | null}} [hooks]
@@ -408,10 +511,13 @@ export async function runSeries(engine, ref, hooks = {}) {
     cooldown = await checkCooldown(engine); // a refusal may have been met meanwhile
     if (cooldown !== null) return cooldownRefusal(ref, cooldown, engine.wallClock());
   }
+  const refused = await unsavedBeforeNetwork(engine);
+  if (refused !== null) return storageRefusal(ref, refused); // nothing could be recorded: no request
   let series;
   try {
     series = await resolve(engine, ref);
   } catch (error) {
+    if (error instanceof StorageRefusedError) return storageRefusal(ref, error.message); // refused right before the listing
     if (error instanceof DiscoveryError) return resolveFailure(ref, error);
     throw error;
   }
@@ -439,13 +545,22 @@ export async function runSeries(engine, ref, hooks = {}) {
   const state = loadState(await engine.readState(series.seriesId), series.seriesId, series.name);
   await engine.view.refresh();
   const { results, stopped: reported } = await downloadSeries(engine, series, selected, state);
-  const stopped = reported ?? stopStatusSummary(results);
-  const report = seriesReport(series, results, { stopped });
-  if (report.complete) {
-    markComplete(state, engine.wallClock(), report.done + report.onDisk);
-    await engine.writeState(state);
-  } else if (clearComplete(state)) {
-    await engine.writeState(state);
+  let stopped = reported ?? stopStatusSummary(results);
+  let report = seriesReport(series, results, { stopped });
+  if (stopped === null || !stopped.startsWith(STORAGE_REFUSED_PREFIX)) {
+    // the complete mark, set or cleared (after a refused write nothing more is written)
+    /** @type {string | null} */
+    let unsaved = null;
+    if (report.complete) {
+      markComplete(state, engine.wallClock(), report.done + report.onDisk);
+      unsaved = await saveState(engine, state);
+    } else if (clearComplete(state)) {
+      unsaved = await saveState(engine, state);
+    }
+    if (unsaved !== null && stopped === null) {
+      stopped = unsaved; // the mark could not be stored: a stop like any other, the batch ends here
+      report = seriesReport(series, results, { stopped });
+    }
   }
   return {
     ref,
@@ -612,7 +727,8 @@ export async function runSelection(engine, series, numbers, job) {
  * resolved it; the extension cannot tell sessions apart, so it lists again) —, so the series is
  * listed right before its downloads: the cooldown (refused: no request), the rest between jobs or
  * the long break (before the list, so the fresh play URLs never wait through it), the cooldown
- * again, the resolve (a failure is the run's error and a stop, as in a batch), then
+ * again, whether the progress can be stored (refused: no request), the resolve (a failure is the
+ * run's error and a stop, as in a batch), then
  * {@link runSelection} over the fresh list, whose access decisions apply: an episode it now calls
  * locked is `skipped-locked` unless includeLocked.
  * @param {Engine} engine
@@ -627,15 +743,32 @@ export async function runSelectionJob(engine, ref, numbers, job) {
   await restBetweenJobs(engine, { lastContactAt: job.lastContactAt, batchJob: true });
   cooldown = await checkCooldown(engine); // a refusal may have been met meanwhile
   if (cooldown !== null) return cooldownRefusal(ref, cooldown, engine.wallClock());
+  const refused = await unsavedBeforeNetwork(engine);
+  if (refused !== null) return storageRefusal(ref, refused); // nothing could be recorded: no request
   let series;
   try {
     series = await resolve(engine, ref);
   } catch (error) {
+    if (error instanceof StorageRefusedError) return storageRefusal(ref, error.message); // refused right before the listing
     if (error instanceof DiscoveryError) return resolveFailure(ref, error);
     throw error;
   }
   const run = await runSelection(engine, series, numbers, { lastContactAt: null }); // rested already
   return { ...run, contacted: true };
+}
+
+/**
+ * A listing asked for after `chrome.storage.local` refused a write of this page: not one request
+ * is made (the page's `discover` checks right before the listing). Its message is the reason,
+ * {@link storageRefusedReason}; a run that meets it is a {@link storageRefusal}, and the in-run
+ * re-discovery of an episode fails that episode with it, no further URL requested.
+ */
+export class StorageRefusedError extends DiscoveryError {
+  /** @param {string} reason {@link storageRefusedReason} */
+  constructor(reason) {
+    super(reason);
+    this.name = "StorageRefusedError";
+  }
 }
 
 /** The user asked the run to stop: it ends at the next pause or between two episodes. */

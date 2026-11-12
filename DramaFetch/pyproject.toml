@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dramafetch"
-version = "1.3.0"
+version = "1.3.1"
 description = "Download the TikTok short-drama episodes you are allowed to watch, a whole series at a time, for personal offline viewing."
 readme = "README.md"
 requires-python = ">=3.11"

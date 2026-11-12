@@ -706,7 +706,22 @@ function renderTable() {
     const view = app.rows.get(key);
     if (view !== undefined) rows.push(view.tr);
   }
-  body.replaceChildren(...rows);
+  // Putting every row back costs a layout of the whole table — seconds once thousands of rows
+  // have piled up without **Clear**, at every resolved link —, so the rows already shown in their
+  // place stay: only what follows the first row out of place is put back (a link read into its
+  // parts or episodes and the rows after it, the newest rows), nothing when the list is the same.
+  const shown = body.children;
+  let kept = 0;
+  while (kept < shown.length && kept < rows.length && shown[kept] === rows[kept]) kept += 1;
+  if (kept === 0 && shown.length > 0) {
+    body.replaceChildren(...rows); // nothing to keep (Clear, a new first row): one operation
+  } else {
+    // counted once and taken from the end: reading the live collection's length after each
+    // removal would make the browser count every remaining row again
+    for (let extra = shown.length - kept; extra > 0; extra -= 1)
+      body.removeChild(/** @type {Element} */ (body.lastElementChild));
+    if (kept < rows.length) body.append(...rows.slice(kept));
+  }
   renderSummary();
 }
 
@@ -1143,6 +1158,7 @@ function onClear() {
   app.resolved.clear();
   app.rows = new Map();
   app.order = [];
+  covers.forget();
   $("input-notes").replaceChildren();
   clearFailedBlock();
   renderTable();
@@ -1424,6 +1440,9 @@ export class CoverLoader {
       return;
     }
     if (this.asked.has(key)) return;
+    // the row was drawn again (its link read once more): its earlier image is let go, not kept watched
+    const previous = this.cells.get(key);
+    if (previous !== undefined && previous.image !== image) this.watcher?.unobserve(previous.image);
     this.cells.set(key, { image, url });
     this.keyOf.set(image, key);
     if (this.watcher === null) {
@@ -1445,6 +1464,17 @@ export class CoverLoader {
       });
     }
     this.watcher.observe(image);
+  }
+
+  /**
+   * Forget the rows still watched (**Clear**): their images — and through them the rows and their
+   * targets — are let go. What was asked for stays asked: a thumbnail is never requested twice.
+   */
+  forget() {
+    for (const cell of this.cells.values()) this.watcher?.unobserve(cell.image);
+    this.cells.clear();
+    this.visible.clear();
+    this.queue.length = 0;
   }
 
   /** @returns {string | null} the next cover to fetch: a row in view, not asked yet */

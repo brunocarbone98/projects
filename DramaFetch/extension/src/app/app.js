@@ -10,8 +10,8 @@
  */
 
 import { isLocked } from "../lib/catalog.js";
-import { COOLDOWN_STORAGE_KEY, activeCooldown, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
-import { buildReport, hasFailures, reportFilename, reportJson, reportStem } from "../lib/diagnosis.js";
+import { COOLDOWN_STORAGE_KEY, activeCooldown, clockTime, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
+import { buildReport, digestEntry, hasFailures, reportFilename, reportJson, reportStem, slimRows } from "../lib/diagnosis.js";
 import { displayText, statusLabel } from "../lib/display.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import { fileBaseName } from "../lib/naming.js";
@@ -31,7 +31,17 @@ import { parseSeriesList } from "../lib/urls.js";
 import { closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
 import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
 import { initPageRedirects } from "./redirects.js";
-import { StopRequested, checkCooldown, episodeContext, resolve, restBetweenJobs, runBatch, runSelectionJob } from "./engine.js";
+import {
+  StopRequested,
+  StorageRefusedError,
+  checkCooldown,
+  episodeContext,
+  resolve,
+  restBetweenJobs,
+  runBatch,
+  runSelectionJob,
+  storageRefusedReason,
+} from "./engine.js";
 import { displayLabels, displayLanguage, localize, t } from "./i18n.js";
 import {
   DEFAULT_SETTINGS,
@@ -46,6 +56,7 @@ import {
   savePacing,
   saveSettings,
   saveTestSettings,
+  storedCooldownUntil,
   writeSeriesState,
 } from "./storage.js";
 import { TabKeeper } from "./tabkeeper.js";
@@ -76,6 +87,10 @@ const ENGINE_LOCK = "dramafetch-engine";
  *
  * @typedef {object} JobRecord What a finished job leaves in the history.
  * @property {{kind: string, seconds: number, text: string}[]} pauses
+ * @property {SeriesInput[]} inputs what the report reads of the first finished series of a batch,
+ *   in the runs' order, each taken when its series was done ({@link releaseSeries})
+ * @property {boolean} taking whether the next series' is still taken: false once one could not be
+ *   (that run and the later ones stay whole, and the report reads them at the job's end)
  *
  * @typedef {object} JobOutcome How a job ended, as its history entry records it ({@link reportJobEnd}).
  * @property {string} startedAt
@@ -124,6 +139,17 @@ const app = {
   /** @type {number | null} when DramaFetch last contacted TikTok (a request, or a finished job that made one) */
   lastContactAt: null,
   stopRequested: false,
+  /**
+   * Why `chrome.storage.local` refused a write of this page (the pacing, a series' state), once it
+   * did ({@link storageRefusedReason}) — kept until the page is reloaded: what Chrome accepts after
+   * a refused write may not survive its restart, so this page asks nothing more of TikTok.
+   * @type {string | null}
+   */
+  unsaved: null,
+  /** whether the storage advice on screen says the wait could not be saved ({@link showStorageRefused}) */
+  unsavedWaitShown: false,
+  /** when the page last looked whether its cooldown is stored ({@link lookAgainAtCooldown}) */
+  cooldownLookedAt: 0,
   /** @type {Set<() => void>} */
   stopWaiters: new Set(),
   /** @type {import("../lib/cooldown.js").Cooldown | null} */
@@ -300,15 +326,87 @@ function sleep(seconds) {
 async function noteContact(job) {
   job.contacted = true;
   app.lastContactAt = now();
-  await savePacing(app.pacing, app.lastContactAt);
+  await storePacing();
 }
 
 /**
+ * `chrome.storage.local` refused a write: remembered in {@link app}.unsaved, the first reason kept,
+ * and the buttons that would start a job disabled from now on.
+ * @param {unknown} error what the write rejected with
+ */
+function noteRefusedWrite(error) {
+  if (app.unsaved !== null) return;
+  app.unsaved = storageRefusedReason(error);
+  updateButtons();
+}
+
+/**
+ * Save the run's pacing. A write the storage refuses never throws — the pacing in force is this
+ * page's own, `app.pacing`, so no pause gets shorter — but it is remembered: the engine stops
+ * before its next request and the job's end says why.
+ * @returns {Promise<void>}
+ */
+async function storePacing() {
+  try {
+    await savePacing(app.pacing, app.lastContactAt);
+  } catch (error) {
+    noteRefusedWrite(error);
+  }
+}
+
+/**
+ * Say, in the status line, that this page stopped because `chrome.storage.local` refused a write
+ * ({@link app}.unsaved) and what to do. When a cooldown is in force too, the advice names its end:
+ * a cooldown that could not be stored is only in this browser session's memory, and restarting
+ * Chrome before then would forget it.
+ * @returns {Promise<void>}
+ */
+async function showStorageRefused() {
+  if (app.unsaved === null) return;
+  const reason = shownText(app.unsaved);
+  const cooldown = await checkCooldownNow();
+  // A cooldown in force: its end is always named — what Chrome accepts after a refused write may
+  // not survive its restart, so even a stored wait is waited out first. "could not be saved"
+  // only when chrome.storage.local does not hold it.
+  const unsavedWait = cooldown !== null && (await storedCooldownUntil()) < cooldown.until;
+  app.unsavedWaitShown = unsavedWait;
+  const text =
+    cooldown === null
+      ? t("storageRefused", [reason])
+      : t(unsavedWait ? "storageRefusedCooldown" : "storageRefusedWait", [reason, clockTime(cooldown.until)]);
+  setStatus($("input-status"), text, "error");
+  updateButtons();
+}
+
+/**
+ * The cooldown store of a job: a record the storage refuses is a refused write like any other
+ * ({@link noteRefusedWrite}) — the cooldown stays in force from the page's and the browser
+ * session's memory, and the job's end says the wait could not be saved.
+ * @param {import("../lib/cooldown.js").CooldownStore} store
+ * @returns {import("../lib/cooldown.js").CooldownStore}
+ */
+function noticedCooldownStore(store) {
+  return {
+    ...store,
+    write: async (record) => {
+      try {
+        await store.write(record);
+      } catch (error) {
+        noteRefusedWrite(error);
+        throw error; // `recordBlock` keeps the cooldown in force all the same
+      }
+    },
+  };
+}
+
+/**
+ * The engine of one job, wired to this page: its storage, its pacing, its downloader and the
+ * progress card. (Exported for the unit tests, which cannot run a job but can call its hooks.)
  * @param {Job} job
  * @param {JobRecord} jobRecord
  * @returns {Engine}
  */
-function buildEngine(job, jobRecord) {
+export function buildEngine(job, jobRecord) {
   const base = baseUrl();
   const test = app.testMode ? app.testSettings : {};
   const networkBefore = app.pacing.lastNetworkAt;
@@ -322,6 +420,8 @@ function buildEngine(job, jobRecord) {
   /** A listing contacts TikTok from its first request to its last: noted at both ends. */
   const discover = async (/** @type {SeriesRef} */ ref) => {
     await noteContact(job);
+    // that save refused (or one before it): not one request of the listing
+    if (app.unsaved !== null) throw new StorageRefusedError(app.unsaved);
     try {
       return await discoverSeries(ref, discoveryOptions);
     } finally {
@@ -351,12 +451,20 @@ function buildEngine(job, jobRecord) {
     sleep,
     clock: now,
     wallClock: now,
-    cooldownStore: cooldownStore(),
+    cooldownStore: noticedCooldownStore(cooldownStore()),
     discover,
     downloader,
     view,
     readState: readSeriesState,
-    writeState: writeSeriesState,
+    writeState: async (state) => {
+      try {
+        await writeSeriesState(state);
+      } catch (error) {
+        noteRefusedWrite(error);
+        throw error; // the engine makes it the run's stop
+      }
+    },
+    unsaved: () => app.unsaved,
     persist: async () => {
       // after every network attempt (and pause): a download contacted TikTok at lastNetworkAt
       const network = app.pacing.lastNetworkAt;
@@ -364,7 +472,7 @@ function buildEngine(job, jobRecord) {
         job.contacted = true;
         if (app.lastContactAt === null || network > app.lastContactAt) app.lastContactAt = network;
       }
-      await savePacing(app.pacing, app.lastContactAt);
+      await storePacing();
     },
     stopRequested: () => app.stopRequested,
     onPause: (kind, seconds, text) => {
@@ -393,8 +501,36 @@ function buildEngine(job, jobRecord) {
     onSeriesDone: (_index, _total, run) => {
       clearPause();
       renderReportLine(run);
+      releaseSeries(run, downloader, jobRecord);
+      trimResultRows();
     },
   };
+}
+
+/**
+ * A series of a batch is done: take what the job's report reads of it ({@link seriesInput}), then
+ * let go of what the run kept only for that — the downloader's traces and fresh list of the series
+ * and every episode's raw list item (several kilobytes each: a batch of hundreds of series would
+ * hold them all until its end). Nothing the engine does next reads them: a batch downloads a
+ * series once. Never throws into the batch: when the report's input cannot be taken, the run is
+ * left whole — it and every later one — and the report reads them at the job's end. (Exported for
+ * the unit tests, which cannot run a job.)
+ * @param {SeriesRun} run
+ * @param {Pick<Downloader, "traceOf" | "forgetSeries">} downloader the job's
+ * @param {Pick<JobRecord, "inputs" | "taking">} jobRecord
+ */
+export function releaseSeries(run, downloader, jobRecord) {
+  if (!jobRecord.taking) return;
+  try {
+    jobRecord.inputs.push(seriesInput(run, (episode) => downloader.traceOf(episode)));
+  } catch (error) {
+    console.warn(error);
+    jobRecord.taking = false;
+    return;
+  }
+  downloader.forgetSeries(run.ref.seriesId);
+  for (const episode of run.series?.episodes ?? []) episode.raw = null;
+  for (const result of run.results) result.episode.raw = null;
 }
 
 // --------------------------------------------------------------------------- progress
@@ -460,6 +596,73 @@ function renderResult(result) {
   else body.append(row);
 }
 
+/**
+ * At most this many rows stay in the result table while a job runs: about the last thirty series
+ * of sixty episodes. A row costs some 40 KB of the tab's memory and every new row lays the whole
+ * table out again, so a batch of hundreds of series would otherwise hold gigabytes and stutter.
+ */
+export const MAX_RESULT_ROWS = 2000;
+/** How many nodes one `append(...nodes)` call is handed at most (a call takes about 124 000 arguments). */
+const APPEND_CHUNK = 10_000;
+
+/**
+ * `parent.append(...nodes)` in pieces of {@link APPEND_CHUNK}: the same children in the same
+ * order, however many there are.
+ * @param {Element} parent
+ * @param {readonly Element[]} nodes
+ */
+function appendInPieces(parent, nodes) {
+  for (let index = 0; index < nodes.length; index += APPEND_CHUNK) parent.append(...nodes.slice(index, index + APPEND_CHUNK));
+}
+
+/**
+ * @param {Element} row a row of the result table
+ * @returns {boolean} whether it is a series' header row ({@link buildEngine} `onStart`)
+ */
+function isSeriesRow(row) {
+  return ` ${row.className} `.includes(" series-row ");
+}
+
+/**
+ * `rows` without the header rows of the series that have no row left among them (their rows all
+ * failed and moved to the failed block, or the trimming took them).
+ * @param {readonly Element[]} rows
+ * @returns {Element[]}
+ */
+function withoutBareHeaders(rows) {
+  const shown = new Set(rows.filter((row) => !isSeriesRow(row)).map((row) => row.getAttribute("data-series-id")));
+  return rows.filter((row) => !isSeriesRow(row) || shown.has(row.getAttribute("data-series-id")));
+}
+
+/**
+ * Keep the result table light (called when a series of a batch is done): over `limit` rows, the
+ * OLDEST rows of episodes that completed — done, skipped, dry run — leave, then the header rows
+ * of the series left with no row. A failure row never leaves (the job's end shows those apart,
+ * {@link renderFailed}), nor does its series' header; every finished series keeps its report
+ * line, and `#result-trimmed` says so once rows have left. A display matter
+ * only: the results, the history and the report are untouched. (Exported for the unit tests,
+ * which cannot run a job.)
+ * @param {number} [limit] {@link MAX_RESULT_ROWS}; lower only in the test copy of the extension
+ */
+export function trimResultRows(limit = (app.testMode ? app.testSettings.maxResultRows : undefined) ?? MAX_RESULT_ROWS) {
+  const body = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
+  const rows = [...body.children];
+  let excess = rows.length - limit;
+  if (excess <= 0) return;
+  /** @type {Set<Element>} */
+  const leaving = new Set();
+  for (const row of rows) {
+    if (excess <= 0) break;
+    if (isSeriesRow(row) || isFailure(row.getAttribute("data-status"))) continue;
+    leaving.add(row);
+    excess -= 1;
+  }
+  if (leaving.size === 0) return;
+  body.replaceChildren();
+  appendInPieces(body, withoutBareHeaders(rows.filter((row) => !leaving.has(row)))); // a header whose series has no row left goes too
+  $("result-trimmed").hidden = false;
+}
+
 /** @param {SeriesRun} run */
 function renderReportLine(run) {
   const name = run.report.name || run.series?.name || run.ref.seriesId;
@@ -494,6 +697,7 @@ function renderBatchTable(runs) {
 function startProgress(job) {
   $("progress-card").hidden = false;
   /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody")).textContent = "";
+  $("result-trimmed").hidden = true;
   $("report-lines").textContent = "";
   $("batch-table").hidden = true;
   $("failed-block").hidden = true; // the last job's episodes that did not download; this job's come at its end
@@ -635,7 +839,7 @@ function failedEpisodesText(targets, named) {
  * @param {HTMLButtonElement} source
  */
 function startRetry(targets, source) {
-  if (!app.owner || app.cooldown !== null || spentRetries.has(source)) return;
+  if (!app.owner || app.cooldown !== null || app.unsaved !== null || spentRetries.has(source)) return;
   source.disabled = true;
   spentRetries.add(source);
   for (const job of retryJobs(targets)) enqueue(job);
@@ -674,9 +878,11 @@ export function renderFailed(seriesRecords) {
   if (rows.length > 0) {
     const leaving = new Set(rows.map((row) => `${row.seriesId}:${row.number}`));
     const results = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
-    results.replaceChildren(
-      ...[...results.children].filter((row) => !leaving.has(`${row.getAttribute("data-series-id")}:${row.getAttribute("data-number")}`)),
-    );
+    const kept = [...results.children].filter((row) => !leaving.has(`${row.getAttribute("data-series-id")}:${row.getAttribute("data-number")}`));
+    results.replaceChildren();
+    // a series' header with no row left goes too; never one spread of them all: a table of
+    // 125 000 rows would overflow the call
+    appendInPieces(results, withoutBareHeaders(kept));
     for (const row of rows) {
       body.append(
         el("tr", { attrs: { "data-series-id": row.seriesId, "data-number": String(row.number), "data-status": row.status } }, [
@@ -720,23 +926,27 @@ function seriesInput(run, traceOf) {
     contacted: run.contacted,
     listed: episodes?.length ?? null,
     access,
-    listedEpisodes: episodes, // the raw items of every listed episode: the report's digest
-    episodes: run.results.map((result) => ({
-      number: result.episode.number,
-      itemId: result.episode.itemId,
-      title: result.episode.title,
-      durationS: result.episode.durationS,
-      access: result.episode.access,
-      paid: result.episode.paid,
-      drm: result.episode.drm,
-      lockHints: result.episode.lockHints,
-      qualityHint: result.episode.qualityHint,
-      raw: result.episode.raw,
-      status: result.status,
-      message: result.message,
-      path: result.path ?? null,
-      trace: traceOf(result.episode),
-    })),
+    listedEpisodes: null,
+    episodesDigest: episodes === null ? null : episodes.map(digestEntry), // of every listed episode, made now
+    // the raw item and the trace only of the rows the report describes (`lib/diagnosis.slimRows`)
+    episodes: slimRows(
+      run.results.map((result) => ({
+        number: result.episode.number,
+        itemId: result.episode.itemId,
+        title: result.episode.title,
+        durationS: result.episode.durationS,
+        access: result.episode.access,
+        paid: result.episode.paid,
+        drm: result.episode.drm,
+        lockHints: result.episode.lockHints,
+        qualityHint: result.episode.qualityHint,
+        raw: result.episode.raw,
+        status: result.status,
+        message: result.message,
+        path: result.path ?? null,
+        trace: traceOf(result.episode),
+      })),
+    ),
   };
 }
 
@@ -751,13 +961,15 @@ function seriesInput(run, traceOf) {
  * @param {JobOutcome} outcome
  * @param {readonly SeriesRun[] | null} runs the `SeriesRun`s the job produced, in order
  * @param {(episode: Episode) => EpisodeTrace | null} traceOf the downloader's traces
+ * @param {readonly SeriesInput[]} [taken] what the report reads of the first runs, taken already
+ *   (a batch: {@link releaseSeries}); the other runs are read now
  * @returns {Promise<void>}
  */
-export async function reportJobEnd(job, outcome, runs, traceOf) {
+export async function reportJobEnd(job, outcome, runs, traceOf, taken = []) {
   app.lastReport = null;
   try {
     if (job.kind !== "load" && runs !== null) {
-      const series = runs.map((run) => seriesInput(run, traceOf));
+      const series = runs.map((run, index) => taken[index] ?? seriesInput(run, traceOf));
       if (hasFailures(series)) {
         const generatedAt = new Date();
         const report = buildReport({
@@ -835,6 +1047,12 @@ function renderAppStatus() {
  */
 function enqueue(job) {
   if (!app.owner) return;
+  if (app.unsaved !== null) {
+    // the page cannot store anything any more: a job would only be refused, after clearing the
+    // last one's results (the popup's "Download this series" and the retry buttons come here too)
+    void showStorageRefused();
+    return;
+  }
   app.queue.push({ ...job, id: app.nextJobId++ });
   renderAppStatus();
   void pump();
@@ -914,7 +1132,7 @@ function runToHistory(run) {
 /** @param {Job} job */
 async function runJob(job) {
   /** @type {JobRecord} */
-  const jobRecord = { pauses: [] };
+  const jobRecord = { pauses: [], inputs: [], taking: true };
   const startedAt = new Date().toISOString();
   /** @type {Record<string, unknown>} */
   const entry = { id: Date.now(), kind: job.kind, label: job.label, started_at: startedAt, error: null, stopped: null, refreshes: 0, pauses: jobRecord.pauses, series: [] };
@@ -933,6 +1151,10 @@ async function runJob(job) {
     if (cooldown !== null) {
       entry["error"] = stop = cooldownMessage(cooldown, { now: now() });
       setStatus($("input-status"), shownText(stop), "error");
+      return;
+    }
+    if (app.unsaved !== null) {
+      entry["error"] = stop = app.unsaved; // a write was refused earlier in this page: no request (the finally says why)
       return;
     }
     await applyRefererRule(baseUrl());
@@ -976,10 +1198,15 @@ async function runJob(job) {
     }
   } finally {
     clearPause();
+    if (job.contacted) app.lastContactAt = now(); // the rest between jobs counts from the job's end
+    await storePacing();
+    if (app.unsaved !== null) {
+      // chrome.storage.local refused a write: a stop (no waiting job starts), and what to do about it
+      if (stop === null) entry["error"] = stop = app.unsaved;
+      await showStorageRefused();
+    }
     entry["stopped"] = stop;
     entry["finished_at"] = new Date().toISOString();
-    if (job.contacted) app.lastContactAt = now(); // the rest between jobs counts from the job's end
-    await savePacing(app.pacing, app.lastContactAt);
     if (stopping !== null) await cancelQueue(notStartedMessage(stopping));
     else if (stop !== null) await cancelQueue(`not started: batch stopped in ${job.label} (${stop})`);
     await appendHistory(entry);
@@ -998,6 +1225,7 @@ async function runJob(job) {
       },
       runs,
       (episode) => engine.downloader.traceOf(episode),
+      jobRecord.inputs,
     );
   }
 }
@@ -1021,6 +1249,11 @@ async function runLoad(job, engine, entry) {
     setStatus($("input-status"), shownText(message), "error");
     entry["error"] = message;
     return message;
+  }
+  await storePacing(); // can anything be stored? asked before the listing's first request, as the engine does
+  if (app.unsaved !== null) {
+    entry["error"] = app.unsaved;
+    return app.unsaved;
   }
   let series;
   try {
@@ -1124,12 +1357,23 @@ function showCover(itemId, url) {
 }
 
 /**
+ * Whether the list's thumbnails may be requested now: in the engine's tab, while no job runs or
+ * waits, no cooldown is in force and nothing was refused by `chrome.storage.local` — once a write
+ * was refused, this page asks nothing of TikTok, not even a thumbnail. (Exported for the unit
+ * tests.)
+ * @returns {Promise<boolean>}
+ */
+export async function coversAllowed() {
+  return app.owner && app.unsaved === null && app.running === null && app.queue.length === 0 && (await checkCooldownNow()) === null;
+}
+
+/**
  * The list's thumbnails: the extension's own requests, only for the rows in view, one at a time,
- * never during a job or a cooldown.
+ * never during a job or a cooldown, nor after a refused write ({@link coversAllowed}).
  */
 const covers = new CoverLoader({
   hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
-  allowed: async () => app.owner && app.running === null && app.queue.length === 0 && (await checkCooldownNow()) === null,
+  allowed: coversAllowed,
   pause: () => sleepSeconds(pagePause(defaultRng, app.testMode ? (app.testSettings.pageDelayS ?? PAGE_DELAY_S) : PAGE_DELAY_S)),
   onCover: showCover,
   baseUrl,
@@ -1153,7 +1397,7 @@ function updateSelection() {
 // ------------------------------------------------------------------------- the buttons
 
 function updateButtons() {
-  const blocked = !app.owner || app.cooldown !== null;
+  const blocked = !app.owner || app.cooldown !== null || app.unsaved !== null;
   button("load-button").disabled = blocked;
   button("download-all-button").disabled = blocked;
   const loaded = app.loaded !== null;
@@ -1297,6 +1541,31 @@ function tickCooldown() {
     return;
   }
   $("cooldown-left").textContent = t("cooldownLeft", [minutesLeft(app.cooldown, now())]);
+  if (now() - app.cooldownLookedAt >= COOLDOWN_LOOK_S) {
+    app.cooldownLookedAt = now();
+    void lookAgainAtCooldown();
+  }
+}
+
+/** How often (seconds) a page with a cooldown in force looks whether the storage holds it. */
+export const COOLDOWN_LOOK_S = 15;
+
+/**
+ * Store a cooldown in force that `chrome.storage.local` does not hold yet (its write was refused:
+ * a full disk) as soon as the storage takes writes again, so that a restart of Chrome no longer
+ * loses it — a reading does it ({@link cooldownStore}) — and drop "could not be saved" from the
+ * advice on screen then. Only the storage is read: nothing is asked of TikTok. Called every
+ * {@link COOLDOWN_LOOK_S} s while a cooldown is in force. (Exported for the unit tests, which
+ * cannot run the page's timer.)
+ * @returns {Promise<boolean>} whether the storage holds the cooldown in force
+ */
+export async function lookAgainAtCooldown() {
+  const cooldown = app.cooldown;
+  if (cooldown === null) return false;
+  if ((await storedCooldownUntil()) < cooldown.until) await checkCooldownNow();
+  const stored = (await storedCooldownUntil()) >= cooldown.until;
+  if (stored && app.unsavedWaitShown) await showStorageRefused();
+  return stored;
 }
 
 // --------------------------------------------------------------------------- settings
@@ -1344,7 +1613,12 @@ async function onSaveSettings(event) {
 }
 
 async function onResetSettings() {
-  await saveSettings({ ...DEFAULT_SETTINGS });
+  try {
+    await saveSettings({ ...DEFAULT_SETTINGS });
+  } catch (error) {
+    setStatus($("settings-status"), t("settingsRefused", shownText(oneLine(error))), "error");
+    return;
+  }
   app.settings = { ...DEFAULT_SETTINGS };
   fillSettings();
   setStatus($("settings-status"), t("settingsSaved"), "ok");
@@ -1373,6 +1647,9 @@ async function renderHistory() {
       else line = "";
       item.append(el("div", { text: `${String(record["name"] ?? record["series_id"] ?? "")}: ${line}` }));
     }
+    // a run too large for its share of the history kept only some of its series (storage.js)
+    const omitted = entry["series_omitted"];
+    if (typeof omitted === "number" && omitted > 0) item.append(el("div", { className: "meta", text: t("historySeriesOmitted", [omitted]) }));
     // the episodes that did not download, and the button that queues them again (one selection job
     // per series): a run from yesterday can be retried too
     const targets = retryTargets(series);

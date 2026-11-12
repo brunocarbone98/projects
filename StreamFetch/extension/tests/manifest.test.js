@@ -33,13 +33,13 @@ const HOSTS = [
   "https://upos-bstar1-mirrorakam.akamaized.net/*",
 ];
 
-test("the manifest: MV3, the names from _locales, version 1.0.0, Chrome 116+", () => {
+test("the manifest: MV3, the names from _locales, version 1.0.1, Chrome 116+", () => {
   assert.equal(manifest["manifest_version"], 3);
   assert.equal(manifest["name"], "__MSG_extName__");
   assert.equal(manifest["description"], "__MSG_extDescription__");
   assert.equal(manifest["default_locale"], "en");
   assert.equal(manifest["short_name"], "StreamFetch");
-  assert.equal(manifest["version"], "1.0.0");
+  assert.equal(manifest["version"], "1.0.1");
   assert.equal(manifest["minimum_chrome_version"], "116");
   assert.equal(manifest["streamfetch_test"], undefined, "the shipped manifest is never the test copy");
 });

@@ -65,7 +65,7 @@ import {
   NO_CURSOR_WARNING,
   NO_LIST_WARNING,
 } from "../app/discovery.js";
-import { StopRequested } from "../app/engine.js";
+import { STORAGE_REFUSED_PREFIX, StopRequested } from "../app/engine.js";
 
 /**
  * @typedef {"en" | "es"} Lang
@@ -745,6 +745,8 @@ const RULES = [
   [/^duplicate: (.*)$/s, (m) => `repetida: ${m[1]}`],
   [/^failed: (.*)$/s, (m, inner) => `falló: ${inner(String(m[1]))}`],
   [/^could not list the series: (.*)$/s, (m, inner) => `no se pudo listar la serie: ${inner(String(m[1]))}`],
+  // engine.storageRefusedReason: chrome.storage.local refused a write (Chrome's own reason stays as it is)
+  [new RegExp(`^${esc(STORAGE_REFUSED_PREFIX)}(.*)$`, "s"), (m) => `no se pudo guardar el progreso: ${m[1]}`],
   [/^download failed: (.*)$/s, (m, inner) => `la descarga falló: ${inner(String(m[1]))}`],
   [
     new RegExp(`^${esc(INCOMPLETE_PREFIX)}(.*)$`, "s"),

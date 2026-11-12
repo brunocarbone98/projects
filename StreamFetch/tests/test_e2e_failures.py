@@ -24,6 +24,7 @@ from extension_harness import ExtensionHarness
 from fake_sites import (
     BILI_MAIN,
     CLAIMED_SECONDS,
+    DM_FMP4_ID,
     DM_SHORT_ID,
     DM_TITLES,
     DM_TS_ID,
@@ -192,6 +193,38 @@ def test_a_file_shorter_than_the_site_says_is_never_saved_and_no_work_file_is_le
         assert re.search(expected, row["message_en"]), row["message_en"]
         assert sum(1 for a in row["attempts"] if a["requested"]) >= len(segments)
         assert_sequential(sites.site_requests())
+
+
+#: What Chrome does to the extension's private file system when the disk under the Chrome profile
+#: fills up (measured on Chromium 153): the whole folder goes, under the open tab.
+DELETE_PRIVATE_FILES_JS = """async () => {
+  await (await navigator.storage.getDirectory()).removeEntry("streamfetch", { recursive: true });
+}"""
+
+
+def test_after_chrome_deleted_the_work_folder_under_the_open_tab_the_next_videos_download(
+    media: MediaSet, tmp_path: Path
+):
+    """A tab that keeps no handle to a folder Chrome deleted: after a full disk, the next run
+    downloads without a reload (1.0.0 failed every later row with `no answer from the server`)."""
+    with FakeSites(media) as sites, ExtensionHarness(tmp_path, sites) as ext:
+        ext.download_all(_links(DM, DM_TS_ID))
+        assert _statuses(ext, DM_TS_ID) == ["done"]
+        assert ext.private_files() == ["streamfetch/", "streamfetch/work/"]
+        ext.page.evaluate(DELETE_PRIVATE_FILES_JS)
+        assert ext.private_files() == []
+        ext.download_all(_links(DM, DM_FMP4_ID) + "\n" + _links(BILI, BILI_MAIN))
+        statuses = _statuses(ext, DM_FMP4_ID, BILI_MAIN)
+        rows = [(row.key, row.status, row.message) for row in ext.rows()]
+        assert statuses and set(statuses) == {"done"}, rows
+        # made again by the download, then emptied
+        assert ext.private_files() == ["streamfetch/", "streamfetch/work/"]
+        saved = ext.wait_saved(1 + len(statuses))
+        assert f"StreamFetch/Dailymotion/{DM_TITLES[DM_FMP4_ID]} [{DM_FMP4_ID}].mp4" in saved, saved
+        assert_saved_media(
+            ext.saved_path(f"StreamFetch/Dailymotion/{DM_TITLES[DM_FMP4_ID]} [{DM_FMP4_ID}].mp4"),
+            media.expected("fmp4-hls"),
+        )
 
 
 def test_a_429_on_a_manifest_stops_the_run_and_starts_a_cooldown_that_refuses_new_runs(

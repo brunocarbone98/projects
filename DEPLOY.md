@@ -87,8 +87,8 @@ domain:
 
 ## Monitoring & incidents
 The live app is watched by the **Uptime patrol** workflow
-([`.github/workflows/uptime-patrol.yml`](./.github/workflows/uptime-patrol.yml)): every 30
-minutes, and on demand from the Actions tab (Uptime patrol → **Run workflow**). It checks out one commit (`fetch-depth: 1`) only to run
+([`.github/workflows/uptime-patrol.yml`](./.github/workflows/uptime-patrol.yml)): scheduled every 30
+minutes (GitHub starts schedules best-effort, often hours late), and on demand from the Actions tab (Uptime patrol → **Run workflow**). It checks out one commit (`fetch-depth: 1`) only to run
 [`.github/scripts/uptime-probe.sh`](./.github/scripts/uptime-probe.sh) — the probe logic, runnable
 locally with `BASE_URL=https://shipping-hub.up.railway.app .github/scripts/uptime-probe.sh` — needs
 no repository secrets, and only probes `https://shipping-hub.up.railway.app`:

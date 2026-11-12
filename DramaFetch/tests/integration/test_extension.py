@@ -947,9 +947,14 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         assert rows[5]["attempts"] == [] and rows[5]["access"] == "locked"
         assert rows[5]["lock_hints"] and rows[5]["raw"]["id"] == MAIN_ITEMS[5]
         assert rows[5]["probable_cause"].startswith("listed as locked for this session: ")
-        # the page: the file's name, the button
-        assert line.is_visible()
-        assert line.text_content() == f"Report saved: {report_path.name}"
+        # the page: the file's name (said once its download has completed), the button
+        ext.wait_for(
+            lambda: (
+                line.is_visible() and line.text_content() == f"Report saved: {report_path.name}"
+            ),
+            10,
+            "the page did not say the report was saved",
+        )
         report_button = page.locator("#report-button")
         assert report_button.is_visible() and report_button.is_enabled()
         assert report_button.text_content() == "Save the report"
@@ -975,8 +980,14 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         second = [path for path in _report_files(ext) if path != report_path]
         (second_path,) = second
         assert _REPORT_NAME_RE.match(second_path.name), second_path.name
-        assert line.is_visible()
-        assert line.text_content() == f"Report saved: {second_path.name}"
+        # the file is on disk a moment before the page has heard that its download completed
+        ext.wait_for(
+            lambda: (
+                line.is_visible() and line.text_content() == f"Report saved: {second_path.name}"
+            ),
+            10,
+            "the page did not say the second report was saved",
+        )
         retried = json.loads((ext.downloads / second_path).read_text(encoding="utf-8"))
         assert [row["number"] for row in retried["series"][0]["not_downloaded"]] == [1, 2, 3, 4]
         assert retried["series"][0]["not_downloaded"][1]["status"] == "skipped-locked"
@@ -1137,3 +1148,94 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         ]
         assert "UrlList" not in json.dumps(digest) and "http" not in json.dumps(digest)
         assert report["summary"] == [f"E03 failed-unavailable — {served} — probable cause: {cause}"]
+
+
+def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_history_complete(
+    tmp_path: Path,
+) -> None:
+    """A batch of three series with the result table held to 5 rows (the test setting
+    `maxResultRows`; 2000 as shipped) and one encrypted episode in the first series. As each
+    series is done its completed rows leave the table from the oldest — the failure row stays
+    until the job's end moves it to **Did not download** — and the page says that only the most
+    recent rows are shown; every series keeps its report line and its row of the batch table. What
+    the run kept of a finished series is released then, and the report built at the end is whole
+    all the same: the failed episode with its attempt and its list item, the locked ones, a
+    reference row and the digest of every listed episode of all three series. The history entry
+    has every row. The next job starts with a clean table and no notice."""
+    drm = frozenset({(SERIES_ID, 2)})
+    with (
+        FakeTikTok(drm_media=drm) as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings={"maxResultRows": 5}) as ext,
+    ):
+        page = ext.page
+        entry = ext.download_all("\n".join([MAIN_LINK, SECOND_LINK, THIRD_LINK]))
+        main, second, third = entry["series"]
+        assert _statuses(main) == ["done", "failed-unavailable", "done", "done", "skipped-locked"]
+        assert _statuses(second) == ["done"] * 3
+        assert _statuses(third) == ["done", "done", "skipped-locked", "skipped-locked"]
+        assert [len(series["rows"]) for series in entry["series"]] == [
+            5,
+            3,
+            4,
+        ]  # the history: whole
+        assert "rows_omitted" not in main and "pauses_omitted" not in entry
+        assert len(_videos(ext)) == 3 + 3 + 2
+
+        # the table: the last rows only; the failure went to its own block at the end
+        assert _table_rows(page, "#result-table") == [("4", "skipped-locked")]
+        assert page.locator("#result-table tbody tr[data-number]").first.get_attribute(
+            "data-series-id"
+        ) == (THIRD_SERIES_ID)
+        assert page.locator("#result-trimmed").is_visible()
+        assert page.locator("#result-trimmed").text_content() == (
+            "Only the most recent episode rows are shown; every finished series keeps its line "
+            "below."
+        )
+        # every row of the table, headers included: no header is left without its rows
+        every_row = page.locator("#result-table tbody tr")
+        assert [
+            (row.get_attribute("data-series-id"), row.get_attribute("data-number"))
+            for row in every_row.all()
+        ] == [(THIRD_SERIES_ID, None), (THIRD_SERIES_ID, "4")]
+        assert _table_rows(page, "#failed-table") == [("2", "failed-unavailable")]
+        assert page.locator("#failed-heading").text_content() == "Did not download (1)"
+        assert page.locator("#report-lines li").count() == 3
+        assert page.locator("#batch-table tbody tr").count() == 3
+
+        # the report, built after every series was released
+        ext.wait_for(lambda: len(_report_files(ext)) == 1, 20, "the report was not saved")
+        (report_path,) = _report_files(ext)
+        report = json.loads((ext.downloads / report_path).read_text(encoding="utf-8"))
+        first, middle, last = report["series"]
+        assert [row["number"] for row in first["not_downloaded"]] == [2, 5]
+        encrypted, locked = first["not_downloaded"]
+        assert encrypted["status"] == "failed-unavailable" and encrypted["message"] == DRM_MESSAGE
+        assert encrypted["attempted"] is True and len(encrypted["attempts"]) == 1
+        assert encrypted["raw"]["id"] == MAIN_ITEMS[2]  # its list item, as served
+        assert locked["status"] == "skipped-locked" and locked["raw"]["id"] == MAIN_ITEMS[5]
+        assert (
+            first["reference"]["number"] == 1 and first["reference"]["raw"]["id"] == MAIN_ITEMS[1]
+        )
+        assert [item["number"] for item in first["episodes_digest"]] == [1, 2, 3, 4, 5]
+        # the digest was made from the list items before they were released: the bitrate comes
+        # from a list item only (the fixtures carry one on some episodes of each series)
+        for reported in report["series"]:
+            assert any(isinstance(item["bitrate"], int) for item in reported["episodes_digest"])
+        assert middle["not_downloaded"] == [] and middle["reference"]["number"] == 1
+        assert len(middle["episodes_digest"]) == 3
+        assert [row["number"] for row in last["not_downloaded"]] == [3, 4]
+        assert all(
+            row["raw"] is not None for row in last["not_downloaded"]
+        )  # two locked: both kept
+        assert len(last["episodes_digest"]) == 4
+        assert len(report["summary"]) == 4
+
+        # the next job: a clean table, no notice (four rows under their header fit the five)
+        again = ext.download_all(SECOND_LINK, recheck=True)
+        assert _statuses(again["series"][0]) == ["skipped-exists"] * 3
+        assert _table_rows(page, "#result-table") == [
+            ("1", "skipped-exists"),
+            ("2", "skipped-exists"),
+            ("3", "skipped-exists"),
+        ]
+        assert page.locator("#result-trimmed").is_hidden()

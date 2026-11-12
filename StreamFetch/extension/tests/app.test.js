@@ -214,6 +214,55 @@ test("covers: a 429 or 412 on a thumbnail stops the loader for the page's life a
   assert.ok(cells.every((cell) => cell.className === "cover placeholder"));
 });
 
+test("covers: Clear lets go of the rows still watched; a forgotten row asks for nothing, a fetched cover is still never asked for twice", async () => {
+  /** @type {((entries: readonly { target: Element, isIntersecting: boolean }[]) => void) | null} */
+  let callback = null;
+  /** @type {unknown[]} */
+  const unobserved = [];
+  /** @type {string[]} */
+  const fetched = [];
+  const loader = new CoverLoader({
+    allowed: () => true,
+    fetchCover: async (url) => {
+      fetched.push(url);
+      return new Blob(["img"]);
+    },
+    pause: async () => undefined,
+    objectUrl: () => "blob:cover",
+    watcher: (handler) => {
+      callback = handler;
+      return { observe: () => undefined, unobserve: (target) => void unobserved.push(target) };
+    },
+  });
+  /** @returns {HTMLImageElement} */
+  const image = () => /** @type {HTMLImageElement} */ (/** @type {unknown} */ ({ src: "", className: "cover placeholder" }));
+  const seen = image();
+  const never = [image(), image(), image()];
+  loader.watch(seen, "a", "https://s1.dmcdn.net/a.jpg");
+  never.forEach((cell, index) => loader.watch(cell, `n${index}`, `https://s1.dmcdn.net/n${index}.jpg`));
+  const show = /** @type {(entries: readonly { target: Element, isIntersecting: boolean }[]) => void} */ (/** @type {unknown} */ (callback));
+  show([{ target: /** @type {Element} */ (/** @type {unknown} */ (seen)), isIntersecting: true }]);
+  while (loader.running !== null) await loader.running;
+  assert.deepEqual(fetched, ["https://s1.dmcdn.net/a.jpg"]);
+  assert.equal(loader.cells.size, 3, "the rows never in view are still watched (a fetched one is let go at once)");
+  loader.forget();
+  assert.equal(loader.cells.size, 0);
+  assert.equal(loader.visible.size, 0);
+  assert.deepEqual(loader.queue, []);
+  assert.deepEqual(unobserved.slice(-3), never, "no row is observed any more");
+  show([{ target: /** @type {Element} */ (/** @type {unknown} */ (never[0])), isIntersecting: true }]);
+  while (loader.running !== null) await loader.running;
+  assert.equal(fetched.length, 1, "a forgotten row asks for nothing");
+  const again = image();
+  loader.watch(again, "a", "https://s1.dmcdn.net/a.jpg");
+  assert.equal(again.src, "blob:cover", "a cover already fetched is shown at once, never asked for twice");
+  const later = image();
+  loader.watch(later, "n0", "https://s1.dmcdn.net/n0.jpg"); // a row pasted again after Clear is watched again
+  show([{ target: /** @type {Element} */ (/** @type {unknown} */ (later)), isIntersecting: true }]);
+  while (loader.running !== null) await loader.running;
+  assert.deepEqual(fetched, ["https://s1.dmcdn.net/a.jpg", "https://s1.dmcdn.net/n0.jpg"]);
+});
+
 test("the history keeps canonical links, never a share link's parameters", () => {
   assert.equal(
     historyLine("https://www.bilibili.com/video/BV1aa411x7h7/?vd_source=0123abcd&buvid=XY-ab12&mid=42&share_source=copy_web"),
@@ -372,6 +421,20 @@ class FakeElement {
     this.children = [];
     this.append(...nodes);
   }
+  /** @returns {FakeElement | null} */
+  get lastElementChild() {
+    return this.children[this.children.length - 1] ?? null;
+  }
+  /**
+   * @param {FakeElement} node
+   * @returns {FakeElement}
+   */
+  removeChild(node) {
+    const at = this.children.indexOf(node);
+    if (at < 0) throw new Error("NotFoundError: not a child");
+    this.children.splice(at, 1);
+    return node;
+  }
   /**
    * The first descendant with this tag name (a plain tag selector); a `tbody` is created on
    * first use, as the page's tables have one.
@@ -432,6 +495,8 @@ let pages = 0;
 async function fakePage(options = {}) {
   /** @type {Map<string, FakeElement>} */
   const elements = new Map();
+  /** @type {Set<unknown>} the covers the page's IntersectionObserver watches */
+  const observed = new Set();
   /** @param {string} id @returns {FakeElement} */
   const element = (id) => {
     let found = elements.get(id);
@@ -560,8 +625,14 @@ async function fakePage(options = {}) {
     location: { search: "", pathname: "/src/app/app.html" },
     history: { replaceState: () => undefined },
     IntersectionObserver: class {
-      observe() {}
-      unobserve() {}
+      /** @param {unknown} target */
+      observe(target) {
+        observed.add(target);
+      }
+      /** @param {unknown} target */
+      unobserve(target) {
+        observed.delete(target);
+      }
       disconnect() {}
     },
     setInterval: () => 0,
@@ -587,7 +658,7 @@ async function fakePage(options = {}) {
   }
   /** @returns {FakeElement[]} the rows of the items table */
   const rows = () => (element("items-table").querySelector("tbody")?.children ?? []);
-  return { element, rows, local, saved, requests, until, restore, changed: (/** @type {string} */ key) => changeListeners.forEach((listener) => listener({ [key]: {} }, "local")) };
+  return { element, rows, local, saved, requests, until, restore, observed, changed: (/** @type {string} */ key) => changeListeners.forEach((listener) => listener({ [key]: {} }, "local")) };
 }
 
 /** A minimal in-memory OPFS root for the page. */
@@ -656,7 +727,7 @@ function dailymotion(url) {
 test("the page loads idle: version, the engine lock held, the history empty", async () => {
   const page = await fakePage();
   try {
-    assert.equal(page.element("version").textContent, "1.0.0");
+    assert.equal(page.element("version").textContent, "1.0.1");
     assert.equal(page.element("readonly-banner").hidden, true);
     assert.equal(page.element("app-status").dataset["state"], "idle");
     assert.equal(page.element("analyze-button").disabled, false);
@@ -727,6 +798,64 @@ test("Analyze fills the rows: title link, site, duration, a quality selector; re
     const img = cell(ok, "cover").children[0];
     assert.equal(img?.className, "cover placeholder", "a cover frame, loaded only once in view");
     assert.equal(page.saved.length, 0);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the table keeps the rows already shown in place: only the rows from the first one out of place on are put back — a link read into its parts included —, Clear empties it", async () => {
+  const BILI = "BV1Ab4C1dE2f"; // the two-part video of tests/fixtures/bilibili-page-ok.html
+  const page_ = readFileSync(new URL("./fixtures/bilibili-page-ok.html", import.meta.url), "utf8");
+  /** @param {string} url */
+  const site = (url) => dailymotion(url) ?? (url.startsWith(`https://www.bilibili.com/video/${BILI}`) ? { body: page_, headers: { "content-type": "text/html" } } : undefined);
+  const page = await fakePage({ site });
+  try {
+    const body = /** @type {FakeElement} */ (page.element("items-table").querySelector("tbody"));
+    let replaced = 0;
+    const replace = body.replaceChildren.bind(body);
+    body.replaceChildren = (...nodes) => {
+      replaced += 1;
+      replace(...nodes);
+    };
+    /** @type {(string | undefined)[]} */
+    const removed = [];
+    const remove = body.removeChild.bind(body);
+    body.removeChild = (node) => {
+      removed.push(node.dataset["key"]);
+      return remove(node);
+    };
+    /** @param {string} what */
+    const analyze = async (what) => {
+      page.element("activity").textContent = "";
+      page.element("analyze-button").fire("click");
+      await page.until(() => page.element("app-status").dataset["state"] === "idle" && /^analyzed: /.test(page.element("activity").textContent), what);
+    };
+    page.element("links").value = `https://www.dailymotion.com/video/${OK_ID}`;
+    await analyze("Analyze");
+    assert.equal(page.rows().length, 1);
+    const first = page.rows()[0];
+    // a new link at the end: appended, nothing removed
+    page.element("links").value = [`https://www.dailymotion.com/video/${OK_ID}`, `https://www.dailymotion.com/video/${GEO_ID}`].join("\n");
+    await analyze("Analyze again");
+    assert.equal(page.rows()[0], first, "the row already shown is the same element, left in place");
+    assert.deepEqual(page.rows().map((row) => row.dataset["key"]), [`dailymotion:${OK_ID}`, `dailymotion:${GEO_ID}`]);
+    assert.deepEqual(removed, []);
+    // a two-part video: its pasted row gives way to a header and a row per part — only that row is taken out
+    page.element("links").value = [`https://www.dailymotion.com/video/${OK_ID}`, `https://www.dailymotion.com/video/${GEO_ID}`, `https://www.bilibili.com/video/${BILI}`].join("\n");
+    await analyze("Analyze a two-part video");
+    const keys = page.rows().map((row) => row.dataset["key"]);
+    assert.deepEqual(keys.slice(0, 2), [`dailymotion:${OK_ID}`, `dailymotion:${GEO_ID}`]);
+    assert.ok(keys.includes(`bilibili:${BILI}:1`) && keys.includes(`bilibili:${BILI}:2`), JSON.stringify(keys));
+    assert.equal(page.rows()[0], first);
+    assert.deepEqual(removed, [`bilibili:${BILI}:all`], "the earlier rows stay where they are");
+    assert.equal(replaced, 0, "the table is never put back whole");
+    // the covers of the rows on screen (those with a cover to fetch) are watched until Clear lets them go
+    const covers = page.rows().flatMap((row) => row.all().filter((node) => node.tagName === "IMG"));
+    const watched = covers.filter((image) => page.observed.has(image));
+    assert.ok(watched.length >= 2, `${watched.length} of ${covers.length} covers watched`);
+    page.element("clear-button").fire("click");
+    assert.deepEqual(page.rows(), []);
+    assert.equal(page.observed.size, 0, "Clear lets every watched cover go");
   } finally {
     page.restore();
   }

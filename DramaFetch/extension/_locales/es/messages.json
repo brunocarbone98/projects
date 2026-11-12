@@ -241,6 +241,43 @@
       }
     }
   },
+  "resultTrimmed": {
+    "message": "Solo se muestran las filas de los episodios más recientes; cada serie terminada conserva su línea más abajo.",
+    "description": "Under the result table once a long batch has dropped the rows of the episodes it finished long ago (the table keeps about the last 2000 rows)."
+  },
+  "storageRefused": {
+    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque el disco está lleno. Libera espacio, reinicia Chrome y vuelve a intentarlo: lo que ya está guardado se omite.",
+    "description": "Shown when chrome.storage.local refused to store DramaFetch's progress: the engine's reason in the page's language (it ends with Chrome's own words), and what to do.",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "storageRefusedWait": {
+    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque el disco está lleno. Además, TikTok rechazó una solicitud: libera espacio, reinicia Chrome o recarga DramaFetch solo después de las $time$ y vuelve a intentarlo; lo que ya está guardado se omite.",
+    "description": "Shown instead of storageRefusedCooldown when the cooldown in force is stored: what Chrome accepts after a refused write may not survive its restart, so its end is named all the same. $1 is the engine's reason in the page's language, $2 the cooldown's end (HH:MM).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      },
+      "time": {
+        "content": "$2"
+      }
+    }
+  },
+  "storageRefusedCooldown": {
+    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque el disco está lleno. Además, TikTok rechazó una solicitud y la espera hasta las $time$ no se pudo guardar: libera espacio, reinicia Chrome o recarga DramaFetch solo después de las $time$ y vuelve a intentarlo; lo que ya está guardado se omite.",
+    "description": "Shown instead of storageRefused when a cooldown is in force too: that wait could not be stored, so restarting Chrome before its end would forget it. $1 is the engine's reason in the page's language, $2 the cooldown's end (HH:MM).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      },
+      "time": {
+        "content": "$2"
+      }
+    }
+  },
   "queueHeading": {
     "message": "En espera",
     "description": "Heading of the queue card."
@@ -503,6 +540,15 @@
     "description": "History line: a past run's episodes that did not download (E02, E07; per series when the run had several).",
     "placeholders": {
       "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "historySeriesOmitted": {
+    "message": "Series de esta ejecución no listadas aquí: $count$.",
+    "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series, about 120-190 when a stop left most of them not started): how many of its series are not listed (any count: the wording does not depend on it). The ones with an episode to retry are kept first.",
+    "placeholders": {
+      "count": {
         "content": "$1"
       }
     }

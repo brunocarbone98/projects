@@ -6,6 +6,13 @@
  * long break or the rest between jobs), the history of the last 20 runs — and the test settings,
  * honoured ONLY when the manifest says `dramafetch_test` (the test harness' temporary copy).
  *
+ * The manifest's `unlimitedStorage` lifts the area's 10 MB quota: a series' state is about 350–400
+ * bytes per episode and is never pruned (it is the resume memory), so the quota was full near
+ * 27 000 episodes. A write can still be refused — the disk that holds the Chrome profile is full
+ * or failing: the callers stop the run (`engine.storageRefusedReason`), the history gives way
+ * ({@link appendHistory}) and a refusal's cooldown stays in force from this browser session's
+ * memory ({@link cooldownStore}).
+ *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
  */
 
@@ -22,8 +29,15 @@ export const PACING_KEY = "pacing";
 export const SERIES_KEY_PREFIX = "series:";
 /** How many past runs the history keeps. */
 export const HISTORY_LIMIT = 20;
-/** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB of the 10 MB quota. */
+/** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB. */
 export const HISTORY_MAX_BYTES = 1024 * 1024;
+/**
+ * One run's share of the history, about 51 KiB: {@link HISTORY_LIMIT} runs of this size — each
+ * with its comma, and the array's brackets — fit {@link HISTORY_MAX_BYTES}. A larger run is stored
+ * compact and held to it ({@link historyEntry}), so that the last 20 runs stay together however
+ * large one of them was.
+ */
+export const HISTORY_ENTRY_MAX_BYTES = Math.floor((HISTORY_MAX_BYTES - 2) / HISTORY_LIMIT) - 1;
 
 /**
  * @typedef {object} Settings What the user may set (Settings panel); the pauses only upwards.
@@ -56,6 +70,8 @@ export const HISTORY_MAX_BYTES = 1024 * 1024;
  * @property {number} [existenceDelayMs] the wait after asking Chrome to re-check its files (300 ms)
  * @property {number} [existenceRateLimitS] Chrome's 10 s between two such checks, which a job's
  *   first look at the downloads waits out; 0: never wait (tests that delete no file)
+ * @property {number} [maxResultRows] how many rows the result table keeps while a job runs (2000
+ *   outside test mode: `app.MAX_RESULT_ROWS`)
  *
  * @typedef {object} StoredPacing The run's pacing as stored (wall-clock seconds).
  * @property {PacingState} pacing
@@ -93,6 +109,7 @@ const TEST_NUMBER_KEYS = /** @type {const} */ ([
   "detailGraceS",
   "existenceDelayMs",
   "existenceRateLimitS",
+  "maxResultRows",
 ]);
 
 /**
@@ -244,9 +261,92 @@ export async function saveTestSettings(raw) {
   return parsed;
 }
 
-/** @returns {import("../lib/cooldown.js").CooldownStore} the cooldown record in chrome.storage.local */
+/**
+ * A refusal's record that `chrome.storage.local` would not store (a full disk under the Chrome
+ * profile): TikTok refused all the same, so the cooldown stays in force from here while this page
+ * lives — and from `chrome.storage.session`, the browser session's memory (never written to disk),
+ * after a reload of the tab too.
+ * @type {Record<string, unknown> | null}
+ */
+let unstoredCooldown = null;
+
+/**
+ * @param {unknown} record a cooldown record, or whatever the storage holds
+ * @returns {number} when it ends, -Infinity when it is no record
+ */
+function untilOf(record) {
+  const until = isRecord(record) ? record["until"] : undefined;
+  return typeof until === "number" && Number.isFinite(until) ? until : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * The cooldown record in `chrome.storage.local` — and, when the storage refused to write one, the
+ * same record kept in this page's memory and in `chrome.storage.session` (the browser session's
+ * memory: it survives a reload of the tab and is gone when Chrome closes; a full disk cannot
+ * refuse it). Reading gives whichever of them ends later — also when one cannot be read —, so a
+ * refusal by TikTok is honoured even when it could not be stored; a kept copy that ends later than
+ * the stored record is written to `chrome.storage.local` again at each reading, so it outlives a
+ * restart of Chrome as soon as the storage takes it (still refused, the copies answer). The
+ * record the local storage accepts next ends later and so replaces them.
+ * @returns {import("../lib/cooldown.js").CooldownStore}
+ */
 export function cooldownStore() {
-  return storageAreaStore(chrome.storage.local);
+  const stored = storageAreaStore(chrome.storage.local);
+  const session = chrome.storage.session === undefined ? null : storageAreaStore(chrome.storage.session);
+  /** @param {import("../lib/cooldown.js").CooldownStore | null} area @returns {Promise<unknown>} */
+  const readOf = async (area) => {
+    try {
+      return area === null ? undefined : await area.read();
+    } catch {
+      return undefined; // an unreadable area counts as none (`readCooldown`); the others still answer
+    }
+  };
+  return {
+    read: async () => {
+      const local = await readOf(stored);
+      let found = local;
+      for (const other of [unstoredCooldown, await readOf(session)]) if (untilOf(other) > untilOf(found)) found = other;
+      if (found !== local && isRecord(found)) {
+        try {
+          await stored.write(found);
+          unstoredCooldown = null;
+          await session?.remove?.()?.catch(() => undefined);
+        } catch {
+          // refused again: the copies still answer
+        }
+      }
+      return found;
+    },
+    write: async (record) => {
+      try {
+        await stored.write(record);
+        unstoredCooldown = null; // the stored record is the newest: the copies kept on a refusal go
+        await session?.remove?.()?.catch(() => undefined);
+      } catch (error) {
+        unstoredCooldown = record;
+        await session?.write(record)?.catch(() => undefined);
+        throw error; // `recordBlock` reports it and still returns the cooldown
+      }
+    },
+    remove: async () => {
+      unstoredCooldown = null;
+      await session?.remove?.()?.catch(() => undefined);
+      await stored.remove?.();
+    },
+  };
+}
+
+/**
+ * When the cooldown `chrome.storage.local` holds ends (-Infinity when there is none or it cannot
+ * be read): a cooldown in force that ends later lives only in this browser session's memory.
+ * @returns {Promise<number>}
+ */
+export async function storedCooldownUntil() {
+  try {
+    return untilOf(await storageAreaStore(chrome.storage.local).read());
+  } catch {
+    return Number.NEGATIVE_INFINITY;
+  }
 }
 
 /**
@@ -317,9 +417,8 @@ export async function readHistory() {
 /**
  * The history to store: `entries` (most recent first) cut to the last {@link HISTORY_LIMIT} runs
  * and to {@link HISTORY_MAX_BYTES} of UTF-8 JSON, the oldest runs dropped first; the most recent
- * run is always kept. `chrome.storage.local` holds 10 MB without the `unlimitedStorage`
- * permission, and the per-series states — the resume memory — must never lose that room to the
- * history.
+ * run is always kept. The history is read whole at every page start and after every job, so it
+ * stays small whatever the storage could hold.
  * @param {readonly Record<string, unknown>[]} entries
  * @param {number} [limit]
  * @param {number} [maxBytes]
@@ -340,14 +439,93 @@ export function trimHistory(entries, limit = HISTORY_LIMIT, maxBytes = HISTORY_M
 }
 
 /**
- * Put a finished run first in the history ({@link trimHistory}). Should the storage still refuse
- * it (the quota), the history gives way — the run alone, else no history at all — and never the
- * series states.
+ * @param {unknown} value
+ * @returns {number} its size as UTF-8 JSON
+ */
+function jsonBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * A run as the history stores it, within its share ({@link HISTORY_ENTRY_MAX_BYTES}, about 51 KiB:
+ * a couple of 60-episode series stored whole). A run that fits is stored as it is. A larger one —
+ * a row per episode and a record per pause — is stored compact, so that it neither pushes the
+ * earlier runs out nor makes the history a value of megabytes read at every page start. Compact
+ * keeps what **Past runs** reads: no pauses (`pauses_omitted` says how many), and of each series
+ * its name, line and error and only the rows whose episode did not download (status `failed…`:
+ * what the retry line and button read; `rows_omitted` says how many others), without the series'
+ * report (the page and the run's report file had it). Should even that pass the share — a batch of
+ * more than about 200 series, about 120–190 when a stop left most of them `not started` —, those rows keep only their number and status, and the series are kept
+ * in batch order as long as they fit, the ones with an episode to retry first; `series_omitted`
+ * says how many more the run had, and **Past runs** says so.
  * @param {Record<string, unknown>} entry
+ * @param {number} [maxBytes]
+ * @returns {Record<string, unknown>}
+ */
+export function historyEntry(entry, maxBytes = HISTORY_ENTRY_MAX_BYTES) {
+  if (jsonBytes(entry) <= maxBytes) return entry;
+  const series = Array.isArray(entry["series"]) ? entry["series"] : [];
+  const pauses = Array.isArray(entry["pauses"]) ? entry["pauses"] : [];
+  const compact = { ...entry, pauses: [], pauses_omitted: pauses.length, series: series.map((record) => compactRecord(record, false)) };
+  if (jsonBytes(compact) <= maxBytes) return compact;
+  const records = series.map((record) => compactRecord(record, true));
+  // the count written can only be shorter than the one measured here, and each record is counted
+  // with a comma: the entry ends within the share — unless the run's own fields (a label, an error:
+  // a few hundred bytes) pass it, which no series left out would change
+  let bytes = jsonBytes({ ...compact, series: [], series_omitted: records.length });
+  if (bytes > maxBytes) return compact;
+  /** @type {Set<number>} */
+  const kept = new Set();
+  for (const retryFirst of [true, false]) {
+    for (const [index, record] of records.entries()) {
+      if (kept.has(index) || hasRows(record) !== retryFirst) continue;
+      const size = jsonBytes(record) + 1;
+      if (bytes + size > maxBytes) continue; // a smaller series further on may still fit
+      kept.add(index);
+      bytes += size;
+    }
+  }
+  return { ...compact, series: records.filter((_, index) => kept.has(index)), series_omitted: records.length - kept.size };
+}
+
+/**
+ * A series record of a run as a compact history entry keeps it ({@link historyEntry}).
+ * @param {unknown} record
+ * @param {boolean} bare the rows of the episodes that did not download with their number and status only
+ * @returns {unknown}
+ */
+function compactRecord(record, bare) {
+  if (!isRecord(record)) return record;
+  /** @type {Record<string, unknown>} */
+  const kept = { ...record };
+  delete kept["report"];
+  const rows = record["rows"];
+  if (!Array.isArray(rows)) return kept;
+  const failed = rows.filter((row) => isRecord(row) && typeof row["status"] === "string" && row["status"].startsWith("failed"));
+  kept["rows"] = bare ? failed.map((row) => ({ number: row["number"], status: row["status"] })) : failed;
+  kept["rows_omitted"] = rows.length - failed.length;
+  return kept;
+}
+
+/**
+ * @param {unknown} record a compact series record
+ * @returns {boolean} whether it has an episode the retry would queue
+ */
+function hasRows(record) {
+  return isRecord(record) && Array.isArray(record["rows"]) && record["rows"].length > 0;
+}
+
+/**
+ * Put a finished run first in the history ({@link historyEntry}, {@link trimHistory}). Should the
+ * storage refuse it (a full disk), the history gives way — the run alone, else no history at all —
+ * and never the series states; a history that cannot be read gives way too. Never throws: a job's
+ * end must not break on its history.
+ * @param {Record<string, unknown>} run
  * @returns {Promise<void>}
  */
-export async function appendHistory(entry) {
-  const history = trimHistory([entry, ...(await readHistory())]);
+export async function appendHistory(run) {
+  const entry = historyEntry(run);
+  const history = trimHistory([entry, ...(await readHistory().catch(() => []))]);
   try {
     await chrome.storage.local.set({ [HISTORY_KEY]: history });
   } catch {

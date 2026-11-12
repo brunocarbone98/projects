@@ -717,6 +717,19 @@ export class Downloader {
   }
 
   /**
+   * A series of the job is finished: release what the run kept for it — the traces of its
+   * episodes and its fresh list. Nothing asks for them again (a job downloads a series once, and
+   * the report took what it reads before); the count of refreshes and the memory of a failed
+   * refresh stay.
+   * @param {string} seriesId
+   */
+  forgetSeries(seriesId) {
+    this.freshItems.delete(seriesId);
+    const prefix = `${seriesId}:`;
+    for (const key of [...this.traces.keys()]) if (key.startsWith(prefix)) this.traces.delete(key);
+  }
+
+  /**
    * The episode's trace, started when missing (the recording never changes what is decided).
    * @param {Episode} episode
    * @returns {EpisodeTrace}
@@ -783,7 +796,8 @@ export class Downloader {
   }
 
   /**
-   * Download one episode. Never throws: every failure is a result.
+   * Download one episode. Every failure is a result, except the user's Stop and a listing the page
+   * refused for storage before any request (`StorageRefusedError`, by name): both are the run's.
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @returns {Promise<DownloadResult>}
@@ -796,7 +810,9 @@ export class Downloader {
     try {
       return await this.downloadEpisode(episode, context);
     } catch (error) {
-      if (error instanceof Error && error.name === "StopRequested") throw error; // the user's Stop
+      // the user's Stop; a fresh list the page refused because a write was refused: no request
+      // went out, so this is the run's storage stop, never a failed attempt
+      if (error instanceof Error && (error.name === "StopRequested" || error.name === "StorageRefusedError")) throw error;
       let status = /** @type {import("../lib/messages.js").Status} */ (FAILED);
       if (error instanceof LoginRequiredError) status = FAILED_LOGIN;
       else if (error instanceof RateLimitedError) status = FAILED_RATE_LIMITED;
@@ -1143,6 +1159,11 @@ export class Downloader {
       } catch (error) {
         this.failedRefreshes.add(episode.seriesId);
         record.outcome = "failed";
+        if (error instanceof Error && error.name === "StorageRefusedError") {
+          // refused by the page before any request (a write was refused): nothing was listed
+          this.refreshes -= 1;
+          record.fresh_list = false;
+        }
         throw error;
       }
       fresh = new Map();
