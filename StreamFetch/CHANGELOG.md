@@ -2,6 +2,13 @@
 
 One version for the whole of StreamFetch for Chrome — `extension/manifest.json` (shown in `chrome://extensions` and next to the title of the StreamFetch tab) and `extension/package.json`. Every change users can see ships with a new number: a new feature raises the middle number (1.0.0 → 1.1.0), a fix the last one (1.0.0 → 1.0.1). Dates are the day the version was finished.
 
+## 1.0.1 — 2026-11-12
+
+- A full disk no longer leaves the tab unable to download. When the disk that holds your Chrome profile fills up, Chrome may delete StreamFetch's private work folder while the tab is open; until now every later video in that tab then failed with `no answer from the server (A requested file or directory could not be found …)` until the tab was reloaded. StreamFetch now looks the folder up again for every file it writes, so once you have freed some space, **Retry** works in the same tab.
+- A tab kept open for many batches stays fast. The table no longer puts every row back each time a link is read — rows new at its end are added —, the record of a video's requests is let go of with its row, and **Clear** now really releases the rows it removes, their covers included (a cover already fetched is still never asked for twice).
+- The README says what `already on disk` rests on — Chrome's own download list: do not clear it while a project lasts, or pasted links are downloaded again as ` (1)` — what a very long download list costs, and that the rows of earlier runs stay until **Clear**.
+- What is downloaded, and how — requests, pauses, files — does not change; no new permission.
+
 ## 1.0.0 — 2026-11-11
 
 The first version: a Chrome extension (Load unpacked, Windows first) that saves videos from Dailymotion, Bilibili.tv and Bilibili as MP4 files, for your own offline viewing, with your own browser session.

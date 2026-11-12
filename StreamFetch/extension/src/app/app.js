@@ -706,7 +706,14 @@ function renderTable() {
     const view = app.rows.get(key);
     if (view !== undefined) rows.push(view.tr);
   }
-  body.replaceChildren(...rows);
+  // Putting every row back costs a layout of the whole table — seconds once thousands of rows
+  // have piled up without **Clear**, at every resolved link —, so the rows already shown in their
+  // place stay: nothing is touched when the list is the same, rows new at its end are appended.
+  const shown = body.children;
+  let kept = 0;
+  while (kept < shown.length && kept < rows.length && shown[kept] === rows[kept]) kept += 1;
+  if (kept < shown.length) body.replaceChildren(...rows);
+  else if (kept < rows.length) body.append(...rows.slice(kept));
   renderSummary();
 }
 
@@ -1143,6 +1150,7 @@ function onClear() {
   app.resolved.clear();
   app.rows = new Map();
   app.order = [];
+  covers.forget();
   $("input-notes").replaceChildren();
   clearFailedBlock();
   renderTable();
@@ -1445,6 +1453,17 @@ export class CoverLoader {
       });
     }
     this.watcher.observe(image);
+  }
+
+  /**
+   * Forget the rows still watched (**Clear**): their images — and through them the rows and their
+   * targets — are let go. What was asked for stays asked: a thumbnail is never requested twice.
+   */
+  forget() {
+    for (const cell of this.cells.values()) this.watcher?.unobserve(cell.image);
+    this.cells.clear();
+    this.visible.clear();
+    this.queue.length = 0;
   }
 
   /** @returns {string | null} the next cover to fetch: a row in view, not asked yet */

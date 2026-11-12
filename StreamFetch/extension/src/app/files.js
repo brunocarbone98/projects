@@ -88,26 +88,19 @@ export class WorkFiles {
         const estimate = await navigator.storage.estimate();
         return { quota: estimate.quota, usage: estimate.usage };
       });
-    /** @type {Promise<DirLike> | null} */
-    this.dir = null;
   }
 
   /**
-   * `streamfetch/work/`, created when missing.
+   * `streamfetch/work/`, created when missing — looked up at every call, never kept: when the
+   * disk under the Chrome profile fills up, Chrome may delete the extension's whole private file
+   * system under the open tab, and a handle kept from before would fail every later download of
+   * the page with `NotFoundError` until it is reloaded.
    * @returns {Promise<DirLike>}
    */
-  workDir() {
-    if (this.dir === null) {
-      this.dir = (async () => {
-        const root = await this.root();
-        const own = await root.getDirectoryHandle(ROOT_DIR, { create: true });
-        return own.getDirectoryHandle(WORK_DIR, { create: true });
-      })();
-      this.dir.catch(() => {
-        this.dir = null;
-      });
-    }
-    return this.dir;
+  async workDir() {
+    const root = await this.root();
+    const own = await root.getDirectoryHandle(ROOT_DIR, { create: true });
+    return own.getDirectoryHandle(WORK_DIR, { create: true });
   }
 
   /**

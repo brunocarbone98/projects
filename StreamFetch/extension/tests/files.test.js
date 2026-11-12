@@ -8,7 +8,8 @@ import { SWEEP_AGE_MS, WorkFiles, workKey } from "../src/app/files.js";
 
 /**
  * An in-memory OPFS directory with Chrome's semantics for what files.js uses: a writable writes
- * to a swap copy that replaces the file on `close()`, `abort()` drops it.
+ * to a swap copy that replaces the file on `close()`, `abort()` drops it; the handle of a
+ * directory that was removed — with everything under it — rejects every call.
  */
 class FakeDir {
   constructor() {
@@ -16,6 +17,12 @@ class FakeDir {
     this.kind = "directory";
     /** @type {Map<string, FakeDir | FakeFile>} */
     this.entriesMap = new Map();
+    this.removed = false;
+  }
+
+  /** Chrome's answer to any use of a removed directory's handle. */
+  check() {
+    if (this.removed) throw new DOMException("A requested file or directory could not be found at the time an operation was processed.", "NotFoundError");
   }
 
   /**
@@ -24,6 +31,7 @@ class FakeDir {
    * @returns {Promise<FakeDir>}
    */
   async getDirectoryHandle(name, options = {}) {
+    this.check();
     const found = this.entriesMap.get(name);
     if (found instanceof FakeDir) return found;
     if (found !== undefined || !options.create) throw new Error(`NotFoundError: ${name}`);
@@ -38,6 +46,7 @@ class FakeDir {
    * @returns {Promise<FakeFile>}
    */
   async getFileHandle(name, options = {}) {
+    this.check();
     const found = this.entriesMap.get(name);
     if (found instanceof FakeFile) return found;
     if (found !== undefined || !options.create) throw new Error(`NotFoundError: ${name}`);
@@ -46,13 +55,29 @@ class FakeDir {
     return file;
   }
 
-  /** @param {string} name */
-  async removeEntry(name) {
-    if (!this.entriesMap.delete(name)) throw new Error(`NotFoundError: ${name}`);
+  /**
+   * @param {string} name
+   * @param {{ recursive?: boolean }} [options]
+   */
+  async removeEntry(name, options = {}) {
+    this.check();
+    const found = this.entriesMap.get(name);
+    if (found === undefined) throw new Error(`NotFoundError: ${name}`);
+    if (found instanceof FakeDir) {
+      if (found.entriesMap.size > 0 && !options.recursive) throw new Error(`InvalidModificationError: ${name}`);
+      /** @param {FakeDir} dir */
+      const remove = (dir) => {
+        dir.removed = true;
+        for (const entry of dir.entriesMap.values()) if (entry instanceof FakeDir) remove(entry);
+      };
+      remove(found);
+    }
+    this.entriesMap.delete(name);
   }
 
   /** @returns {AsyncIterable<[string, FakeDir | FakeFile]>} */
   entries() {
+    this.check();
     const list = [...this.entriesMap.entries()];
     return (async function* () {
       yield* list;
@@ -193,6 +218,28 @@ test("the startup sweep deletes leftovers older than 24 h and keeps recent files
   old.lastModified = now - SWEEP_AGE_MS - 1000;
   assert.equal(await files.sweep(), 1);
   assert.deepEqual([...dir.entriesMap.keys()], ["new.video.m4s"]);
+});
+
+test("after Chrome deleted the extension's file system under the open tab (a full disk), the work folder comes back: the next download works without a reload", async () => {
+  const { files, root } = workFiles();
+  const first = await files.appendWriter("a.video.m4s");
+  await first.write(Uint8Array.from([1, 2, 3]));
+  await first.close();
+  assert.equal(await files.removeWork("a"), 1);
+  const before = await (await root.getDirectoryHandle("streamfetch")).getDirectoryHandle("work");
+  await root.removeEntry("streamfetch", { recursive: true }); // what Chrome does when the profile's disk is full
+  await assert.rejects(before.getFileHandle("b.video.m4s", { create: true }), { name: "NotFoundError" }); // a handle kept from before
+  const second = await files.appendWriter("b.video.m4s");
+  await second.write(Uint8Array.from([4, 5]));
+  await second.close();
+  assert.deepEqual([...(await (await files.slicer("b.video.m4s")).slice(0, 9))], [4, 5]);
+  assert.equal((await files.file("b.video.m4s")).size, 2);
+  assert.equal(await files.sweep(), 0);
+  assert.equal(await files.removeWork("b"), 1);
+  await files.remove("b.video.m4s"); // already gone: no throw
+  const work = await (await root.getDirectoryHandle("streamfetch")).getDirectoryHandle("work");
+  assert.notEqual(work, before);
+  assert.deepEqual([...work.entriesMap.keys()], []);
 });
 
 test("estimateFree: the quota minus the usage, null when unknown", async () => {

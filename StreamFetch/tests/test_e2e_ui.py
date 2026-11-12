@@ -63,7 +63,7 @@ def _literal_chunks(message: str) -> list[str]:
 def test_the_page_shows_its_version_and_the_legal_notice(media: MediaSet, tmp_path: Path):
     with FakeSites(media) as sites, ExtensionHarness(tmp_path, sites) as ext:
         manifest = json.loads((ext.extension_dir / "manifest.json").read_text(encoding="utf-8"))
-        assert manifest["version"] == "1.0.0"
+        assert manifest["version"] == "1.0.1"
         assert manifest["version"] in ext.text("#version")
         assert ext.text("#legal-notice") == LEGAL_NOTICE
         assert sites.requests == []  # opening the tab asks nothing of the sites

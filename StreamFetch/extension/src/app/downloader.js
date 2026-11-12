@@ -1116,8 +1116,13 @@ export function audioExpected(streams) {
 
 // ------------------------------------------------------------------------ the download
 
-/** What the download's own requests are traced as, by target key (the report's attempts). */
-const traces = new Map();
+/**
+ * What the download's own requests are traced as (the report's attempts), by target: let go with
+ * the target, so a tab that runs batch after batch keeps none of them; a target resolved again —
+ * another run, a retry — starts with no downloader trace.
+ * @type {WeakMap<Target, Attempt[]>}
+ */
+const traces = new WeakMap();
 
 /**
  * Every request made for a target: the resolver's, then the downloader's last run of it.
@@ -1125,7 +1130,7 @@ const traces = new Map();
  * @returns {Attempt[]}
  */
 export function traceOf(target) {
-  return [...target.attempts, ...(traces.get(target.key) ?? [])];
+  return [...target.attempts, ...(traces.get(target) ?? [])];
 }
 
 /**
@@ -1808,7 +1813,7 @@ function oneDecimal(seconds) {
 export async function download(target, ctx) {
   /** @type {Attempt[]} */
   const attempts = [];
-  traces.set(target.key, attempts);
+  traces.set(target, attempts);
   /** @type {Result} */
   const result = {
     status: DONE,
