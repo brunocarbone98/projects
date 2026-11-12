@@ -38,11 +38,15 @@ import {
   sanitizeError,
   servedShort,
 } from "../src/app/downloader.js";
-import { downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
+import { STORAGE_REFUSED_PREFIX, downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
 
 const TINY = readFileSync(new URL("../../tests/fixtures/tiny.mp4", import.meta.url));
 const SERIES_ID = "7699393770256782354";
+/** What Chrome 153 rejects a `chrome.storage.local.set` with when the disk under its profile is full. */
+const REFUSED = "IO error: .../000003.log: FILE_ERROR_NO_SPACE (ChromeMethodBFE: 3::WritableFileAppend::8)";
+/** The stop of a run whose progress the storage refused. */
+const UNSAVED = `${STORAGE_REFUSED_PREFIX}${REFUSED}`;
 
 /**
  * tiny.mp4 padded with a top-level `free` box to 128 KiB (a real video: >= 64 KiB, 3 s, audio).
@@ -97,13 +101,19 @@ const series = (episodes, name = "Test Series", seriesId = SERIES_ID) => ({
 
 /**
  * A fake engine: scripted downloads, recorded pauses, an in-memory cooldown and state.
- * @param {{results?: Record<number, string>, testMode?: boolean, pacing?: object, discover?: (ref: import("../src/lib/urls.js").SeriesRef) => Promise<import("../src/lib/catalog.js").Series>}} [options]
+ * `stateWrites`: how many state writes the storage accepts before it refuses every further one
+ * ({@link REFUSED}, as `chrome.storage.local` rejects them).
+ * @param {{results?: Record<number, string>, testMode?: boolean, pacing?: object, stateWrites?: number, discover?: (ref: import("../src/lib/urls.js").SeriesRef) => Promise<import("../src/lib/catalog.js").Series>}} [options]
  */
 function fakeEngine(options = {}) {
   /** @type {{kind: string, seconds: number, text: string}[]} */
   const pauses = [];
   /** @type {number[]} */
   const downloads = [];
+  /** @type {import("../src/lib/report.js").DownloadResult[]} the rows as the page gets them (`onResult`) */
+  const shown = [];
+  let writesLeft = options.stateWrites ?? Number.POSITIVE_INFINITY;
+  let refusedWrites = 0;
   /** @type {Record<string, unknown> | undefined} */
   let cooldown;
   /** @type {Map<string, unknown>} */
@@ -150,14 +160,22 @@ function fakeEngine(options = {}) {
     ),
     readState: async (id) => states.get(id),
     writeState: async (state) => {
+      if (writesLeft <= 0) {
+        refusedWrites += 1;
+        throw new Error(REFUSED);
+      }
+      writesLeft -= 1;
       states.set(state.series_id, JSON.parse(JSON.stringify(state)));
     },
     onPause: (kind, seconds, text) => pauses.push({ kind, seconds, text }),
+    onResult: (result) => shown.push(result),
   };
   return {
     engine,
     pauses,
     downloads,
+    shown,
+    refusedWrites: () => refusedWrites,
     states,
     getCooldown: () => cooldown,
     /** @param {Record<string, unknown>} record */
@@ -285,6 +303,155 @@ test("a batch: series one after the other, the series rest between them, not sta
   const again = await runBatch(fake.engine, refs.slice(0, 1));
   assert.deepEqual(resolved, []);
   assert.equal(again[0]?.report.skippedComplete, true);
+});
+
+// ------------------------------------------------- a write chrome.storage.local refuses
+
+test("a refused state write: the saved episode keeps its row and counts, the rest is stopped with no request and no further write", async () => {
+  const fake = fakeEngine({ stateWrites: 2 });
+  const episodes = [episode(1), episode(2), episode(3), episode(4, { locked: true }), episode(5)];
+  const { results, stopped } = await downloadSeries(fake.engine, series(episodes), episodes, newState(SERIES_ID));
+  assert.equal(UNSAVED, `the progress could not be saved: ${REFUSED}`);
+  assert.equal(stopped, UNSAVED);
+  assert.deepEqual(fake.downloads, [1, 2, 3]); // E03 was saved before its write was refused; nothing after it is asked for
+  assert.deepEqual(results.map((r) => r.status), ["done", "done", "done", "skipped-locked", "failed"]);
+  assert.equal(results[2]?.message, "done 3"); // the saved episode keeps its own row
+  assert.match(String(results[3]?.message), /^looks locked/); // the skip it would have had anyway
+  assert.equal(results[4]?.message, `stopped: ${UNSAVED}`);
+  assert.deepEqual(fake.shown.map((r) => r.episode.number), [1, 2, 3, 4, 5]); // every row reached the page, E03's too
+  assert.equal(fake.engine.pacingState.runAttempts, 3); // E03's request counts toward the rest and the long break
+  assert.equal(fake.engine.pacingState.lastNetworkAt, fake.engine.clock());
+  assert.equal(fake.engine.pacingState.consecutiveFailures, 0);
+  assert.deepEqual(fake.pauses.map((p) => p.kind), ["pace", "pace"]); // no pause for a request that is never made
+  assert.equal(fake.refusedWrites(), 1); // one refused write, not one per remaining row
+  const stored = /** @type {{episodes: Record<string, unknown>}} */ (fake.states.get(SERIES_ID));
+  assert.deepEqual(Object.keys(stored.episodes), ["1", "2"]); // E03's file is found on disk by the next run
+});
+
+test("a 429 whose state write is refused is still the stop, with its cooldown and its count", async () => {
+  const fake = fakeEngine({ stateWrites: 1, results: { 2: "failed-rate-limited" } });
+  const episodes = [episode(1), episode(2), episode(3)];
+  const { results, stopped } = await downloadSeries(fake.engine, series(episodes), episodes, newState(SERIES_ID));
+  assert.equal(stopped, "episode 2 failed-rate-limited");
+  assert.deepEqual(fake.downloads, [1, 2]);
+  const cooldown = /** @type {Record<string, unknown>} */ (fake.getCooldown());
+  assert.equal(cooldown["reason"], MEDIA_RATE_LIMIT_MESSAGE); // recorded although the state was not
+  assert.equal(cooldown["until"], fake.engine.wallClock() + 1800);
+  assert.equal(fake.engine.pacingState.runAttempts, 2);
+  assert.equal(results[2]?.status, "failed-rate-limited");
+  assert.equal(results[2]?.message, `stopped: episode 2 failed-rate-limited: ${MEDIA_RATE_LIMIT_MESSAGE}`);
+  assert.equal(fake.refusedWrites(), 1);
+});
+
+test("a batch ends at a refused write — at a series' last result or at its complete mark: the next series is never listed", async () => {
+  const lists = {
+    [SERIES_ID]: series([episode(1), episode(2)], "One"),
+    "7699393770256782399": series([episode(1, { seriesId: "7699393770256782399" })], "Two", "7699393770256782399"),
+  };
+  const refs = Object.keys(lists).map((seriesId) => ({ kind: /** @type {const} */ ("series"), seriesId, episodeHint: null, sourceUrl: seriesId }));
+  // E01 stored, E02 (the last result) refused — then both stored and the complete mark refused
+  for (const stateWrites of [1, 2]) {
+    /** @type {string[]} */
+    const resolved = [];
+    const fake = fakeEngine({
+      stateWrites,
+      discover: async (ref) => {
+        resolved.push(ref.seriesId);
+        return /** @type {never} */ (lists)[ref.seriesId];
+      },
+    });
+    const runs = await runBatch(fake.engine, refs);
+    assert.deepEqual(resolved, [SERIES_ID], `${stateWrites} writes`); // the second series is never listed
+    assert.deepEqual(fake.downloads, [1, 2]);
+    assert.deepEqual(runs[0]?.results.map((r) => r.status), ["done", "done"]);
+    assert.equal(runs[0]?.stop, true);
+    assert.equal(runs[0]?.report.stopped, UNSAVED);
+    assert.equal(runs[0]?.report.complete, true); // every file is on disk; what is missing is the memory of it
+    const stored = /** @type {{episodes: Record<string, unknown>, complete_at?: string | null}} */ (fake.states.get(SERIES_ID));
+    assert.equal(Object.keys(stored.episodes).length, stateWrites);
+    assert.equal(stored.complete_at ?? null, null); // no complete mark stored: the next run lists the series and finds its files
+    assert.equal(runs[1]?.error, `not started: batch stopped in One (${UNSAVED})`);
+    assert.equal(runs[1]?.errorKind, "not-started");
+    assert.equal(fake.refusedWrites(), 1);
+    assert.deepEqual(fake.pauses.map((p) => p.kind), ["pace"]); // and no rest before a series that never starts
+  }
+});
+
+test("a write the page was refused (the pacing): the run stops before its next request, and no series is listed while it holds", async () => {
+  // the page's memory of a refused write: here a variable the fake `persist` sets from its third save on
+  /** @type {string | null} */
+  let unsaved = null;
+  let persists = 0;
+  const fake = fakeEngine();
+  fake.engine.unsaved = () => unsaved;
+  fake.engine.persist = async () => {
+    persists += 1;
+    if (persists >= 3) unsaved = unsaved ?? UNSAVED;
+  };
+  const episodes = [episode(1), episode(2), episode(3), episode(4)];
+  const { results, stopped } = await downloadSeries(fake.engine, series(episodes), episodes, newState(SERIES_ID));
+  // the saves: after E01's attempt, after E02's pause, after E02's attempt (refused) — E03 is never asked for
+  assert.deepEqual(fake.downloads, [1, 2]);
+  assert.equal(stopped, UNSAVED);
+  assert.deepEqual(results.map((r) => r.status), ["done", "done", "failed", "failed"]);
+  assert.equal(results[2]?.message, `stopped: ${UNSAVED}`);
+  assert.equal(fake.refusedWrites(), 0); // no state write was refused: the page's refusal alone stops the run
+  const stored = /** @type {{episodes: Record<string, unknown>}} */ (fake.states.get(SERIES_ID));
+  assert.deepEqual(Object.keys(stored.episodes), ["1", "2"]); // nothing is written after it
+  // refused during a pause: the request that pause was for is not made
+  unsaved = null;
+  persists = 1; // the next save (E02's pause) is the second, the one after it (still the pause's) the third
+  const paused = fakeEngine();
+  paused.engine.unsaved = () => unsaved;
+  paused.engine.persist = async () => {
+    persists += 2;
+    if (persists >= 3) unsaved = unsaved ?? UNSAVED;
+  };
+  const during = await downloadSeries(paused.engine, series(episodes), episodes, newState(SERIES_ID));
+  assert.deepEqual(paused.downloads, [1]);
+  assert.equal(during.stopped, UNSAVED);
+  // a batch and a selection started while it holds: asked before the listing, no request at all
+  /** @type {string[]} */
+  const resolved = [];
+  const later = fakeEngine({
+    discover: async (ref) => {
+      resolved.push(ref.seriesId);
+      return series([episode(1)]);
+    },
+  });
+  let asked = 0;
+  later.engine.unsaved = () => unsaved;
+  later.engine.persist = async () => {
+    asked += 1;
+  };
+  const refs = [SERIES_ID, "7699393770256782399"].map((seriesId) => ({ kind: /** @type {const} */ ("series"), seriesId, episodeHint: null, sourceUrl: seriesId }));
+  const runs = await runBatch(later.engine, refs);
+  assert.deepEqual(resolved, []);
+  assert.deepEqual(later.downloads, []);
+  assert.equal(asked, 1); // the question is one save of the pacing, asked once: the second series is not started
+  assert.equal(runs[0]?.error, UNSAVED);
+  assert.equal(runs[0]?.report.stopped, UNSAVED);
+  assert.equal(runs[0]?.errorKind, "storage");
+  assert.equal(runs[0]?.stop, true);
+  assert.equal(runs[0]?.contacted, false);
+  assert.equal(runs[1]?.error, `not started: batch stopped in ${SERIES_ID} (${UNSAVED})`);
+  const selection = await runSelectionJob(later.engine, /** @type {never} */ (refs[0]), [1], { lastContactAt: null });
+  assert.deepEqual(resolved, []);
+  assert.equal(selection.errorKind, "storage");
+  assert.equal(selection.contacted, false);
+  // a series found complete still costs nothing: no save, no request
+  unsaved = null;
+  const complete = fakeEngine({ discover: later.engine.discover });
+  await runBatch(complete.engine, refs.slice(0, 1));
+  resolved.length = 0;
+  asked = 0;
+  unsaved = UNSAVED;
+  complete.engine.unsaved = () => unsaved;
+  complete.engine.persist = later.engine.persist;
+  const again = await runBatch(complete.engine, refs.slice(0, 1));
+  assert.equal(again[0]?.report.skippedComplete, true);
+  assert.deepEqual(resolved, []);
+  assert.equal(asked, 0);
 });
 
 // ------------------------------------------------------------------------- discovery

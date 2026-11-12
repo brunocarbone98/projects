@@ -80,8 +80,11 @@ ACTIVE_WORKER_JS = """async () => {
 _ID_ALPHABET = str.maketrans("0123456789abcdef", "abcdefghijklmnop")
 
 
-def make_test_copy(target: Path) -> Path:
-    """Copy the extension's runtime files to `target` and mark the COPY as the test build."""
+def make_test_copy(target: Path, *, drop_permissions: tuple[str, ...] = ()) -> Path:
+    """Copy the extension's runtime files to `target` and mark the COPY as the test build.
+    `drop_permissions` leaves those permissions out of the COPY's manifest: without
+    `unlimitedStorage` Chrome holds `chrome.storage.local` to its 10 MB quota again — the one
+    refused write a sandbox can make Chrome itself produce."""
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
@@ -95,6 +98,11 @@ def make_test_copy(target: Path) -> Path:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["dramafetch_test"] = True
     manifest["host_permissions"] = [*manifest["host_permissions"], TEST_HOST_PERMISSION]
+    missing = [name for name in drop_permissions if name not in manifest["permissions"]]
+    assert not missing, f"the manifest has no permission {missing} to leave out"
+    manifest["permissions"] = [
+        name for name in manifest["permissions"] if name not in drop_permissions
+    ]
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return target
 
@@ -133,13 +141,19 @@ class ExtensionHarness:
         test_settings: dict[str, Any] | None = None,
         profile: Path | None = None,
         preferences: dict[str, Any] | None = None,
+        drop_permissions: tuple[str, ...] = (),
     ) -> None:
         """`preferences`: more top-level keys of the profile's `Default/Preferences`, written with
         the download directory before the first launch (e.g. `{"profile": {"cookie_controls_mode":
-        1, "block_third_party_cookies": True}}`: third-party cookies blocked)."""
+        1, "block_third_party_cookies": True}}`: third-party cookies blocked). `drop_permissions`:
+        permissions left out of the test copy's manifest (`make_test_copy`). A second harness over
+        the same `tmp_path` is the same extension (the id comes from the copy's path) with the
+        same profile: what the first stored is there."""
         self.tmp_path = tmp_path
         self.base_url = base_url
-        self.extension_dir = make_test_copy(tmp_path / "extension")
+        self.extension_dir = make_test_copy(
+            tmp_path / "extension", drop_permissions=drop_permissions
+        )
         self.profile = profile or tmp_path / "profile"
         self.downloads = tmp_path / "downloads"
         self.preferences: dict[str, Any] = dict(preferences or {})

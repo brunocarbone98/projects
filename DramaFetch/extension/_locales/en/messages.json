@@ -241,6 +241,15 @@
       }
     }
   },
+  "storageRefused": {
+    "message": "DramaFetch stopped: $reason$. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.",
+    "description": "Shown when chrome.storage.local refused to store DramaFetch's progress: the engine's reason in the page's language (it ends with Chrome's own words), and what to do.",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
   "queueHeading": {
     "message": "Waiting",
     "description": "Heading of the queue card."

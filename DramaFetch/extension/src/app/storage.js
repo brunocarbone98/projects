@@ -6,6 +6,12 @@
  * long break or the rest between jobs), the history of the last 20 runs — and the test settings,
  * honoured ONLY when the manifest says `dramafetch_test` (the test harness' temporary copy).
  *
+ * The manifest's `unlimitedStorage` lifts the area's 10 MB quota: a series' state is about 350–400
+ * bytes per episode and is never pruned (it is the resume memory), so the quota was full near
+ * 27 000 episodes. A write can still be refused — the disk that holds the Chrome profile is full
+ * or failing: the callers stop the run (`engine.storageRefusedReason`), the history gives way
+ * ({@link appendHistory}) and a refusal's cooldown stays in force from memory ({@link cooldownStore}).
+ *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
  */
 
@@ -22,7 +28,7 @@ export const PACING_KEY = "pacing";
 export const SERIES_KEY_PREFIX = "series:";
 /** How many past runs the history keeps. */
 export const HISTORY_LIMIT = 20;
-/** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB of the 10 MB quota. */
+/** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB. */
 export const HISTORY_MAX_BYTES = 1024 * 1024;
 
 /**
@@ -244,9 +250,57 @@ export async function saveTestSettings(raw) {
   return parsed;
 }
 
-/** @returns {import("../lib/cooldown.js").CooldownStore} the cooldown record in chrome.storage.local */
+/**
+ * A refusal's record that `chrome.storage.local` would not store (a full disk under the Chrome
+ * profile): TikTok refused all the same, so the cooldown stays in force from here while this page
+ * lives.
+ * @type {Record<string, unknown> | null}
+ */
+let unstoredCooldown = null;
+
+/**
+ * @param {unknown} record a cooldown record, or whatever the storage holds
+ * @returns {number} when it ends, -Infinity when it is no record
+ */
+function untilOf(record) {
+  const until = isRecord(record) ? record["until"] : undefined;
+  return typeof until === "number" && Number.isFinite(until) ? until : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * The cooldown record in `chrome.storage.local` — and, when the storage refused to write one, the
+ * record kept in memory: reading gives whichever ends later (also when the storage cannot be read),
+ * so a refusal by TikTok is honoured even when it could not be stored. The next record the storage
+ * accepts replaces the one in memory.
+ * @returns {import("../lib/cooldown.js").CooldownStore}
+ */
 export function cooldownStore() {
-  return storageAreaStore(chrome.storage.local);
+  const stored = storageAreaStore(chrome.storage.local);
+  return {
+    read: async () => {
+      /** @type {unknown} */
+      let record;
+      try {
+        record = await stored.read();
+      } catch {
+        record = undefined; // an unreadable store counts as none (`readCooldown`), the memory still answers
+      }
+      return unstoredCooldown !== null && untilOf(unstoredCooldown) > untilOf(record) ? unstoredCooldown : record;
+    },
+    write: async (record) => {
+      try {
+        await stored.write(record);
+        unstoredCooldown = null;
+      } catch (error) {
+        unstoredCooldown = record;
+        throw error; // `recordBlock` reports it and still returns the cooldown
+      }
+    },
+    remove: async () => {
+      unstoredCooldown = null;
+      await stored.remove?.();
+    },
+  };
 }
 
 /**
@@ -317,9 +371,8 @@ export async function readHistory() {
 /**
  * The history to store: `entries` (most recent first) cut to the last {@link HISTORY_LIMIT} runs
  * and to {@link HISTORY_MAX_BYTES} of UTF-8 JSON, the oldest runs dropped first; the most recent
- * run is always kept. `chrome.storage.local` holds 10 MB without the `unlimitedStorage`
- * permission, and the per-series states — the resume memory — must never lose that room to the
- * history.
+ * run is always kept. The history is read whole at every page start and after every job, so it
+ * stays small whatever the storage could hold.
  * @param {readonly Record<string, unknown>[]} entries
  * @param {number} [limit]
  * @param {number} [maxBytes]
@@ -340,14 +393,15 @@ export function trimHistory(entries, limit = HISTORY_LIMIT, maxBytes = HISTORY_M
 }
 
 /**
- * Put a finished run first in the history ({@link trimHistory}). Should the storage still refuse
- * it (the quota), the history gives way — the run alone, else no history at all — and never the
- * series states.
+ * Put a finished run first in the history ({@link trimHistory}). Should the storage refuse it (a
+ * full disk), the history gives way — the run alone, else no history at all — and never the
+ * series states; a history that cannot be read gives way too. Never throws: a job's end must not
+ * break on its history.
  * @param {Record<string, unknown>} entry
  * @returns {Promise<void>}
  */
 export async function appendHistory(entry) {
-  const history = trimHistory([entry, ...(await readHistory())]);
+  const history = trimHistory([entry, ...(await readHistory().catch(() => []))]);
   try {
     await chrome.storage.local.set({ [HISTORY_KEY]: history });
   } catch {

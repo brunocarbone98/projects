@@ -72,9 +72,12 @@ import { completeSince, doneEntries, donePath, drmProtected, lockedNumbers, miss
 export const MAX_EPISODE_NUMBER = 10_000;
 /** At most this many ranges of numbers in a report line; the rest becomes "…". */
 const MAX_REPORT_RANGES = 10;
-/** `SeriesRun.error_kind` values the extension uses (`engine.ERROR_KINDS` less `cookies`). */
+/**
+ * `SeriesRun.error_kind` values the extension uses: `engine.ERROR_KINDS` less `cookies`, plus its
+ * own `storage` (a series refused because `chrome.storage.local` would not store its progress).
+ */
 export const ERROR_KINDS = Object.freeze(
-  /** @type {const} */ (["cooldown", "login", "captcha", "rate-limited", "discovery", "empty", "not-started"]),
+  /** @type {const} */ (["cooldown", "login", "captcha", "rate-limited", "discovery", "empty", "not-started", "storage"]),
 );
 
 // ------------------------------------------------------------------------ result builders

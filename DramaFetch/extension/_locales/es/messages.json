@@ -241,6 +241,15 @@
       }
     }
   },
+  "storageRefused": {
+    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque ese disco está lleno. Libera espacio, reinicia Chrome y vuelve a ejecutar: lo que ya está guardado se omite.",
+    "description": "Shown when chrome.storage.local refused to store DramaFetch's progress: the engine's reason in the page's language (it ends with Chrome's own words), and what to do.",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
   "queueHeading": {
     "message": "En espera",
     "description": "Heading of the queue card."

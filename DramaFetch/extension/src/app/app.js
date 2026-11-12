@@ -31,7 +31,16 @@ import { parseSeriesList } from "../lib/urls.js";
 import { closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
 import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
 import { initPageRedirects } from "./redirects.js";
-import { StopRequested, checkCooldown, episodeContext, resolve, restBetweenJobs, runBatch, runSelectionJob } from "./engine.js";
+import {
+  StopRequested,
+  checkCooldown,
+  episodeContext,
+  resolve,
+  restBetweenJobs,
+  runBatch,
+  runSelectionJob,
+  storageRefusedReason,
+} from "./engine.js";
 import { displayLabels, displayLanguage, localize, t } from "./i18n.js";
 import {
   DEFAULT_SETTINGS,
@@ -124,6 +133,13 @@ const app = {
   /** @type {number | null} when DramaFetch last contacted TikTok (a request, or a finished job that made one) */
   lastContactAt: null,
   stopRequested: false,
+  /**
+   * Why `chrome.storage.local` refused a write of this page (the pacing, a series' state), once it
+   * did ({@link storageRefusedReason}) — kept until the page is reloaded: what Chrome accepts after
+   * a refused write may not survive its restart, so this page asks nothing more of TikTok.
+   * @type {string | null}
+   */
+  unsaved: null,
   /** @type {Set<() => void>} */
   stopWaiters: new Set(),
   /** @type {import("../lib/cooldown.js").Cooldown | null} */
@@ -300,7 +316,29 @@ function sleep(seconds) {
 async function noteContact(job) {
   job.contacted = true;
   app.lastContactAt = now();
-  await savePacing(app.pacing, app.lastContactAt);
+  await storePacing();
+}
+
+/**
+ * `chrome.storage.local` refused a write: remembered in {@link app}.unsaved, the first reason kept.
+ * @param {unknown} error what the write rejected with
+ */
+function noteRefusedWrite(error) {
+  app.unsaved = app.unsaved ?? storageRefusedReason(error);
+}
+
+/**
+ * Save the run's pacing. A write the storage refuses never throws — the pacing in force is this
+ * page's own, `app.pacing`, so no pause gets shorter — but it is remembered: the engine stops
+ * before its next request and the job's end says why.
+ * @returns {Promise<void>}
+ */
+async function storePacing() {
+  try {
+    await savePacing(app.pacing, app.lastContactAt);
+  } catch (error) {
+    noteRefusedWrite(error);
+  }
 }
 
 /**
@@ -356,7 +394,15 @@ function buildEngine(job, jobRecord) {
     downloader,
     view,
     readState: readSeriesState,
-    writeState: writeSeriesState,
+    writeState: async (state) => {
+      try {
+        await writeSeriesState(state);
+      } catch (error) {
+        noteRefusedWrite(error);
+        throw error; // the engine makes it the run's stop
+      }
+    },
+    unsaved: () => app.unsaved,
     persist: async () => {
       // after every network attempt (and pause): a download contacted TikTok at lastNetworkAt
       const network = app.pacing.lastNetworkAt;
@@ -364,7 +410,7 @@ function buildEngine(job, jobRecord) {
         job.contacted = true;
         if (app.lastContactAt === null || network > app.lastContactAt) app.lastContactAt = network;
       }
-      await savePacing(app.pacing, app.lastContactAt);
+      await storePacing();
     },
     stopRequested: () => app.stopRequested,
     onPause: (kind, seconds, text) => {
@@ -935,6 +981,10 @@ async function runJob(job) {
       setStatus($("input-status"), shownText(stop), "error");
       return;
     }
+    if (app.unsaved !== null) {
+      entry["error"] = stop = app.unsaved; // a write was refused earlier in this page: no request (the finally says why)
+      return;
+    }
     await applyRefererRule(baseUrl());
     if (job.kind === "load") {
       stop = await runLoad(job, engine, entry);
@@ -976,10 +1026,15 @@ async function runJob(job) {
     }
   } finally {
     clearPause();
+    if (job.contacted) app.lastContactAt = now(); // the rest between jobs counts from the job's end
+    await storePacing();
+    if (app.unsaved !== null) {
+      // chrome.storage.local refused a write: a stop (no waiting job starts), and what to do about it
+      if (stop === null) entry["error"] = stop = app.unsaved;
+      setStatus($("input-status"), t("storageRefused", [shownText(app.unsaved)]), "error");
+    }
     entry["stopped"] = stop;
     entry["finished_at"] = new Date().toISOString();
-    if (job.contacted) app.lastContactAt = now(); // the rest between jobs counts from the job's end
-    await savePacing(app.pacing, app.lastContactAt);
     if (stopping !== null) await cancelQueue(notStartedMessage(stopping));
     else if (stop !== null) await cancelQueue(`not started: batch stopped in ${job.label} (${stop})`);
     await appendHistory(entry);
@@ -1021,6 +1076,11 @@ async function runLoad(job, engine, entry) {
     setStatus($("input-status"), shownText(message), "error");
     entry["error"] = message;
     return message;
+  }
+  await storePacing(); // can anything be stored? asked before the listing's first request, as the engine does
+  if (app.unsaved !== null) {
+    entry["error"] = app.unsaved;
+    return app.unsaved;
   }
   let series;
   try {
