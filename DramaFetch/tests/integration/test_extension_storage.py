@@ -59,6 +59,16 @@ STOPPED_TAIL = (
 )
 
 
+def _stopped_with_stored_wait(reason: str, until: str) -> str:
+    """The message when the cooldown in force is stored (`storageRefusedWait`): its end is named
+    all the same, since what Chrome accepts after a refused write may not survive a restart."""
+    return (
+        f"{STOPPED_HEAD}{reason}. Chrome could not write to its profile folder — usually its disk "
+        "is full. TikTok also refused a request: free some space, restart Chrome or reload "
+        f"DramaFetch only after {until} and run again — what is already saved is skipped."
+    )
+
+
 def _stopped_with_cooldown(reason: str, until: str) -> str:
     """The message when a cooldown is in force too (`storageRefusedCooldown`)."""
     return (
@@ -401,7 +411,8 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
     download buttons disabled, the popup's "Download this series" refused with no request); what
     proves the cooldown's memory is the banner and the page's advice naming the cooldown's end.
     Once space is freed the same tab stores the cooldown by itself within its next look (every
-    15 s: a restart of Chrome keeps it from then on) and its advice drops "could not be saved";
+    15 s) and its advice drops "could not be saved" but still names the wait's end (what Chrome
+    accepts after a refused write may not survive a restart);
     after a reload of the tab the banner is back and a listing is refused by the cooldown, still
     with no request. The rest of the series is `stopped` by the 429."""
     with (
@@ -452,8 +463,10 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
         ext.wait_for(lambda: ext.cooldown() is not None, 30)  # stored by the tab's own look
         stored = ext.cooldown()
         assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
-        plain = f"{STOPPED_HEAD}{UNSAVED_PREFIX}{FULL_DISK}{STOPPED_TAIL}"
-        ext.wait_for(lambda: _status_line(ext) == plain, 10)  # no more "could not be saved"
+        # no more "could not be saved" — but the wait's end is still named: what Chrome accepts
+        # after a refused write may not survive a restart
+        stored_advice = _stopped_with_stored_wait(f"{UNSAVED_PREFIX}{FULL_DISK}", until.group(1))
+        ext.wait_for(lambda: _status_line(ext) == stored_advice, 10)
         assert page.locator("#download-all-button").is_disabled()  # until the tab is reloaded
         assert len(server.requests) == requests
 

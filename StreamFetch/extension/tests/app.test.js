@@ -421,6 +421,10 @@ class FakeElement {
     this.children = [];
     this.append(...nodes);
   }
+  /** @returns {FakeElement | null} */
+  get lastElementChild() {
+    return this.children[this.children.length - 1] ?? null;
+  }
   /**
    * @param {FakeElement} node
    * @returns {FakeElement}

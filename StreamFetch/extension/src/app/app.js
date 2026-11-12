@@ -713,8 +713,14 @@ function renderTable() {
   const shown = body.children;
   let kept = 0;
   while (kept < shown.length && kept < rows.length && shown[kept] === rows[kept]) kept += 1;
-  while (shown.length > kept) body.removeChild(/** @type {Element} */ (shown[shown.length - 1]));
-  if (kept < rows.length) body.append(...rows.slice(kept));
+  if (kept === 0 && shown.length > 0) {
+    body.replaceChildren(...rows); // nothing to keep (Clear, a new first row): one operation
+  } else {
+    // counted once and taken from the end: reading the live collection's length after each
+    // removal would make the browser count every remaining row again
+    for (let extra = shown.length - kept; extra > 0; extra -= 1) body.removeChild(/** @type {Element} */ (body.lastElementChild));
+    if (kept < rows.length) body.append(...rows.slice(kept));
+  }
   renderSummary();
 }
 

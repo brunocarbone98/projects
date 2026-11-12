@@ -2214,21 +2214,29 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       for (const id of ["load-button", "download-all-button", "download-available-button", "download-selected-button", "retry-button"]) {
         assert.equal(element(id).disabled, true, id);
       }
-      // a cooldown in force that chrome.storage.local holds: it outlives a restart, the banner names its end
+      /** @param {number} until @returns {string} the page's HH:MM of a cooldown's end */
+      const clock = (until) => {
+        const time = new Date(Math.floor(until) * 1000);
+        return `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
+      };
+      /** @param {number} until @returns {string} the advice for a stored wait: its end named all the same */
+      const storedWaitAdvice = (until) =>
+        `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request: free some space, restart Chrome or reload DramaFetch only after ${clock(until)} and run again — what is already saved is skipped.`;
+      // a cooldown in force that chrome.storage.local holds: its end is named all the same — what Chrome
+      // accepts after a refused write may not survive a restart — without saying it was not saved
       const stored = Date.now() / 1000 + 600;
       local.set("cooldown", { until: stored, reason: "rate limited (HTTP 429) by the video server", source: "browser", recorded_at: stored - 1800 });
       element("input-status").className = "";
       page.message({ type: "dramafetch:load", input: SERIES_ID });
       for (let turns = 0; turns < 20 && element("input-status").className !== "status error"; turns += 1) await page.turn();
-      assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
+      assert.equal(element("input-status").textContent, storedWaitAdvice(stored));
       // a refusal by TikTok whose cooldown the storage refuses too: the advice names the wait's end, kept only in this browser session
       const recorded = await recordBlock(engine.cooldownStore, MEDIA_RATE_LIMIT_MESSAGE, "browser", { now: Date.now() / 1000 });
       assert.equal(/** @type {{until: number} | undefined} */ (local.get("cooldown"))?.until, stored); // not stored
       element("input-status").className = "";
       page.message({ type: "dramafetch:load", input: SERIES_ID });
       for (let turns = 0; turns < 20 && element("input-status").className !== "status error"; turns += 1) await page.turn();
-      const time = new Date(Math.floor(recorded.until) * 1000);
-      const hhmm = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
+      const hhmm = clock(recorded.until);
       assert.equal(
         element("input-status").textContent,
         `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request, and the wait until ${hhmm} could not be saved: free some space, restart Chrome or reload DramaFetch only after ${hhmm} and run again — what is already saved is skipped.`,
@@ -2242,12 +2250,12 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       for (let turns = 0; turns < 20 && element("cooldown-banner").hidden; turns += 1) await page.turn();
       assert.equal(element("cooldown-banner").hidden, false);
       assert.equal(await module.lookAgainAtCooldown(), false);
-      // space freed: the next look (every COOLDOWN_LOOK_S s) stores it, and the advice drops "could not be saved"
+      // space freed: the next look (every COOLDOWN_LOOK_S s) stores it, and the advice drops "could not be saved" — never the wait's end
       Object.assign(chrome.storage.local, { set });
       assert.equal(module.COOLDOWN_LOOK_S, 15);
       assert.equal(await module.lookAgainAtCooldown(), true);
       assert.equal(/** @type {{until: number} | undefined} */ (local.get("cooldown"))?.until, recorded.until);
-      assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
+      assert.equal(element("input-status").textContent, storedWaitAdvice(recorded.until));
       assert.equal(await module.lookAgainAtCooldown(), true); // stored: nothing more to do
     } finally {
       Object.assign(chrome.storage.local, { set });

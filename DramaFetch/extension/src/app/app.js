@@ -365,11 +365,15 @@ async function showStorageRefused() {
   if (app.unsaved === null) return;
   const reason = shownText(app.unsaved);
   const cooldown = await checkCooldownNow();
-  // "the wait could not be saved" only when it was not: a cooldown chrome.storage.local holds
-  // outlives a restart of Chrome, and the banner already names its end
+  // A cooldown in force: its end is always named — what Chrome accepts after a refused write may
+  // not survive its restart, so even a stored wait is waited out first. "could not be saved"
+  // only when chrome.storage.local does not hold it.
   const unsavedWait = cooldown !== null && (await storedCooldownUntil()) < cooldown.until;
   app.unsavedWaitShown = unsavedWait;
-  const text = unsavedWait ? t("storageRefusedCooldown", [reason, clockTime(cooldown.until)]) : t("storageRefused", [reason]);
+  const text =
+    cooldown === null
+      ? t("storageRefused", [reason])
+      : t(unsavedWait ? "storageRefusedCooldown" : "storageRefusedWait", [reason, clockTime(cooldown.until)]);
   setStatus($("input-status"), text, "error");
   updateButtons();
 }

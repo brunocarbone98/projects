@@ -254,6 +254,18 @@
       }
     }
   },
+  "storageRefusedWait": {
+    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque el disco está lleno. Además, TikTok rechazó una solicitud: libera espacio, reinicia Chrome o recarga DramaFetch solo después de las $time$ y vuelve a intentarlo; lo que ya está guardado se omite.",
+    "description": "Shown instead of storageRefusedCooldown when the cooldown in force is stored: what Chrome accepts after a refused write may not survive its restart, so its end is named all the same. $1 is the engine's reason in the page's language, $2 the cooldown's end (HH:MM).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      },
+      "time": {
+        "content": "$2"
+      }
+    }
+  },
   "storageRefusedCooldown": {
     "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque el disco está lleno. Además, TikTok rechazó una solicitud y la espera hasta las $time$ no se pudo guardar: libera espacio, reinicia Chrome o recarga DramaFetch solo después de las $time$ y vuelve a intentarlo; lo que ya está guardado se omite.",
     "description": "Shown instead of storageRefused when a cooldown is in force too: that wait could not be stored, so restarting Chrome before its end would forget it. $1 is the engine's reason in the page's language, $2 the cooldown's end (HH:MM).",
