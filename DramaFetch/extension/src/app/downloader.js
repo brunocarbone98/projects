@@ -1156,6 +1156,11 @@ export class Downloader {
       } catch (error) {
         this.failedRefreshes.add(episode.seriesId);
         record.outcome = "failed";
+        if (error instanceof Error && error.name === "StorageRefusedError") {
+          // refused by the page before any request (a write was refused): nothing was listed
+          this.refreshes -= 1;
+          record.fresh_list = false;
+        }
         throw error;
       }
       fresh = new Map();

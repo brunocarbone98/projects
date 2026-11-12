@@ -32,11 +32,12 @@ export const HISTORY_LIMIT = 20;
 /** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB. */
 export const HISTORY_MAX_BYTES = 1024 * 1024;
 /**
- * One run's share of the history ({@link HISTORY_MAX_BYTES} / {@link HISTORY_LIMIT}, about
- * 51 KiB): a run larger than this is stored compact ({@link historyEntry}), so that the last runs
- * stay together however large one of them was.
+ * One run's share of the history, about 51 KiB: {@link HISTORY_LIMIT} runs of this size — each
+ * with its comma, and the array's brackets — fit {@link HISTORY_MAX_BYTES}. A larger run is stored
+ * compact and held to it ({@link historyEntry}), so that the last 20 runs stay together however
+ * large one of them was.
  */
-export const HISTORY_ENTRY_MAX_BYTES = Math.floor(HISTORY_MAX_BYTES / HISTORY_LIMIT);
+export const HISTORY_ENTRY_MAX_BYTES = Math.floor((HISTORY_MAX_BYTES - 2) / HISTORY_LIMIT) - 1;
 
 /**
  * @typedef {object} Settings What the user may set (Settings panel); the pauses only upwards.
@@ -283,8 +284,10 @@ function untilOf(record) {
  * same record kept in this page's memory and in `chrome.storage.session` (the browser session's
  * memory: it survives a reload of the tab and is gone when Chrome closes; a full disk cannot
  * refuse it). Reading gives whichever of them ends later — also when one cannot be read —, so a
- * refusal by TikTok is honoured even when it could not be stored. The record the local storage
- * accepts next ends later and so replaces them.
+ * refusal by TikTok is honoured even when it could not be stored; a kept copy that ends later than
+ * the stored record is written to `chrome.storage.local` again at each reading, so it outlives a
+ * restart of Chrome as soon as the storage takes it (still refused, the copies answer). The
+ * record the local storage accepts next ends later and so replaces them.
  * @returns {import("../lib/cooldown.js").CooldownStore}
  */
 export function cooldownStore() {
@@ -300,8 +303,18 @@ export function cooldownStore() {
   };
   return {
     read: async () => {
-      let found = await readOf(stored);
+      const local = await readOf(stored);
+      let found = local;
       for (const other of [unstoredCooldown, await readOf(session)]) if (untilOf(other) > untilOf(found)) found = other;
+      if (found !== local && isRecord(found)) {
+        try {
+          await stored.write(found);
+          unstoredCooldown = null;
+          await session?.remove?.()?.catch(() => undefined);
+        } catch {
+          // refused again: the copies still answer
+        }
+      }
       return found;
     },
     write: async (record) => {
@@ -321,6 +334,19 @@ export function cooldownStore() {
       await stored.remove?.();
     },
   };
+}
+
+/**
+ * When the cooldown `chrome.storage.local` holds ends (-Infinity when there is none or it cannot
+ * be read): a cooldown in force that ends later lives only in this browser session's memory.
+ * @returns {Promise<number>}
+ */
+export async function storedCooldownUntil() {
+  try {
+    return untilOf(await storageAreaStore(chrome.storage.local).read());
+  } catch {
+    return Number.NEGATIVE_INFINITY;
+  }
 }
 
 /**
@@ -421,13 +447,17 @@ function jsonBytes(value) {
 }
 
 /**
- * A run as the history stores it. One that fits its share of the history
- * ({@link HISTORY_ENTRY_MAX_BYTES}, about 51 KiB: a couple of 60-episode series) is stored as it
- * is. A larger one — a row per episode and a record per pause — is stored compact, so that it
- * neither pushes the earlier runs out nor makes the history a value of megabytes read at every
- * page start: of each series only the rows whose episode did not download (status `failed…`: all
- * the history's retry line and button read), no pauses, and how many of each were left out
- * (`rows_omitted` per series, `pauses_omitted`). The series' names, lines, errors and reports stay.
+ * A run as the history stores it, within its share ({@link HISTORY_ENTRY_MAX_BYTES}, about 51 KiB:
+ * a couple of 60-episode series stored whole). A run that fits is stored as it is. A larger one —
+ * a row per episode and a record per pause — is stored compact, so that it neither pushes the
+ * earlier runs out nor makes the history a value of megabytes read at every page start. Compact
+ * keeps what **Past runs** reads: no pauses (`pauses_omitted` says how many), and of each series
+ * its name, line and error and only the rows whose episode did not download (status `failed…`:
+ * what the retry line and button read; `rows_omitted` says how many others), without the series'
+ * report (the page and the run's report file had it). Should even that pass the share — a batch of
+ * more than about 200 series —, those rows keep only their number and status, and the series are kept
+ * in batch order as long as they fit, the ones with an episode to retry first; `series_omitted`
+ * says how many more the run had, and **Past runs** says so.
  * @param {Record<string, unknown>} entry
  * @param {number} [maxBytes]
  * @returns {Record<string, unknown>}
@@ -436,16 +466,53 @@ export function historyEntry(entry, maxBytes = HISTORY_ENTRY_MAX_BYTES) {
   if (jsonBytes(entry) <= maxBytes) return entry;
   const series = Array.isArray(entry["series"]) ? entry["series"] : [];
   const pauses = Array.isArray(entry["pauses"]) ? entry["pauses"] : [];
-  return {
-    ...entry,
-    pauses: [],
-    pauses_omitted: pauses.length,
-    series: series.map((record) => {
-      if (!isRecord(record) || !Array.isArray(record["rows"])) return record;
-      const rows = record["rows"].filter((row) => isRecord(row) && typeof row["status"] === "string" && row["status"].startsWith("failed"));
-      return { ...record, rows, rows_omitted: record["rows"].length - rows.length };
-    }),
-  };
+  const compact = { ...entry, pauses: [], pauses_omitted: pauses.length, series: series.map((record) => compactRecord(record, false)) };
+  if (jsonBytes(compact) <= maxBytes) return compact;
+  const records = series.map((record) => compactRecord(record, true));
+  // the count written can only be shorter than the one measured here, and each record is counted
+  // with a comma: the entry ends within the share — unless the run's own fields (a label, an error:
+  // a few hundred bytes) pass it, which no series left out would change
+  let bytes = jsonBytes({ ...compact, series: [], series_omitted: records.length });
+  if (bytes > maxBytes) return compact;
+  /** @type {Set<number>} */
+  const kept = new Set();
+  for (const retryFirst of [true, false]) {
+    for (const [index, record] of records.entries()) {
+      if (kept.has(index) || hasRows(record) !== retryFirst) continue;
+      const size = jsonBytes(record) + 1;
+      if (bytes + size > maxBytes) continue; // a smaller series further on may still fit
+      kept.add(index);
+      bytes += size;
+    }
+  }
+  return { ...compact, series: records.filter((_, index) => kept.has(index)), series_omitted: records.length - kept.size };
+}
+
+/**
+ * A series record of a run as a compact history entry keeps it ({@link historyEntry}).
+ * @param {unknown} record
+ * @param {boolean} bare the rows of the episodes that did not download with their number and status only
+ * @returns {unknown}
+ */
+function compactRecord(record, bare) {
+  if (!isRecord(record)) return record;
+  /** @type {Record<string, unknown>} */
+  const kept = { ...record };
+  delete kept["report"];
+  const rows = record["rows"];
+  if (!Array.isArray(rows)) return kept;
+  const failed = rows.filter((row) => isRecord(row) && typeof row["status"] === "string" && row["status"].startsWith("failed"));
+  kept["rows"] = bare ? failed.map((row) => ({ number: row["number"], status: row["status"] })) : failed;
+  kept["rows_omitted"] = rows.length - failed.length;
+  return kept;
+}
+
+/**
+ * @param {unknown} record a compact series record
+ * @returns {boolean} whether it has an episode the retry would queue
+ */
+function hasRows(record) {
+  return isRecord(record) && Array.isArray(record["rows"]) && record["rows"].length > 0;
 }
 
 /**

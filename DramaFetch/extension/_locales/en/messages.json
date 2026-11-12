@@ -532,6 +532,15 @@
       }
     }
   },
+  "historySeriesOmitted": {
+    "message": "…and $count$ more series of this run, too many to keep here.",
+    "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series): how many of its series are not listed. The ones with an episode to retry are kept first.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
   "testHeading": {
     "message": "Test mode",
     "description": "Heading of the test card (test copy only)."

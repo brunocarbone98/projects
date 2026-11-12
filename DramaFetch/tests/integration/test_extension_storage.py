@@ -395,8 +395,9 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
     result on: the cooldown cannot be stored — and is in force all the same, from the browser
     session's memory: the banner, the download buttons disabled, the popup's "Download this
     series" refused with no request, the page's advice naming the cooldown's end; and after a
-    reload of the tab (writes work again) the banner is back and a listing is refused by the
-    cooldown, still with no request. The rest of the series is `stopped` by the 429."""
+    reload of the tab (writes work again) the banner is back, the cooldown is stored at last (a
+    restart of Chrome keeps it now) and a listing is refused by the cooldown, still with no
+    request. The rest of the series is `stopped` by the 429."""
     with (
         FakeTikTok(cdn_rate_limit=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
@@ -445,7 +446,10 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
         page = ext.reopen_app()
         ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)
         assert page.locator("#download-all-button").is_disabled()
-        assert ext.cooldown() is None  # still not in chrome.storage.local
+        # written to chrome.storage.local at the first reading that the storage takes
+        ext.wait_for(lambda: ext.cooldown() is not None, 10)
+        stored = ext.cooldown()
+        assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
         _popup_load(ext, None)  # accepted by this fresh page, then refused by the cooldown's gate
         ext.wait_for(lambda: ext.finished_jobs() >= 1 and ext.idle(), 20)
         assert str(ext.history()[0]["error"]).startswith("TikTok refused a request at ")

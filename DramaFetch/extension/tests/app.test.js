@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { makeEpisode } from "../src/lib/catalog.js";
+import { clearCooldown, recordBlock } from "../src/lib/cooldown.js";
 import { CUT_SHORT_CAUSE_PREFIX, DRM_CAUSE, LOCKED_CAUSE_PREFIX, NOT_ATTEMPTED_CAUSE } from "../src/lib/diagnosis.js";
 import { DRM_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE, shortServedMessage } from "../src/lib/messages.js";
 import { PacingState, pacingOptions } from "../src/lib/pacing.js";
@@ -39,6 +40,7 @@ import {
   servedShort,
 } from "../src/app/downloader.js";
 import { STORAGE_REFUSED_PREFIX, StorageRefusedError, downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
+import { historyEntry as storedHistoryEntry } from "../src/app/storage.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
 
 const TINY = readFileSync(new URL("../../tests/fixtures/tiny.mp4", import.meta.url));
@@ -501,11 +503,15 @@ test("a listing refused because nothing could be stored is a storage stop, never
       throw new Error("nothing is saved");
     },
   });
-  const result = await subject.download(episode(1, { urls: ["https://v1.tiktok.com/a.mp4"] }), CONTEXT);
+  const refused = episode(1, { urls: ["https://v1.tiktok.com/a.mp4"] });
+  const result = await subject.download(refused, CONTEXT);
   assert.equal(result.status, "failed");
   assert.equal(result.message, `HTTP 403 from v1.tiktok.com; refreshing the episode list failed: ${UNSAVED}`);
   assert.deepEqual(log, ["https://v1.tiktok.com/a.mp4"]);
   assert.equal(listings, 1);
+  // the report says no fresh list was fetched: none was, no request went out for it
+  assert.equal(subject.refreshes, 0);
+  assert.deepEqual(subject.traceOf(refused)?.refreshes.map((record) => [record.outcome, record.fresh_list]), [["failed", false]]);
 });
 
 // ------------------------------------------------------------------------- discovery
@@ -1756,6 +1762,33 @@ test("the page: a past run's episodes that did not download get their line and a
   }
 });
 
+test("the page: a past run too large for its share of the history lists the series it kept, says how many more it had, and retries what it kept", async () => {
+  // 60 series, the third and the fiftieth with an episode that did not download, held to 1 500 bytes
+  const records = Array.from({ length: 60 }, (_, index) => seriesRecord(String(7699393770256782300n + BigInt(index)), `Series ${index}`, [[1, "done"], [2, index === 2 || index === 49 ? "failed" : "done"]]));
+  const entry = storedHistoryEntry(historyEntry("batch", "60 series", records), 1500);
+  const kept = /** @type {Record<string, unknown>[]} */ (entry["series"]);
+  const omitted = Number(entry["series_omitted"]);
+  assert.ok(omitted > 0 && kept.length + omitted === 60, `${kept.length} kept, ${omitted} omitted`);
+  const page = await fakePage({ storage: { history: [entry] } });
+  try {
+    const item = /** @type {FakeElement} */ (page.element("history-list").children[0]);
+    const lines = item.children.slice(1).map((child) => child.textContent);
+    // the series kept, in batch order (the two with a failure among them), then the count
+    assert.deepEqual(
+      lines.slice(0, kept.length),
+      kept.map((record) => `${String(record["name"])}: ${RECORD_LINE}`),
+    );
+    assert.ok(lines.includes("Series 2: " + RECORD_LINE) && lines.includes("Series 49: " + RECORD_LINE));
+    assert.equal(lines[kept.length], `…and ${omitted} more series of this run, too many to keep here.`);
+    const found = retryLineOf(item);
+    assert.ok(found, "the run keeps its retry line and button");
+    assert.equal(found.line.children[0]?.textContent, "Did not download: Series 2: E02; Series 49: E02");
+    assert.equal(found.retry.textContent, "Retry the episodes that did not download (2)");
+  } finally {
+    page.restore();
+  }
+});
+
 test("the page: the retry buttons obey the cooldown like every download button — disabled while it is in force, back when it ends", async () => {
   const now = Date.now() / 1000;
   const failures = historyEntry("selection", "2 episodes of One", [seriesRecord(SERIES_ID, "One", [[1, "done"], [2, "failed"]])]);
@@ -2155,13 +2188,20 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       for (const id of ["load-button", "download-all-button", "download-available-button", "download-selected-button", "retry-button"]) {
         assert.equal(element(id).disabled, true, id);
       }
-      // a cooldown in force too: the advice names its end — that wait lives only in this browser session
-      const until = Date.now() / 1000 + 600;
-      local.set("cooldown", { until, reason: "rate limited (HTTP 429) by the video server", source: "browser", recorded_at: until - 1800 });
+      // a cooldown in force that chrome.storage.local holds: it outlives a restart, the banner names its end
+      const stored = Date.now() / 1000 + 600;
+      local.set("cooldown", { until: stored, reason: "rate limited (HTTP 429) by the video server", source: "browser", recorded_at: stored - 1800 });
       element("input-status").className = "";
       page.message({ type: "dramafetch:load", input: SERIES_ID });
       for (let turns = 0; turns < 20 && element("input-status").className !== "error"; turns += 1) await page.turn();
-      const time = new Date(Math.floor(until) * 1000);
+      assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
+      // a refusal by TikTok whose cooldown the storage refuses too: the advice names the wait's end, kept only in this browser session
+      const recorded = await recordBlock(engine.cooldownStore, MEDIA_RATE_LIMIT_MESSAGE, "browser", { now: Date.now() / 1000 });
+      assert.equal(/** @type {{until: number} | undefined} */ (local.get("cooldown"))?.until, stored); // not stored
+      element("input-status").className = "";
+      page.message({ type: "dramafetch:load", input: SERIES_ID });
+      for (let turns = 0; turns < 20 && element("input-status").className !== "error"; turns += 1) await page.turn();
+      const time = new Date(Math.floor(recorded.until) * 1000);
       const hhmm = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
       assert.equal(
         element("input-status").textContent,
@@ -2173,6 +2213,33 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       assert.equal(element("settings-status").textContent, `Not saved: ${REFUSED}`);
     } finally {
       Object.assign(chrome.storage.local, { set });
+      await clearCooldown(engine.cooldownStore); // the page's memory of it, which outlives this page's module
+    }
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: a cooldown the storage refuses is a refused write — the job's engine remembers it and nothing more is asked", async () => {
+  const page = await fakePage();
+  try {
+    const { module } = page;
+    const engine = module.buildEngine({ ...BATCH_JOB }, { pauses: [], inputs: [], taking: true });
+    const set = chrome.storage.local.set;
+    Object.assign(chrome.storage.local, {
+      set: async () => {
+        throw new Error(REFUSED);
+      },
+    });
+    try {
+      assert.equal(engine.unsaved?.(), null);
+      const cooldown = await recordBlock(engine.cooldownStore, MEDIA_RATE_LIMIT_MESSAGE, "browser", { now: Date.now() / 1000 });
+      assert.equal(cooldown.reason, MEDIA_RATE_LIMIT_MESSAGE); // in force all the same
+      assert.equal(engine.unsaved?.(), UNSAVED);
+      assert.equal(await module.coversAllowed(), false);
+    } finally {
+      Object.assign(chrome.storage.local, { set });
+      await clearCooldown(engine.cooldownStore);
     }
   } finally {
     page.restore();

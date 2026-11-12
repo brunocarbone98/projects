@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 import { activeCooldown, clearCooldown, recordBlock } from "../src/lib/cooldown.js";
 import { MEDIA_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
+import { reportLine, reportToDict } from "../src/lib/report.js";
 import {
   DEFAULT_SETTINGS,
   HISTORY_ENTRY_MAX_BYTES,
@@ -73,8 +74,8 @@ function run(id, bytes = 100) {
   return { id, label: `run ${id}`, padding: "x".repeat(Math.max(0, bytes - 40)) };
 }
 
-/** @param {readonly unknown[]} entries @returns {number} */
-const size = (entries) => new TextEncoder().encode(JSON.stringify(entries)).length;
+/** @param {unknown} value a history, or one entry of it @returns {number} its size as UTF-8 JSON */
+const size = (value) => new TextEncoder().encode(JSON.stringify(value)).length;
 
 test("the history keeps the last 20 runs, most recent first", () => {
   const entries = Array.from({ length: 30 }, (_, index) => run(30 - index));
@@ -141,14 +142,29 @@ test("a storage that refuses the history gets the run alone, else no history", a
 });
 
 /**
- * The history entry of a batch as the page records it: `seriesCount` series of `episodes` rows,
- * the second episode of every tenth series failed, a pause per episode.
+ * A finished series' report: `episodes` listed, the `failedNumbers` failed, the rest downloaded.
+ * @param {string} seriesId
+ * @param {string} name
+ * @param {number} episodes
+ * @param {number[]} failedNumbers
+ * @returns {import("../src/lib/report.js").SeriesReport}
+ */
+function seriesReportOf(seriesId, name, episodes, failedNumbers) {
+  const failed = failedNumbers.length;
+  return { seriesId, name, listed: episodes, done: episodes - failed, onDisk: 0, locked: 0, failed, gaps: [], complete: failed === 0, skippedComplete: false, stopped: null, total: episodes, lockedNumbers: [], failedNumbers, totalHint: episodes, checkedAgoS: null, unlocked: 0, unlockedNumbers: [] };
+}
+
+/**
+ * The history entry of a batch as the page records it (app.js `runToHistory`: each series' line,
+ * its report as `reportToDict` writes it, a row per episode): `seriesCount` series of `episodes`
+ * rows, the second episode of every `failEvery`-th series failed, a pause per episode.
  * @param {number} id
  * @param {number} seriesCount
  * @param {number} episodes
+ * @param {number} [failEvery]
  * @returns {Record<string, unknown>}
  */
-function batchRun(id, seriesCount, episodes) {
+function batchRun(id, seriesCount, episodes, failEvery = 10) {
   return {
     id,
     kind: "batch",
@@ -159,35 +175,48 @@ function batchRun(id, seriesCount, episodes) {
     stopped: null,
     refreshes: 0,
     pauses: Array.from({ length: seriesCount * episodes }, () => ({ kind: "pace", seconds: 6.4, text: "pausing 6.4 s" })),
-    series: Array.from({ length: seriesCount }, (_, index) => ({
-      series_id: String(7599400000000000000n + BigInt(index)),
-      name: `Invented Series Number ${index}`,
-      status: index % 10 === 0 ? "incomplete" : "complete",
-      error: null,
-      error_kind: null,
-      stop: false,
-      contacted: true,
-      line: index % 10 === 0 ? `incomplete: ${episodes - 1} of ${episodes} — 1 failed (2)` : `complete: ${episodes} of ${episodes} (${episodes} downloaded)`,
-      report: { listed: episodes, done: episodes },
-      rows: Array.from({ length: episodes }, (_, row) => ({
-        number: row + 1,
-        status: index % 10 === 0 && row === 1 ? "failed-unavailable" : "done",
-        message: `saved Invented Series Number ${index} - Episode ${String(row + 1).padStart(2, "0")}.mp4 (12.3 MiB) + cover embedded`,
-        path: `C:\\Users\\Owner\\Downloads\\DramaFetch\\Invented Series Number ${index}\\Episode ${row + 1}.mp4`,
-        download_id: index * 100 + row,
-      })),
-    })),
+    series: Array.from({ length: seriesCount }, (_, index) => {
+      const seriesId = String(7599400000000000000n + BigInt(index));
+      const name = `Invented Series Number ${index}`;
+      const failedNumbers = index % failEvery === 0 ? [2] : [];
+      const report = seriesReportOf(seriesId, name, episodes, failedNumbers);
+      return {
+        series_id: seriesId,
+        name,
+        status: report.complete ? "complete" : "incomplete",
+        error: null,
+        error_kind: null,
+        stop: false,
+        contacted: true,
+        line: reportLine(report),
+        report: reportToDict(report),
+        rows: Array.from({ length: episodes }, (_, row) => ({
+          number: row + 1,
+          status: failedNumbers.includes(row + 1) ? "failed-unavailable" : "done",
+          message: `saved ${name} - Episode ${String(row + 1).padStart(2, "0")}.mp4 (12.3 MiB) + cover embedded`,
+          path: `C:\\Users\\Owner\\Downloads\\DramaFetch\\${name}\\Episode ${row + 1}.mp4`,
+          download_id: index * 100 + row,
+        })),
+      };
+    }),
   };
 }
 
-test("a run too large for the history's budget is stored compact — its failure rows, its series' lines, no pauses — and pushes no earlier run out", async () => {
+/**
+ * @param {Record<string, unknown>} entry a history entry
+ * @returns {Record<string, unknown>[]} its series records
+ */
+const seriesOf = (entry) => /** @type {Record<string, unknown>[]} */ (entry["series"]);
+
+test("a run too large for its share of the history is stored compact — its failure rows, its series' lines, no pauses, no reports — and pushes no earlier run out", async () => {
   const small = batchRun(1, 2, 60);
   assert.ok(size([small]) < HISTORY_MAX_BYTES);
   assert.equal(historyEntry(small), small); // a run that fits is stored as it is
   const large = batchRun(2, 70, 60);
   assert.ok(size([large]) > HISTORY_MAX_BYTES, String(size([large]))); // 4 200 rows and 4 200 pauses: over 1 MiB
   const compact = historyEntry(large);
-  assert.ok(size([compact]) < 64 * 1024, String(size([compact])));
+  assert.ok(size(compact) <= HISTORY_ENTRY_MAX_BYTES, String(size(compact)));
+  assert.equal(Object.hasOwn(compact, "series_omitted"), false); // every series listed
   assert.deepEqual(compact["pauses"], []);
   assert.equal(compact["pauses_omitted"], 4200);
   const series = /** @type {Record<string, unknown>[]} */ (compact["series"]);
@@ -195,8 +224,9 @@ test("a run too large for the history's budget is stored compact — its failure
   for (const [index, record] of series.entries()) {
     const whole = /** @type {Record<string, unknown>[]} */ (large["series"])[index];
     const { rows, rows_omitted: omitted, ...rest } = record;
-    const { rows: wholeRows, ...wholeRest } = /** @type {Record<string, unknown>} */ (whole);
-    assert.deepEqual(rest, wholeRest); // the name, the status, the error, the line and the report stay
+    const { rows: wholeRows, report, ...wholeRest } = /** @type {Record<string, unknown>} */ (whole);
+    assert.deepEqual(rest, wholeRest); // the name, the status, the error and the line stay
+    assert.equal(typeof report, "object"); // the report, which Past runs never reads, goes
     const failures = /** @type {Record<string, unknown>[]} */ (wholeRows).filter((row) => String(row["status"]).startsWith("failed"));
     assert.deepEqual(rows, failures); // every row the retry reads, whole
     assert.equal(omitted, 60 - failures.length);
@@ -217,7 +247,9 @@ test("a run too large for the history's budget is stored compact — its failure
 });
 
 test("every run is held to its share of the history: back-to-back batches of 40 series all stay, each with its retry", async () => {
-  assert.equal(HISTORY_ENTRY_MAX_BYTES, Math.floor(HISTORY_MAX_BYTES / HISTORY_LIMIT));
+  // twenty runs of the share, each with its comma, and the brackets fit the history's budget
+  assert.ok(HISTORY_LIMIT * (HISTORY_ENTRY_MAX_BYTES + 1) + 2 <= HISTORY_MAX_BYTES);
+  assert.ok(HISTORY_ENTRY_MAX_BYTES > 50 * 1024);
   const one = batchRun(1, 40, 60);
   assert.ok(size([one]) > HISTORY_ENTRY_MAX_BYTES && size([one]) < HISTORY_MAX_BYTES, String(size([one]))); // whole, it would fit 1 MiB alone
   const { stored } = fakeLocal();
@@ -233,6 +265,65 @@ test("every run is held to its share of the history: back-to-back batches of 40 
   const small = batchRun(99, 1, 60);
   assert.ok(size([small]) <= HISTORY_ENTRY_MAX_BYTES);
   assert.equal(historyEntry(small), small);
+});
+
+test("a batch of hundreds or thousands of series is held to its share too: the series with an episode to retry first, then as many others as fit, and how many more it had", async () => {
+  // 300 series, a failure in every tenth: compact with every series listed it would pass the share
+  const large = batchRun(1, 300, 10);
+  const entry = historyEntry(large);
+  assert.ok(size(entry) <= HISTORY_ENTRY_MAX_BYTES, String(size(entry)));
+  const kept = seriesOf(entry);
+  const omitted = Number(entry["series_omitted"]);
+  assert.ok(omitted > 0 && kept.length > 150, `${kept.length} kept, ${omitted} omitted`);
+  assert.equal(kept.length + omitted, 300);
+  // in batch order; every series with an episode to retry kept, its rows' number and status only
+  const order = seriesOf(large).map((record) => record["series_id"]);
+  const keptIds = kept.map((record) => record["series_id"]);
+  assert.deepEqual(keptIds, order.filter((id) => keptIds.includes(id)));
+  const retried = kept.filter((record) => /** @type {unknown[]} */ (record["rows"]).length > 0);
+  assert.equal(retried.length, 30);
+  for (const record of retried) assert.deepEqual(record["rows"], [{ number: 2, status: "failed-unavailable" }]);
+  for (const record of kept) {
+    assert.equal(Object.hasOwn(record, "report"), false);
+    assert.match(String(record["line"]), /^(complete|incomplete): /);
+  }
+  assert.deepEqual(entry["pauses"], []);
+  assert.equal(entry["pauses_omitted"], 3000);
+  // twenty of them back to back: all twenty stay
+  const { stored } = fakeLocal();
+  for (let id = 1; id <= HISTORY_LIMIT; id += 1) await appendHistory(batchRun(id, 300, 10));
+  const history = /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]);
+  assert.deepEqual(history.map((run) => run["id"]), Array.from({ length: HISTORY_LIMIT }, (_, index) => HISTORY_LIMIT - index));
+  assert.ok(size(history) <= HISTORY_MAX_BYTES, String(size(history)));
+  // nineteen runs, then one batch of 2 000 series with an episode to retry in each: the nineteen
+  // stay, and the batch keeps as many series to retry as fit, and says how many more it had
+  const { stored: after } = fakeLocal();
+  for (let id = 1; id < HISTORY_LIMIT; id += 1) await appendHistory(run(id));
+  await appendHistory(batchRun(HISTORY_LIMIT, 2000, 2, 1));
+  const both = /** @type {Record<string, unknown>[]} */ (after[HISTORY_KEY]);
+  assert.deepEqual(both.map((run) => run["id"]), Array.from({ length: HISTORY_LIMIT }, (_, index) => HISTORY_LIMIT - index));
+  const huge = /** @type {Record<string, unknown>} */ (both[0]);
+  assert.ok(size(huge) <= HISTORY_ENTRY_MAX_BYTES, String(size(huge)));
+  const listed = seriesOf(huge);
+  assert.ok(listed.length > 100, String(listed.length));
+  assert.ok(listed.every((record) => /** @type {unknown[]} */ (record["rows"]).length === 1));
+  assert.equal(huge["series_omitted"], 2000 - listed.length);
+  // a run that does not even need the second step lists every series and no count
+  assert.equal(Object.hasOwn(historyEntry(batchRun(2, 70, 60)), "series_omitted"), false);
+  // the second step over malformed parts: left as they are, in order, never a throw
+  const records = [null, "odd", { series_id: "x", rows: "many", report: {} }, ...Array.from({ length: 40 }, (_, index) => ({ series_id: String(index), rows: [{ number: 1, status: "failed", message: "m".repeat(50) }] }))];
+  const held = historyEntry({ id: 5, pauses: [], series: records }, 1000);
+  assert.ok(size(held) <= 1000, String(size(held)));
+  const heldSeries = /** @type {unknown[]} */ (held["series"]);
+  assert.deepEqual(heldSeries.slice(0, 2), [null, "odd"]); // small enough to fit after the series to retry, in batch order
+  const retry = heldSeries.slice(2).filter((record) => JSON.stringify(record) !== '{"series_id":"x","rows":"many"}');
+  assert.ok(retry.length > 5, String(retry.length));
+  assert.deepEqual(retry, retry.map((_, index) => ({ series_id: String(index), rows: [{ number: 1, status: "failed" }], rows_omitted: 0 })));
+  assert.equal(Number(held["series_omitted"]) + heldSeries.length, records.length);
+  // a run whose own fields pass the share keeps its series: leaving them out would not bring it in
+  const wordy = historyEntry({ id: 6, error: "e".repeat(2000), series: [{ series_id: "1", rows: [{ status: "done" }] }] }, 1000);
+  assert.deepEqual(wordy["series"], [{ series_id: "1", rows: [], rows_omitted: 1 }]);
+  assert.equal(Object.hasOwn(wordy, "series_omitted"), false);
 });
 
 test("the history never throws: a store that can be neither read nor written ends a job all the same", async () => {
@@ -295,10 +386,22 @@ test("a cooldown the storage refuses survives a reload of the tab: the browser s
   // the page reloaded: a fresh instance of the module, its memory empty — the session still answers
   const reloaded = /** @type {typeof import("../src/app/storage.js")} */ (await import(`../src/app/storage.js?reload=${now}`));
   assert.equal((await activeCooldown(reloaded.cooldownStore(), { now: now + 60 }))?.reason, MEDIA_RATE_LIMIT_MESSAGE);
+  assert.equal(Object.hasOwn(stored, "cooldown"), false); // read while the storage still refuses: stays in the session
   // Chrome restarted: the session's memory is gone, and so is that cooldown (the page's message says to wait it out first)
+  const kept = session["cooldown"];
   delete session["cooldown"];
   const restarted = /** @type {typeof import("../src/app/storage.js")} */ (await import(`../src/app/storage.js?restart=${now}`));
   assert.equal(await activeCooldown(restarted.cooldownStore(), { now: now + 60 }), null);
+  // unless the storage takes it first: once space is freed, the next reading stores it, and a restart keeps it
+  session["cooldown"] = kept;
+  switches.refuseWrites = false;
+  assert.equal((await activeCooldown(reloaded.cooldownStore(), { now: now + 120 }))?.reason, MEDIA_RATE_LIMIT_MESSAGE);
+  assert.deepEqual(stored["cooldown"], kept);
+  assert.equal(Object.hasOwn(session, "cooldown"), false);
+  const later = /** @type {typeof import("../src/app/storage.js")} */ (await import(`../src/app/storage.js?later=${now}`));
+  assert.equal((await activeCooldown(later.cooldownStore(), { now: now + 180 }))?.reason, MEDIA_RATE_LIMIT_MESSAGE);
+  assert.equal(await later.storedCooldownUntil(), now + 1800);
+  switches.refuseWrites = true;
   // clearing removes the session's copy too
   await recordBlock(reloaded.cooldownStore(), "again", "browser", { now: now + 100, onError: () => undefined });
   switches.refuseWrites = false;

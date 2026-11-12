@@ -56,6 +56,7 @@ import {
   savePacing,
   saveSettings,
   saveTestSettings,
+  storedCooldownUntil,
   writeSeriesState,
 } from "./storage.js";
 import { TabKeeper } from "./tabkeeper.js";
@@ -360,9 +361,33 @@ async function showStorageRefused() {
   if (app.unsaved === null) return;
   const reason = shownText(app.unsaved);
   const cooldown = await checkCooldownNow();
-  const text = cooldown === null ? t("storageRefused", [reason]) : t("storageRefusedCooldown", [reason, clockTime(cooldown.until)]);
+  // "the wait could not be saved" only when it was not: a cooldown chrome.storage.local holds
+  // outlives a restart of Chrome, and the banner already names its end
+  const unsavedWait = cooldown !== null && (await storedCooldownUntil()) < cooldown.until;
+  const text = unsavedWait ? t("storageRefusedCooldown", [reason, clockTime(cooldown.until)]) : t("storageRefused", [reason]);
   setStatus($("input-status"), text, "error");
   updateButtons();
+}
+
+/**
+ * The cooldown store of a job: a record the storage refuses is a refused write like any other
+ * ({@link noteRefusedWrite}) — the cooldown stays in force from the page's and the browser
+ * session's memory, and the job's end says the wait could not be saved.
+ * @param {import("../lib/cooldown.js").CooldownStore} store
+ * @returns {import("../lib/cooldown.js").CooldownStore}
+ */
+function noticedCooldownStore(store) {
+  return {
+    ...store,
+    write: async (record) => {
+      try {
+        await store.write(record);
+      } catch (error) {
+        noteRefusedWrite(error);
+        throw error; // `recordBlock` keeps the cooldown in force all the same
+      }
+    },
+  };
 }
 
 /**
@@ -417,7 +442,7 @@ export function buildEngine(job, jobRecord) {
     sleep,
     clock: now,
     wallClock: now,
-    cooldownStore: cooldownStore(),
+    cooldownStore: noticedCooldownStore(cooldownStore()),
     discover,
     downloader,
     view,
@@ -604,8 +629,8 @@ function withoutBareHeaders(rows) {
  * Keep the result table light (called when a series of a batch is done): over `limit` rows, the
  * OLDEST rows of episodes that completed — done, skipped, dry run — leave, then the header rows
  * of the series left with no row. A failure row never leaves (the job's end shows those apart,
- * {@link renderFailed}), nor does its series' header; every series keeps its report line and its
- * row of the batch table, and `#result-trimmed` says so once rows have left. A display matter
+ * {@link renderFailed}), nor does its series' header; every finished series keeps its report
+ * line, and `#result-trimmed` says so once rows have left. A display matter
  * only: the results, the history and the report are untouched. (Exported for the unit tests,
  * which cannot run a job.)
  * @param {number} [limit] {@link MAX_RESULT_ROWS}; lower only in the test copy of the extension
@@ -1588,6 +1613,9 @@ async function renderHistory() {
       else line = "";
       item.append(el("div", { text: `${String(record["name"] ?? record["series_id"] ?? "")}: ${line}` }));
     }
+    // a run too large for its share of the history kept only some of its series (storage.js)
+    const omitted = entry["series_omitted"];
+    if (typeof omitted === "number" && omitted > 0) item.append(el("div", { className: "meta", text: t("historySeriesOmitted", [omitted]) }));
     // the episodes that did not download, and the button that queues them again (one selection job
     // per series): a run from yesterday can be retried too
     const targets = retryTargets(series);
