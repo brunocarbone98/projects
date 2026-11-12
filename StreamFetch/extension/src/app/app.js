@@ -1433,6 +1433,9 @@ export class CoverLoader {
       return;
     }
     if (this.asked.has(key)) return;
+    // the row was drawn again (its link read once more): its earlier image is let go, not kept watched
+    const previous = this.cells.get(key);
+    if (previous !== undefined && previous.image !== image) this.watcher?.unobserve(previous.image);
     this.cells.set(key, { image, url });
     this.keyOf.set(image, key);
     if (this.watcher === null) {

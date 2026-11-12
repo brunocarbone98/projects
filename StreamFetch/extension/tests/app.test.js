@@ -491,6 +491,8 @@ let pages = 0;
 async function fakePage(options = {}) {
   /** @type {Map<string, FakeElement>} */
   const elements = new Map();
+  /** @type {Set<unknown>} the covers the page's IntersectionObserver watches */
+  const observed = new Set();
   /** @param {string} id @returns {FakeElement} */
   const element = (id) => {
     let found = elements.get(id);
@@ -619,8 +621,14 @@ async function fakePage(options = {}) {
     location: { search: "", pathname: "/src/app/app.html" },
     history: { replaceState: () => undefined },
     IntersectionObserver: class {
-      observe() {}
-      unobserve() {}
+      /** @param {unknown} target */
+      observe(target) {
+        observed.add(target);
+      }
+      /** @param {unknown} target */
+      unobserve(target) {
+        observed.delete(target);
+      }
       disconnect() {}
     },
     setInterval: () => 0,
@@ -646,7 +654,7 @@ async function fakePage(options = {}) {
   }
   /** @returns {FakeElement[]} the rows of the items table */
   const rows = () => (element("items-table").querySelector("tbody")?.children ?? []);
-  return { element, rows, local, saved, requests, until, restore, changed: (/** @type {string} */ key) => changeListeners.forEach((listener) => listener({ [key]: {} }, "local")) };
+  return { element, rows, local, saved, requests, until, restore, observed, changed: (/** @type {string} */ key) => changeListeners.forEach((listener) => listener({ [key]: {} }, "local")) };
 }
 
 /** A minimal in-memory OPFS root for the page. */
@@ -837,8 +845,13 @@ test("the table keeps the rows already shown in place: only the rows from the fi
     assert.equal(page.rows()[0], first);
     assert.deepEqual(removed, [`bilibili:${BILI}:all`], "the earlier rows stay where they are");
     assert.equal(replaced, 0, "the table is never put back whole");
+    // the covers of the rows on screen (those with a cover to fetch) are watched until Clear lets them go
+    const covers = page.rows().flatMap((row) => row.all().filter((node) => node.tagName === "IMG"));
+    const watched = covers.filter((image) => page.observed.has(image));
+    assert.ok(watched.length >= 2, `${watched.length} of ${covers.length} covers watched`);
     page.element("clear-button").fire("click");
     assert.deepEqual(page.rows(), []);
+    assert.equal(page.observed.size, 0, "Clear lets every watched cover go");
   } finally {
     page.restore();
   }

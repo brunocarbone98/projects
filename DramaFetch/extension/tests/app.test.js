@@ -2274,7 +2274,15 @@ test("the page: a cooldown the storage refuses is a refused write — the job's 
       const cooldown = await recordBlock(engine.cooldownStore, MEDIA_RATE_LIMIT_MESSAGE, "browser", { now: Date.now() / 1000 });
       assert.equal(cooldown.reason, MEDIA_RATE_LIMIT_MESSAGE); // in force all the same
       assert.equal(engine.unsaved?.(), UNSAVED);
-      assert.equal(await module.coversAllowed(), false);
+      // the cooldown lifted and writes working again: the noted refusal alone still keeps the page from asking anything
+      Object.assign(chrome.storage.local, { set });
+      await clearCooldown(engine.cooldownStore);
+      assert.equal((await module.coversAllowed()), false);
+      page.message({ type: "dramafetch:load", input: SERIES_ID });
+      for (let turns = 0; turns < 20 && page.element("input-status").className !== "error"; turns += 1) await page.turn();
+      assert.deepEqual(queuedLabels(page), []);
+      const status = String(page.element("input-status").textContent);
+      assert.ok(status.startsWith(`DramaFetch stopped: ${UNSAVED}.`), status);
     } finally {
       Object.assign(chrome.storage.local, { set });
       await clearCooldown(engine.cooldownStore);

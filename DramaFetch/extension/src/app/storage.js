@@ -455,7 +455,7 @@ function jsonBytes(value) {
  * its name, line and error and only the rows whose episode did not download (status `failed…`:
  * what the retry line and button read; `rows_omitted` says how many others), without the series'
  * report (the page and the run's report file had it). Should even that pass the share — a batch of
- * more than about 200 series —, those rows keep only their number and status, and the series are kept
+ * more than about 200 series, about 130 when a stop left most of them `not started` —, those rows keep only their number and status, and the series are kept
  * in batch order as long as they fit, the ones with an episode to retry first; `series_omitted`
  * says how many more the run had, and **Past runs** says so.
  * @param {Record<string, unknown>} entry

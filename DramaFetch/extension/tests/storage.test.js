@@ -407,6 +407,10 @@ test("a cooldown the storage refuses survives a reload of the tab: the browser s
   switches.refuseWrites = false;
   await clearCooldown(reloaded.cooldownStore());
   assert.equal(Object.hasOwn(session, "cooldown"), false);
+  // and this file's own module forgets the copy it kept at the start: no later test starts inside it
+  await clearCooldown(cooldownStore());
+  fakeLocal();
+  assert.equal(await activeCooldown(cooldownStore(), { now: now + 60 }), null);
 });
 
 test("the report switch: on by default, a stored non-boolean falls back to it, and it must be a boolean to save", () => {
