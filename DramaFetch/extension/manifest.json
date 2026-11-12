@@ -27,6 +27,7 @@
   "permissions": [
     "downloads",
     "storage",
+    "unlimitedStorage",
     "scripting",
     "tabs",
     "webRequest",

@@ -80,6 +80,7 @@ Pauses are printed on stderr as they happen (`… pausing 7 s`, `… resting 95 
 | --- | --- |
 | `downloads` | Save the episodes (and covers), and the report of what did not download, into your download folder, and know whether a saved file still exists |
 | `storage` | The settings, the 30-minute cooldown, each series' progress (what is on disk), the run's pacing and the last 20 runs — never a cookie |
+| `unlimitedStorage` | Keep that progress for as many series as you download: without it Chrome holds an extension's storage to 10 MB, and at about 350–400 bytes per episode the memory was full near 27 000 episodes (some 450 series of 60) — from then on nothing more could be recorded. The same data in the same place; Chrome shows no new warning for it |
 | `scripting` | Read the episode list from inside the TikTok tab it opened (the page's own `fetch`) and that page's visible text (a captcha) |
 | `tabs` | Open, mute and close that tab and read its address (a login redirect); find and focus the one DramaFetch tab, and keep it from being discarded while a job runs or waits; the toolbar popup reads the active tab's address |
 | `webRequest` | Observe the URLs and status codes of the page's own episode-list requests, and where the extension's own video, cover and thumbnail requests are redirected (the target URL only, in the DramaFetch tab only), so that it follows a redirect to a TikTok host and no other — never bodies, never blocking |

@@ -14,7 +14,15 @@ const file = (relative) => new URL(`../${relative}`, import.meta.url);
 /** @type {Record<string, unknown>} */
 const manifest = JSON.parse(readFileSync(file("manifest.json"), "utf8"));
 
-const PERMISSIONS = ["downloads", "storage", "scripting", "tabs", "webRequest", "declarativeNetRequestWithHostAccess"];
+const PERMISSIONS = [
+  "downloads",
+  "storage",
+  "unlimitedStorage", // the series' progress is not held to chrome.storage.local's 10 MB (README: the permissions table)
+  "scripting",
+  "tabs",
+  "webRequest",
+  "declarativeNetRequestWithHostAccess",
+];
 const HOSTS = [
   "https://www.tiktok.com/*",
   "https://*.tiktok.com/*",
