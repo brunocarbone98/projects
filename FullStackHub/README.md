@@ -152,7 +152,7 @@ Notification env vars (`RESEND_API_KEY`, `WEBHOOK_URL`, …) are optional — se
 
 Shipping Hub is maintained around the clock by Claude Code agents; a human reviews and merges every
 PR except the Dependabot and agent PRs that pass the merge gate, which also builds the web for production first. **CI** (lint, format:check, typecheck, Vitest) runs on every push to `main` and every PR,
-**Uptime patrol** probes the live app every 30 minutes and opens an `incident` issue when it is
+**Uptime patrol** probes the live app on a 30-minute schedule and opens an `incident` issue when it is
 unhealthy, **SecureGate CI** runs the black-box suite nightly and on PRs, and Dependabot opens
 weekly grouped dependency PRs for npm (label `dependencies`); the services' `requirements.txt` are
 unpinned, so it has nothing to bump there and the weekly security review runs `pip-audit` on them

@@ -1,6 +1,6 @@
 # Bruno Carbone · projects
 
-A production full-stack platform, the black-box QA suite that tests it and a TikTok short-drama downloader for personal offline viewing — all three maintained around the clock by Claude Code agents —, a Chrome extension that saves Dailymotion, Bilibili.tv and Bilibili videos for offline viewing, and the portfolio site that presents them.
+A production full-stack platform, the black-box QA suite that tests it and a TikTok short-drama downloader for personal offline viewing — all three maintained around the clock by Claude Code agents —, the portfolio site that presents them, and a Chrome extension that saves Dailymotion, Bilibili.tv and Bilibili videos for offline viewing.
 
 [![CI](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/ci.yml)
 [![SecureGate CI](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml/badge.svg)](https://github.com/brunocarbone98/projects/actions/workflows/securegate-ci.yml)
@@ -9,7 +9,7 @@ A production full-stack platform, the black-box QA suite that tests it and a Tik
 [![Live app](https://img.shields.io/badge/live-shipping--hub.up.railway.app-22d3ee?logo=railway&logoColor=white)](https://shipping-hub.up.railway.app/)
 [![Autonomous maintenance · 24/7](https://img.shields.io/badge/autonomous%20maintenance-24%2F7-a78bfa)](./OPERATIONS.md)
 
-**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents the projects. **DramaFetch** is a Python CLI, a local web UI and a Chrome extension that download the TikTok short-drama episodes your own account can already watch — whole series, several in one run — for personal offline viewing: paid episodes your account has unlocked download like free ones, and it never unlocks, buys or decrypts anything. **StreamFetch for Chrome** is a Chrome extension that saves videos from Dailymotion, Bilibili.tv and Bilibili that your own browser session can already play — several links at once, the highest quality you are served, verified MP4s with the cover and title embedded — for personal offline viewing. Shipping Hub, SecureGate and DramaFetch are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, a daily merge gate, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges them, except the Dependabot and agent PRs that pass the merge gate, which an agent merges after running every check itself.
+**Shipping Hub** is a bilingual (es/en) parcel shipping & tracking platform deployed live on Railway. **SecureGate** is the QA & security suite that tests it black-box — Karate API, Serenity Screenplay UI, Postman/Newman — in CI. **PersonalWebsite** is the portfolio that presents Shipping Hub, SecureGate and DramaFetch. **DramaFetch** is a Python CLI, a local web UI and a Chrome extension that download the TikTok short-drama episodes your own account can already watch — whole series, several in one run — for personal offline viewing: paid episodes your account has unlocked download like free ones, and it never unlocks, buys or decrypts anything. **StreamFetch for Chrome** is a Chrome extension that saves videos from Dailymotion, Bilibili.tv and Bilibili that your own browser session can already play — several links at once, the highest quality you are served, verified MP4s with the cover and title embedded — for personal offline viewing. Shipping Hub, SecureGate and DramaFetch are maintained around the clock by Claude Code agents: CI on every push to `main` and every pull request, nightly QA regression, an uptime patrol scheduled every 30 minutes, dependency updates, nightly maintenance PRs, a weekly security review, a daily merge gate, and an on-call agent you can `@claude` in any issue or PR. Agents open pull requests and issues; a human reviews and merges them, except the Dependabot and agent PRs that pass the merge gate, which an agent merges after running every check itself.
 
 ## What's inside
 
@@ -41,7 +41,7 @@ flowchart TB
 
   subgraph AM["Autonomous maintenance · 24/7"]
     direction LR
-    GHA["GitHub Actions · Uptime patrol every 30 min · Claude on-call · Dependabot · CI"] --> OUT["Pull requests and issues"]
+    GHA["GitHub Actions · Uptime patrol scheduled every 30 min · Claude on-call · Dependabot · CI"] --> OUT["Pull requests and issues"]
     CC["Claude Code cloud · SRE patrol every 6 h · nightly maintenance · weekly security review · merge gate"] --> OUT
     OUT --> GATE["Merge gate (merge-steward) or human review"] --> MERGE["Merge to main · Railway redeploys"]
   end

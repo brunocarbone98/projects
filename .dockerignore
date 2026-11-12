@@ -7,6 +7,7 @@
 PersonalWebsite
 SecureGate
 DramaFetch
+StreamFetch
 FullStackHub/screenshots
 **/*.log
 # Claude Code agents, shifts, scripts and hooks are not part of the image
