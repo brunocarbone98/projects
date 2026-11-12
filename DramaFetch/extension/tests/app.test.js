@@ -461,7 +461,7 @@ test("a write the page was refused (the pacing): the run stops before its next r
   assert.equal(asked, 0);
 });
 
-test("a listing refused because nothing could be stored is a storage stop, never a request; a re-discovery refused so fails its episode with no further URL", async () => {
+test("a listing refused because nothing could be stored is a storage stop, never a request; a re-discovery refused so fails its episode with no further URL after a requested one, and stops the series before any request", async () => {
   // the page's listing throws StorageRefusedError when its save right before was refused
   /** @type {string[]} */
   const resolved = [];

@@ -545,8 +545,8 @@
     }
   },
   "historySeriesOmitted": {
-    "message": "Series de esta ejecución no guardadas aquí: $count$.",
-    "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series, about 130 when a stop left most of them not started): how many of its series are not listed (any count: the wording does not depend on it). The ones with an episode to retry are kept first.",
+    "message": "Series de esta ejecución no listadas aquí: $count$.",
+    "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series, about 120-190 when a stop left most of them not started): how many of its series are not listed (any count: the wording does not depend on it). The ones with an episode to retry are kept first.",
     "placeholders": {
       "count": {
         "content": "$1"

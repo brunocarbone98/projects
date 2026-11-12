@@ -404,80 +404,107 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
         assert _on_disk(state) == {1: "done", 2: "done", 3: "skipped-exists", 4: "done"}
 
 
-def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: Path) -> None:
+def _a_429_while_the_disk_is_full(ext: ExtensionHarness, server: FakeTikTok) -> tuple[str, str]:
     """TikTok's video server answers HTTP 429 and the storage refuses every write from that
-    result on: the cooldown cannot be stored — and is in force all the same, from the page's and
-    the browser session's memory. In the first tab the refused writes stop everything anyway (the
-    download buttons disabled, the popup's "Download this series" refused with no request); what
-    proves the cooldown's memory is the banner and the page's advice naming the cooldown's end.
-    Once space is freed the same tab stores the cooldown by itself within its next look (every
-    15 s) and its advice drops "could not be saved" but still names the wait's end (what Chrome
-    accepts after a refused write may not survive a restart);
-    after a reload of the tab the banner is back and a listing is refused by the cooldown, still
-    with no request. The rest of the series is `stopped` by the 429."""
+    result on: the cooldown cannot be stored, and is in force all the same, from the page's and
+    the browser session's memory. In this tab the refused writes stop everything anyway (the
+    download buttons disabled, the popup's "Download this series" refused with no request); the
+    banner and the advice naming the cooldown's end prove the cooldown's memory. Returns the
+    cooldown's end (HH:MM) and the advice."""
+    errors = _watch_errors(ext)
+    page = ext.page
+    assert page.evaluate(FULL_DISK_JS, {"acceptStateWrites": 0, "message": FULL_DISK})
+    page.fill("#links", MAIN_LINK)
+    _click_and_wait(ext, "#download-all-button", 1)
+
+    assert _media_counts(server) == [1, 0, 0, 0, 0]
+    assert _table_rows(ext, "#failed-table") == [
+        ("1", "failed-rate-limited"),
+        ("2", "failed-rate-limited"),
+        ("3", "failed-rate-limited"),
+        ("4", "failed-rate-limited"),
+    ]
+    messages = page.locator("#failed-table tbody tr td.message")
+    assert messages.nth(0).text_content() == MEDIA_RATE_LIMIT
+    assert messages.nth(1).text_content() == (
+        f"stopped: episode 1 failed-rate-limited: {MEDIA_RATE_LIMIT}"
+    )
+    assert ext.cooldown() is None  # the storage would not take the record…
+    ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)  # …it holds anyway
+    banner = page.locator("#cooldown-text").text_content() or ""
+    assert banner.startswith("TikTok refused a request at ") and MEDIA_RATE_LIMIT in banner
+    assert page.locator("#download-all-button").is_disabled()
+    assert page.locator("#load-button").is_disabled()
+    assert page.locator("#retry-button").is_disabled()
+    until = re.search(r"waits until (\d\d:\d\d)", banner)
+    assert until is not None, banner
+    advice = _stopped_with_cooldown(f"{UNSAVED_PREFIX}{FULL_DISK}", until.group(1))
+    assert _status_line(ext) == advice  # restart Chrome only after the cooldown's end
+    pacing = ext.storage("pacing").get("pacing")
+    assert pacing is not None and pacing["runAttempts"] == 0  # stored before the 429: the old one
+    assert page.locator("#app-status").get_attribute("data-finished") == "1"
+
+    requests = len(server.requests)
+    _popup_load(ext, advice)  # refused: nothing queued, nothing asked of TikTok
+    assert len(server.requests) == requests
+    assert errors == []
+    return until.group(1), advice
+
+
+def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: Path) -> None:
+    """A 429 whose cooldown the full disk will not store (`_a_429_while_the_disk_is_full`), then
+    a reload of the tab while it is still unstored: the browser session's copy brings the banner
+    back, the reloaded page's first reading stores it (writes work there), and a listing is
+    refused by the cooldown, still with no request."""
+    with (
+        FakeTikTok(cdn_rate_limit=True) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        _a_429_while_the_disk_is_full(ext, server)
+        requests = len(server.requests)
+        assert ext.cooldown() is None
+        ext.page.close()  # the tab reloaded: its memory is gone, the browser session's is not
+        page = ext.reopen_app()
+        ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)
+        assert page.locator("#download-all-button").is_disabled()
+        ext.wait_for(lambda: ext.cooldown() is not None, 10)  # stored at the first reading
+        stored = ext.cooldown()
+        assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
+        _popup_load(ext, None)  # accepted by this fresh page, then refused by the cooldown's gate
+        ext.wait_for(lambda: ext.finished_jobs() >= 1 and ext.idle(), 20)
+        assert str(ext.history()[0]["error"]).startswith("TikTok refused a request at ")
+        assert len(server.requests) == requests
+
+
+def test_c2_once_space_is_freed_the_open_tab_stores_the_cooldown_and_keeps_naming_its_end(
+    tmp_path: Path,
+) -> None:
+    """The same 429 on a full disk; then space is freed and the tab is left as it is: within its
+    next look (every 15 s) the tab stores the cooldown by itself, and its advice drops "could not
+    be saved" but still names the wait's end — what Chrome accepts after a refused write may not
+    survive a restart. Nothing is asked of TikTok, and a reload of the tab finds it stored."""
     with (
         FakeTikTok(cdn_rate_limit=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         errors = _watch_errors(ext)
-        page = ext.page
-        assert page.evaluate(FULL_DISK_JS, {"acceptStateWrites": 0, "message": FULL_DISK})
-        page.fill("#links", MAIN_LINK)
-        _click_and_wait(ext, "#download-all-button", 1)
-
-        assert _media_counts(server) == [1, 0, 0, 0, 0]
-        assert _table_rows(ext, "#failed-table") == [
-            ("1", "failed-rate-limited"),
-            ("2", "failed-rate-limited"),
-            ("3", "failed-rate-limited"),
-            ("4", "failed-rate-limited"),
-        ]
-        messages = page.locator("#failed-table tbody tr td.message")
-        assert messages.nth(0).text_content() == MEDIA_RATE_LIMIT
-        assert messages.nth(1).text_content() == (
-            f"stopped: episode 1 failed-rate-limited: {MEDIA_RATE_LIMIT}"
-        )
-        assert ext.cooldown() is None  # the storage would not take the record…
-        ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)  # …it holds anyway
-        banner = page.locator("#cooldown-text").text_content() or ""
-        assert banner.startswith("TikTok refused a request at ") and MEDIA_RATE_LIMIT in banner
-        assert page.locator("#download-all-button").is_disabled()
-        assert page.locator("#load-button").is_disabled()
-        assert page.locator("#retry-button").is_disabled()
-        until = re.search(r"waits until (\d\d:\d\d)", banner)
-        assert until is not None, banner
-        advice = _stopped_with_cooldown(f"{UNSAVED_PREFIX}{FULL_DISK}", until.group(1))
-        assert _status_line(ext) == advice  # restart Chrome only after the cooldown's end
-        pacing = ext.storage("pacing").get("pacing")
-        assert (
-            pacing is not None and pacing["runAttempts"] == 0
-        )  # stored before the 429: the old one
-        assert page.locator("#app-status").get_attribute("data-finished") == "1"
-
+        until, _advice = _a_429_while_the_disk_is_full(ext, server)
         requests = len(server.requests)
-        _popup_load(ext, advice)  # refused: nothing queued, nothing asked of TikTok
-        assert len(server.requests) == requests
-        assert errors == []
-
+        page = ext.page
         page.evaluate("() => globalThis.__freeDisk()")  # space freed, the tab left as it is
         ext.wait_for(lambda: ext.cooldown() is not None, 30)  # stored by the tab's own look
         stored = ext.cooldown()
         assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
-        # no more "could not be saved" — but the wait's end is still named: what Chrome accepts
-        # after a refused write may not survive a restart
-        stored_advice = _stopped_with_stored_wait(f"{UNSAVED_PREFIX}{FULL_DISK}", until.group(1))
+        stored_advice = _stopped_with_stored_wait(f"{UNSAVED_PREFIX}{FULL_DISK}", until)
         ext.wait_for(lambda: _status_line(ext) == stored_advice, 10)
         assert page.locator("#download-all-button").is_disabled()  # until the tab is reloaded
         assert len(server.requests) == requests
+        assert errors == []
 
-        page.close()  # the tab reloaded: its memory is gone, the browser session's is not
+        page.close()
         page = ext.reopen_app()
         ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)
-        assert page.locator("#download-all-button").is_disabled()
         assert ext.cooldown() == stored
-        _popup_load(ext, None)  # accepted by this fresh page, then refused by the cooldown's gate
-        ext.wait_for(lambda: ext.finished_jobs() >= 1 and ext.idle(), 20)
-        assert str(ext.history()[0]["error"]).startswith("TikTok refused a request at ")
         assert len(server.requests) == requests
 
 
