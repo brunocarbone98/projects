@@ -346,7 +346,18 @@ export async function downloadSeries(engine, series, episodes, state, hooks = {}
         break;
       }
     }
-    const result = await downloader.download(episode, context);
+    /** @type {DownloadResult} */
+    let result;
+    try {
+      result = await downloader.download(episode, context);
+    } catch (error) {
+      if (!(error instanceof StorageRefusedError)) throw error;
+      // the fresh list this episode needed was refused before any request: the storage stop,
+      // neither an attempt nor a failure of the streak
+      unsaved = unsaved ?? error.message;
+      await stop(ordered.slice(index), FAILED, unsaved, unsaved);
+      break;
+    }
     await emit(result);
     const outcome = afterResult(engine.pacing, pacing, clock, result);
     if (outcome.network) {

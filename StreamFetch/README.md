@@ -33,7 +33,7 @@ It downloads only what your own logged-in Chrome session can already play on tho
 5. **Download all** downloads every row with its own selection, one after the other (rows not analysed yet are read first). Each row shows its status badge, the progress (`12.3 MB · 1.2 MB/s`) and a message. The summary line counts `N videos · M detected · K failed`.
 6. **Stop** ends the current request at once and marks the rest `stopped`.
 7. At the end, the rows that did not download move to **Did not download**, with **Retry** (a new run over exactly those links) and **Save the report**. **Last runs** keeps the last 20 runs with their counts and a **Retry** of their failures.
-8. The rows of earlier runs stay in the table until **Clear**: clear it between big batches when you keep the tab open for days.
+8. The rows of earlier runs stay in the table until **Clear**: clear it between big batches when you keep the tab open for days. The thumbnails already shown stay in the tab's memory until it is closed or reloaded, so none is asked for twice.
 
 Keep the StreamFetch tab open while it works; it may sit in the background. Enter in the box starts nothing — **Analyze** and **Download all** do.
 
@@ -64,7 +64,7 @@ Downloads/StreamFetch/reports/<YYYY-MM-DD HHMM> - did not download.json
 
 Names are made safe for Windows (forbidden characters become `_`, reserved names such as `CON` are suffixed, long titles are shortened so the whole path stays inside Windows' limits). A file already saved under its name is skipped (`already on disk`) without a request; Chrome never overwrites a file — a clash gets ` (1)`.
 
-StreamFetch knows a file is there from Chrome's own download list (an extension cannot look at your disk). Until you are done with a project, do not clear that list (**Clear all** in `chrome://downloads`, **Delete browsing data → Download history**, cleaner tools) and do not move or rename `Downloads/StreamFetch`: a link pasted afterwards would be downloaded again, next to the old file as ` (1)`. With tens of thousands of downloads in the list Chrome takes a moment at each video's start to look, and a file deleted moments before may still count as on disk once: run that link again.
+StreamFetch knows a file is there from Chrome's own download list (an extension cannot look at your disk). Until you are done with a project, do not clear that list (**Clear all** in `chrome://downloads`, **Delete browsing data → Download history**, cleaner tools): a link pasted afterwards would be downloaded again, next to the old file as ` (1)`. Do not move or rename `Downloads/StreamFetch` either: a link pasted afterwards would be downloaded again, into a new `Downloads/StreamFetch`. With tens of thousands of downloads in the list Chrome takes a moment at each video's start to look, and a file deleted moments before may still count as on disk once: run that link again.
 
 ## Quality and codecs
 

@@ -512,6 +512,32 @@ test("a listing refused because nothing could be stored is a storage stop, never
   // the report says no fresh list was fetched: none was, no request went out for it
   assert.equal(subject.refreshes, 0);
   assert.deepEqual(subject.traceOf(refused)?.refreshes.map((record) => [record.outcome, record.fresh_list]), [["failed", false]]);
+  // an episode with no usable URL needs the fresh list before any request: refused, it is the run's storage stop, not a result
+  // (another series: this one's re-discovery already failed in this run and is not asked again)
+  const unlisted = episode(2, { urls: [], seriesId: OTHER_ID });
+  await assert.rejects(subject.download(unlisted, CONTEXT), (error) => error instanceof StorageRefusedError && error.message === UNSAVED);
+  assert.deepEqual(log, ["https://v1.tiktok.com/a.mp4"]); // nothing more requested
+  // in a run: that episode and the rest read `stopped: <the storage reason>`, the run stops on it — not on a failure streak — and no attempt is counted
+  const run = fakeEngine({ results: { 1: "failed", 2: "failed" } });
+  const scripted = run.engine.downloader.download.bind(run.engine.downloader);
+  Object.assign(run.engine.downloader, {
+    /** @param {import("../src/lib/catalog.js").Episode} ep @param {import("../src/app/downloader.js").EpisodeContext} context */
+    download: async (ep, context) => {
+      if (ep.number === 3) throw new StorageRefusedError(UNSAVED);
+      return scripted(ep, context);
+    },
+  });
+  const listed = series([episode(1), episode(2), episode(3), episode(4)]);
+  const { results, stopped } = await downloadSeries(run.engine, listed, listed.episodes, newState(SERIES_ID, "One"));
+  assert.deepEqual(results.map((result) => [result.episode.number, result.status, result.message]), [
+    [1, "failed", "failed 1"],
+    [2, "failed", "failed 2"],
+    [3, "failed", `stopped: ${UNSAVED}`],
+    [4, "failed", `stopped: ${UNSAVED}`],
+  ]);
+  assert.equal(stopped, UNSAVED);
+  assert.equal(run.engine.pacingState.runAttempts, 2); // E3 asked nothing
+  assert.deepEqual(run.downloads, [1, 2]);
 });
 
 // ------------------------------------------------------------------------- discovery
@@ -1779,7 +1805,7 @@ test("the page: a past run too large for its share of the history lists the seri
       kept.map((record) => `${String(record["name"])}: ${RECORD_LINE}`),
     );
     assert.ok(lines.includes("Series 2: " + RECORD_LINE) && lines.includes("Series 49: " + RECORD_LINE));
-    assert.equal(lines[kept.length], `…and ${omitted} more series of this run, too many to keep here.`);
+    assert.equal(lines[kept.length], `Series of this run not kept here: ${omitted}.`);
     const found = retryLineOf(item);
     assert.ok(found, "the run keeps its retry line and button");
     assert.equal(found.line.children[0]?.textContent, "Did not download: Series 2: E02; Series 49: E02");
@@ -2205,12 +2231,24 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       const hhmm = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
       assert.equal(
         element("input-status").textContent,
-        `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request, and the wait until ${hhmm} could not be saved: free some space, restart Chrome only after ${hhmm} and run again — what is already saved is skipped.`,
+        `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request, and the wait until ${hhmm} could not be saved: free some space, restart Chrome or reload DramaFetch only after ${hhmm} and run again — what is already saved is skipped.`,
       );
       // a reset of the settings the storage refuses says so, instead of failing silently
       element("settings-reset").fire("click");
       for (let turns = 0; turns < 20 && element("settings-status").className !== "error"; turns += 1) await page.turn();
       assert.equal(element("settings-status").textContent, `Not saved: ${REFUSED}`);
+      // the page holds the unsaved cooldown; while the disk is full its look stores nothing
+      page.storageChanged("cooldown");
+      for (let turns = 0; turns < 20 && element("cooldown-banner").hidden; turns += 1) await page.turn();
+      assert.equal(element("cooldown-banner").hidden, false);
+      assert.equal(await module.lookAgainAtCooldown(), false);
+      // space freed: the next look (every COOLDOWN_LOOK_S s) stores it, and the advice drops "could not be saved"
+      Object.assign(chrome.storage.local, { set });
+      assert.equal(module.COOLDOWN_LOOK_S, 15);
+      assert.equal(await module.lookAgainAtCooldown(), true);
+      assert.equal(/** @type {{until: number} | undefined} */ (local.get("cooldown"))?.until, recorded.until);
+      assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
+      assert.equal(await module.lookAgainAtCooldown(), true); // stored: nothing more to do
     } finally {
       Object.assign(chrome.storage.local, { set });
       await clearCooldown(engine.cooldownStore); // the page's memory of it, which outlives this page's module

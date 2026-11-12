@@ -708,12 +708,13 @@ function renderTable() {
   }
   // Putting every row back costs a layout of the whole table — seconds once thousands of rows
   // have piled up without **Clear**, at every resolved link —, so the rows already shown in their
-  // place stay: nothing is touched when the list is the same, rows new at its end are appended.
+  // place stay: only what follows the first row out of place is put back (a link read into its
+  // parts or episodes and the rows after it, the newest rows), nothing when the list is the same.
   const shown = body.children;
   let kept = 0;
   while (kept < shown.length && kept < rows.length && shown[kept] === rows[kept]) kept += 1;
-  if (kept < shown.length) body.replaceChildren(...rows);
-  else if (kept < rows.length) body.append(...rows.slice(kept));
+  while (shown.length > kept) body.removeChild(/** @type {Element} */ (shown[shown.length - 1]));
+  if (kept < rows.length) body.append(...rows.slice(kept));
   renderSummary();
 }
 

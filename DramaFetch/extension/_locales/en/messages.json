@@ -255,7 +255,7 @@
     }
   },
   "storageRefusedCooldown": {
-    "message": "DramaFetch stopped: $reason$. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request, and the wait until $time$ could not be saved: free some space, restart Chrome only after $time$ and run again — what is already saved is skipped.",
+    "message": "DramaFetch stopped: $reason$. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request, and the wait until $time$ could not be saved: free some space, restart Chrome or reload DramaFetch only after $time$ and run again — what is already saved is skipped.",
     "description": "Shown instead of storageRefused when a cooldown is in force too: that wait could not be stored, so restarting Chrome before its end would forget it. $1 is the engine's reason in the page's language, $2 the cooldown's end (HH:MM).",
     "placeholders": {
       "reason": {
@@ -533,8 +533,8 @@
     }
   },
   "historySeriesOmitted": {
-    "message": "…and $count$ more series of this run, too many to keep here.",
-    "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series): how many of its series are not listed. The ones with an episode to retry are kept first.",
+    "message": "Series of this run not kept here: $count$.",
+    "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series): how many of its series are not listed (any count: the wording does not depend on it). The ones with an episode to retry are kept first.",
     "placeholders": {
       "count": {
         "content": "$1"

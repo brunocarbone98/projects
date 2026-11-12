@@ -146,6 +146,10 @@ const app = {
    * @type {string | null}
    */
   unsaved: null,
+  /** whether the storage advice on screen says the wait could not be saved ({@link showStorageRefused}) */
+  unsavedWaitShown: false,
+  /** when the page last looked whether its cooldown is stored ({@link lookAgainAtCooldown}) */
+  cooldownLookedAt: 0,
   /** @type {Set<() => void>} */
   stopWaiters: new Set(),
   /** @type {import("../lib/cooldown.js").Cooldown | null} */
@@ -364,6 +368,7 @@ async function showStorageRefused() {
   // "the wait could not be saved" only when it was not: a cooldown chrome.storage.local holds
   // outlives a restart of Chrome, and the banner already names its end
   const unsavedWait = cooldown !== null && (await storedCooldownUntil()) < cooldown.until;
+  app.unsavedWaitShown = unsavedWait;
   const text = unsavedWait ? t("storageRefusedCooldown", [reason, clockTime(cooldown.until)]) : t("storageRefused", [reason]);
   setStatus($("input-status"), text, "error");
   updateButtons();
@@ -1348,10 +1353,6 @@ function showCover(itemId, url) {
 }
 
 /**
- * The list's thumbnails: the extension's own requests, only for the rows in view, one at a time,
- * never during a job or a cooldown.
- */
-/**
  * Whether the list's thumbnails may be requested now: in the engine's tab, while no job runs or
  * waits, no cooldown is in force and nothing was refused by `chrome.storage.local` — once a write
  * was refused, this page asks nothing of TikTok, not even a thumbnail. (Exported for the unit
@@ -1362,6 +1363,10 @@ export async function coversAllowed() {
   return app.owner && app.unsaved === null && app.running === null && app.queue.length === 0 && (await checkCooldownNow()) === null;
 }
 
+/**
+ * The list's thumbnails: the extension's own requests, only for the rows in view, one at a time,
+ * never during a job or a cooldown, nor after a refused write ({@link coversAllowed}).
+ */
 const covers = new CoverLoader({
   hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
   allowed: coversAllowed,
@@ -1532,6 +1537,31 @@ function tickCooldown() {
     return;
   }
   $("cooldown-left").textContent = t("cooldownLeft", [minutesLeft(app.cooldown, now())]);
+  if (now() - app.cooldownLookedAt >= COOLDOWN_LOOK_S) {
+    app.cooldownLookedAt = now();
+    void lookAgainAtCooldown();
+  }
+}
+
+/** How often (seconds) a page with a cooldown in force looks whether the storage holds it. */
+export const COOLDOWN_LOOK_S = 15;
+
+/**
+ * Store a cooldown in force that `chrome.storage.local` does not hold yet (its write was refused:
+ * a full disk) as soon as the storage takes writes again, so that a restart of Chrome no longer
+ * loses it — a reading does it ({@link cooldownStore}) — and drop "could not be saved" from the
+ * advice on screen then. Only the storage is read: nothing is asked of TikTok. Called every
+ * {@link COOLDOWN_LOOK_S} s while a cooldown is in force. (Exported for the unit tests, which
+ * cannot run the page's timer.)
+ * @returns {Promise<boolean>} whether the storage holds the cooldown in force
+ */
+export async function lookAgainAtCooldown() {
+  const cooldown = app.cooldown;
+  if (cooldown === null) return false;
+  if ((await storedCooldownUntil()) < cooldown.until) await checkCooldownNow();
+  const stored = (await storedCooldownUntil()) >= cooldown.until;
+  if (stored && app.unsavedWaitShown) await showStorageRefused();
+  return stored;
 }
 
 // --------------------------------------------------------------------------- settings

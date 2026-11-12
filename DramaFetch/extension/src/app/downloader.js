@@ -796,7 +796,8 @@ export class Downloader {
   }
 
   /**
-   * Download one episode. Never throws: every failure is a result.
+   * Download one episode. Every failure is a result, except the user's Stop and a listing the page
+   * refused for storage before any request (`StorageRefusedError`, by name): both are the run's.
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @returns {Promise<DownloadResult>}
@@ -809,7 +810,9 @@ export class Downloader {
     try {
       return await this.downloadEpisode(episode, context);
     } catch (error) {
-      if (error instanceof Error && error.name === "StopRequested") throw error; // the user's Stop
+      // the user's Stop; a fresh list the page refused because a write was refused: no request
+      // went out, so this is the run's storage stop, never a failed attempt
+      if (error instanceof Error && (error.name === "StopRequested" || error.name === "StorageRefusedError")) throw error;
       let status = /** @type {import("../lib/messages.js").Status} */ (FAILED);
       if (error instanceof LoginRequiredError) status = FAILED_LOGIN;
       else if (error instanceof RateLimitedError) status = FAILED_RATE_LIMITED;

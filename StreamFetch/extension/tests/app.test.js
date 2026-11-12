@@ -422,6 +422,16 @@ class FakeElement {
     this.append(...nodes);
   }
   /**
+   * @param {FakeElement} node
+   * @returns {FakeElement}
+   */
+  removeChild(node) {
+    const at = this.children.indexOf(node);
+    if (at < 0) throw new Error("NotFoundError: not a child");
+    this.children.splice(at, 1);
+    return node;
+  }
+  /**
    * The first descendant with this tag name (a plain tag selector); a `tbody` is created on
    * first use, as the page's tables have one.
    * @param {string} selector
@@ -781,8 +791,12 @@ test("Analyze fills the rows: title link, site, duration, a quality selector; re
   }
 });
 
-test("the table keeps the rows already shown: Analyze appends the new ones, a run never puts them all back, Clear empties it", async () => {
-  const page = await fakePage({ site: dailymotion });
+test("the table keeps the rows already shown in place: only the rows from the first one out of place on are put back — a link read into its parts included —, Clear empties it", async () => {
+  const BILI = "BV1Ab4C1dE2f"; // the two-part video of tests/fixtures/bilibili-page-ok.html
+  const page_ = readFileSync(new URL("./fixtures/bilibili-page-ok.html", import.meta.url), "utf8");
+  /** @param {string} url */
+  const site = (url) => dailymotion(url) ?? (url.startsWith(`https://www.bilibili.com/video/${BILI}`) ? { body: page_, headers: { "content-type": "text/html" } } : undefined);
+  const page = await fakePage({ site });
   try {
     const body = /** @type {FakeElement} */ (page.element("items-table").querySelector("tbody"));
     let replaced = 0;
@@ -790,6 +804,13 @@ test("the table keeps the rows already shown: Analyze appends the new ones, a ru
     body.replaceChildren = (...nodes) => {
       replaced += 1;
       replace(...nodes);
+    };
+    /** @type {(string | undefined)[]} */
+    const removed = [];
+    const remove = body.removeChild.bind(body);
+    body.removeChild = (node) => {
+      removed.push(node.dataset["key"]);
+      return remove(node);
     };
     /** @param {string} what */
     const analyze = async (what) => {
@@ -801,14 +822,23 @@ test("the table keeps the rows already shown: Analyze appends the new ones, a ru
     await analyze("Analyze");
     assert.equal(page.rows().length, 1);
     const first = page.rows()[0];
+    // a new link at the end: appended, nothing removed
     page.element("links").value = [`https://www.dailymotion.com/video/${OK_ID}`, `https://www.dailymotion.com/video/${GEO_ID}`].join("\n");
     await analyze("Analyze again");
     assert.equal(page.rows()[0], first, "the row already shown is the same element, left in place");
     assert.deepEqual(page.rows().map((row) => row.dataset["key"]), [`dailymotion:${OK_ID}`, `dailymotion:${GEO_ID}`]);
-    assert.equal(replaced, 0, "rows new at the end are appended, nothing is put back");
+    assert.deepEqual(removed, []);
+    // a two-part video: its pasted row gives way to a header and a row per part — only that row is taken out
+    page.element("links").value = [`https://www.dailymotion.com/video/${OK_ID}`, `https://www.dailymotion.com/video/${GEO_ID}`, `https://www.bilibili.com/video/${BILI}`].join("\n");
+    await analyze("Analyze a two-part video");
+    const keys = page.rows().map((row) => row.dataset["key"]);
+    assert.deepEqual(keys.slice(0, 2), [`dailymotion:${OK_ID}`, `dailymotion:${GEO_ID}`]);
+    assert.ok(keys.includes(`bilibili:${BILI}:1`) && keys.includes(`bilibili:${BILI}:2`), JSON.stringify(keys));
+    assert.equal(page.rows()[0], first);
+    assert.deepEqual(removed, [`bilibili:${BILI}:all`], "the earlier rows stay where they are");
+    assert.equal(replaced, 0, "the table is never put back whole");
     page.element("clear-button").fire("click");
     assert.deepEqual(page.rows(), []);
-    assert.equal(replaced, 1, "Clear empties the table");
   } finally {
     page.restore();
   }

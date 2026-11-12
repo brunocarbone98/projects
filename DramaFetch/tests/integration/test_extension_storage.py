@@ -64,8 +64,8 @@ def _stopped_with_cooldown(reason: str, until: str) -> str:
     return (
         f"{STOPPED_HEAD}{reason}. Chrome could not write to its profile folder — usually its disk "
         f"is full. TikTok also refused a request, and the wait until {until} could not be saved: "
-        f"free some space, restart Chrome only after {until} and run again — what is already "
-        "saved is skipped."
+        f"free some space, restart Chrome or reload DramaFetch only after {until} and run again — "
+        "what is already saved is skipped."
     )
 
 
@@ -148,6 +148,10 @@ FULL_DISK_JS = r"""
   };
   local.remove = (keys) => (full ? refuse() : remove(keys));
   globalThis.__refused = () => refused;
+  globalThis.__freeDisk = () => {
+    full = false;
+    acceptStateWrites = Number.POSITIVE_INFINITY;
+  };
   return true;
 }
 """
@@ -392,12 +396,14 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
 
 def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: Path) -> None:
     """TikTok's video server answers HTTP 429 and the storage refuses every write from that
-    result on: the cooldown cannot be stored — and is in force all the same, from the browser
-    session's memory: the banner, the download buttons disabled, the popup's "Download this
-    series" refused with no request, the page's advice naming the cooldown's end; and after a
-    reload of the tab (writes work again) the banner is back, the cooldown is stored at last (a
-    restart of Chrome keeps it now) and a listing is refused by the cooldown, still with no
-    request. The rest of the series is `stopped` by the 429."""
+    result on: the cooldown cannot be stored — and is in force all the same, from the page's and
+    the browser session's memory. In the first tab the refused writes stop everything anyway (the
+    download buttons disabled, the popup's "Download this series" refused with no request); what
+    proves the cooldown's memory is the banner and the page's advice naming the cooldown's end.
+    Once space is freed the same tab stores the cooldown by itself within its next look (every
+    15 s: a restart of Chrome keeps it from then on) and its advice drops "could not be saved";
+    after a reload of the tab the banner is back and a listing is refused by the cooldown, still
+    with no request. The rest of the series is `stopped` by the 429."""
     with (
         FakeTikTok(cdn_rate_limit=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
@@ -442,14 +448,20 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
         assert len(server.requests) == requests
         assert errors == []
 
+        page.evaluate("() => globalThis.__freeDisk()")  # space freed, the tab left as it is
+        ext.wait_for(lambda: ext.cooldown() is not None, 30)  # stored by the tab's own look
+        stored = ext.cooldown()
+        assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
+        plain = f"{STOPPED_HEAD}{UNSAVED_PREFIX}{FULL_DISK}{STOPPED_TAIL}"
+        ext.wait_for(lambda: _status_line(ext) == plain, 10)  # no more "could not be saved"
+        assert page.locator("#download-all-button").is_disabled()  # until the tab is reloaded
+        assert len(server.requests) == requests
+
         page.close()  # the tab reloaded: its memory is gone, the browser session's is not
         page = ext.reopen_app()
         ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)
         assert page.locator("#download-all-button").is_disabled()
-        # written to chrome.storage.local at the first reading that the storage takes
-        ext.wait_for(lambda: ext.cooldown() is not None, 10)
-        stored = ext.cooldown()
-        assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
+        assert ext.cooldown() == stored
         _popup_load(ext, None)  # accepted by this fresh page, then refused by the cooldown's gate
         ext.wait_for(lambda: ext.finished_jobs() >= 1 and ext.idle(), 20)
         assert str(ext.history()[0]["error"]).startswith("TikTok refused a request at ")
