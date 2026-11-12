@@ -15,6 +15,7 @@ import {
   INVALID_FILE_CAUSE_PREFIX,
   INVALID_FILE_CAUSE_SUFFIX,
   LOCKED_CAUSE_PREFIX,
+  LOCKED_RAW_KEPT,
   LOCKED_CAUSE_SUFFIX,
   LOGIN_CAUSE,
   LONGER_FILE_CAUSE_SUFFIX,
@@ -30,11 +31,13 @@ import {
   UNAVAILABLE_CAUSE_SUFFIX,
   WHAT_THIS_IS,
   buildReport,
+  digestEntry,
   hasFailures,
   probableCause,
   reportFilename,
   reportJson,
   reportStem,
+  slimRows,
 } from "../src/lib/diagnosis.js";
 import {
   BLOCKED_MESSAGE,
@@ -500,6 +503,116 @@ test("buildReport: episodes_digest has one small entry per LISTED episode — th
   // not listed: null (an unstarted series, or an input without the list)
   assert.equal(/** @type {Record<string, unknown>[]} */ (buildReport(input([{ ...one, listedEpisodes: null }]))["series"])[0]?.["episodes_digest"], null);
   assert.equal(REPORT_VERSION, 1); // an additive field: the format version stays
+});
+
+/** A job as the report records it. */
+const JOB = { kind: "batch", label: "3 series", startedAt: "2026-11-12T09:00:00.000Z", finishedAt: "2026-11-12T10:00:00.000Z", error: null, stopped: null, refreshes: 0, pauses: [] };
+
+/**
+ * A whole series as a run leaves it: two downloaded rows, two failures and `locked` locked rows from E05 on.
+ * @param {number} locked
+ */
+function mixedRows(locked) {
+  const lockedMessage = "looks locked: isLocked=True; no play address";
+  return [
+    episodeInput(1, "skipped-exists", "already downloaded (manifest): E1.mp4"),
+    episodeInput(2, "done", "saved E2.mp4 (0.1 MiB)"),
+    episodeInput(3, "failed", `${INCOMPLETE_PREFIX}truncated body (100000 of 131072 bytes) from v16.tiktok.com`),
+    episodeInput(4, "done", "saved E4.mp4 (0.1 MiB)"),
+    ...Array.from({ length: locked }, (_, index) =>
+      episodeInput(5 + index, "skipped-locked", lockedMessage, { access: "locked", lockHints: ["isLocked=True", "no play address"], trace: null }),
+    ),
+    episodeInput(5 + locked, "failed", "stopped: 3 consecutive failures", { trace: null }),
+  ];
+}
+
+test("slimRows: the raw item and the trace only of what the report describes — of a series' locked rows the first three — and the reference row's raw item", () => {
+  assert.equal(LOCKED_RAW_KEPT, 3);
+  const rows = mixedRows(10);
+  const slim = slimRows(rows);
+  assert.equal(slim.length, rows.length);
+  const kept = (/** @type {"raw" | "trace"} */ field) => slim.filter((row) => row[field] !== null).map((row) => row.number);
+  // raw: the reference (E02, the first done — not E01, on disk only), both failures, the first three locked rows
+  assert.deepEqual(kept("raw"), [2, 3, 5, 6, 7, 15]);
+  // trace: only what a row that did not download recorded (the locked and the stopped ones recorded none)
+  assert.deepEqual(kept("trace"), [3]);
+  for (const [index, row] of slim.entries()) {
+    const { raw, trace, ...rest } = row;
+    const { raw: fullRaw, trace: fullTrace, ...fullRest } = /** @type {import("../src/lib/diagnosis.js").EpisodeInput} */ (rows[index]);
+    assert.deepEqual(rest, fullRest); // nothing else of a row changes
+    if (raw !== null) assert.equal(raw, fullRaw); // the very item, as served
+    if (trace !== null) assert.equal(trace, fullTrace);
+  }
+  assert.deepEqual(slimRows(slim), slim); // taking it twice changes nothing
+  // the three locked rows that keep their item are the first by NUMBER, whatever the rows' order
+  assert.deepEqual(
+    slimRows([...rows].reverse()).filter((row) => row.status === "skipped-locked" && row.raw !== null).map((row) => row.number).sort((a, b) => a - b),
+    [5, 6, 7],
+  );
+  // with no done row the reference is the first one found on disk; a series with three locked rows or fewer loses nothing
+  const onDisk = slimRows([episodeInput(1, "skipped-exists", "x"), episodeInput(2, "skipped-exists", "x"), episodeInput(3, "dry-run", "x")]);
+  assert.deepEqual(onDisk.map((row) => row.raw !== null), [true, false, false]);
+  const few = mixedRows(3);
+  assert.deepEqual(slimRows(few).filter((row) => row.status !== "done" && row.status !== "skipped-exists"), few.filter((row) => row.status !== "done" && row.status !== "skipped-exists"));
+});
+
+test("buildReport: the same report from rows and a digest taken when the series was done as from the whole run", () => {
+  const listed = (/** @type {import("../src/lib/diagnosis.js").EpisodeInput[]} */ rows) =>
+    rows.map((row) => ({ number: row.number, access: row.access, lockHints: row.lockHints, durationS: row.durationS, raw: row.raw }));
+  const first = mixedRows(10);
+  const second = [episodeInput(1, "done", "saved"), episodeInput(2, "failed-rate-limited", MEDIA_RATE_LIMIT_MESSAGE)];
+  const whole = [
+    { ...seriesInput(SERIES_ID, "One", first), listedEpisodes: listed(first) },
+    { ...seriesInput(OTHER_ID, null, second), listedEpisodes: listed(second) },
+    { ...seriesInput("7699393770256782388", "Never started", []), listed: null, access: null, listedEpisodes: null },
+  ];
+  // what the page takes when a series of a batch is done: the slim rows and the digest, no list any more
+  const taken = whole.map((run) => ({
+    ...run,
+    episodes: slimRows(run.episodes),
+    listedEpisodes: null,
+    episodesDigest: run.listedEpisodes === null ? null : run.listedEpisodes.map(digestEntry),
+  }));
+  const input = { generatedAt: "2026-11-12T10:00:00.000Z", extensionVersion: "1.3.1", userAgent: "UA", language: "en", testMode: false, job: JOB };
+  const fromWhole = buildReport({ ...input, series: whole });
+  const fromTaken = buildReport({ ...input, series: taken });
+  assert.deepEqual(fromTaken, fromWhole);
+  assert.equal(new TextDecoder().decode(reportJson(fromTaken)), new TextDecoder().decode(reportJson(fromWhole)));
+  const [one, two, never] = /** @type {Record<string, any>[]} */ (fromWhole["series"]);
+  // every locked row is described; only the first three carry their list item
+  const locked = one?.["not_downloaded"].filter((/** @type {Record<string, unknown>} */ row) => row["status"] === "skipped-locked");
+  assert.equal(locked.length, 10);
+  assert.deepEqual(locked.map((/** @type {Record<string, unknown>} */ row) => row["raw"] !== null), [true, true, true, ...Array(7).fill(false)]);
+  assert.ok(locked.every((/** @type {Record<string, unknown>} */ row) => String(row["probable_cause"]).startsWith(LOCKED_CAUSE_PREFIX) && /** @type {unknown[]} */ (row["lock_hints"]).length === 2));
+  // a failure always carries its item, the reference too, and the digest lists every episode
+  assert.ok(one?.["not_downloaded"].filter((/** @type {Record<string, unknown>} */ row) => String(row["status"]).startsWith("failed")).every((/** @type {Record<string, unknown>} */ row) => row["raw"] !== null));
+  assert.equal(one?.["reference"].number, 2);
+  assert.notEqual(one?.["reference"].raw, null);
+  assert.equal(one?.["episodes_digest"].length, first.length);
+  assert.equal(two?.["episodes_digest"].length, 2);
+  assert.equal(never?.["episodes_digest"], null);
+  assert.equal(/** @type {string[]} */ (fromWhole["summary"]).length, 10 + 2 + 1);
+});
+
+test("the report of a series with many locked episodes stays small: its size no longer grows with their list items", () => {
+  const padding = "x".repeat(6000); // a list item of some 6 KB, as TikTok serves them
+  /** @param {number} locked */
+  const bytes = (locked) => {
+    const rows = mixedRows(locked).map((row) => ({ ...row, raw: { ...row.raw, padding } }));
+    const report = buildReport({
+      generatedAt: "2026-11-12T10:00:00.000Z",
+      extensionVersion: "1.3.1",
+      userAgent: "UA",
+      language: "en",
+      testMode: false,
+      job: JOB,
+      series: [seriesInput(SERIES_ID, "One", rows)],
+    });
+    return reportJson(report).length;
+  };
+  const perLockedRow = (bytes(53) - bytes(3)) / 50;
+  assert.ok(perLockedRow < 1500, `${perLockedRow} bytes per further locked row`); // its description, not its 6 KB item
+  assert.ok(bytes(3) - bytes(0) > 3 * 6000); // the first three do carry theirs
 });
 
 test("hasFailures: any failed-* row of any series; locked skips alone are none", () => {

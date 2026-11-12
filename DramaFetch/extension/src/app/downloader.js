@@ -717,6 +717,19 @@ export class Downloader {
   }
 
   /**
+   * A series of the job is finished: release what the run kept for it — the traces of its
+   * episodes and its fresh list. Nothing asks for them again (a job downloads a series once, and
+   * the report took what it reads before); the count of refreshes and the memory of a failed
+   * refresh stay.
+   * @param {string} seriesId
+   */
+  forgetSeries(seriesId) {
+    this.freshItems.delete(seriesId);
+    const prefix = `${seriesId}:`;
+    for (const key of [...this.traces.keys()]) if (key.startsWith(prefix)) this.traces.delete(key);
+  }
+
+  /**
    * The episode's trace, started when missing (the recording never changes what is decided).
    * @param {Episode} episode
    * @returns {EpisodeTrace}

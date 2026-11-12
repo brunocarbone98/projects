@@ -11,7 +11,7 @@
 
 import { isLocked } from "../lib/catalog.js";
 import { COOLDOWN_STORAGE_KEY, activeCooldown, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
-import { buildReport, hasFailures, reportFilename, reportJson, reportStem } from "../lib/diagnosis.js";
+import { buildReport, digestEntry, hasFailures, reportFilename, reportJson, reportStem, slimRows } from "../lib/diagnosis.js";
 import { displayText, statusLabel } from "../lib/display.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import { fileBaseName } from "../lib/naming.js";
@@ -85,6 +85,10 @@ const ENGINE_LOCK = "dramafetch-engine";
  *
  * @typedef {object} JobRecord What a finished job leaves in the history.
  * @property {{kind: string, seconds: number, text: string}[]} pauses
+ * @property {SeriesInput[]} inputs what the report reads of the first finished series of a batch,
+ *   in the runs' order, each taken when its series was done ({@link releaseSeries})
+ * @property {boolean} taking whether the next series' is still taken: false once one could not be
+ *   (that run and the later ones stay whole, and the report reads them at the job's end)
  *
  * @typedef {object} JobOutcome How a job ended, as its history entry records it ({@link reportJobEnd}).
  * @property {string} startedAt
@@ -439,8 +443,36 @@ function buildEngine(job, jobRecord) {
     onSeriesDone: (_index, _total, run) => {
       clearPause();
       renderReportLine(run);
+      releaseSeries(run, downloader, jobRecord);
+      trimResultRows();
     },
   };
+}
+
+/**
+ * A series of a batch is done: take what the job's report reads of it ({@link seriesInput}), then
+ * let go of what the run kept only for that — the downloader's traces and fresh list of the series
+ * and every episode's raw list item (several kilobytes each: a batch of hundreds of series would
+ * hold them all until its end). Nothing the engine does next reads them: a batch downloads a
+ * series once. Never throws into the batch: when the report's input cannot be taken, the run is
+ * left whole — it and every later one — and the report reads them at the job's end. (Exported for
+ * the unit tests, which cannot run a job.)
+ * @param {SeriesRun} run
+ * @param {Pick<Downloader, "traceOf" | "forgetSeries">} downloader the job's
+ * @param {Pick<JobRecord, "inputs" | "taking">} jobRecord
+ */
+export function releaseSeries(run, downloader, jobRecord) {
+  if (!jobRecord.taking) return;
+  try {
+    jobRecord.inputs.push(seriesInput(run, (episode) => downloader.traceOf(episode)));
+  } catch (error) {
+    console.warn(error);
+    jobRecord.taking = false;
+    return;
+  }
+  downloader.forgetSeries(run.ref.seriesId);
+  for (const episode of run.series?.episodes ?? []) episode.raw = null;
+  for (const result of run.results) result.episode.raw = null;
 }
 
 // --------------------------------------------------------------------------- progress
@@ -506,6 +538,65 @@ function renderResult(result) {
   else body.append(row);
 }
 
+/**
+ * At most this many rows stay in the result table while a job runs: about the last thirty series
+ * of sixty episodes. A row costs some 40 KB of the tab's memory and every new row lays the whole
+ * table out again, so a batch of hundreds of series would otherwise hold gigabytes and stutter.
+ */
+export const MAX_RESULT_ROWS = 2000;
+/** How many nodes one `append(...nodes)` call is handed at most (a call takes about 124 000 arguments). */
+const APPEND_CHUNK = 10_000;
+
+/**
+ * `parent.append(...nodes)` in pieces of {@link APPEND_CHUNK}: the same children in the same
+ * order, however many there are.
+ * @param {Element} parent
+ * @param {readonly Element[]} nodes
+ */
+function appendInPieces(parent, nodes) {
+  for (let index = 0; index < nodes.length; index += APPEND_CHUNK) parent.append(...nodes.slice(index, index + APPEND_CHUNK));
+}
+
+/**
+ * @param {Element} row a row of the result table
+ * @returns {boolean} whether it is a series' header row ({@link buildEngine} `onStart`)
+ */
+function isSeriesRow(row) {
+  return ` ${row.className} `.includes(" series-row ");
+}
+
+/**
+ * Keep the result table light (called when a series of a batch is done): over `limit` rows, the
+ * OLDEST rows of episodes that completed — done, skipped, dry run — leave, then the header rows
+ * of the series left with no row. A failure row never leaves (the job's end shows those apart,
+ * {@link renderFailed}), nor does its series' header; every series keeps its report line and its
+ * row of the batch table, and `#result-trimmed` says so once rows have left. A display matter
+ * only: the results, the history and the report are untouched. (Exported for the unit tests,
+ * which cannot run a job.)
+ * @param {number} [limit] {@link MAX_RESULT_ROWS}; lower only in the test copy of the extension
+ */
+export function trimResultRows(limit = (app.testMode ? app.testSettings.maxResultRows : undefined) ?? MAX_RESULT_ROWS) {
+  const body = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
+  const rows = [...body.children];
+  let excess = rows.length - limit;
+  if (excess <= 0) return;
+  /** @type {Set<Element>} */
+  const leaving = new Set();
+  for (const row of rows) {
+    if (excess <= 0) break;
+    if (isSeriesRow(row) || isFailure(row.getAttribute("data-status"))) continue;
+    leaving.add(row);
+    excess -= 1;
+  }
+  if (leaving.size === 0) return;
+  // a header whose series has no row left goes with them
+  const shown = new Set(rows.filter((row) => !isSeriesRow(row) && !leaving.has(row)).map((row) => row.getAttribute("data-series-id")));
+  for (const row of rows) if (isSeriesRow(row) && !shown.has(row.getAttribute("data-series-id"))) leaving.add(row);
+  body.replaceChildren();
+  appendInPieces(body, rows.filter((row) => !leaving.has(row)));
+  $("result-trimmed").hidden = false;
+}
+
 /** @param {SeriesRun} run */
 function renderReportLine(run) {
   const name = run.report.name || run.series?.name || run.ref.seriesId;
@@ -540,6 +631,7 @@ function renderBatchTable(runs) {
 function startProgress(job) {
   $("progress-card").hidden = false;
   /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody")).textContent = "";
+  $("result-trimmed").hidden = true;
   $("report-lines").textContent = "";
   $("batch-table").hidden = true;
   $("failed-block").hidden = true; // the last job's episodes that did not download; this job's come at its end
@@ -720,9 +812,9 @@ export function renderFailed(seriesRecords) {
   if (rows.length > 0) {
     const leaving = new Set(rows.map((row) => `${row.seriesId}:${row.number}`));
     const results = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
-    results.replaceChildren(
-      ...[...results.children].filter((row) => !leaving.has(`${row.getAttribute("data-series-id")}:${row.getAttribute("data-number")}`)),
-    );
+    const kept = [...results.children].filter((row) => !leaving.has(`${row.getAttribute("data-series-id")}:${row.getAttribute("data-number")}`));
+    results.replaceChildren();
+    appendInPieces(results, kept); // never one spread of them all: a table of 125 000 rows would overflow the call
     for (const row of rows) {
       body.append(
         el("tr", { attrs: { "data-series-id": row.seriesId, "data-number": String(row.number), "data-status": row.status } }, [
@@ -766,23 +858,27 @@ function seriesInput(run, traceOf) {
     contacted: run.contacted,
     listed: episodes?.length ?? null,
     access,
-    listedEpisodes: episodes, // the raw items of every listed episode: the report's digest
-    episodes: run.results.map((result) => ({
-      number: result.episode.number,
-      itemId: result.episode.itemId,
-      title: result.episode.title,
-      durationS: result.episode.durationS,
-      access: result.episode.access,
-      paid: result.episode.paid,
-      drm: result.episode.drm,
-      lockHints: result.episode.lockHints,
-      qualityHint: result.episode.qualityHint,
-      raw: result.episode.raw,
-      status: result.status,
-      message: result.message,
-      path: result.path ?? null,
-      trace: traceOf(result.episode),
-    })),
+    listedEpisodes: null,
+    episodesDigest: episodes === null ? null : episodes.map(digestEntry), // of every listed episode, made now
+    // the raw item and the trace only of the rows the report describes (`lib/diagnosis.slimRows`)
+    episodes: slimRows(
+      run.results.map((result) => ({
+        number: result.episode.number,
+        itemId: result.episode.itemId,
+        title: result.episode.title,
+        durationS: result.episode.durationS,
+        access: result.episode.access,
+        paid: result.episode.paid,
+        drm: result.episode.drm,
+        lockHints: result.episode.lockHints,
+        qualityHint: result.episode.qualityHint,
+        raw: result.episode.raw,
+        status: result.status,
+        message: result.message,
+        path: result.path ?? null,
+        trace: traceOf(result.episode),
+      })),
+    ),
   };
 }
 
@@ -797,13 +893,15 @@ function seriesInput(run, traceOf) {
  * @param {JobOutcome} outcome
  * @param {readonly SeriesRun[] | null} runs the `SeriesRun`s the job produced, in order
  * @param {(episode: Episode) => EpisodeTrace | null} traceOf the downloader's traces
+ * @param {readonly SeriesInput[]} [taken] what the report reads of the first runs, taken already
+ *   (a batch: {@link releaseSeries}); the other runs are read now
  * @returns {Promise<void>}
  */
-export async function reportJobEnd(job, outcome, runs, traceOf) {
+export async function reportJobEnd(job, outcome, runs, traceOf, taken = []) {
   app.lastReport = null;
   try {
     if (job.kind !== "load" && runs !== null) {
-      const series = runs.map((run) => seriesInput(run, traceOf));
+      const series = runs.map((run, index) => taken[index] ?? seriesInput(run, traceOf));
       if (hasFailures(series)) {
         const generatedAt = new Date();
         const report = buildReport({
@@ -960,7 +1058,7 @@ function runToHistory(run) {
 /** @param {Job} job */
 async function runJob(job) {
   /** @type {JobRecord} */
-  const jobRecord = { pauses: [] };
+  const jobRecord = { pauses: [], inputs: [], taking: true };
   const startedAt = new Date().toISOString();
   /** @type {Record<string, unknown>} */
   const entry = { id: Date.now(), kind: job.kind, label: job.label, started_at: startedAt, error: null, stopped: null, refreshes: 0, pauses: jobRecord.pauses, series: [] };
@@ -1053,6 +1151,7 @@ async function runJob(job) {
       },
       runs,
       (episode) => engine.downloader.traceOf(episode),
+      jobRecord.inputs,
     );
   }
 }

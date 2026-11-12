@@ -175,6 +175,10 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s â€
  * @property {EpisodeInput[]} episodes every result row of the run, in order
  * @property {readonly ListedEpisode[] | null} [listedEpisodes] every episode the list had, in its
  *   order (`series.episodes`), for the digest; null (or absent) when the series was not listed
+ * @property {Record<string, unknown>[] | null} [episodesDigest] the digest made already
+ *   ({@link digestEntry} of every listed episode, in the list's order; null when the series was not
+ *   listed): when present it is the report's digest and `listedEpisodes` is not read â€” a batch
+ *   takes it when a series is done, so the list's raw items need not stay until the job ends
  *
  * @typedef {object} JobInput The job as the history records it.
  * @property {string} kind
@@ -198,6 +202,40 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s â€
 
 /** The statuses of a row that did download, or needed no download: never in the report. */
 const DOWNLOADED_STATUSES = new Set([DONE, SKIPPED_EXISTS, DRY_RUN]);
+/**
+ * How many `skipped-locked` rows of one series keep their raw list item in the report: the first
+ * ones by number. Every locked row keeps its access, hints and probable cause, and the digest
+ * lists every episode; the raw items of a whole locked series (one of 6 KB or more per episode)
+ * would make the report of a large batch hundreds of megabytes.
+ */
+export const LOCKED_RAW_KEPT = 3;
+
+/**
+ * The rows of one series as the report reads them, and nothing more: `raw` only for the rows it
+ * describes (every status but the downloaded ones) â€” of the `skipped-locked` ones the first
+ * {@link LOCKED_RAW_KEPT} by number â€” and for its reference row (the first `done`, else the
+ * first `skipped-exists`); `trace` only for the rows it describes. {@link buildReport} applies it
+ * to whatever it is given, so the rows may be reduced as soon as a series is done: the report is
+ * the same.
+ * @param {readonly EpisodeInput[]} episodes every result row of the run, in order
+ * @returns {EpisodeInput[]}
+ */
+export function slimRows(episodes) {
+  const reference = referenceRow(episodes);
+  const lockedWithRaw = new Set(
+    episodes
+      .filter((episode) => episode.status === SKIPPED_LOCKED)
+      .map((episode) => episode.number)
+      .sort((a, b) => a - b)
+      .slice(0, LOCKED_RAW_KEPT),
+  );
+  return episodes.map((episode) => {
+    const described = !DOWNLOADED_STATUSES.has(episode.status);
+    const keepsRaw = described ? episode.status !== SKIPPED_LOCKED || lockedWithRaw.has(episode.number) : episode === reference;
+    if (keepsRaw && described) return episode;
+    return { ...episode, raw: keepsRaw ? episode.raw : null, trace: described ? episode.trace : null };
+  });
+}
 
 /**
  * The probable cause of a row that did not download, from its status, its message, what the list
@@ -343,7 +381,7 @@ function fieldOf(dict, key) {
  * @param {ListedEpisode} episode
  * @returns {Record<string, unknown>}
  */
-function digestEntry(episode) {
+export function digestEntry(episode) {
   const raw = episode.raw;
   const video = fieldOf(raw, "video");
   const music = fieldOf(raw, "music");
@@ -367,12 +405,21 @@ function digestEntry(episode) {
 
 /**
  * The row to compare the failures with: the first `done` row of the series, else the first
- * `skipped-exists` one (a file an earlier run saved), else null.
+ * `skipped-exists` one (a file an earlier run saved), else undefined.
+ * @param {readonly EpisodeInput[]} episodes
+ * @returns {EpisodeInput | undefined}
+ */
+function referenceRow(episodes) {
+  return episodes.find((episode) => episode.status === DONE) ?? episodes.find((episode) => episode.status === SKIPPED_EXISTS);
+}
+
+/**
+ * {@link referenceRow} as the report shows it, or null.
  * @param {readonly EpisodeInput[]} episodes
  * @returns {Record<string, unknown> | null}
  */
 function referenceEntry(episodes) {
-  const found = episodes.find((episode) => episode.status === DONE) ?? episodes.find((episode) => episode.status === SKIPPED_EXISTS);
+  const found = referenceRow(episodes);
   if (found === undefined) return null;
   return {
     number: found.number,
@@ -388,10 +435,11 @@ function referenceEntry(episodes) {
  * The report of one run: a plain JSON-serialisable object, snake_case keys. Every series of the
  * run is in it, with its rows that did not download (every status but `done`, `skipped-exists`
  * and `dry-run`: the `failed-*` ones and `skipped-locked`), ascending by number, each with its
- * probable cause, its attempts and re-discoveries and its raw list item; one downloaded row for
- * comparison; and the digest of every LISTED episode ({@link digestEntry}; null when the series
- * was not listed). The `summary` has one line per such row, series-prefixed when the run had
- * several series.
+ * probable cause, its attempts and re-discoveries and its raw list item (of a series' locked rows
+ * only the first {@link LOCKED_RAW_KEPT}: {@link slimRows}); one downloaded row for comparison;
+ * and the digest of every LISTED episode ({@link digestEntry}; null when the series was not
+ * listed). The `summary` has one line per such row, series-prefixed when the run had several
+ * series.
  * @param {ReportInput} input
  * @returns {Record<string, unknown>}
  */
@@ -400,7 +448,8 @@ export function buildReport(input) {
   /** @type {string[]} */
   const summary = [];
   const series = input.series.map((run) => {
-    const notDownloaded = run.episodes
+    const rows = slimRows(run.episodes);
+    const notDownloaded = rows
       .filter((episode) => !DOWNLOADED_STATUSES.has(episode.status))
       .sort((a, b) => a.number - b.number)
       .map(notDownloadedEntry);
@@ -419,8 +468,8 @@ export function buildReport(input) {
       listed: run.listed,
       access_counts: run.access === null ? null : { ...run.access },
       not_downloaded: notDownloaded,
-      reference: referenceEntry(run.episodes),
-      episodes_digest: run.listedEpisodes === null || run.listedEpisodes === undefined ? null : run.listedEpisodes.map(digestEntry),
+      reference: referenceEntry(rows),
+      episodes_digest: run.episodesDigest !== undefined ? run.episodesDigest : (run.listedEpisodes?.map(digestEntry) ?? null),
     };
   });
   const job = input.job;

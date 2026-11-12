@@ -1820,6 +1820,198 @@ test("the page: at a job's end the failure rows leave the result table for the f
   }
 });
 
+// ------------------------------------------------------------ a batch of hundreds of series
+
+/**
+ * A series' header row of the result table, as `onStart` adds it.
+ * @param {string} seriesId
+ * @returns {FakeElement}
+ */
+function headerRow(seriesId) {
+  const header = new FakeElement("tr");
+  header.className = "series-row";
+  header.setAttribute("data-series-id", seriesId);
+  return header;
+}
+
+test("the page: a long batch keeps the result table light — the oldest completed rows leave, a failure and its series' header never", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    assert.equal(module.MAX_RESULT_ROWS, 2000);
+    const results = element("result-table").querySelector("tbody");
+    const keys = (/** @type {FakeElement} */ row) => `${row.getAttribute("data-series-id")}:${row.getAttribute("data-number") ?? "header"}:${row.getAttribute("data-status") ?? ""}`;
+    // four finished series of four rows each under their headers: A clean, B with a failure, C clean, D clean
+    const ids = ["A", "B", "C", "D"];
+    const fill = () => {
+      results.textContent = "";
+      for (const id of ids) {
+        results.append(headerRow(id));
+        for (let number = 1; number <= 4; number += 1) {
+          results.append(resultRow(id, number, id === "B" && number === 2 ? "failed-unavailable" : number === 4 ? "skipped-locked" : "done"));
+        }
+      }
+    };
+    fill();
+    const before = results.children.map(keys);
+    assert.equal(before.length, 20);
+    element("result-trimmed").hidden = true;
+    module.trimResultRows(20); // at the cap: nothing leaves, nothing is said
+    assert.deepEqual(results.children.map(keys), before);
+    assert.equal(element("result-trimmed").hidden, true);
+    module.trimResultRows(13); // seven over: A's four rows and B's three completed ones leave — never B's failure
+    assert.deepEqual(results.children.map(keys), [
+      "B:header:",
+      "B:2:failed-unavailable",
+      "C:header:",
+      "C:1:done",
+      "C:2:done",
+      "C:3:done",
+      "C:4:skipped-locked",
+      "D:header:",
+      "D:1:done",
+      "D:2:done",
+      "D:3:done",
+      "D:4:skipped-locked",
+    ]); // A's header went with its last row; the order of what stays is unchanged
+    assert.equal(element("result-trimmed").hidden, false);
+    module.trimResultRows(1); // far over: every completed row leaves, the failure and its header stay
+    assert.deepEqual(results.children.map(keys), ["B:header:", "B:2:failed-unavailable"]);
+    module.trimResultRows(1); // nothing more can leave: said once, done once
+    assert.deepEqual(results.children.map(keys), ["B:header:", "B:2:failed-unavailable"]);
+    // the shipped cap: a batch of 60 series x 60 episodes ends with the last rows of the last series
+    results.textContent = "";
+    for (let seriesIndex = 0; seriesIndex < 60; seriesIndex += 1) {
+      results.append(headerRow(`S${seriesIndex}`));
+      for (let number = 1; number <= 60; number += 1) results.append(resultRow(`S${seriesIndex}`, number, "done"));
+      module.trimResultRows(); // as each series is done
+    }
+    assert.ok(results.children.length <= 2000, String(results.children.length));
+    assert.ok(results.children.length > 1900);
+    assert.equal(results.children.at(-1)?.getAttribute("data-key"), "S59:60");
+    // only the series that still have rows keep their header, each right before its rows
+    const headers = results.children.filter((row) => row.className === "series-row").map((row) => row.getAttribute("data-series-id"));
+    const withRows = [...new Set(results.children.filter((row) => row.className !== "series-row").map((row) => row.getAttribute("data-series-id")))];
+    assert.deepEqual(headers, withRows);
+    assert.ok(headers.length >= 32 && headers.length <= 34, String(headers.length));
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: a table of 200 000 rows is emptied of its failure rows without one call taking them all", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const results = element("result-table").querySelector("tbody");
+    results.children = Array.from({ length: 200_000 }, (_, index) => resultRow(SERIES_ID, index + 1, index === 99_999 ? "failed" : "done"));
+    // a call handed 200 000 arguments overflows the stack, in Node as in Chrome (there from 124 568 on)
+    assert.throws(() => new FakeElement("tbody").append(...results.children), RangeError);
+    module.renderFailed([seriesRecord(SERIES_ID, "One", [[100_000, "failed", "boom"]])]);
+    assert.equal(results.children.length, 199_999);
+    assert.equal(results.children[99_998]?.getAttribute("data-number"), "99999"); // the order holds around the row that left
+    assert.equal(results.children[99_999]?.getAttribute("data-number"), "100001");
+    assert.equal(element("failed-table").querySelector("tbody").children.length, 1);
+    assert.equal(element("failed-heading").textContent, "Did not download (1)");
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: a finished series of a batch gives the report what it reads, then lets go of its list items and traces — the report is the same", async () => {
+  const page = await fakePage();
+  try {
+    const { module, downloads } = page;
+    const job = { kind: /** @type {const} */ ("batch"), label: "2 series" };
+    const other = () => finishedRun(OTHER_ID, "Other", [{ episode: episode(1, { seriesId: OTHER_ID }), status: /** @type {const} */ ("done"), path: "/x", message: "saved" }]);
+    // the whole runs, read at the job's end (what a selection job does)
+    await module.reportJobEnd(job, OUTCOME, [finishedRun(SERIES_ID, "Test Series", reportRows()), other()], TRACES.of);
+    // the same runs, each taken and released when its series was done
+    const runs = [finishedRun(SERIES_ID, "Test Series", reportRows()), other()];
+    /** @type {string[]} */
+    const forgotten = [];
+    const jobDownloader = { traceOf: TRACES.of, forgetSeries: (/** @type {string} */ seriesId) => void forgotten.push(seriesId) };
+    /** @type {Pick<import("../src/app/app.js").JobRecord, "inputs" | "taking">} */
+    const record = { inputs: [], taking: true };
+    for (const run of runs) module.releaseSeries(run, jobDownloader, record);
+    assert.equal(record.inputs.length, 2);
+    assert.deepEqual(forgotten, [SERIES_ID, OTHER_ID]);
+    for (const run of runs) {
+      assert.ok(run.series?.episodes.every((ep) => ep.raw === null)); // the list items are gone…
+      assert.ok(run.results.every((result) => result.episode.raw === null));
+      assert.equal(run.results.length > 0 && run.report.listed > 0, true); // …the results and the series' report are not
+    }
+    // nothing of a downloaded row but the reference's item was kept for the report
+    const [first] = record.inputs;
+    assert.deepEqual(first?.episodes.map((row) => [row.number, row.status, row.raw !== null, row.trace !== null]), [
+      [1, "done", true, false], // the reference row: its item, no trace
+      [2, "failed", true, true],
+      [3, "skipped-locked", true, true], // described: whatever the run recorded of it
+      [4, "failed", true, true],
+    ]);
+    assert.equal(first?.listedEpisodes, null);
+    assert.equal(first?.episodesDigest?.length, 4);
+    await module.reportJobEnd(job, OUTCOME, runs, () => null, record.inputs); // the downloader has forgotten: it is not asked
+    assert.equal(downloads.length, 2);
+    const parsed = downloads.map((saved) => ({ ...JSON.parse(saved.text), generated_at: null }));
+    assert.deepEqual(parsed[1], parsed[0]);
+    assert.equal(parsed[0].series[0].not_downloaded[0].attempts.length, 1); // the truncated episode's attempt is in both
+    // an input that cannot be taken leaves that run, and every later one, whole — and the report still has them all
+    const later = [finishedRun(SERIES_ID, "Test Series", reportRows()), other(), finishedRun("7699393770256782388", "Third", reportRows().map((row) => ({ ...row, episode: episode(row.episode.number, { seriesId: "7699393770256782388" }) })))];
+    let asked = 0;
+    const failing = {
+      traceOf: (/** @type {import("../src/lib/catalog.js").Episode} */ ep) => {
+        asked += 1;
+        if (ep.seriesId === OTHER_ID) throw new Error("no trace");
+        return TRACES.of(ep);
+      },
+      forgetSeries: jobDownloader.forgetSeries,
+    };
+    /** @type {Pick<import("../src/app/app.js").JobRecord, "inputs" | "taking">} */
+    const partial = { inputs: [], taking: true };
+    const warn = console.warn;
+    console.warn = () => undefined; // the page notes the reason; not this test's output
+    try {
+      for (const run of later) module.releaseSeries(run, failing, partial);
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(partial.inputs.length, 1);
+    assert.equal(partial.taking, false);
+    assert.equal(asked, 4 + 1); // the third series was not even tried
+    assert.ok(later[1]?.results.every((result) => result.episode.raw !== null) && later[2]?.results.every((result) => result.episode.raw !== null));
+    await module.reportJobEnd({ kind: "batch", label: "3 series" }, OUTCOME, later, TRACES.of, partial.inputs);
+    const whole = JSON.parse(/** @type {string} */ (downloads[2]?.text));
+    assert.deepEqual(whole.series.map((/** @type {{not_downloaded: unknown[]}} */ run) => run.not_downloaded.length), [3, 0, 3]);
+    assert.equal(whole.series[2].not_downloaded[0].raw.id, "item2");
+  } finally {
+    page.restore();
+  }
+});
+
+test("the downloader lets go of a finished series: its traces and fresh list, nothing of another series", async () => {
+  const subject = downloader({ fetch: async () => new Response("", { status: 404 }) });
+  const mine = [episode(1), episode(2)];
+  const theirs = episode(1, { seriesId: OTHER_ID });
+  for (const ep of [...mine, theirs]) subject.trace(ep).attempts.push(/** @type {never} */ ({ url: "https://v1.tiktok.com/a.mp4" }));
+  subject.freshItems.set(SERIES_ID, new Map([["item1", {}]]));
+  subject.freshItems.set(OTHER_ID, new Map([["item1", {}]]));
+  subject.failedRefreshes.add(SERIES_ID);
+  subject.refreshes = 3;
+  subject.forgetSeries(SERIES_ID);
+  assert.deepEqual(mine.map((ep) => subject.traceOf(ep)), [null, null]);
+  assert.equal(subject.traceOf(theirs)?.attempts.length, 1);
+  assert.deepEqual([...subject.freshItems.keys()], [OTHER_ID]);
+  assert.equal(subject.failedRefreshes.has(SERIES_ID), true); // a failed refresh is still not asked again
+  assert.equal(subject.refreshes, 3);
+  // an id that is the beginning of another's is not that other series
+  const longer = episode(1, { seriesId: `${OTHER_ID}9` });
+  subject.trace(longer);
+  subject.forgetSeries(OTHER_ID);
+  assert.equal(subject.traceOf(theirs), null);
+  assert.notEqual(subject.traceOf(longer), null);
+});
+
 /**
  * A finished series run as the engine hands it to the page, over `results` (its series listed:
  * every result's episode, plus `extra` episodes the run never reached).

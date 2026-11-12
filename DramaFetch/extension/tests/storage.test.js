@@ -15,6 +15,7 @@ import {
   HISTORY_MAX_BYTES,
   appendHistory,
   cooldownStore,
+  historyEntry,
   normalizeSettings,
   settingsProblem,
   trimHistory,
@@ -126,6 +127,82 @@ test("a storage that refuses the history gets the run alone, else no history", a
     /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]).map((entry) => entry["id"]),
     [5],
   );
+});
+
+/**
+ * The history entry of a batch as the page records it: `seriesCount` series of `episodes` rows,
+ * the second episode of every tenth series failed, a pause per episode.
+ * @param {number} id
+ * @param {number} seriesCount
+ * @param {number} episodes
+ * @returns {Record<string, unknown>}
+ */
+function batchRun(id, seriesCount, episodes) {
+  return {
+    id,
+    kind: "batch",
+    label: `${seriesCount} series`,
+    started_at: "2026-11-12T08:00:00.000Z",
+    finished_at: "2026-11-12T20:00:00.000Z",
+    error: null,
+    stopped: null,
+    refreshes: 0,
+    pauses: Array.from({ length: seriesCount * episodes }, () => ({ kind: "pace", seconds: 6.4, text: "pausing 6.4 s" })),
+    series: Array.from({ length: seriesCount }, (_, index) => ({
+      series_id: String(7599400000000000000n + BigInt(index)),
+      name: `Invented Series Number ${index}`,
+      status: index % 10 === 0 ? "incomplete" : "complete",
+      error: null,
+      error_kind: null,
+      stop: false,
+      contacted: true,
+      line: index % 10 === 0 ? `incomplete: ${episodes - 1} of ${episodes} — 1 failed (2)` : `complete: ${episodes} of ${episodes} (${episodes} downloaded)`,
+      report: { listed: episodes, done: episodes },
+      rows: Array.from({ length: episodes }, (_, row) => ({
+        number: row + 1,
+        status: index % 10 === 0 && row === 1 ? "failed-unavailable" : "done",
+        message: `saved Invented Series Number ${index} - Episode ${String(row + 1).padStart(2, "0")}.mp4 (12.3 MiB) + cover embedded`,
+        path: `C:\\Users\\Owner\\Downloads\\DramaFetch\\Invented Series Number ${index}\\Episode ${row + 1}.mp4`,
+        download_id: index * 100 + row,
+      })),
+    })),
+  };
+}
+
+test("a run too large for the history's budget is stored compact — its failure rows, its series' lines, no pauses — and pushes no earlier run out", async () => {
+  const small = batchRun(1, 2, 60);
+  assert.ok(size([small]) < HISTORY_MAX_BYTES);
+  assert.equal(historyEntry(small), small); // a run that fits is stored as it is
+  const large = batchRun(2, 70, 60);
+  assert.ok(size([large]) > HISTORY_MAX_BYTES, String(size([large]))); // 4 200 rows and 4 200 pauses: over 1 MiB
+  const compact = historyEntry(large);
+  assert.ok(size([compact]) < 64 * 1024, String(size([compact])));
+  assert.deepEqual(compact["pauses"], []);
+  assert.equal(compact["pauses_omitted"], 4200);
+  const series = /** @type {Record<string, unknown>[]} */ (compact["series"]);
+  assert.equal(series.length, 70);
+  for (const [index, record] of series.entries()) {
+    const whole = /** @type {Record<string, unknown>[]} */ (large["series"])[index];
+    const { rows, rows_omitted: omitted, ...rest } = record;
+    const { rows: wholeRows, ...wholeRest } = /** @type {Record<string, unknown>} */ (whole);
+    assert.deepEqual(rest, wholeRest); // the name, the status, the error, the line and the report stay
+    const failures = /** @type {Record<string, unknown>[]} */ (wholeRows).filter((row) => String(row["status"]).startsWith("failed"));
+    assert.deepEqual(rows, failures); // every row the retry reads, whole
+    assert.equal(omitted, 60 - failures.length);
+  }
+  assert.equal(series.filter((record) => /** @type {unknown[]} */ (record["rows"]).length === 1).length, 7);
+  for (const key of ["id", "kind", "label", "started_at", "finished_at", "error", "stopped", "refreshes"]) assert.deepEqual(compact[key], large[key]);
+  assert.equal(JSON.stringify(large).length > 1_000_000, true); // the run handed in is not touched
+  // malformed parts are left as they are, never a throw
+  const odd = { id: 3, padding: "x".repeat(2000), pauses: "none", series: [null, { series_id: "1", rows: "many" }, { series_id: "2", rows: [null, { status: 7 }, { status: "failed" }] }] };
+  assert.deepEqual(historyEntry(odd, 1000), { ...odd, pauses: [], pauses_omitted: 0, series: [null, { series_id: "1", rows: "many" }, { series_id: "2", rows: [{ status: "failed" }], rows_omitted: 2 }] });
+  // stored: the earlier runs stay, where the whole run would have pushed them all out
+  const { stored } = fakeLocal({ [HISTORY_KEY]: [run(1), run(0)] });
+  await appendHistory(large);
+  const history = /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]);
+  assert.deepEqual(history.map((entry) => entry["id"]), [2, 1, 0]);
+  assert.deepEqual(history[0], compact);
+  assert.ok(size(history) < HISTORY_MAX_BYTES);
 });
 
 test("the history never throws: a store that can be neither read nor written ends a job all the same", async () => {

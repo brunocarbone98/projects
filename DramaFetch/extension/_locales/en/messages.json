@@ -241,6 +241,10 @@
       }
     }
   },
+  "resultTrimmed": {
+    "message": "Only the most recent episode rows are shown. Every series keeps its line below, and its row in the table at the end.",
+    "description": "Under the result table once a long batch has dropped the rows of the episodes it finished long ago (the table keeps about the last 2000 rows)."
+  },
   "storageRefused": {
     "message": "DramaFetch stopped: $reason$. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.",
     "description": "Shown when chrome.storage.local refused to store DramaFetch's progress: the engine's reason in the page's language (it ends with Chrome's own words), and what to do.",

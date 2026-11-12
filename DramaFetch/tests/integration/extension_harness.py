@@ -21,8 +21,9 @@ Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
 `tr[data-number]` per listed episode with `data-access` free|unlocked|locked, its checkbox, the
 `.badge` and the `.hints` span of a locked one — `plays 2 s of 10 s`, say — and the
 `td.cover-cell` whose thumbnail arrives once the row is in view), `#result-table`,
-`#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`, `#failed-table` (rows with
-`data-number`, `data-status`, a `.badge` and a `td.message`), `#retry-button`, `#report-button`,
+`#result-trimmed`, `#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`,
+`#failed-table` (rows with `data-number`, `data-status`, a `.badge` and a `td.message`),
+`#retry-button`, `#report-button`,
 `#failed-report`, `#setting-report`, `#settings-save`, `#history-list`. Storage keys it reads:
 `history` (most recent run first), `cooldown`, `series:<id>`, `pacing`. A cookie value is never
 printed, logged or asserted on.

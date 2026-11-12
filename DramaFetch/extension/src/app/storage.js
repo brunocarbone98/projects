@@ -62,6 +62,8 @@ export const HISTORY_MAX_BYTES = 1024 * 1024;
  * @property {number} [existenceDelayMs] the wait after asking Chrome to re-check its files (300 ms)
  * @property {number} [existenceRateLimitS] Chrome's 10 s between two such checks, which a job's
  *   first look at the downloads waits out; 0: never wait (tests that delete no file)
+ * @property {number} [maxResultRows] how many rows the result table keeps while a job runs (2000
+ *   outside test mode: `app.MAX_RESULT_ROWS`)
  *
  * @typedef {object} StoredPacing The run's pacing as stored (wall-clock seconds).
  * @property {PacingState} pacing
@@ -99,6 +101,7 @@ const TEST_NUMBER_KEYS = /** @type {const} */ ([
   "detailGraceS",
   "existenceDelayMs",
   "existenceRateLimitS",
+  "maxResultRows",
 ]);
 
 /**
@@ -393,14 +396,51 @@ export function trimHistory(entries, limit = HISTORY_LIMIT, maxBytes = HISTORY_M
 }
 
 /**
- * Put a finished run first in the history ({@link trimHistory}). Should the storage refuse it (a
- * full disk), the history gives way — the run alone, else no history at all — and never the
- * series states; a history that cannot be read gives way too. Never throws: a job's end must not
- * break on its history.
+ * @param {unknown} value
+ * @returns {number} its size as UTF-8 JSON
+ */
+function jsonBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * A run as the history stores it. One that fits {@link HISTORY_MAX_BYTES} is stored as it is. A
+ * larger one — a batch of some 45 series or more: a row per episode and a record per pause — is
+ * stored compact, so that it neither pushes every earlier run out nor makes the history a value
+ * of tens of megabytes read at every page start: of each series only the rows whose episode did
+ * not download (status `failed…`: all the history's retry line and button read), no pauses, and
+ * how many of each were left out (`rows_omitted` per series, `pauses_omitted`). The series' names,
+ * lines, errors and reports stay.
  * @param {Record<string, unknown>} entry
+ * @param {number} [maxBytes]
+ * @returns {Record<string, unknown>}
+ */
+export function historyEntry(entry, maxBytes = HISTORY_MAX_BYTES) {
+  if (jsonBytes(entry) <= maxBytes) return entry;
+  const series = Array.isArray(entry["series"]) ? entry["series"] : [];
+  const pauses = Array.isArray(entry["pauses"]) ? entry["pauses"] : [];
+  return {
+    ...entry,
+    pauses: [],
+    pauses_omitted: pauses.length,
+    series: series.map((record) => {
+      if (!isRecord(record) || !Array.isArray(record["rows"])) return record;
+      const rows = record["rows"].filter((row) => isRecord(row) && typeof row["status"] === "string" && row["status"].startsWith("failed"));
+      return { ...record, rows, rows_omitted: record["rows"].length - rows.length };
+    }),
+  };
+}
+
+/**
+ * Put a finished run first in the history ({@link historyEntry}, {@link trimHistory}). Should the
+ * storage refuse it (a full disk), the history gives way — the run alone, else no history at all —
+ * and never the series states; a history that cannot be read gives way too. Never throws: a job's
+ * end must not break on its history.
+ * @param {Record<string, unknown>} run
  * @returns {Promise<void>}
  */
-export async function appendHistory(entry) {
+export async function appendHistory(run) {
+  const entry = historyEntry(run);
   const history = trimHistory([entry, ...(await readHistory().catch(() => []))]);
   try {
     await chrome.storage.local.set({ [HISTORY_KEY]: history });
