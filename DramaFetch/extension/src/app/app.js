@@ -10,7 +10,7 @@
  */
 
 import { isLocked } from "../lib/catalog.js";
-import { COOLDOWN_STORAGE_KEY, activeCooldown, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
+import { COOLDOWN_STORAGE_KEY, activeCooldown, clockTime, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
 import { buildReport, digestEntry, hasFailures, reportFilename, reportJson, reportStem, slimRows } from "../lib/diagnosis.js";
 import { displayText, statusLabel } from "../lib/display.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
@@ -33,6 +33,7 @@ import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, save
 import { initPageRedirects } from "./redirects.js";
 import {
   StopRequested,
+  StorageRefusedError,
   checkCooldown,
   episodeContext,
   resolve,
@@ -324,11 +325,14 @@ async function noteContact(job) {
 }
 
 /**
- * `chrome.storage.local` refused a write: remembered in {@link app}.unsaved, the first reason kept.
+ * `chrome.storage.local` refused a write: remembered in {@link app}.unsaved, the first reason kept,
+ * and the buttons that would start a job disabled from now on.
  * @param {unknown} error what the write rejected with
  */
 function noteRefusedWrite(error) {
-  app.unsaved = app.unsaved ?? storageRefusedReason(error);
+  if (app.unsaved !== null) return;
+  app.unsaved = storageRefusedReason(error);
+  updateButtons();
 }
 
 /**
@@ -346,11 +350,29 @@ async function storePacing() {
 }
 
 /**
+ * Say, in the status line, that this page stopped because `chrome.storage.local` refused a write
+ * ({@link app}.unsaved) and what to do. When a cooldown is in force too, the advice names its end:
+ * a cooldown that could not be stored is only in this browser session's memory, and restarting
+ * Chrome before then would forget it.
+ * @returns {Promise<void>}
+ */
+async function showStorageRefused() {
+  if (app.unsaved === null) return;
+  const reason = shownText(app.unsaved);
+  const cooldown = await checkCooldownNow();
+  const text = cooldown === null ? t("storageRefused", [reason]) : t("storageRefusedCooldown", [reason, clockTime(cooldown.until)]);
+  setStatus($("input-status"), text, "error");
+  updateButtons();
+}
+
+/**
+ * The engine of one job, wired to this page: its storage, its pacing, its downloader and the
+ * progress card. (Exported for the unit tests, which cannot run a job but can call its hooks.)
  * @param {Job} job
  * @param {JobRecord} jobRecord
  * @returns {Engine}
  */
-function buildEngine(job, jobRecord) {
+export function buildEngine(job, jobRecord) {
   const base = baseUrl();
   const test = app.testMode ? app.testSettings : {};
   const networkBefore = app.pacing.lastNetworkAt;
@@ -364,6 +386,8 @@ function buildEngine(job, jobRecord) {
   /** A listing contacts TikTok from its first request to its last: noted at both ends. */
   const discover = async (/** @type {SeriesRef} */ ref) => {
     await noteContact(job);
+    // that save refused (or one before it): not one request of the listing
+    if (app.unsaved !== null) throw new StorageRefusedError(app.unsaved);
     try {
       return await discoverSeries(ref, discoveryOptions);
     } finally {
@@ -566,6 +590,17 @@ function isSeriesRow(row) {
 }
 
 /**
+ * `rows` without the header rows of the series that have no row left among them (their rows all
+ * failed and moved to the failed block, or the trimming took them).
+ * @param {readonly Element[]} rows
+ * @returns {Element[]}
+ */
+function withoutBareHeaders(rows) {
+  const shown = new Set(rows.filter((row) => !isSeriesRow(row)).map((row) => row.getAttribute("data-series-id")));
+  return rows.filter((row) => !isSeriesRow(row) || shown.has(row.getAttribute("data-series-id")));
+}
+
+/**
  * Keep the result table light (called when a series of a batch is done): over `limit` rows, the
  * OLDEST rows of episodes that completed — done, skipped, dry run — leave, then the header rows
  * of the series left with no row. A failure row never leaves (the job's end shows those apart,
@@ -589,11 +624,8 @@ export function trimResultRows(limit = (app.testMode ? app.testSettings.maxResul
     excess -= 1;
   }
   if (leaving.size === 0) return;
-  // a header whose series has no row left goes with them
-  const shown = new Set(rows.filter((row) => !isSeriesRow(row) && !leaving.has(row)).map((row) => row.getAttribute("data-series-id")));
-  for (const row of rows) if (isSeriesRow(row) && !shown.has(row.getAttribute("data-series-id"))) leaving.add(row);
   body.replaceChildren();
-  appendInPieces(body, rows.filter((row) => !leaving.has(row)));
+  appendInPieces(body, withoutBareHeaders(rows.filter((row) => !leaving.has(row)))); // a header whose series has no row left goes too
   $("result-trimmed").hidden = false;
 }
 
@@ -773,7 +805,7 @@ function failedEpisodesText(targets, named) {
  * @param {HTMLButtonElement} source
  */
 function startRetry(targets, source) {
-  if (!app.owner || app.cooldown !== null || spentRetries.has(source)) return;
+  if (!app.owner || app.cooldown !== null || app.unsaved !== null || spentRetries.has(source)) return;
   source.disabled = true;
   spentRetries.add(source);
   for (const job of retryJobs(targets)) enqueue(job);
@@ -814,7 +846,9 @@ export function renderFailed(seriesRecords) {
     const results = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
     const kept = [...results.children].filter((row) => !leaving.has(`${row.getAttribute("data-series-id")}:${row.getAttribute("data-number")}`));
     results.replaceChildren();
-    appendInPieces(results, kept); // never one spread of them all: a table of 125 000 rows would overflow the call
+    // a series' header with no row left goes too; never one spread of them all: a table of
+    // 125 000 rows would overflow the call
+    appendInPieces(results, withoutBareHeaders(kept));
     for (const row of rows) {
       body.append(
         el("tr", { attrs: { "data-series-id": row.seriesId, "data-number": String(row.number), "data-status": row.status } }, [
@@ -979,6 +1013,12 @@ function renderAppStatus() {
  */
 function enqueue(job) {
   if (!app.owner) return;
+  if (app.unsaved !== null) {
+    // the page cannot store anything any more: a job would only be refused, after clearing the
+    // last one's results (the popup's "Download this series" and the retry buttons come here too)
+    void showStorageRefused();
+    return;
+  }
   app.queue.push({ ...job, id: app.nextJobId++ });
   renderAppStatus();
   void pump();
@@ -1129,7 +1169,7 @@ async function runJob(job) {
     if (app.unsaved !== null) {
       // chrome.storage.local refused a write: a stop (no waiting job starts), and what to do about it
       if (stop === null) entry["error"] = stop = app.unsaved;
-      setStatus($("input-status"), t("storageRefused", [shownText(app.unsaved)]), "error");
+      await showStorageRefused();
     }
     entry["stopped"] = stop;
     entry["finished_at"] = new Date().toISOString();
@@ -1286,9 +1326,20 @@ function showCover(itemId, url) {
  * The list's thumbnails: the extension's own requests, only for the rows in view, one at a time,
  * never during a job or a cooldown.
  */
+/**
+ * Whether the list's thumbnails may be requested now: in the engine's tab, while no job runs or
+ * waits, no cooldown is in force and nothing was refused by `chrome.storage.local` — once a write
+ * was refused, this page asks nothing of TikTok, not even a thumbnail. (Exported for the unit
+ * tests.)
+ * @returns {Promise<boolean>}
+ */
+export async function coversAllowed() {
+  return app.owner && app.unsaved === null && app.running === null && app.queue.length === 0 && (await checkCooldownNow()) === null;
+}
+
 const covers = new CoverLoader({
   hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
-  allowed: async () => app.owner && app.running === null && app.queue.length === 0 && (await checkCooldownNow()) === null,
+  allowed: coversAllowed,
   pause: () => sleepSeconds(pagePause(defaultRng, app.testMode ? (app.testSettings.pageDelayS ?? PAGE_DELAY_S) : PAGE_DELAY_S)),
   onCover: showCover,
   baseUrl,
@@ -1312,7 +1363,7 @@ function updateSelection() {
 // ------------------------------------------------------------------------- the buttons
 
 function updateButtons() {
-  const blocked = !app.owner || app.cooldown !== null;
+  const blocked = !app.owner || app.cooldown !== null || app.unsaved !== null;
   button("load-button").disabled = blocked;
   button("download-all-button").disabled = blocked;
   const loaded = app.loaded !== null;
@@ -1503,7 +1554,12 @@ async function onSaveSettings(event) {
 }
 
 async function onResetSettings() {
-  await saveSettings({ ...DEFAULT_SETTINGS });
+  try {
+    await saveSettings({ ...DEFAULT_SETTINGS });
+  } catch (error) {
+    setStatus($("settings-status"), t("settingsRefused", shownText(oneLine(error))), "error");
+    return;
+  }
   app.settings = { ...DEFAULT_SETTINGS };
   fillSettings();
   setStatus($("settings-status"), t("settingsSaved"), "ok");

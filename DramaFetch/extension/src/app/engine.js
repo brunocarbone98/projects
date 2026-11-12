@@ -26,7 +26,8 @@
  *   to the videos: what the result needed comes first (its row, the attempt counted, a refusal's
  *   cooldown), then the rest is `stopped: the progress could not be saved: <Chrome's reason>` with
  *   no request and no further write, and no series is listed while the page says a write was
- *   refused (`engine.unsaved`).
+ *   refused (`engine.unsaved`; the page's listing throws {@link StorageRefusedError} instead of
+ *   making a request).
  *
  * Every pause is announced (`onPause`) and slept through the injected `sleep`; the state is saved
  * after every episode, so closing the tab loses nothing and the next run resumes. Timers in a
@@ -505,6 +506,7 @@ export async function runSeries(engine, ref, hooks = {}) {
   try {
     series = await resolve(engine, ref);
   } catch (error) {
+    if (error instanceof StorageRefusedError) return storageRefusal(ref, error.message); // refused right before the listing
     if (error instanceof DiscoveryError) return resolveFailure(ref, error);
     throw error;
   }
@@ -736,11 +738,26 @@ export async function runSelectionJob(engine, ref, numbers, job) {
   try {
     series = await resolve(engine, ref);
   } catch (error) {
+    if (error instanceof StorageRefusedError) return storageRefusal(ref, error.message); // refused right before the listing
     if (error instanceof DiscoveryError) return resolveFailure(ref, error);
     throw error;
   }
   const run = await runSelection(engine, series, numbers, { lastContactAt: null }); // rested already
   return { ...run, contacted: true };
+}
+
+/**
+ * A listing asked for after `chrome.storage.local` refused a write of this page: not one request
+ * is made (the page's `discover` checks right before the listing). Its message is the reason,
+ * {@link storageRefusedReason}; a run that meets it is a {@link storageRefusal}, and the in-run
+ * re-discovery of an episode fails that episode with it, no further URL requested.
+ */
+export class StorageRefusedError extends DiscoveryError {
+  /** @param {string} reason {@link storageRefusedReason} */
+  constructor(reason) {
+    super(reason);
+    this.name = "StorageRefusedError";
+  }
 }
 
 /** The user asked the run to stop: it ends at the next pause or between two episodes. */

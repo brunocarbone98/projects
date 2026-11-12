@@ -242,7 +242,7 @@
     }
   },
   "resultTrimmed": {
-    "message": "Only the most recent episode rows are shown. Every series keeps its line below, and its row in the table at the end.",
+    "message": "Only the most recent episode rows are shown; every finished series keeps its line below.",
     "description": "Under the result table once a long batch has dropped the rows of the episodes it finished long ago (the table keeps about the last 2000 rows)."
   },
   "storageRefused": {
@@ -251,6 +251,18 @@
     "placeholders": {
       "reason": {
         "content": "$1"
+      }
+    }
+  },
+  "storageRefusedCooldown": {
+    "message": "DramaFetch stopped: $reason$. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request, and the wait until $time$ could not be saved: free some space, restart Chrome only after $time$ and run again — what is already saved is skipped.",
+    "description": "Shown instead of storageRefused when a cooldown is in force too: that wait could not be stored, so restarting Chrome before its end would forget it. $1 is the engine's reason in the page's language, $2 the cooldown's end (HH:MM).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      },
+      "time": {
+        "content": "$2"
       }
     }
   },

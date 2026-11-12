@@ -947,9 +947,14 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         assert rows[5]["attempts"] == [] and rows[5]["access"] == "locked"
         assert rows[5]["lock_hints"] and rows[5]["raw"]["id"] == MAIN_ITEMS[5]
         assert rows[5]["probable_cause"].startswith("listed as locked for this session: ")
-        # the page: the file's name, the button
-        assert line.is_visible()
-        assert line.text_content() == f"Report saved: {report_path.name}"
+        # the page: the file's name (said once its download has completed), the button
+        ext.wait_for(
+            lambda: (
+                line.is_visible() and line.text_content() == f"Report saved: {report_path.name}"
+            ),
+            10,
+            "the page did not say the report was saved",
+        )
         report_button = page.locator("#report-button")
         assert report_button.is_visible() and report_button.is_enabled()
         assert report_button.text_content() == "Save the report"
@@ -975,8 +980,14 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         second = [path for path in _report_files(ext) if path != report_path]
         (second_path,) = second
         assert _REPORT_NAME_RE.match(second_path.name), second_path.name
-        assert line.is_visible()
-        assert line.text_content() == f"Report saved: {second_path.name}"
+        # the file is on disk a moment before the page has heard that its download completed
+        ext.wait_for(
+            lambda: (
+                line.is_visible() and line.text_content() == f"Report saved: {second_path.name}"
+            ),
+            10,
+            "the page did not say the second report was saved",
+        )
         retried = json.loads((ext.downloads / second_path).read_text(encoding="utf-8"))
         assert [row["number"] for row in retried["series"][0]["not_downloaded"]] == [1, 2, 3, 4]
         assert retried["series"][0]["not_downloaded"][1]["status"] == "skipped-locked"
@@ -1177,9 +1188,15 @@ def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_history_c
         ) == (THIRD_SERIES_ID)
         assert page.locator("#result-trimmed").is_visible()
         assert page.locator("#result-trimmed").text_content() == (
-            "Only the most recent episode rows are shown. Every series keeps its line below, and "
-            "its row in the table at the end."
+            "Only the most recent episode rows are shown; every finished series keeps its line "
+            "below."
         )
+        # every row of the table, headers included: no header is left without its rows
+        every_row = page.locator("#result-table tbody tr")
+        assert [
+            (row.get_attribute("data-series-id"), row.get_attribute("data-number"))
+            for row in every_row.all()
+        ] == [(THIRD_SERIES_ID, None), (THIRD_SERIES_ID, "4")]
         assert _table_rows(page, "#failed-table") == [("2", "failed-unavailable")]
         assert page.locator("#failed-heading").text_content() == "Did not download (1)"
         assert page.locator("#report-lines li").count() == 3

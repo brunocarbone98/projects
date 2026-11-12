@@ -10,6 +10,7 @@ import { activeCooldown, clearCooldown, recordBlock } from "../src/lib/cooldown.
 import { MEDIA_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
 import {
   DEFAULT_SETTINGS,
+  HISTORY_ENTRY_MAX_BYTES,
   HISTORY_KEY,
   HISTORY_LIMIT,
   HISTORY_MAX_BYTES,
@@ -26,10 +27,12 @@ const REFUSED = "IO error: .../000003.log: FILE_ERROR_NO_SPACE (ChromeMethodBFE:
 
 /**
  * A `chrome.storage.local` whose writes (`set`, `remove`) and reads (`get`) can be made to reject,
- * installed as the global `chrome`.
+ * installed as the global `chrome` with a `chrome.storage.session` (the browser session's memory:
+ * `session`, never refused).
  * @param {Record<string, unknown>} [stored]
+ * @param {Record<string, unknown>} [session]
  */
-function fakeLocal(stored = {}) {
+function fakeLocal(stored = {}, session = {}) {
   const switches = { refuseWrites: false, refuseReads: false };
   const local = {
     /** @param {string} key */
@@ -48,8 +51,16 @@ function fakeLocal(stored = {}) {
       delete stored[key];
     },
   };
-  Object.assign(globalThis, { chrome: { storage: { local } } });
-  return { stored, switches };
+  const sessionArea = {
+    /** @param {string} key */
+    get: async (key) => (Object.hasOwn(session, key) ? { [key]: session[key] } : {}),
+    /** @param {Record<string, unknown>} items */
+    set: async (items) => void Object.assign(session, items),
+    /** @param {string} key */
+    remove: async (key) => void delete session[key],
+  };
+  Object.assign(globalThis, { chrome: { storage: { local, session: sessionArea } } });
+  return { stored, session, switches };
 }
 
 /**
@@ -205,6 +216,25 @@ test("a run too large for the history's budget is stored compact — its failure
   assert.ok(size(history) < HISTORY_MAX_BYTES);
 });
 
+test("every run is held to its share of the history: back-to-back batches of 40 series all stay, each with its retry", async () => {
+  assert.equal(HISTORY_ENTRY_MAX_BYTES, Math.floor(HISTORY_MAX_BYTES / HISTORY_LIMIT));
+  const one = batchRun(1, 40, 60);
+  assert.ok(size([one]) > HISTORY_ENTRY_MAX_BYTES && size([one]) < HISTORY_MAX_BYTES, String(size([one]))); // whole, it would fit 1 MiB alone
+  const { stored } = fakeLocal();
+  for (let id = 1; id <= HISTORY_LIMIT; id += 1) await appendHistory(batchRun(id, 40, 60));
+  const history = /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]);
+  assert.deepEqual(history.map((entry) => entry["id"]), Array.from({ length: HISTORY_LIMIT }, (_, index) => HISTORY_LIMIT - index));
+  for (const entry of history) {
+    const series = /** @type {Record<string, unknown>[]} */ (entry["series"]);
+    assert.equal(series.filter((record) => /** @type {unknown[]} */ (record["rows"]).length === 1).length, 4); // the failures each run's retry reads
+  }
+  assert.ok(size(history) <= HISTORY_MAX_BYTES);
+  // a run within its share is stored as it is: what the end-to-end scenarios read of small runs
+  const small = batchRun(99, 1, 60);
+  assert.ok(size([small]) <= HISTORY_ENTRY_MAX_BYTES);
+  assert.equal(historyEntry(small), small);
+});
+
 test("the history never throws: a store that can be neither read nor written ends a job all the same", async () => {
   const { stored, switches } = fakeLocal({ [HISTORY_KEY]: [run(1)] });
   switches.refuseWrites = true;
@@ -253,6 +283,27 @@ test("a cooldown the storage refuses to write is in force from memory until it e
   switches.refuseWrites = false;
   await clearCooldown(cooldownStore());
   assert.equal(await activeCooldown(cooldownStore(), { now: now + 302 }), null);
+});
+
+test("a cooldown the storage refuses survives a reload of the tab: the browser session's memory keeps it until Chrome closes", async () => {
+  const { stored, session, switches } = fakeLocal();
+  const now = 1_800_000_000;
+  switches.refuseWrites = true;
+  await recordBlock(cooldownStore(), MEDIA_RATE_LIMIT_MESSAGE, "browser", { now, onError: () => undefined });
+  assert.equal(Object.hasOwn(stored, "cooldown"), false);
+  assert.equal(/** @type {Record<string, unknown>} */ (session["cooldown"])["until"], now + 1800);
+  // the page reloaded: a fresh instance of the module, its memory empty — the session still answers
+  const reloaded = /** @type {typeof import("../src/app/storage.js")} */ (await import(`../src/app/storage.js?reload=${now}`));
+  assert.equal((await activeCooldown(reloaded.cooldownStore(), { now: now + 60 }))?.reason, MEDIA_RATE_LIMIT_MESSAGE);
+  // Chrome restarted: the session's memory is gone, and so is that cooldown (the page's message says to wait it out first)
+  delete session["cooldown"];
+  const restarted = /** @type {typeof import("../src/app/storage.js")} */ (await import(`../src/app/storage.js?restart=${now}`));
+  assert.equal(await activeCooldown(restarted.cooldownStore(), { now: now + 60 }), null);
+  // clearing removes the session's copy too
+  await recordBlock(reloaded.cooldownStore(), "again", "browser", { now: now + 100, onError: () => undefined });
+  switches.refuseWrites = false;
+  await clearCooldown(reloaded.cooldownStore());
+  assert.equal(Object.hasOwn(session, "cooldown"), false);
 });
 
 test("the report switch: on by default, a stored non-boolean falls back to it, and it must be a boolean to save", () => {

@@ -10,7 +10,8 @@
  * bytes per episode and is never pruned (it is the resume memory), so the quota was full near
  * 27 000 episodes. A write can still be refused — the disk that holds the Chrome profile is full
  * or failing: the callers stop the run (`engine.storageRefusedReason`), the history gives way
- * ({@link appendHistory}) and a refusal's cooldown stays in force from memory ({@link cooldownStore}).
+ * ({@link appendHistory}) and a refusal's cooldown stays in force from this browser session's
+ * memory ({@link cooldownStore}).
  *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
  */
@@ -30,6 +31,12 @@ export const SERIES_KEY_PREFIX = "series:";
 export const HISTORY_LIMIT = 20;
 /** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB. */
 export const HISTORY_MAX_BYTES = 1024 * 1024;
+/**
+ * One run's share of the history ({@link HISTORY_MAX_BYTES} / {@link HISTORY_LIMIT}, about
+ * 51 KiB): a run larger than this is stored compact ({@link historyEntry}), so that the last runs
+ * stay together however large one of them was.
+ */
+export const HISTORY_ENTRY_MAX_BYTES = Math.floor(HISTORY_MAX_BYTES / HISTORY_LIMIT);
 
 /**
  * @typedef {object} Settings What the user may set (Settings panel); the pauses only upwards.
@@ -256,7 +263,8 @@ export async function saveTestSettings(raw) {
 /**
  * A refusal's record that `chrome.storage.local` would not store (a full disk under the Chrome
  * profile): TikTok refused all the same, so the cooldown stays in force from here while this page
- * lives.
+ * lives — and from `chrome.storage.session`, the browser session's memory (never written to disk),
+ * after a reload of the tab too.
  * @type {Record<string, unknown> | null}
  */
 let unstoredCooldown = null;
@@ -272,35 +280,44 @@ function untilOf(record) {
 
 /**
  * The cooldown record in `chrome.storage.local` — and, when the storage refused to write one, the
- * record kept in memory: reading gives whichever ends later (also when the storage cannot be read),
- * so a refusal by TikTok is honoured even when it could not be stored. The next record the storage
- * accepts replaces the one in memory.
+ * same record kept in this page's memory and in `chrome.storage.session` (the browser session's
+ * memory: it survives a reload of the tab and is gone when Chrome closes; a full disk cannot
+ * refuse it). Reading gives whichever of them ends later — also when one cannot be read —, so a
+ * refusal by TikTok is honoured even when it could not be stored. The record the local storage
+ * accepts next ends later and so replaces them.
  * @returns {import("../lib/cooldown.js").CooldownStore}
  */
 export function cooldownStore() {
   const stored = storageAreaStore(chrome.storage.local);
+  const session = chrome.storage.session === undefined ? null : storageAreaStore(chrome.storage.session);
+  /** @param {import("../lib/cooldown.js").CooldownStore | null} area @returns {Promise<unknown>} */
+  const readOf = async (area) => {
+    try {
+      return area === null ? undefined : await area.read();
+    } catch {
+      return undefined; // an unreadable area counts as none (`readCooldown`); the others still answer
+    }
+  };
   return {
     read: async () => {
-      /** @type {unknown} */
-      let record;
-      try {
-        record = await stored.read();
-      } catch {
-        record = undefined; // an unreadable store counts as none (`readCooldown`), the memory still answers
-      }
-      return unstoredCooldown !== null && untilOf(unstoredCooldown) > untilOf(record) ? unstoredCooldown : record;
+      let found = await readOf(stored);
+      for (const other of [unstoredCooldown, await readOf(session)]) if (untilOf(other) > untilOf(found)) found = other;
+      return found;
     },
     write: async (record) => {
       try {
         await stored.write(record);
-        unstoredCooldown = null;
+        unstoredCooldown = null; // the stored record is the newest: the copies kept on a refusal go
+        await session?.remove?.()?.catch(() => undefined);
       } catch (error) {
         unstoredCooldown = record;
+        await session?.write(record)?.catch(() => undefined);
         throw error; // `recordBlock` reports it and still returns the cooldown
       }
     },
     remove: async () => {
       unstoredCooldown = null;
+      await session?.remove?.()?.catch(() => undefined);
       await stored.remove?.();
     },
   };
@@ -404,18 +421,18 @@ function jsonBytes(value) {
 }
 
 /**
- * A run as the history stores it. One that fits {@link HISTORY_MAX_BYTES} is stored as it is. A
- * larger one — a batch of some 45 series or more: a row per episode and a record per pause — is
- * stored compact, so that it neither pushes every earlier run out nor makes the history a value
- * of tens of megabytes read at every page start: of each series only the rows whose episode did
- * not download (status `failed…`: all the history's retry line and button read), no pauses, and
- * how many of each were left out (`rows_omitted` per series, `pauses_omitted`). The series' names,
- * lines, errors and reports stay.
+ * A run as the history stores it. One that fits its share of the history
+ * ({@link HISTORY_ENTRY_MAX_BYTES}, about 51 KiB: a couple of 60-episode series) is stored as it
+ * is. A larger one — a row per episode and a record per pause — is stored compact, so that it
+ * neither pushes the earlier runs out nor makes the history a value of megabytes read at every
+ * page start: of each series only the rows whose episode did not download (status `failed…`: all
+ * the history's retry line and button read), no pauses, and how many of each were left out
+ * (`rows_omitted` per series, `pauses_omitted`). The series' names, lines, errors and reports stay.
  * @param {Record<string, unknown>} entry
  * @param {number} [maxBytes]
  * @returns {Record<string, unknown>}
  */
-export function historyEntry(entry, maxBytes = HISTORY_MAX_BYTES) {
+export function historyEntry(entry, maxBytes = HISTORY_ENTRY_MAX_BYTES) {
   if (jsonBytes(entry) <= maxBytes) return entry;
   const series = Array.isArray(entry["series"]) ? entry["series"] : [];
   const pauses = Array.isArray(entry["pauses"]) ? entry["pauses"] : [];

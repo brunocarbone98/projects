@@ -242,15 +242,27 @@
     }
   },
   "resultTrimmed": {
-    "message": "Solo se muestran las filas de los episodios más recientes. Cada serie conserva su línea más abajo y su fila en la tabla del final.",
+    "message": "Solo se muestran las filas de los episodios más recientes; cada serie terminada conserva su línea más abajo.",
     "description": "Under the result table once a long batch has dropped the rows of the episodes it finished long ago (the table keeps about the last 2000 rows)."
   },
   "storageRefused": {
-    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque ese disco está lleno. Libera espacio, reinicia Chrome y vuelve a ejecutar: lo que ya está guardado se omite.",
+    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque el disco está lleno. Libera espacio, reinicia Chrome y vuelve a intentarlo: lo que ya está guardado se omite.",
     "description": "Shown when chrome.storage.local refused to store DramaFetch's progress: the engine's reason in the page's language (it ends with Chrome's own words), and what to do.",
     "placeholders": {
       "reason": {
         "content": "$1"
+      }
+    }
+  },
+  "storageRefusedCooldown": {
+    "message": "DramaFetch se detuvo: $reason$. Chrome no pudo escribir en la carpeta de su perfil; normalmente es porque el disco está lleno. Además, TikTok rechazó una solicitud y la espera hasta las $time$ no se pudo guardar: libera espacio, reinicia Chrome solo después de las $time$ y vuelve a intentarlo; lo que ya está guardado se omite.",
+    "description": "Shown instead of storageRefused when a cooldown is in force too: that wait could not be stored, so restarting Chrome before its end would forget it. $1 is the engine's reason in the page's language, $2 the cooldown's end (HH:MM).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      },
+      "time": {
+        "content": "$2"
       }
     }
   },

@@ -38,7 +38,7 @@ import {
   sanitizeError,
   servedShort,
 } from "../src/app/downloader.js";
-import { STORAGE_REFUSED_PREFIX, downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
+import { STORAGE_REFUSED_PREFIX, StorageRefusedError, downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
 
 const TINY = readFileSync(new URL("../../tests/fixtures/tiny.mp4", import.meta.url));
@@ -392,24 +392,29 @@ test("a write the page was refused (the pacing): the run stops before its next r
   const { results, stopped } = await downloadSeries(fake.engine, series(episodes), episodes, newState(SERIES_ID));
   // the saves: after E01's attempt, after E02's pause, after E02's attempt (refused) — E03 is never asked for
   assert.deepEqual(fake.downloads, [1, 2]);
+  assert.deepEqual(fake.pauses.map((p) => p.kind), ["pace"]); // and no pause once the refusal is known
   assert.equal(stopped, UNSAVED);
   assert.deepEqual(results.map((r) => r.status), ["done", "done", "failed", "failed"]);
   assert.equal(results[2]?.message, `stopped: ${UNSAVED}`);
   assert.equal(fake.refusedWrites(), 0); // no state write was refused: the page's refusal alone stops the run
   const stored = /** @type {{episodes: Record<string, unknown>}} */ (fake.states.get(SERIES_ID));
   assert.deepEqual(Object.keys(stored.episodes), ["1", "2"]); // nothing is written after it
-  // refused during a pause: the request that pause was for is not made
+  // refused during a pause: the save after E01's attempt is stored, the one at E02's pause refused —
+  // the request that pause was for is not made
   unsaved = null;
-  persists = 1; // the next save (E02's pause) is the second, the one after it (still the pause's) the third
+  persists = 0;
   const paused = fakeEngine();
   paused.engine.unsaved = () => unsaved;
   paused.engine.persist = async () => {
-    persists += 2;
-    if (persists >= 3) unsaved = unsaved ?? UNSAVED;
+    persists += 1;
+    if (persists >= 2) unsaved = unsaved ?? UNSAVED;
   };
   const during = await downloadSeries(paused.engine, series(episodes), episodes, newState(SERIES_ID));
   assert.deepEqual(paused.downloads, [1]);
+  assert.deepEqual(paused.pauses.map((p) => p.kind), ["pace"]); // the pause was taken, its request was not made
+  assert.equal(persists, 2);
   assert.equal(during.stopped, UNSAVED);
+  assert.deepEqual(during.results.map((r) => r.status), ["done", "failed", "failed", "failed"]);
   // a batch and a selection started while it holds: asked before the listing, no request at all
   /** @type {string[]} */
   const resolved = [];
@@ -452,6 +457,55 @@ test("a write the page was refused (the pacing): the run stops before its next r
   assert.equal(again[0]?.report.skippedComplete, true);
   assert.deepEqual(resolved, []);
   assert.equal(asked, 0);
+});
+
+test("a listing refused because nothing could be stored is a storage stop, never a request; a re-discovery refused so fails its episode with no further URL", async () => {
+  // the page's listing throws StorageRefusedError when its save right before was refused
+  /** @type {string[]} */
+  const resolved = [];
+  const fake = fakeEngine({
+    discover: async (ref) => {
+      resolved.push(ref.seriesId);
+      throw new StorageRefusedError(UNSAVED);
+    },
+  });
+  const refs = [SERIES_ID, OTHER_ID].map((seriesId) => ({ kind: /** @type {const} */ ("series"), seriesId, episodeHint: null, sourceUrl: seriesId }));
+  const runs = await runBatch(fake.engine, refs);
+  assert.deepEqual(resolved, [SERIES_ID]);
+  assert.deepEqual(fake.downloads, []);
+  assert.equal(runs[0]?.errorKind, "storage");
+  assert.equal(runs[0]?.error, UNSAVED);
+  assert.equal(runs[0]?.report.stopped, UNSAVED); // not "the episode list could not be fetched"
+  assert.equal(runs[1]?.error, `not started: batch stopped in ${SERIES_ID} (${UNSAVED})`);
+  const selection = await runSelectionJob(fake.engine, /** @type {never} */ (refs[1]), [1], { lastContactAt: null });
+  assert.equal(selection.errorKind, "storage");
+  assert.deepEqual(fake.downloads, []);
+  // inside a run: the episode's URL is refused (403), the fresh list it would need is refused for storage — no other URL is tried
+  /** @type {string[]} */
+  const log = [];
+  let listings = 0;
+  const subject = new Downloader({
+    quality: "compatible",
+    thumbnail: "none",
+    nameFormat: "{series} - Episode {number}",
+    includeLocked: false,
+    hostPatterns: ["https://*.tiktok.com/*", "https://*.tiktokcdn.com/*"],
+    view: /** @type {never} */ ({ completedAt: () => null, remember() {} }),
+    rediscover: async () => {
+      listings += 1;
+      throw new StorageRefusedError(UNSAVED);
+    },
+    fetch: fakeFetch({ "https://v1.tiktok.com/": () => new Response("", { status: 403 }) }, log),
+    redirects: null,
+    save: async () => {
+      throw new Error("nothing is saved");
+    },
+  });
+  const result = await subject.download(episode(1, { urls: ["https://v1.tiktok.com/a.mp4"] }), CONTEXT);
+  assert.equal(result.status, "failed");
+  assert.equal(result.message, `HTTP 403 from v1.tiktok.com; refreshing the episode list failed: ${UNSAVED}`);
+  assert.deepEqual(log, ["https://v1.tiktok.com/a.mp4"]);
+  assert.equal(listings, 1);
 });
 
 // ------------------------------------------------------------------------- discovery
@@ -2010,6 +2064,119 @@ test("the downloader lets go of a finished series: its traces and fresh list, no
   subject.forgetSeries(OTHER_ID);
   assert.equal(subject.traceOf(theirs), null);
   assert.notEqual(subject.traceOf(longer), null);
+});
+
+/** A batch job as the page queues it (no request is made by building its engine). */
+const BATCH_JOB = /** @type {import("../src/app/app.js").Job} */ ({
+  id: 1,
+  kind: "batch",
+  label: "2 series",
+  refs: [],
+  series: null,
+  numbers: [],
+  includeLocked: false,
+  recheck: false,
+});
+
+test("the page: the engine's hook releases each finished series of a batch and keeps the table light", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    /** @type {import("../src/app/app.js").JobRecord} */
+    const record = { pauses: [], inputs: [], taking: true };
+    const engine = module.buildEngine({ ...BATCH_JOB }, record);
+    const run = finishedRun(SERIES_ID, "Test Series", reportRows());
+    const [first] = run.results;
+    assert.ok(first !== undefined);
+    engine.downloader.trace(first.episode).attempts.push(/** @type {never} */ ({ url: "https://v1.tiktok.com/a.mp4" }));
+    const results = element("result-table").querySelector("tbody");
+    for (let number = 1; number <= module.MAX_RESULT_ROWS + 5; number += 1) results.append(resultRow(OTHER_ID, number, "done"));
+    element("result-trimmed").hidden = true;
+    engine.onSeriesDone?.(1, 2, run);
+    assert.equal(record.inputs.length, 1); // what the report reads of it, taken
+    assert.equal(record.inputs[0]?.seriesId, SERIES_ID);
+    assert.ok(run.series?.episodes.every((ep) => ep.raw === null)); // then its list items let go of
+    assert.equal(engine.downloader.traceOf(first.episode), null); // and its traces
+    assert.equal(element("report-lines").children.length, 1); // its report line, as before
+    assert.equal(results.children.length, module.MAX_RESULT_ROWS); // and the table held to the cap
+    assert.equal(element("result-trimmed").hidden, false);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: a series whose rows all failed leaves no bare header behind when they move to the failed block", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const results = element("result-table").querySelector("tbody");
+    results.append(headerRow(SERIES_ID), resultRow(SERIES_ID, 1, "failed"), resultRow(SERIES_ID, 2, "failed"), headerRow(OTHER_ID), resultRow(OTHER_ID, 1, "done"), resultRow(OTHER_ID, 2, "failed"));
+    module.renderFailed([
+      seriesRecord(SERIES_ID, "One", [[1, "failed", "boom"], [2, "failed", "boom"]]),
+      seriesRecord(OTHER_ID, "Two", [[1, "done"], [2, "failed", "boom"]]),
+    ]);
+    const keys = (/** @type {FakeElement} */ row) => `${row.getAttribute("data-series-id")}:${row.getAttribute("data-number") ?? "header"}`;
+    assert.deepEqual(results.children.map(keys), [`${OTHER_ID}:header`, `${OTHER_ID}:1`]);
+    assert.equal(element("failed-table").querySelector("tbody").children.length, 3);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: once chrome.storage.local refuses a write nothing more is asked of TikTok — no listing, no thumbnail, no job — and the page says what to do", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module, local } = page;
+    const engine = module.buildEngine({ ...BATCH_JOB }, { pauses: [], inputs: [], taking: true });
+    assert.equal(await module.coversAllowed(), true);
+    assert.equal(engine.unsaved?.(), null);
+    const set = chrome.storage.local.set;
+    Object.assign(chrome.storage.local, {
+      set: async () => {
+        throw new Error(REFUSED);
+      },
+    });
+    try {
+      await engine.persist?.(); // a save of the pacing, refused: never thrown, remembered
+      assert.equal(engine.unsaved?.(), UNSAVED);
+      // a listing asked for now makes no request: refused before the discovery's tab is even opened
+      await assert.rejects(
+        engine.discover({ kind: "series", seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID }),
+        (error) => error instanceof StorageRefusedError && error.message === UNSAVED,
+      );
+      assert.equal(await module.coversAllowed(), false); // no thumbnail either
+      // the popup's "Download this series": nothing queued, the page says why and what to do
+      const finished = element("app-status").dataset["finished"];
+      page.message({ type: "dramafetch:load", input: SERIES_ID });
+      for (let turns = 0; turns < 20 && element("input-status").className !== "error"; turns += 1) await page.turn();
+      assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
+      assert.deepEqual(queuedLabels(page), []);
+      assert.equal(element("app-status").dataset["finished"], finished);
+      for (const id of ["load-button", "download-all-button", "download-available-button", "download-selected-button", "retry-button"]) {
+        assert.equal(element(id).disabled, true, id);
+      }
+      // a cooldown in force too: the advice names its end — that wait lives only in this browser session
+      const until = Date.now() / 1000 + 600;
+      local.set("cooldown", { until, reason: "rate limited (HTTP 429) by the video server", source: "browser", recorded_at: until - 1800 });
+      element("input-status").className = "";
+      page.message({ type: "dramafetch:load", input: SERIES_ID });
+      for (let turns = 0; turns < 20 && element("input-status").className !== "error"; turns += 1) await page.turn();
+      const time = new Date(Math.floor(until) * 1000);
+      const hhmm = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}`;
+      assert.equal(
+        element("input-status").textContent,
+        `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. TikTok also refused a request, and the wait until ${hhmm} could not be saved: free some space, restart Chrome only after ${hhmm} and run again — what is already saved is skipped.`,
+      );
+      // a reset of the settings the storage refuses says so, instead of failing silently
+      element("settings-reset").fire("click");
+      for (let turns = 0; turns < 20 && element("settings-status").className !== "error"; turns += 1) await page.turn();
+      assert.equal(element("settings-status").textContent, `Not saved: ${REFUSED}`);
+    } finally {
+      Object.assign(chrome.storage.local, { set });
+    }
+  } finally {
+    page.restore();
+  }
 });
 
 /**

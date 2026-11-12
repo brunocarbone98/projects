@@ -13,6 +13,7 @@ value is involved.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,17 @@ STOPPED_TAIL = (
     ". Chrome could not write to its profile folder — usually its disk is full. Free some space, "
     "restart Chrome and run again: what is already saved is skipped."
 )
+
+
+def _stopped_with_cooldown(reason: str, until: str) -> str:
+    """The message when a cooldown is in force too (`storageRefusedCooldown`)."""
+    return (
+        f"{STOPPED_HEAD}{reason}. Chrome could not write to its profile folder — usually its disk "
+        f"is full. TikTok also refused a request, and the wait until {until} could not be saved: "
+        f"free some space, restart Chrome only after {until} and run again — what is already "
+        "saved is skipped."
+    )
+
 
 #: Fill `chrome.storage.local` with the states of finished 60-episode series — invented ids, built
 #: and written by the extension's own `lib/state.js` and `app/storage.js` — until the area holds
@@ -169,6 +181,54 @@ def _status_line(ext: ExtensionHarness) -> str:
     return ext.page.locator("#input-status").text_content() or ""
 
 
+def _queue_two(ext: ExtensionHarness, first: str, second: str) -> None:
+    """**Download all** for `first`, then for `second`, in one go: the second job is queued while
+    the first runs, whatever the first does (no race with a quick refusal)."""
+    ext.page.evaluate(
+        """([first, second]) => {
+          const links = document.getElementById("links");
+          const button = document.getElementById("download-all-button");
+          for (const value of [first, second]) {
+            links.value = value;
+            button.click();
+          }
+        }""",
+        [first, second],
+    )
+
+
+def _wait_finished(ext: ExtensionHarness, finished: int) -> None:
+    """Until `finished` jobs have ended, nothing runs and nothing waits."""
+    ext.wait_for(
+        lambda: (
+            ext.finished_jobs() >= finished
+            and ext.idle()
+            and ext.page.locator("#queue-card").is_hidden()
+        ),
+        message=f"{finished} job(s) did not finish",
+    )
+
+
+def _popup_load(ext: ExtensionHarness, expected_status: str | None) -> None:
+    """The popup's **Download this series** for the main series, as test_e of test_extension.py
+    sends it; waits until the app page has the link (and, unless None, shows `expected_status`)."""
+    ext.page.fill("#links", "")
+    popup = ext.context.new_page()
+    popup.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
+    popup.evaluate(
+        "(id) => chrome.runtime.sendMessage({type: 'dramafetch:open', load: id})", SERIES_ID
+    )
+    ext.wait_for(
+        lambda: (
+            ext.page.input_value("#links") == SERIES_ID
+            and (expected_status is None or _status_line(ext) == expected_status)
+        ),
+        20,
+        f"the popup's load did not end with {expected_status!r}",
+    )
+    popup.close()
+
+
 def _table_rows(ext: ExtensionHarness, table: str) -> list[tuple[str, str]]:
     """(episode number, status) of every episode row of `table`, in order."""
     rows = ext.page.locator(f"{table} tbody tr[data-number]")
@@ -215,9 +275,9 @@ def test_a_progress_past_chromes_10_mb_is_stored_and_a_series_still_completes(
     tmp_path: Path,
 ) -> None:
     """With the shipped permissions (`unlimitedStorage`) the per-series progress is not held to
-    `chrome.storage.local`'s 10 MB: about 480 finished 60-episode series are stored (11 MB), and
+    `chrome.storage.local`'s 10 MB: about 510 finished 60-episode series are stored (11 MB), and
     on top of them a series downloads, is recorded and, run again, is skipped as complete without
-    a request. Without the permission (DramaFetch 1.3.0) the store is full near 450 such series
+    a request. Without the permission (DramaFetch 1.3.0) the store is full near 490 such series
     and nothing more can be recorded."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         errors = _watch_errors(ext)
@@ -252,18 +312,17 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
     """The disk under the Chrome profile fills while episode 3 downloads: its file is saved and
     keeps its row, nothing more is asked of TikTok — episode 4 is `stopped: the progress could not
     be saved: <Chrome's reason>`, shown apart with its retry button and in the report —, the page
-    says what to do, the job waiting behind it never starts, and a second click makes no request.
-    Once writes work again (the page reloaded) the same series resumes: the two recorded episodes
+    says what to do, the job waiting behind it never starts, the buttons that would start a job
+    are disabled and the popup's **Download this series** makes no request. Once writes work again
+    (the page reloaded) the same series resumes: the two recorded episodes
     from the state, episode 3 found on disk through Chrome's download history, episode 4
     downloaded — nothing twice, no `(1).mp4`."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         errors = _watch_errors(ext)
         page = ext.page
         assert page.evaluate(FULL_DISK_JS, {"acceptStateWrites": 2, "message": FULL_DISK})
-        page.fill("#links", MAIN_LINK)
-        page.click("#download-all-button")
-        page.fill("#links", THIRD_LINK)  # a second job, waiting behind the first
-        _click_and_wait(ext, "#download-all-button", 1)
+        _queue_two(ext, MAIN_LINK, THIRD_LINK)  # a second job, waiting behind the first
+        _wait_finished(ext, 1)
 
         reason = f"{UNSAVED_PREFIX}{FULL_DISK}"
         assert ext.finished_jobs() == 1  # the waiting job never ran
@@ -281,7 +340,11 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
         assert failed.locator("td.message").text_content() == f"stopped: {reason}"
         assert failed.locator(".badge").text_content() == "stopped"
         assert page.locator("#failed-heading").text_content() == "Did not download (1)"
-        assert page.locator("#retry-button").is_enabled()
+        for button in ("#retry-button", "#download-all-button", "#load-button"):
+            assert page.locator(button).is_disabled(), button  # nothing can start a job here now
+        assert page.locator(
+            "#report-button"
+        ).is_enabled()  # a save of the report is no storage write
         assert _status_line(ext) == f"{STOPPED_HEAD}{reason}{STOPPED_TAIL}"
         assert "error" in (page.locator("#input-status").get_attribute("class") or "")
         ext.wait_for(lambda: page.locator("#failed-report").is_visible(), 10)
@@ -295,10 +358,10 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
         assert page.locator("#cooldown-banner").is_hidden()
 
         requests = len(server.requests)
-        page.fill("#links", MAIN_LINK)
-        _click_and_wait(ext, "#download-all-button", 2)  # again, in the same page: no request
+        _popup_load(ext, f"{STOPPED_HEAD}{reason}{STOPPED_TAIL}")  # queued nowhere: no request
         assert len(server.requests) == requests
-        assert _status_line(ext) == f"{STOPPED_HEAD}{reason}{STOPPED_TAIL}"
+        assert ext.finished_jobs() == 1 and page.locator("#queue-card").is_hidden()
+        assert _table_rows(ext, "#failed-table") == [("4", "failed")]  # the stopped run stays shown
         assert page.evaluate("() => globalThis.__refused()") > 0
         assert errors == []
 
@@ -329,9 +392,11 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
 
 def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: Path) -> None:
     """TikTok's video server answers HTTP 429 and the storage refuses every write from that
-    result on: the cooldown cannot be stored — and is in force all the same, from the page's
-    memory: the banner, the download buttons disabled, the popup's "Download this series" refused
-    with no request. The rest of the series is `stopped` by the 429, not by the storage."""
+    result on: the cooldown cannot be stored — and is in force all the same, from the browser
+    session's memory: the banner, the download buttons disabled, the popup's "Download this
+    series" refused with no request, the page's advice naming the cooldown's end; and after a
+    reload of the tab (writes work again) the banner is back and a listing is refused by the
+    cooldown, still with no request. The rest of the series is `stopped` by the 429."""
     with (
         FakeTikTok(cdn_rate_limit=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
@@ -361,31 +426,42 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
         assert page.locator("#download-all-button").is_disabled()
         assert page.locator("#load-button").is_disabled()
         assert page.locator("#retry-button").is_disabled()
-        assert _status_line(ext) == f"{STOPPED_HEAD}{UNSAVED_PREFIX}{FULL_DISK}{STOPPED_TAIL}"
+        until = re.search(r"waits until (\d\d:\d\d)", banner)
+        assert until is not None, banner
+        advice = _stopped_with_cooldown(f"{UNSAVED_PREFIX}{FULL_DISK}", until.group(1))
+        assert _status_line(ext) == advice  # restart Chrome only after the cooldown's end
         pacing = ext.storage("pacing").get("pacing")
-        assert pacing is None or pacing["runAttempts"] == 0  # the stored pacing is the old one…
+        assert (
+            pacing is not None and pacing["runAttempts"] == 0
+        )  # stored before the 429: the old one
         assert page.locator("#app-status").get_attribute("data-finished") == "1"
 
         requests = len(server.requests)
-        popup = ext.context.new_page()
-        popup.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
-        popup.evaluate(
-            "(id) => chrome.runtime.sendMessage({type: 'dramafetch:open', load: id})", SERIES_ID
-        )
-        ext.wait_for(lambda: ext.finished_jobs() >= 2 and ext.idle(), 30)
-        assert len(server.requests) == requests  # refused by the cooldown: nothing asked of TikTok
+        _popup_load(ext, advice)  # refused: nothing queued, nothing asked of TikTok
+        assert len(server.requests) == requests
         assert errors == []
+
+        page.close()  # the tab reloaded: its memory is gone, the browser session's is not
+        page = ext.reopen_app()
+        ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)
+        assert page.locator("#download-all-button").is_disabled()
+        assert ext.cooldown() is None  # still not in chrome.storage.local
+        _popup_load(ext, None)  # accepted by this fresh page, then refused by the cooldown's gate
+        ext.wait_for(lambda: ext.finished_jobs() >= 1 and ext.idle(), 20)
+        assert str(ext.history()[0]["error"]).startswith("TikTok refused a request at ")
+        assert len(server.requests) == requests
 
 
 def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission_frees_it(
     tmp_path: Path,
 ) -> None:
     """A copy WITHOUT `unlimitedStorage` whose store is at Chrome's 10 MB quota — DramaFetch 1.3.0
-    after about 450 finished series: Chrome itself refuses the next write. Two jobs are queued:
+    after about 490 finished series: Chrome itself refuses the next write. Two jobs are queued:
     the first is refused before its series is even listed, the second never starts, the page says
-    why, and no request reaches TikTok — not on a second click either. The same profile reloaded
-    with the shipped permissions has everything it had stored, and the series downloads and is
-    recorded past the quota."""
+    why, the buttons are disabled, the popup's load is refused, and a fresh tab's **Load list** is
+    refused by its own question before the listing: no request reaches TikTok. The same profile
+    reloaded with the shipped permissions has everything it had stored, and the series downloads
+    and is recorded past the quota."""
     with FakeTikTok() as server:
         with ExtensionHarness(
             tmp_path, server.base_url, drop_permissions=("unlimitedStorage",)
@@ -401,10 +477,8 @@ def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission
             assert "pacing" not in ext.storage("pacing")  # no job ran yet: the first save is new
             before = filled["keys"], filled["bytes"]
 
-            page.fill("#links", MAIN_LINK)
-            page.click("#download-all-button")
-            page.fill("#links", THIRD_LINK)
-            _click_and_wait(ext, "#download-all-button", 1)
+            _queue_two(ext, MAIN_LINK, THIRD_LINK)
+            _wait_finished(ext, 1)
             assert ext.finished_jobs() == 1
             line = _status_line(ext)
             assert line.startswith(f"{STOPPED_HEAD}{UNSAVED_PREFIX}") and line.endswith(
@@ -415,11 +489,19 @@ def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission
             report = page.locator("#report-lines li").first.text_content() or ""
             assert report == f"{SERIES_ID}: {UNSAVED_PREFIX}{chrome_reason}"
             assert page.locator("#failed-block").is_hidden()  # nothing was attempted
+            assert page.locator("#download-all-button").is_disabled()
+            _popup_load(ext, line)  # refused at once
+            assert ext.finished_jobs() == 1
+            # a fresh tab knows nothing of the refusal: its Load list asks first, and is refused
+            page.close()
+            page = ext.reopen_app()
             page.fill("#links", MAIN_LINK)
-            _click_and_wait(ext, "#download-all-button", 2)  # again: refused at once
+            _click_and_wait(ext, "#load-button", 1)
             assert _status_line(ext) == line
-            assert server.requests == []  # not one request, in three jobs
-            assert (filled["keys"], _bytes_in_use(ext)) == before
+            assert page.locator("#episode-table tbody tr").count() == 0
+            assert server.requests == []  # not one request, in all those jobs
+            keys = page.evaluate("async () => (await chrome.storage.local.getKeys()).length")
+            assert (keys, _bytes_in_use(ext)) == before
             assert errors == []
 
         # DramaFetch 1.3.1 over the same folder and profile: the same extension, its memory intact
