@@ -409,6 +409,8 @@ const app = {
   /** @type {import("../lib/cooldown.js").Cooldown | null} */
   cooldown: null,
   files: new WorkFiles(),
+  /** @type {number | undefined} this page's tab: the worker brings it to the front */
+  tabId: undefined,
 };
 
 /**
@@ -1620,14 +1622,17 @@ function acquireEngine() {
 }
 
 /**
- * Put links into the box (the popup's "Download this video"): appended to what is there, in the
- * engine's tab only.
+ * Put links into the box (the popup's **Download this video**, the right-click **Download this
+ * video**): appended to what is there, in the engine's tab only — the request reaches every
+ * StreamFetch page, and the engine's takes it.
  * @param {string} links
+ * @returns {boolean} whether this tab took them (the engine's tab)
  */
 function addLinks(links) {
-  if (!app.owner) return;
+  if (!app.owner) return false;
   const box = textarea("links");
   box.value = box.value.trim() ? `${box.value.trim()}\n${links}` : links;
+  return true;
 }
 
 async function main() {
@@ -1639,6 +1644,7 @@ async function main() {
   app.testMode = isTestMode();
   app.owner = await acquireEngine();
   $("readonly-banner").hidden = app.owner;
+  app.tabId = (await chrome.tabs.getCurrent().catch(() => undefined))?.id; // needs no `tabs` permission
   app.testSettings = await loadTestSettings();
   fillSettings();
   await setupTestMode();
@@ -1657,12 +1663,15 @@ async function main() {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && Object.hasOwn(changes, COOLDOWN_STORAGE_KEY)) void refreshCooldown();
   });
-  chrome.runtime.onMessage.addListener((message, sender) => {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.id !== chrome.runtime.id) return; // only this extension's own code
     if (message !== null && typeof message === "object") {
       const record = /** @type {Record<string, unknown>} */ (message);
-      if (record["type"] === "streamfetch:links" && typeof record["links"] === "string") {
-        addLinks(record["links"]);
+      // the engine's tab takes them and answers with its tab, which the worker brings to the front;
+      // a read-only tab stays silent (as does a tab that is not running: the worker then reloads
+      // one with the links in its address)
+      if (record["type"] === "streamfetch:links" && typeof record["links"] === "string" && addLinks(record["links"])) {
+        sendResponse({ ok: true, tabId: app.tabId ?? null });
       }
     }
   });
