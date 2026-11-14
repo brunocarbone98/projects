@@ -37,6 +37,39 @@ declare namespace chrome {
       (message: unknown, sender: MessageSender, sendResponse: (response?: unknown) => void) => boolean | void
     >;
     const onInstalled: ChromeEvent<(details: { reason: string; previousVersion?: string }) => void>;
+    const onStartup: ChromeEvent<() => void>;
+    /** Set while a callback of a callback-style API (contextMenus) runs after a failure. */
+    const lastError: { message?: string } | undefined;
+  }
+
+  // ------------------------------------------------------------------------- contextMenus
+  /** The right-click menu ("Download this drama"): its items and their clicks, never the page's content. */
+  namespace contextMenus {
+    type ContextType = "page" | "link";
+    interface CreateProperties {
+      id: string;
+      title: string;
+      contexts: ContextType[];
+      /** Where the item shows: the right-clicked page's (or frame's) URL must match (match patterns). */
+      documentUrlPatterns?: string[];
+      /** For a link: its `href` must match (match patterns). */
+      targetUrlPatterns?: string[];
+    }
+    interface OnClickData {
+      menuItemId: string | number;
+      linkUrl?: string;
+      /** The tab's top page. */
+      pageUrl?: string;
+      /** The right-clicked frame's address (Chrome 116 sends it only from inside a frame). */
+      frameUrl?: string;
+      /** The selected text, when there is one (never read). */
+      selectionText?: string;
+    }
+    // callback forms only: removeAll returns a promise only from Chrome 123 on; create never does
+    // (it returns the item's id at once and reports its outcome only to the callback)
+    function create(properties: CreateProperties, callback: () => void): string | number;
+    function removeAll(callback: () => void): void;
+    const onClicked: ChromeEvent<(info: OnClickData, tab?: tabs.Tab) => void>;
   }
 
   // --------------------------------------------------------------------------------- i18n

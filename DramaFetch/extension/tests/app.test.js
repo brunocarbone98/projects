@@ -1413,11 +1413,13 @@ let pages = 0;
  * instance each time (a module URL of its own, so `main()` runs again, over these fakes), awaited
  * to its end; `module` is that instance's exports. `hold()` then makes the next job's first
  * `chrome.tabs.getCurrent` never answer, so that the job stays running and makes no request to
- * anything; `message()` is a runtime message from this extension's own popup; `local` is the
- * storage and `storageChanged(key)` tells the page a key of it changed; `downloads` is every file
- * the page saved through `chrome.downloads` (a fake that completes each at once); `restore()`
- * removes the fakes again.
- * @param {{storage?: Record<string, unknown>}} [options]
+ * anything; `message()` is a runtime message from this extension's own code (or from the
+ * extension its `sender` names), and returns the page's answers; `local` is the storage and
+ * `storageChanged(key)` tells the page a key of it changed; `downloads` is every file the page
+ * saved through `chrome.downloads` (a fake that completes each at once); `restore()` removes the
+ * fakes again. With `options.lockTaken`, another tab holds the engine: this one is
+ * read-only.
+ * @param {{storage?: Record<string, unknown>, lockTaken?: boolean}} [options]
  */
 async function fakePage(options = {}) {
   /** @type {Record<string, CatalogEntry>} */
@@ -1439,7 +1441,7 @@ async function fakePage(options = {}) {
   const local = new Map(Object.entries(options.storage ?? {}));
   /** @type {((changes: Record<string, unknown>, area: string) => void)[]} */
   const changeListeners = [];
-  /** @type {((message: unknown, sender: {id: string}) => void)[]} */
+  /** @type {((message: unknown, sender: {id: string}, sendResponse: (response?: unknown) => void) => void)[]} */
   const messageListeners = [];
   /** @type {{filename: string, conflictAction: string | undefined, text: string}[]} every file the page saved through chrome.downloads, its bytes as text */
   const downloads = [];
@@ -1465,7 +1467,7 @@ async function fakePage(options = {}) {
       id: "dramafetch-test-id",
       getManifest: () => manifest,
       onMessage: {
-        /** @param {(message: unknown, sender: {id: string}) => void} listener */
+        /** @param {(message: unknown, sender: {id: string}, sendResponse: (response?: unknown) => void) => void} listener */
         addListener: (listener) => void messageListeners.push(listener),
       },
     },
@@ -1525,7 +1527,7 @@ async function fakePage(options = {}) {
       userAgent: "FakeChrome/1",
       locks: {
         /** @param {string} name @param {object} _options @param {(lock: {name: string} | null) => unknown} callback */
-        request: (name, _options, callback) => Promise.resolve(callback({ name })),
+        request: (name, _options, callback) => Promise.resolve(callback(options.lockTaken ? null : { name })),
       },
     },
   });
@@ -1577,12 +1579,69 @@ async function fakePage(options = {}) {
     hold: () => {
       holding = true;
     },
-    /** @param {unknown} message */
-    message: (message) => {
-      for (const listener of messageListeners) listener(message, { id: chrome.runtime.id });
+    /**
+     * A runtime message from `sender` (this extension's own code by default); what the page
+     * answers (the worker's openApp brings the answering tab to the front).
+     * @param {unknown} message
+     * @param {string} [sender]
+     * @returns {unknown[]}
+     */
+    message: (message, sender = chrome.runtime.id) => {
+      /** @type {unknown[]} */
+      const answers = [];
+      for (const listener of messageListeners) listener(message, { id: sender }, (answer) => void answers.push(answer));
+      return answers;
     },
   };
 }
+
+test("the page: a series handed over (the popup, the right-click) joins the box and is listed; the engine's tab answers with its tab; a read-only tab stays silent", async () => {
+  const page = await fakePage();
+  try {
+    const { element } = page;
+    const other = "7699393770256782399";
+    const third = "7699393770256782388";
+    const links = element("links");
+    const status = element("input-status");
+    const queued = () => element("queue-list").children.map((item) => item.textContent);
+    page.hold(); // the job's `tabs.getCurrent` never answers: it runs, and makes no request
+    // a batch typed for Download all stays: the series joins it on a line of its own
+    const batch = `https://www.tiktok.com/shortdrama/episode/${other}/1\nhttps://www.tiktok.com/shortdrama/episode/${third}/1\n`;
+    links.value = batch;
+    assert.deepEqual(page.message({ type: "dramafetch:load", input: SERIES_ID }), [{ ok: true, tabId: 1 }]);
+    await page.turn();
+    assert.equal(links.value, `${batch.trimEnd()}\n${SERIES_ID}`);
+    assert.equal(element("progress-current").textContent, `List series ${SERIES_ID}`);
+    // a series the box names already is listed without a second line
+    assert.deepEqual(page.message({ type: "dramafetch:load", input: other }), [{ ok: true, tabId: 1 }]);
+    assert.equal(links.value, `${batch.trimEnd()}\n${SERIES_ID}`);
+    assert.deepEqual(queued(), [`List series ${other}`]);
+    // an address that names no series changes nothing in the box: the tab says why (about the
+    // link, not about the box's first line) and still answers, so that it comes to the front
+    assert.deepEqual(page.message({ type: "dramafetch:load", input: "https://www.tiktok.com/shortdrama/foryou" }), [{ ok: true, tabId: 1 }]);
+    assert.equal(links.value, `${batch.trimEnd()}\n${SERIES_ID}`);
+    assert.equal(status.className, "status error");
+    assert.match(String(status.textContent), /^Not a TikTok short-drama or video URL: 'https:\/\/www\.tiktok\.com\/shortdrama\/foryou'/);
+    assert.deepEqual(queued(), [`List series ${other}`]);
+    // only this extension's own code is heard, and only this message
+    const fourth = "7699393770256782344";
+    assert.deepEqual(page.message({ type: "dramafetch:load", input: fourth }, "another-extension-id"), []);
+    assert.deepEqual(page.message({ type: "dramafetch:open", input: fourth }), []);
+    assert.deepEqual(page.message("dramafetch:load"), []);
+    assert.equal(links.value, `${batch.trimEnd()}\n${SERIES_ID}`);
+    assert.deepEqual(queued(), [`List series ${other}`]);
+  } finally {
+    page.restore();
+  }
+  const readonly = await fakePage({ lockTaken: true });
+  try {
+    assert.deepEqual(readonly.message({ type: "dramafetch:load", input: SERIES_ID }), []);
+    assert.equal(readonly.element("links").value, "");
+    assert.equal(readonly.element("queue-card").hidden, true);
+  } finally {
+    readonly.restore();
+  }
+});
 
 test("the page: a second Load list for a series being listed, or waiting to be, is refused with loadAlreadyQueued and queues nothing", async () => {
   const page = await fakePage();

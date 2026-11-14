@@ -12,6 +12,14 @@ against the fake TikTok server:
 - with no DramaFetch tab open, the popup's **Download this series** on a TikTok series tab opens
   the DramaFetch tab, which lists that series (one listing) and downloads nothing yet — read
   through `chrome.extension.getViews`, since Playwright never sees a tab the extension opens;
+- a series handed to the worker (the popup's **Download this series**, the right-click **Download
+  this drama**): the engine's tab takes it — it joins the box, a batch typed there stays — lists
+  it and answers, and no other tab opens; with no page taking it (a read-only tab left alone once
+  the engine's tab is closed; a tab whose page is not running — restored but not loaded yet,
+  discarded — is the same), the open tab
+  reloads with the series in its address, takes the engine and lists it;
+- the right-click **Download this drama**: Chrome itself took both items the worker puts in place
+  at install (a link to a short drama, a series page), and refuses an id it never created;
 - with Chrome's UI in Spanish (`LANGUAGE=es`: how Chrome on Linux picks its UI language), every
   outcome the fake offers reads in Spanish on screen — no English template word outside the data
   (series and file names, hosts, the payload's `key=value` hints) — while the history keeps the
@@ -95,6 +103,18 @@ ENGLISH_WORDS = (
     "tries again",
     "--",
 )
+#: Whether each menu item exists, through Chrome itself: an update that changes nothing succeeds
+#: for an item the extension created and fails for any other id (`chrome.runtime.lastError`).
+MENU_ITEMS_JS = """async (ids) => {
+  const found = [];
+  for (const id of ids) {
+    found.push(await new Promise((resolve) => chrome.contextMenus.update(id, {}, () =>
+      resolve(chrome.runtime.lastError ? chrome.runtime.lastError.message : "ok"))));
+  }
+  return found;
+}"""
+MENU_IDS = ["dramafetch-download-link", "dramafetch-download-page"]
+
 STATUSES = {
     "done",
     "skipped-exists",
@@ -480,6 +500,74 @@ def test_the_popup_opens_the_dramafetch_tab_with_the_series_listed_when_none_is_
         assert [url for url in tabs if url.endswith("/app.html")] == [f"{pages}/app.html"]
         # the listing's own TikTok tab is closed again: only the user's tab is left
         assert [url for url in tabs if url.startswith(server.base_url)] == [series_tab]
+
+
+def test_a_series_handed_over_reaches_the_engines_tab_or_reloads_a_tab_nobody_runs(
+    tmp_path: Path,
+) -> None:
+    """What the popup's **Download this series** sends (`dramafetch:open`), and what the
+    right-click **Download this drama** hands to the same `openApp` in the worker: the worker hands
+    the series to the engine's tab, which takes it — it joins the box, so a batch typed there for
+    **Download all** stays — lists it and answers; no other tab opens. With no page taking it —
+    here a read-only tab left alone once the engine's tab is closed (a tab whose page is not
+    running, restored by Chrome after a restart but not loaded yet or discarded, takes nothing
+    either) — the open tab reloads with the series in its address (`app.html?load=`), takes the
+    engine and lists it. Nothing is downloaded."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        sender = ext.context.new_page()  # an extension page sends what the popup sends
+        sender.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
+        open_js = "(load) => chrome.runtime.sendMessage({type: 'dramafetch:open', load})"
+        app_tabs_js = (
+            "async (url) => (await chrome.tabs.query({}))"
+            ".filter((tab) => (tab.url || tab.pendingUrl || '').startsWith(url)).length"
+        )
+        typed = "https://www.tiktok.com/shortdrama/episode/7699393770256782300/1"
+        ext.page.fill("#links", typed)
+        jobs = ext.finished_jobs()
+        assert sender.evaluate(open_js, SERIES_ID) == {"ok": True}
+        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "nothing listed")
+        assert ext.page.input_value("#links") == f"{typed}\n{SERIES_ID}"
+        assert ext.page.locator("#episode-table tbody tr").count() == 5
+        assert sender.evaluate(app_tabs_js, ext.app_url) == 1
+
+        second = ext.context.new_page()
+        second.goto(ext.app_url)
+        ext.wait_for(lambda: second.locator("#duplicate-banner").is_visible(), 10, "no banner")
+        ext.page.close()  # the engine's tab is gone: the read-only one, left alone, takes nothing
+        assert sender.evaluate(open_js, SERIES_ID) == {"ok": True}
+
+        def listed_there() -> bool:
+            status = second.locator("#app-status")
+            return (
+                second.locator("#duplicate-banner").is_hidden()
+                and status.get_attribute("data-state") == "idle"
+                and status.get_attribute("data-finished") == "1"
+            )
+
+        ext.wait_for(listed_there, 60, "the read-only tab did not reload with the series")
+        assert second.input_value("#links") == SERIES_ID
+        assert second.locator("#episode-table tbody tr").count() == 5
+        assert sender.evaluate(app_tabs_js, ext.app_url) == 1
+        assert not server.media_requests and ext.saved_files() == []
+
+
+def test_the_right_click_items_are_in_chromes_menu(tmp_path: Path) -> None:
+    """The right-click **Download this drama** (`menus.js`): Chrome took both items the worker puts
+    in place at install — the one on a link to a short drama and the one on a short-drama page — so
+    their contexts and match patterns are valid (a bad one makes `chrome.contextMenus.create` fail
+    and leaves no item), and an id the extension never created is refused, so the check can fail.
+    Playwright cannot open Chrome's own menu: a click is `loadOfClick` (`tests/menus.test.js`, the
+    worker's wiring too) handed to `openApp`, the popup's path, which the scenario above drives."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        ext.wait_for(
+            lambda: ext.page.evaluate(MENU_ITEMS_JS, MENU_IDS) == ["ok", "ok"],
+            10,
+            "the right-click items are not in Chrome's menu",
+        )
+        [missing] = ext.page.evaluate(MENU_ITEMS_JS, ["dramafetch-no-such-item"])
+        assert missing != "ok"
+        assert "dramafetch-no-such-item" in missing
+        assert not server.requests  # putting the menu in place asks nothing of TikTok
 
 
 def test_the_spanish_ui_shows_every_outcome_in_spanish(

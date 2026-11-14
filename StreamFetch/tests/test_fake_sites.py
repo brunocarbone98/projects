@@ -362,8 +362,8 @@ def test_the_saved_file_verification_on_files_ffmpeg_makes(media: MediaSet, tmp_
     assert start_edit(eac3, "audio") == (256, 48000)
     assert packet_hashes(eac3, "audio") == packet_hashes(media.dash_audio_eac3, "audio")
     assert_saved_media(eac3, media.expected("dash-hevc-eac3"))
-    # FLAC encoded afresh from the source (deterministic: the served frames; ffmpeg 6's `-c copy`
-    # of the fragmented FLAC track drops its last, short frame — below)
+    # FLAC encoded afresh from the source (deterministic: the served frames; a `-c copy` of the
+    # fragmented FLAC track is not — ffmpeg 6.1 loses its last packet, 8.0 keeps it)
     flac = with_hevc(tmp_path / "hevc-flac.mp4", media.src, "-c:v", "copy", "-c:a", "flac")
     assert_saved_media(flac, media.expected("dash-hevc-flac"))
     assert sample_entry(flac, "video")[4:8] == HEVC_TAG.encode()  # ffmpeg rewrites the entry
@@ -374,8 +374,16 @@ def test_the_saved_file_verification_on_files_ffmpeg_makes(media: MediaSet, tmp_
         assert_saved_media(plain, media.expected("dash-hevc"))  # H.264 where HEVC is expected
     with pytest.raises(AssertionError, match="audio"):
         assert_saved_media(eac3, media.expected("dash-hevc-flac"))  # E-AC-3, not FLAC
-    # a track one frame short is refused, whatever its duration says
-    short = with_hevc(tmp_path / "hevc-flac-short.mp4", media.dash_audio_flac, "-c", "copy")
+    # a track one frame short is refused, whatever its duration says: the source's sound encoded
+    # afresh without its last frame, on its own (`-frames:a` cuts exactly there; in the command
+    # that also copies the video, ffmpeg 6.1 ends the video early too), then muxed as served
+    served = fixture_framemd5(media.dash_audio_flac, "a:0")
+    cut = tmp_path / "flac-one-frame-short.flac"
+    ffmpeg(
+        ["-i", str(media.src), "-vn", "-c:a", "flac", "-frames:a", str(len(served) - 1), str(cut)]
+    )
+    short = with_hevc(tmp_path / "hevc-flac-short.mp4", cut, "-c", "copy")
+    assert av_framemd5(short, "audio") == served[:-1]
     with pytest.raises(AssertionError, match="audio frames differ"):
         assert_saved_media(short, media.expected("dash-hevc-flac"))
     # without `-copyts` ffmpeg reads the fragmented E-AC-3 track from its first packet (its

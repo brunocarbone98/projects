@@ -3,7 +3,7 @@
   "name": "__MSG_extName__",
   "short_name": "StreamFetch",
   "description": "__MSG_extDescription__",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "default_locale": "en",
   "minimum_chrome_version": "116",
   "icons": {
@@ -24,7 +24,7 @@
     "service_worker": "src/app/background.js",
     "type": "module"
   },
-  "permissions": ["downloads", "storage", "declarativeNetRequestWithHostAccess"],
+  "permissions": ["downloads", "storage", "declarativeNetRequestWithHostAccess", "contextMenus"],
   "host_permissions": [
     "https://www.dailymotion.com/*",
     "https://*.dailymotion.com/*",

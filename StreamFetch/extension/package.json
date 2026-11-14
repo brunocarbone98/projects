@@ -1,6 +1,6 @@
 {
   "name": "streamfetch-extension",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "StreamFetch for Chrome: the extension's sources and tests. No dependencies; Node built-ins only in the tests.",
   "type": "module",

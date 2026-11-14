@@ -547,6 +547,14 @@
     "message": "Download this video",
     "description": "Popup button"
   },
+  "contextDownload": {
+    "message": "Download this video",
+    "description": "Right-click menu item on a link to a Dailymotion, Bilibili or Bilibili.tv video: adds it to the StreamFetch tab's box"
+  },
+  "contextDownloadPage": {
+    "message": "Download this page's video",
+    "description": "Right-click menu item on a Dailymotion, Bilibili or Bilibili.tv video page (not on a link): adds the page's video to the StreamFetch tab's box"
+  },
   "popupOpen": {
     "message": "Open StreamFetch",
     "description": "Popup button"

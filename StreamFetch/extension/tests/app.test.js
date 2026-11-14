@@ -521,13 +521,19 @@ async function fakePage(options = {}) {
   const requests = [];
   /** @type {Catalog} */
   const en = JSON.parse(readFileSync(new URL("../_locales/en/messages.json", import.meta.url), "utf8"));
+  /** @type {((message: unknown, sender: { id: string }, sendResponse: (response?: unknown) => void) => void)[]} */
+  const messageListeners = [];
   const chrome = {
     runtime: {
       id: "streamfetch-test-id",
       getManifest: () => (options.production ? { ...MANIFEST } : { ...MANIFEST, streamfetch_test: true }),
       getURL: (/** @type {string} */ path) => `${ROOT}${path}`,
-      onMessage: { addListener: () => undefined },
+      onMessage: {
+        /** @param {(message: unknown, sender: { id: string }, sendResponse: (response?: unknown) => void) => void} listener */
+        addListener: (listener) => void messageListeners.push(listener),
+      },
     },
+    tabs: { getCurrent: async () => ({ id: 41, windowId: 2, active: true }) },
     i18n: {
       getUILanguage: () => options.uiLanguage ?? "en-US",
       /** @param {string} key */
@@ -658,7 +664,19 @@ async function fakePage(options = {}) {
   }
   /** @returns {FakeElement[]} the rows of the items table */
   const rows = () => (element("items-table").querySelector("tbody")?.children ?? []);
-  return { element, rows, local, saved, requests, until, restore, observed, changed: (/** @type {string} */ key) => changeListeners.forEach((listener) => listener({ [key]: {} }, "local")) };
+  /**
+   * A runtime message from `sender` (this extension's worker by default); what the page answers.
+   * @param {unknown} message
+   * @param {string} [sender]
+   * @returns {unknown[]}
+   */
+  const message = (message, sender = chrome.runtime.id) => {
+    /** @type {unknown[]} */
+    const answers = [];
+    for (const listener of messageListeners) listener(message, { id: sender }, (answer) => void answers.push(answer));
+    return answers;
+  };
+  return { element, rows, local, saved, requests, until, restore, observed, message, changed: (/** @type {string} */ key) => changeListeners.forEach((listener) => listener({ [key]: {} }, "local")) };
 }
 
 /** A minimal in-memory OPFS root for the page. */
@@ -727,7 +745,7 @@ function dailymotion(url) {
 test("the page loads idle: version, the engine lock held, the history empty", async () => {
   const page = await fakePage();
   try {
-    assert.equal(page.element("version").textContent, "1.0.1");
+    assert.equal(page.element("version").textContent, "1.1.0");
     assert.equal(page.element("readonly-banner").hidden, true);
     assert.equal(page.element("app-status").dataset["state"], "idle");
     assert.equal(page.element("analyze-button").disabled, false);
@@ -754,6 +772,30 @@ test("a second tab is read-only: nothing can start there", async () => {
     }
   } finally {
     page.restore();
+  }
+});
+
+test("a link handed over (the popup, the right-click) joins the box in the engine's tab, which answers with its tab; a read-only tab stays silent", async () => {
+  const page = await fakePage();
+  try {
+    page.element("links").value = "https://dai.ly/xaaaaaa\n";
+    assert.deepEqual(page.message({ type: "streamfetch:links", links: `https://www.dailymotion.com/video/${OK_ID}` }), [{ ok: true, tabId: 41 }]);
+    assert.equal(page.element("links").value, `https://dai.ly/xaaaaaa\nhttps://www.dailymotion.com/video/${OK_ID}`);
+    // only this extension's own code is heard, and only this message
+    assert.deepEqual(page.message({ type: "streamfetch:links", links: "https://dai.ly/xother1" }, "another-extension-id"), []);
+    assert.deepEqual(page.message({ type: "streamfetch:open", links: "https://dai.ly/xother1" }), []);
+    assert.deepEqual(page.message("streamfetch:links"), []);
+    assert.equal(page.element("links").value, `https://dai.ly/xaaaaaa\nhttps://www.dailymotion.com/video/${OK_ID}`);
+    assert.deepEqual(page.requests, [], "nothing is requested until Analyze or Download all");
+  } finally {
+    page.restore();
+  }
+  const readonly = await fakePage({ lockTaken: true });
+  try {
+    assert.deepEqual(readonly.message({ type: "streamfetch:links", links: `https://www.dailymotion.com/video/${OK_ID}` }), []);
+    assert.equal(readonly.element("links").value, "");
+  } finally {
+    readonly.restore();
   }
 });
 
@@ -986,38 +1028,60 @@ test("the popup offers a video page of the three sites only (test bases mapped o
   assert.equal(linkOfTab(`http://127.0.0.1:8123/btv/en/video/${aid}`, { bilibilitv: "http://127.0.0.1:8123/btv" }), `https://www.bilibili.tv/en/video/${aid}`);
 });
 
-test("the worker opens the StreamFetch tab, or focuses the one open and hands it the link", async () => {
+test("the worker hands the link to the engine's tab and brings it to the front; when no page takes it, a tab (re)loads with it", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   /** @type {chrome.runtime.ExtensionContext[]} */
   let contexts = [];
+  /** @type {unknown} what the pages answer: an Error when none is running, undefined when none took it */
+  let answer;
   Object.assign(globalThis, {
     chrome: {
       runtime: {
         id: "streamfetch-test-id",
         getURL: (/** @type {string} */ path) => `${ROOT}${path}`,
         getContexts: async () => contexts,
-        sendMessage: async (/** @type {unknown} */ message) => void calls.push(["sendMessage", message]),
+        sendMessage: async (/** @type {unknown} */ message) => {
+          calls.push(["sendMessage", message]);
+          if (answer instanceof Error) throw answer;
+          return answer;
+        },
       },
       tabs: {
         create: async (/** @type {unknown} */ properties) => void calls.push(["create", properties]),
-        update: async (/** @type {number} */ id, /** @type {unknown} */ properties) => void calls.push(["update", id, properties]),
+        update: async (/** @type {number} */ id, /** @type {unknown} */ properties) => {
+          calls.push(["update", id, properties]);
+          return { id, windowId: 3, active: true };
+        },
       },
       windows: { update: async (/** @type {number} */ id, /** @type {unknown} */ info) => void calls.push(["focus", id, info]) },
     },
   });
   try {
     const { onMessage, openApp } = await import("../src/app/background.js");
-    await openApp("https://dai.ly/xbq9z2k");
-    assert.deepEqual(calls, [["create", { url: `${ROOT}src/app/app.html?links=${encodeURIComponent("https://dai.ly/xbq9z2k")}` }]]);
+    const link = "https://dai.ly/xbq9z2k";
+    const handed = ["sendMessage", { type: "streamfetch:links", links: link }];
+    const withLink = `${ROOT}src/app/app.html?links=${encodeURIComponent(link)}`;
+    // no StreamFetch page running (Chrome refuses the message): a new tab opens with the link
+    answer = new Error("Could not establish connection. Receiving end does not exist.");
+    await openApp(link);
+    assert.deepEqual(calls, [handed, ["create", { url: withLink }]]);
     calls.length = 0;
-    contexts = [{ contextType: "TAB", contextId: "c", tabId: 7, windowId: 3, documentUrl: `${ROOT}src/app/app.html`, frameId: 0, incognito: false }];
-    await openApp("https://dai.ly/xbq9z2k");
-    assert.deepEqual(calls, [
-      ["update", 7, { active: true }],
-      ["focus", 3, { focused: true }],
-      ["sendMessage", { type: "streamfetch:links", links: "https://dai.ly/xbq9z2k" }],
-    ]);
+    // the engine's tab takes it and names itself: that tab comes to the front, nothing reloads
+    answer = { ok: true, tabId: 7 };
+    contexts = [{ contextType: "TAB", contextId: "c", tabId: 9, windowId: 4, documentUrl: `${ROOT}src/app/app.html`, frameId: 0, incognito: false }];
+    await openApp(link);
+    assert.deepEqual(calls, [handed, ["update", 7, { active: true }], ["focus", 3, { focused: true }]]);
+    calls.length = 0;
+    // a StreamFetch tab listed whose page took nothing — read-only with its engine's tab closed, or
+    // not running: it reloads with the link in its address
+    answer = undefined;
+    await openApp(link);
+    assert.deepEqual(calls, [handed, ["update", 9, { active: true, url: withLink }], ["focus", 4, { focused: true }]]);
+    calls.length = 0;
+    // the popup's Open StreamFetch (no link): the open tab comes to the front as it is
+    await openApp(null);
+    assert.deepEqual(calls, [["update", 9, { active: true }], ["focus", 4, { focused: true }]]);
     /** @type {unknown[]} */
     const answers = [];
     assert.equal(onMessage({ type: "streamfetch:open", links: null }, { id: "another-extension" }, (answer) => void answers.push(answer)), false, "only this extension may ask");

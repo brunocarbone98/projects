@@ -54,6 +54,40 @@ declare namespace chrome {
         sendResponse: (response?: unknown) => void,
       ) => boolean | void
     >;
+    const onInstalled: ChromeEvent<(details: { reason: string; previousVersion?: string }) => void>;
+    const onStartup: ChromeEvent<() => void>;
+    /** Set while a callback of a callback-style API (contextMenus) runs after a failure. */
+    const lastError: { message?: string } | undefined;
+  }
+
+  // ------------------------------------------------------------------------- contextMenus
+  /** The right-click menu ("Download this video"): its items and their clicks, never the page's content. */
+  namespace contextMenus {
+    type ContextType = "page" | "link";
+    interface CreateProperties {
+      id: string;
+      title: string;
+      contexts: ContextType[];
+      /** Where the item shows: the right-clicked page's (or frame's) URL must match (match patterns). */
+      documentUrlPatterns?: string[];
+      /** For a link: its `href` must match (match patterns). */
+      targetUrlPatterns?: string[];
+    }
+    interface OnClickData {
+      menuItemId: string | number;
+      linkUrl?: string;
+      /** The tab's top page. */
+      pageUrl?: string;
+      /** The right-clicked frame's address (Chrome 116 sends it only from inside a frame). */
+      frameUrl?: string;
+      /** The selected text, when there is one (never read). */
+      selectionText?: string;
+    }
+    // callback forms only: removeAll returns a promise only from Chrome 123 on; create never does
+    // (it returns the item's id at once and reports its outcome only to the callback)
+    function create(properties: CreateProperties, callback: () => void): string | number;
+    function removeAll(callback: () => void): void;
+    const onClicked: ChromeEvent<(info: OnClickData, tab?: unknown) => void>;
   }
 
   // --------------------------------------------------------------------------------- i18n
@@ -64,7 +98,8 @@ declare namespace chrome {
 
   // --------------------------------------------------------------------------------- tabs
   // Only what needs no `tabs` permission: the popup reads the active tab's URL, which Chrome
-  // fills in for the hosts of `host_permissions` only; the worker opens or focuses the app tab.
+  // fills in for the hosts of `host_permissions` only; the worker opens, focuses or reloads the
+  // app tab; the app page asks for its own tab.
   namespace tabs {
     interface Tab {
       id?: number;
@@ -78,6 +113,8 @@ declare namespace chrome {
     }
     interface UpdateProperties {
       active?: boolean;
+      /** Only ever StreamFetch's own page, to a tab of it that is not running. */
+      url?: string;
     }
     interface QueryInfo {
       active?: boolean;
@@ -86,6 +123,7 @@ declare namespace chrome {
     function create(createProperties: CreateProperties): Promise<Tab>;
     function update(tabId: number, updateProperties: UpdateProperties): Promise<Tab | undefined>;
     function query(queryInfo: QueryInfo): Promise<Tab[]>;
+    function getCurrent(): Promise<Tab | undefined>;
   }
 
   // ------------------------------------------------------------------------------ windows

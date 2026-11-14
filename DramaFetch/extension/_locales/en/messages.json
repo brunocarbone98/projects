@@ -569,6 +569,14 @@
     "message": "Download this series",
     "description": "Popup button."
   },
+  "contextDownload": {
+    "message": "Download this drama",
+    "description": "Right-click menu item on a link to a TikTok short-drama series: lists it in the DramaFetch tab."
+  },
+  "contextDownloadPage": {
+    "message": "Download this page's drama",
+    "description": "Right-click menu item on a TikTok short-drama series page (not on a link): lists the page's series in the DramaFetch tab."
+  },
   "popupOpen": {
     "message": "Open DramaFetch",
     "description": "Popup button."

@@ -1444,7 +1444,20 @@ function loadPending(seriesId) {
   return (app.running !== null && listsIt(app.running)) || app.queue.some(listsIt);
 }
 
-/** **Load list**, also reached through {@link loadFromOutside}: one listing per series at a time. */
+/**
+ * Queue the listing of one series — **Load list**, or a series handed from outside
+ * ({@link loadFromOutside}): one listing per series at a time.
+ * @param {SeriesRef} ref
+ */
+function listSeries(ref) {
+  if (loadPending(ref.seriesId)) {
+    setStatus($("input-status"), t("loadAlreadyQueued"), "error");
+    return;
+  }
+  enqueue({ kind: "load", label: t("jobLoad", ref.seriesId), refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false });
+}
+
+/** **Load list**: the one series in the box. */
 function onLoad() {
   const parsed = parsedLinks();
   if (parsed === null) return;
@@ -1452,12 +1465,7 @@ function onLoad() {
     setStatus($("input-status"), t("loadOneOnly"), "error");
     return;
   }
-  const ref = /** @type {SeriesRef} */ (parsed.refs[0]);
-  if (loadPending(ref.seriesId)) {
-    setStatus($("input-status"), t("loadAlreadyQueued"), "error");
-    return;
-  }
-  enqueue({ kind: "load", label: t("jobLoad", ref.seriesId), refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false });
+  listSeries(/** @type {SeriesRef} */ (parsed.refs[0]));
 }
 
 function onDownloadAll() {
@@ -1683,14 +1691,36 @@ async function setupTestMode() {
 // ------------------------------------------------------------------------------- start
 
 /**
- * Put a link into the box and list it (the popup's "Download this series") — in the engine's tab
- * only: the popup's request reaches every DramaFetch tab, and the engine's lists it.
+ * A series handed from outside — the popup's **Download this series**, the right-click **Download
+ * this drama** — listed in the engine's tab only: the request reaches every DramaFetch page, and
+ * the engine's takes it. The link joins the box rather than replacing it, so a batch typed there
+ * for **Download all** stays: on a line of its own, unless the box names that series already. A
+ * link that names no series (or more than one) leaves the box as it is, and the tab says why it
+ * lists nothing.
  * @param {string} link
+ * @returns {boolean} whether this tab took it (the engine's tab)
  */
 function loadFromOutside(link) {
-  if (!app.owner) return;
-  textarea("links").value = link;
-  onLoad();
+  if (!app.owner) return false;
+  const parsed = parseSeriesList(link);
+  const status = $("input-status");
+  if (parsed.errors.length > 0) {
+    // about the link handed over, not about the box's first line
+    setStatus(status, parsed.errors.map((error) => shownText(error.message.replace(/^line 1: /, ""))).join(" · "), "error");
+    return true;
+  }
+  if (parsed.refs.length !== 1) {
+    setStatus(status, t(parsed.refs.length === 0 ? "noLinks" : "loadOneOnly"), "error");
+    return true;
+  }
+  const ref = /** @type {SeriesRef} */ (parsed.refs[0]);
+  const box = textarea("links");
+  if (!parseSeriesList(box.value).refs.some((listed) => listed.seriesId === ref.seriesId)) {
+    box.value = box.value.trim() ? `${box.value.trimEnd()}\n${link}` : link;
+  }
+  setStatus(status, parsed.notes.map(shownText).join(" · "));
+  listSeries(ref);
+  return true;
 }
 
 /** @returns {Promise<boolean>} whether this tab holds the engine (the only one per browser) */
@@ -1762,11 +1792,16 @@ async function main() {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && Object.hasOwn(changes, COOLDOWN_STORAGE_KEY)) void refreshCooldown();
   });
-  chrome.runtime.onMessage.addListener((message, sender) => {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.id !== chrome.runtime.id) return; // only this extension's own code
     if (message !== null && typeof message === "object") {
       const record = /** @type {Record<string, unknown>} */ (message);
-      if (record["type"] === "dramafetch:load" && typeof record["input"] === "string") loadFromOutside(record["input"]);
+      // the engine's tab takes it and answers with its tab, which the worker brings to the front;
+      // a read-only tab stays silent (as does a tab that is not running: the worker then reloads
+      // one with the series in its address)
+      if (record["type"] === "dramafetch:load" && typeof record["input"] === "string" && loadFromOutside(record["input"])) {
+        sendResponse({ ok: true, tabId: app.tabId ?? null });
+      }
     }
   });
   setInterval(() => {

@@ -33,19 +33,25 @@ const HOSTS = [
   "https://upos-bstar1-mirrorakam.akamaized.net/*",
 ];
 
-test("the manifest: MV3, the names from _locales, version 1.0.1, Chrome 116+", () => {
+test("the manifest: MV3, the names from _locales, version 1.1.0, Chrome 116+", () => {
   assert.equal(manifest["manifest_version"], 3);
   assert.equal(manifest["name"], "__MSG_extName__");
   assert.equal(manifest["description"], "__MSG_extDescription__");
   assert.equal(manifest["default_locale"], "en");
   assert.equal(manifest["short_name"], "StreamFetch");
-  assert.equal(manifest["version"], "1.0.1");
+  assert.equal(manifest["version"], "1.1.0");
   assert.equal(manifest["minimum_chrome_version"], "116");
   assert.equal(manifest["streamfetch_test"], undefined, "the shipped manifest is never the test copy");
 });
 
 test("exactly the permissions of the spec, and none of the forbidden ones", () => {
-  assert.deepEqual(manifest["permissions"], ["downloads", "storage", "declarativeNetRequestWithHostAccess"]);
+  // `contextMenus`: the right-click "Download this video" (the owner's request of 2026-11-14)
+  assert.deepEqual(manifest["permissions"], [
+    "downloads",
+    "storage",
+    "declarativeNetRequestWithHostAccess",
+    "contextMenus",
+  ]);
   assert.deepEqual(manifest["host_permissions"], HOSTS);
   const everything = JSON.stringify(manifest);
   for (const forbidden of ["tabs", "scripting", "webRequest", "cookies", "debugger", "<all_urls>", "externally_connectable", "content_scripts", "web_accessible_resources", "optional_permissions", "optional_host_permissions"]) {
