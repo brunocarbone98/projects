@@ -22,6 +22,7 @@ const PERMISSIONS = [
   "tabs",
   "webRequest",
   "declarativeNetRequestWithHostAccess",
+  "contextMenus", // the right-click "Download this drama" (README: the permissions table)
 ];
 const HOSTS = [
   "https://www.tiktok.com/*",
