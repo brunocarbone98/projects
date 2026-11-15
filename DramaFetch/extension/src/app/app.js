@@ -1,18 +1,33 @@
 // @ts-check
 /**
  * The DramaFetch tab: the text box (one link or id per line, the CLI's `--from-file` rules), the
- * episode list of one series (**Load list**), the jobs — one at a time, FIFO, the web job
- * manager's rules — and their progress (the episodes a job did not download shown apart from the
- * ones that completed, with the button that queues them again), the cooldown banner, the settings,
- * the history of the last 20 runs — each past run's failures retryable the same way —, and (only
- * in the test harness' copy) the test settings. The engine runs here while the tab is open; one
- * tab per browser holds it (a Web Lock), a second one stays read-only.
+ * episode list of one series (**Load list**), the user's TikTok favorites (**Your favorite
+ * dramas**: a list job, a filter, ticks and **Add selected to the box**), the jobs — one at a
+ * time, FIFO, the web job manager's rules — and their progress (the episodes a job did not
+ * download shown apart from the ones that completed, with the button that queues them again), the
+ * cooldown banner, the settings, the history of the last 20 runs — each past run's failures
+ * retryable the same way —, and (only in the test harness' copy) the test settings. The engine
+ * runs here while the tab is open; one tab per browser holds it (a Web Lock), a second one stays
+ * read-only.
  */
 
 import { isLocked } from "../lib/catalog.js";
 import { COOLDOWN_STORAGE_KEY, activeCooldown, clockTime, cooldownMessage, minutesLeft, secondsLeft } from "../lib/cooldown.js";
 import { buildReport, digestEntry, hasFailures, reportFilename, reportJson, reportStem, slimRows } from "../lib/diagnosis.js";
 import { displayText, statusLabel } from "../lib/display.js";
+import {
+  FAVORITES_MAX_PAGES,
+  boxWithFavorites,
+  cleanTitle,
+  coversCard,
+  coversShift,
+  durationParts,
+  favoritesOfQuery,
+  handoverOf,
+  progressStatus,
+  resolveCard,
+  titleMatches,
+} from "../lib/favorites.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import { fileBaseName } from "../lib/naming.js";
 import {
@@ -28,7 +43,7 @@ import {
 import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib/report.js";
 import { doneEntries, readState } from "../lib/state.js";
 import { parseSeriesList } from "../lib/urls.js";
-import { closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
+import { DiscoveryError, closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
 import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
 import { initPageRedirects } from "./redirects.js";
 import {
@@ -42,7 +57,9 @@ import {
   runSelectionJob,
   storageRefusedReason,
 } from "./engine.js";
+import { FavoritesError, checkFavoritesTab, cutShort, listFavorites } from "./favorites.js";
 import { displayLabels, displayLanguage, localize, t } from "./i18n.js";
+import { isOwnSender } from "./senders.js";
 import {
   DEFAULT_SETTINGS,
   appendHistory,
@@ -51,8 +68,10 @@ import {
   loadPacing,
   loadSettings,
   loadTestSettings,
+  readFavoritesTemplate,
   readHistory,
   readSeriesState,
+  readSeriesStates,
   savePacing,
   saveSettings,
   saveTestSettings,
@@ -74,16 +93,42 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @typedef {import("./storage.js").Settings} Settings
  * @typedef {import("./storage.js").TestSettings} TestSettings
  *
+ * @typedef {import("../lib/favorites.js").FavoriteItem} FavoriteItem
+ * @typedef {import("../lib/favorites.js").Card} Card
+ * @typedef {import("../lib/favorites.js").CardResolution} CardResolution
+ * @typedef {import("../lib/favorites.js").FavoritesHandover} FavoritesHandover
+ * @typedef {import("./favorites.js").FavoritesListing} FavoritesListing
+ *
  * @typedef {object} Job
  * @property {number} id
- * @property {"load" | "batch" | "selection"} kind
+ * @property {"load" | "batch" | "selection" | "favorites"} kind `favorites`: **List favorites**
  * @property {string} label
- * @property {SeriesRef[]} refs
+ * @property {SeriesRef[]} refs a `load` job from a favorites card has none until the card is resolved
  * @property {Series | null} series
  * @property {number[]} numbers
  * @property {boolean} includeLocked
  * @property {boolean} recheck
  * @property {boolean} [contacted] whether the job made a request to TikTok (set while it runs)
+ * @property {number} [favoritesTab] the user's TikTok tab whose favorites a `favorites` job lists, or
+ *   whose right-clicked card a `load` job resolves first
+ * @property {Card | null} [card] the right-clicked favorites card a `load` job lists the drama of
+ *
+ * @typedef {object} FavoritesShown The favorites list the panel shows: one TikTok tab's.
+ * @property {number} tabId
+ * @property {FavoriteItem[]} items the list's dramas in its order (a drama listed twice: twice)
+ * @property {number | null} total how many favorites TikTok counts
+ * @property {boolean} complete the list's end was reached
+ * @property {FavoritesListing["ended"]} ended why the listing ended before the list's end
+ * @property {boolean} short TikTok stopped sending the list before its end (`favorites.cutShort`)
+ * @property {number} skipped the list's items left out for want of a readable series id
+ * @property {number} perPage how many dramas a page of that list held (`FavoritesListing.perPage`)
+ * @property {boolean} loading a listing is filling it now
+ * @property {number} listedAt when the listing ended, seconds since the epoch
+ *
+ * @typedef {{item: FavoriteItem} | {template: string} | {done: string | null}} CardStart What a
+ *   right-clicked card's job has before its first request ({@link cardStart}): the drama itself
+ *   (from the panel's list, no request), the tab's favorites address to read the list with, or the
+ *   end of the job, said on the page — the job's stop (a login wall) or null
  *
  * @typedef {object} JobRecord What a finished job leaves in the history.
  * @property {{kind: string, seconds: number, text: string}[]} pauses
@@ -125,6 +170,8 @@ const app = {
   testSettings: {},
   /** @type {{series: Series, resolvedAt: number} | null} */
   loaded: null,
+  /** @type {FavoritesShown | null} the favorites the panel shows (**Your favorite dramas**) */
+  favorites: null,
   /** @type {RetryTarget[] | null} the last finished job's episodes that did not download (the progress card's retry button) */
   failed: null,
   /** @type {{report: Record<string, unknown>, stem: string} | null} the last finished job's "did not download" report (**Save the report**) */
@@ -1160,6 +1207,8 @@ async function runJob(job) {
     await applyRefererRule(baseUrl());
     if (job.kind === "load") {
       stop = await runLoad(job, engine, entry);
+    } else if (job.kind === "favorites") {
+      stop = await runFavorites(job, engine, entry);
     } else if (job.kind === "batch") {
       const lastContactAt = app.lastContactAt; // the previous job's: this one's own come later
       runs = await runBatch(engine, job.refs, {
@@ -1233,14 +1282,29 @@ async function runJob(job) {
 /**
  * **Load list**: list one series (no download) and show its episodes — a job like any other: the
  * rest between jobs first (no long break: a listing alone is no download attempt), the cooldown
- * asked again after it. Returns why the job stopped (a cooldown met meanwhile), or null.
+ * asked again after it. A right-click on a drama of the user's TikTok favorites (`job.card`) is a
+ * listing too, in ONE job (so no rest more): the card is resolved to its series first — from the
+ * favorites the panel shows, with no request ({@link cardStart}), or else from the tab's favorites
+ * list read from its top until it reaches the card ({@link fetchFavorites}, paced;
+ * `lib/favorites.coversCard`: a page past the card's position when its drama is not where the card
+ * sits) —, never by a guess between dramas of the same title (`lib/favorites.resolveCard`: those
+ * are shown in the panel for the user to pick, nothing listed; `lib/favorites.coversShift` names
+ * the limit),
+ * the series joins the box like any series handed over, and the listing goes on as for **Load
+ * list**. Returns why the job stopped (a cooldown met meanwhile, a refusal or a login wall met while
+ * reading the list or before it), or null. (Exported for the unit tests, which cannot run a job.)
  * @param {Job} job
  * @param {Engine} engine
  * @param {Record<string, unknown>} entry
  * @returns {Promise<string | null>}
  */
-async function runLoad(job, engine, entry) {
-  const ref = /** @type {SeriesRef} */ (job.refs[0]);
+export async function runLoad(job, engine, entry) {
+  /** @type {CardStart | null} */
+  let start = null;
+  if (job.card) {
+    start = await cardStart(job, entry); // before the rest: without what the card needs, no request at all
+    if ("done" in start) return start.done; // said why, no request; a login wall seen there is the job's stop
+  }
   setStatus($("input-status"), t("loading"));
   await restBetweenJobs(engine, { lastContactAt: app.lastContactAt, batchJob: false });
   const refused = await checkCooldown(engine);
@@ -1255,6 +1319,42 @@ async function runLoad(job, engine, entry) {
     entry["error"] = app.unsaved;
     return app.unsaved;
   }
+  if (start !== null) {
+    /** @type {FavoriteItem | null} */
+    let item = "item" in start ? start.item : null;
+    if ("template" in start) {
+      const card = /** @type {Card} */ (job.card);
+      const tabId = /** @type {number} */ (job.favoritesTab);
+      let read;
+      try {
+        read = await fetchFavorites(job, engine, tabId, start.template, card);
+      } catch (error) {
+        if (error instanceof StopRequested) throw error;
+        return favoritesFailed(error, entry);
+      }
+      const { listing } = read;
+      const resolved = resolveCard(listing.items, card);
+      // TikTok stopped sending the list before it could tell the card's drama: no guess
+      if (cutShort(listing) && stoppedShortOfCard(listing.items, card, listing.perPage, resolved)) {
+        return cardCutShort(card, listing.items.length, entry);
+      }
+      if (resolved.kind === "missing") return cardNotFound(card, entry);
+      if (resolved.kind === "shared") {
+        if (!read.shown) showFavoritesListing(tabId, listing); // the list consulted, in the panel
+        return cardShared(card, entry);
+      }
+      item = resolved.item;
+    }
+    const found = /** @type {FavoriteItem} */ (item);
+    joinBox([found]);
+    if (app.queue.some((queued) => queued.kind === "load" && queued.refs[0]?.seriesId === found.seriesId)) {
+      setStatus($("input-status"), t("loadAlreadyQueued"), "error"); // a waiting Load list lists it: not twice
+      return null;
+    }
+    job.refs = [{ kind: "series", seriesId: found.seriesId, episodeHint: null, sourceUrl: found.seriesId }];
+    setStatus($("input-status"), t("loading"));
+  }
+  const ref = /** @type {SeriesRef} */ (job.refs[0]);
   let series;
   try {
     series = await resolve(engine, ref);
@@ -1273,6 +1373,534 @@ async function runLoad(job, engine, entry) {
   setStatus($("input-status"), t("loaded", [series.episodes.length]), "ok");
   await renderSeries(series, engine.view);
   return null;
+}
+
+// ------------------------------------------------------------ the user's TikTok favorites
+
+/**
+ * The panel's rows, one per series, in the list's order (a drama the list holds twice: one row).
+ * @type {Map<string, {item: FavoriteItem, row: HTMLElement, box: HTMLInputElement, status: HTMLElement}>}
+ */
+const favoriteRows = new Map();
+/**
+ * The series ticked in the panel, by series id: never cleared by another tab's listing (a row
+ * built for a ticked id shows ticked), pruned only by a COMPLETE listing shown in the panel — the
+ * ids it does not hold are dropped ({@link endFavorites}).
+ */
+const favoritesSelected = new Set();
+
+/**
+ * **List favorites** — the popup's **Choose from your favorites**: every page of a TikTok tab's
+ * favorites list into the panel, a job like any other — nothing asked of TikTok without that tab
+ * and its favorites address, then the rest between jobs, the cooldown before it and before every
+ * page ({@link fetchFavorites}). **Stop** ends it between two pages; what was listed stays. When
+ * TikTok stopped sending the list before its end (`favorites.cutShort`) the page says so, and the
+ * history keeps it — TikTok refused nothing, so it is no stop. Returns why the job stopped (a
+ * cooldown met, a refusal, a login wall — also one met before the first request), or null.
+ * (Exported for the unit tests, which cannot run a job.)
+ * @param {Job} job
+ * @param {Engine} engine
+ * @param {Record<string, unknown>} entry
+ * @returns {Promise<string | null>}
+ */
+export async function runFavorites(job, engine, entry) {
+  const tabId = /** @type {number} */ (job.favoritesTab);
+  const template = await favoritesTemplate(tabId, entry);
+  if ("stop" in template) return template.stop; // said why, no request; a login wall is the job's stop
+  setStatus($("input-status"), t("favoritesListing"));
+  await restBetweenJobs(engine, { lastContactAt: app.lastContactAt, batchJob: false });
+  const refused = await checkCooldown(engine);
+  if (refused !== null) {
+    const message = cooldownMessage(refused, { now: now() });
+    setStatus($("input-status"), shownText(message), "error");
+    entry["error"] = message;
+    return message;
+  }
+  await storePacing(); // can anything be stored? asked before the first request, as the engine does
+  if (app.unsaved !== null) {
+    entry["error"] = app.unsaved;
+    return app.unsaved;
+  }
+  let listing;
+  try {
+    ({ listing } = await fetchFavorites(job, engine, tabId, template.url));
+  } catch (error) {
+    if (error instanceof StopRequested) {
+      noteListed(entry); // what was listed before the Stop stays listed
+      throw error;
+    }
+    return favoritesFailed(error, entry);
+  }
+  noteListed(entry);
+  if (cutShort(listing)) {
+    // TikTok sent no more than this: said, and kept in the history — it refused nothing, so no stop
+    const text = t("favoritesCutShort", [favoriteRows.size]);
+    setStatus($("input-status"), text, "error");
+    entry["error"] = text;
+    return null;
+  }
+  setStatus($("input-status"), t("favoritesLoaded", [favoriteRows.size]), "ok");
+  return null;
+}
+
+/**
+ * A favorites listing's history entry: how many dramas it listed, and — when some were — how many
+ * of the list's items it left out for want of a readable series id.
+ * @param {Record<string, unknown>} entry
+ */
+function noteListed(entry) {
+  entry["favorites"] = favoriteRows.size;
+  const skipped = app.favorites?.skipped ?? 0;
+  if (skipped > 0) entry["favorites_skipped"] = skipped;
+}
+
+/**
+ * The favorites address of TikTok tab `tabId` — the first page of its favorites list, as the tab
+ * asked for it and the worker saw it — once that tab is still there and on TikTok; else the page
+ * says what to do and the job's stop comes back instead (`favoritesFailed`: the login wall in the
+ * tab is a stop, the jobs waiting behind end without a request; no address seen or the tab gone,
+ * null): no request either way.
+ * @param {number} tabId
+ * @param {Record<string, unknown>} entry
+ * @returns {Promise<{url: string} | {stop: string | null}>}
+ */
+async function favoritesTemplate(tabId, entry) {
+  const template = await readFavoritesTemplate(tabId).catch(() => null);
+  if (template === null) return { stop: favoritesFailed(new FavoritesError("no-template"), entry) };
+  try {
+    await checkFavoritesTab(tabId, template.url);
+  } catch (error) {
+    return { stop: favoritesFailed(error, entry) };
+  }
+  return { url: template.url };
+}
+
+/**
+ * What a right-click on a favorites card needs before the job's first request — from the list the
+ * panel shows for that tab, when it can tell, with no request at all (a list read from the top,
+ * `lib/favorites.resolveCard`):
+ * - unless the tab has listed its favorites again since the panel's list (its grid may have moved,
+ *   and TikTok may send more of it now): TikTok stopped sending that list before it could tell the
+ *   card's drama (`favorites.cutShort`, {@link stoppedShortOfCard}) → `favoritesCardCutShort`,
+ *   since a new listing would end the same; several dramas of the card's title in it, the card's
+ *   position covered → those dramas shown in the panel for the user to pick ({@link cardShared});
+ *   the list known whole without the title → `favoritesNotFound`;
+ * - the one drama of the card's title, where a fresh listing would stop too
+ *   (`lib/favorites.coversCard`: away from the card's position, a page past it read), or in a list
+ *   known whole or one TikTok sent no more of → that drama; once the tab has listed its favorites
+ *   again since, only when it sits at the card's very position (a drama of that title favorited
+ *   since may be in the grid and not in the panel's list: it moved every card).
+ * Anything else — no list of that tab in the panel, one that does not reach the card or lacks its
+ * title, dramas of the same title in a list the tab has listed again since, the one drama of the
+ * title away from the card's position in such a list — needs the list read again from its top: the
+ * tab's favorites address, checked ({@link favoritesTemplate}).
+ * @param {Job} job
+ * @param {Record<string, unknown>} entry
+ * @returns {Promise<CardStart>}
+ */
+async function cardStart(job, entry) {
+  const tabId = /** @type {number} */ (job.favoritesTab);
+  const card = /** @type {Card} */ (job.card);
+  const shown = app.favorites;
+  if (shown !== null && shown.tabId === tabId && !shown.loading && shown.items.length > 0) {
+    const latest = await readFavoritesTemplate(tabId).catch(() => null);
+    const listedSince = latest !== null && latest.at > shown.listedAt;
+    const reached = shown.complete || shown.items.length > card.index;
+    const resolved = resolveCard(shown.items, card);
+    if (!listedSince) {
+      if (shown.short && stoppedShortOfCard(shown.items, card, shown.perPage, resolved)) return { done: cardCutShort(card, shown.items.length, entry) };
+      if (resolved.kind === "shared" && reached) return { done: cardShared(card, entry) };
+      if (resolved.kind === "missing" && shown.complete) return { done: cardNotFound(card, entry) };
+    }
+    // the tab listed its favorites again since: the grid may hold a drama of that title favorited
+    // since, which the panel's list lacks — its one drama of the title is still the card's only
+    // where it sits at the card's very position (a favorite added or removed moves every card)
+    if (
+      resolved.kind === "found" &&
+      (!listedSince || resolved.index === card.index) &&
+      (shown.complete || (shown.short && !listedSince) || coversCard(shown.items, card, shown.perPage))
+    ) {
+      return { item: resolved.item };
+    }
+  }
+  const template = await favoritesTemplate(tabId, entry);
+  return "url" in template ? { template: template.url } : { done: template.stop };
+}
+
+/**
+ * Whether a list of the favorites that TikTok stopped sending before its end (`favorites.cutShort`)
+ * stops before it can tell a right-clicked card's drama: before the card's position, before the
+ * card's title, or — the one drama of that title away from the card's position: the grid has moved
+ * since it loaded — before a page past that position (`lib/favorites.coversShift`), where the
+ * card's own drama, of the same title, may lie unseen. Two dramas of the title in it are shown
+ * instead ({@link cardShared}).
+ * @param {readonly FavoriteItem[]} items the list, read from its top
+ * @param {Card} card
+ * @param {number} perPage how many dramas a page of the list held
+ * @param {CardResolution} resolved what `items` say of the card (`lib/favorites.resolveCard`)
+ * @returns {boolean}
+ */
+function stoppedShortOfCard(items, card, perPage, resolved) {
+  if (items.length <= card.index || resolved.kind === "missing") return true;
+  return resolved.kind === "found" && !coversShift(items, card, perPage);
+}
+
+/**
+ * Several of the user's favorites bear the right-clicked card's title: none is picked — its
+ * position cannot tell them apart. The panel shows them (its filter set to that title), each with
+ * its episodes and length, and the page asks the user to tick the one they right-clicked and press
+ * **Add selected to the box**; the job lists nothing, and its history entry keeps the text.
+ * @param {Card} card
+ * @param {Record<string, unknown>} entry
+ * @returns {null}
+ */
+function cardShared(card, entry) {
+  input("favorites-filter").value = cleanTitle(card.title);
+  applyFavoritesFilter();
+  $("favorites-card").hidden = false;
+  const message = t("favoritesShared", card.title);
+  setStatus($("input-status"), message, "error");
+  entry["error"] = message;
+  return null;
+}
+
+/**
+ * A right-clicked card names a drama the favorites list does not hold (any more): the page says so
+ * and the job ends — nothing listed.
+ * @param {Card} card
+ * @param {Record<string, unknown>} entry
+ * @returns {null}
+ */
+function cardNotFound(card, entry) {
+  const message = t("favoritesNotFound", card.title);
+  setStatus($("input-status"), message, "error");
+  entry["error"] = message;
+  return null;
+}
+
+/**
+ * A right-clicked card lies further down the favorites than TikTok sent (`favorites.cutShort`): the
+ * page says so and how to list that drama anyway, and the job ends — nothing listed.
+ * @param {Card} card
+ * @param {number} count the dramas TikTok sent
+ * @param {Record<string, unknown>} entry
+ * @returns {null}
+ */
+function cardCutShort(card, count, entry) {
+  const message = t("favoritesCardCutShort", [card.title, count]);
+  setStatus($("input-status"), message, "error");
+  entry["error"] = message;
+  return null;
+}
+
+/**
+ * Read TikTok tab `tabId`'s favorites list (`favorites.listFavorites`: from inside that tab, from
+ * its top, paced, one request at a time, the cooldown before every page, a refusal recorded) — all
+ * of it (**List favorites**, into the panel as pages arrive), or, for a right-clicked `card`, until
+ * it reaches the card (`lib/favorites.coversCard`). A card's listing fills the panel only when the
+ * panel shows nothing yet, or — at its end — when the panel shows the same tab's list, not
+ * complete, and the listing holds more dramas than it (it extends it); otherwise the panel — rows,
+ * count line, ticks — stays exactly as it was, and the card is resolved from the listing alone.
+ * The job's contact with TikTok is noted at both ends, as a listing's; nothing is asked when this
+ * page could not store a write.
+ * @param {Job} job
+ * @param {Engine} engine
+ * @param {number} tabId
+ * @param {string} template
+ * @param {Card} [card]
+ * @returns {Promise<{listing: FavoritesListing, shown: boolean}>} the listing, and whether the panel shows it
+ */
+async function fetchFavorites(job, engine, tabId, template, card) {
+  await noteContact(job);
+  if (app.unsaved !== null) throw new StorageRefusedError(app.unsaved); // that save refused: not one request
+  const test = app.testMode ? app.testSettings : {};
+  const before = app.favorites;
+  const fills = card === undefined || before === null || before.items.length === 0;
+  /** @type {import("./favorites.js").FavoritesOptions} */
+  const options = { onPage: fills ? (listing) => showFavoritesPage(listing) : (listing) => showListingProgress(listing) };
+  if (test.pageDelayS !== undefined) options.pageDelayS = test.pageDelayS;
+  if (test.discoveryTimeoutS !== undefined) options.timeoutS = test.discoveryTimeoutS;
+  if (card !== undefined) options.until = (items, perPage) => coversCard(items, card, perPage);
+  if (fills) startFavorites(tabId);
+  /** @type {FavoritesListing | null} */
+  let listing = null;
+  try {
+    listing = await listFavorites(engine, tabId, template, options);
+    if (fills) return { listing, shown: true };
+    const extending = before !== null && before.tabId === tabId && !before.complete && listing.items.length > before.items.length;
+    if (extending) showFavoritesListing(tabId, listing);
+    return { listing, shown: extending };
+  } finally {
+    if (fills) endFavorites(listing);
+    await noteContact(job);
+  }
+}
+
+/**
+ * Why a favorites listing (or a card's) ended without its list, said on the page and kept in the
+ * job's history entry: TikTok's refusals, its login wall, a cooldown met and a refused write in
+ * the engine's English (shown in the page's language), the rest in the page's own words. Returns
+ * the job's stop — TikTok refused (HTTP 429 or 403, a captcha: the cooldown is recorded already),
+ * its login wall, a cooldown met before a page, a refused write: a full stop, the jobs waiting
+ * behind it end without a request —, or null when the list just could not be read (no address
+ * seen, the tab gone, TikTok's own error, no list in the answer).
+ * @param {unknown} error
+ * @param {Record<string, unknown>} entry
+ * @returns {string | null}
+ */
+function favoritesFailed(error, entry) {
+  if (error instanceof FavoritesError && error.kind !== "cooldown") {
+    const text = favoritesErrorText(error);
+    setStatus($("input-status"), text, "error");
+    entry["error"] = text;
+    return null;
+  }
+  const stored = error instanceof FavoritesError ? error.detail : error instanceof DiscoveryError ? error.message : oneLine(error);
+  setStatus($("input-status"), shownText(stored), "error");
+  entry["error"] = stored;
+  return stored;
+}
+
+/**
+ * What the page says of a favorites list it could not read, in its own words.
+ * @param {FavoritesError} error
+ * @returns {string}
+ */
+function favoritesErrorText(error) {
+  if (error.kind === "no-template") return t("favoritesNoTemplate");
+  if (error.kind === "tab-gone") return t("favoritesTabGone");
+  if (error.kind === "status") return t("favoritesStatusError", error.detail);
+  if (error.detail === "0") return t("favoritesNoAnswer");
+  return t("favoritesUnreadable", error.detail);
+}
+
+/**
+ * A listing of TikTok tab `tabId`'s favorites starts: the panel shows, emptied of an earlier
+ * listing's rows; the ticks stay (another tab's list too: a row built for a ticked drama shows
+ * ticked), until a complete listing prunes them ({@link endFavorites}).
+ * @param {number} tabId
+ */
+function startFavorites(tabId) {
+  app.favorites = { tabId, items: [], total: null, complete: false, ended: null, short: false, skipped: 0, perPage: 0, loading: true, listedAt: now() };
+  favoriteRows.clear();
+  /** @type {HTMLTableSectionElement} */ ($("favorites-table").querySelector("tbody")).textContent = "";
+  setStatus($("favorites-status"), "");
+  input("favorites-select-all").checked = false;
+  $("favorites-card").hidden = false;
+  renderFavoritesCount();
+  updateFavoritesSelection();
+}
+
+/**
+ * A page of the list arrived: its dramas join the panel as rows (a drama listed already keeps its
+ * row), with what DramaFetch's records say of them.
+ * @param {FavoritesListing} listing
+ */
+function showFavoritesPage(listing) {
+  const shown = app.favorites;
+  if (shown === null) return;
+  shown.items = [...listing.items];
+  shown.total = listing.total;
+  shown.skipped = listing.skipped;
+  shown.perPage = listing.perPage;
+  const body = /** @type {HTMLTableSectionElement} */ ($("favorites-table").querySelector("tbody"));
+  /** @type {string[]} */
+  const added = [];
+  for (const item of listing.items) {
+    if (favoriteRows.has(item.seriesId)) continue;
+    const shownRow = favoriteRow(item);
+    favoriteRows.set(item.seriesId, shownRow);
+    body.append(shownRow.row);
+    added.push(item.seriesId);
+  }
+  renderFavoritesCount();
+  $("progress-activity").textContent = $("favorites-count").textContent ?? "";
+  updateFavoritesSelection();
+  void showFavoriteStatuses(added);
+}
+
+/**
+ * The listing ended — at the list's end, or before it (a card's position reached, a limit, a
+ * refusal, **Stop**): the count says how much the panel holds. Only a COMPLETE listing prunes the
+ * ticks — a drama it does not hold is no favorite any more —; a partial one may simply not have
+ * reached a ticked drama yet.
+ * @param {FavoritesListing | null} listing null when it ended without one (an error, a Stop)
+ */
+function endFavorites(listing) {
+  const shown = app.favorites;
+  if (shown === null) return;
+  shown.loading = false;
+  shown.listedAt = now();
+  if (listing !== null) {
+    shown.complete = listing.complete;
+    shown.ended = listing.ended;
+    shown.short = cutShort(listing);
+    if (listing.complete) for (const seriesId of [...favoritesSelected]) if (!favoriteRows.has(seriesId)) favoritesSelected.delete(seriesId);
+  }
+  renderFavoritesCount();
+  updateFavoritesSelection();
+}
+
+/**
+ * A finished listing of TikTok tab `tabId` takes the panel's place — a card's listing that extends
+ * the panel's list of that tab, or the list a card's dramas of the same title were found in
+ * ({@link cardShared}) —: rows and count line anew, the ticks kept.
+ * @param {number} tabId
+ * @param {FavoritesListing} listing
+ */
+function showFavoritesListing(tabId, listing) {
+  startFavorites(tabId);
+  showFavoritesPage(listing);
+  endFavorites(listing);
+}
+
+/**
+ * A card's listing that does not fill the panel says how far it read on the progress card only:
+ * the panel stays as it was.
+ * @param {FavoritesListing} listing
+ */
+function showListingProgress(listing) {
+  const listed = new Set(listing.items.map((item) => item.seriesId)).size;
+  $("progress-activity").textContent =
+    listing.total !== null ? t("favoritesLoading", [listed, listing.total]) : t("favoritesLoadingCount", [listed]);
+}
+
+/**
+ * One drama's row: its tick, its title, its episodes and length, and DramaFetch's status of it.
+ * @param {FavoriteItem} item
+ * @returns {{item: FavoriteItem, row: HTMLElement, box: HTMLInputElement, status: HTMLElement}}
+ */
+function favoriteRow(item) {
+  const box = /** @type {HTMLInputElement} */ (el("input", { attrs: { type: "checkbox", "data-series-id": item.seriesId } }));
+  box.checked = favoritesSelected.has(item.seriesId);
+  box.addEventListener("change", () => {
+    if (box.checked) favoritesSelected.add(item.seriesId);
+    else favoritesSelected.delete(item.seriesId);
+    updateFavoritesSelection();
+  });
+  const status = el("td", { className: "favorite-status" });
+  const row = el("tr", { attrs: { "data-series-id": item.seriesId } }, [
+    el("td", {}, [box]),
+    el("td", { className: "favorite-title", text: item.title ?? item.seriesId }),
+    el("td", { className: "favorite-meta", text: favoriteMeta(item) }),
+    status,
+  ]);
+  row.hidden = !titleMatches(item.title, input("favorites-filter").value);
+  return { item, row, box, status };
+}
+
+/**
+ * `60 episodes · 1h 19m`, as far as the list says.
+ * @param {FavoriteItem} item
+ * @returns {string}
+ */
+function favoriteMeta(item) {
+  const parts = durationParts(item.durationS);
+  const length =
+    parts === null
+      ? null
+      : parts.hours > 0
+        ? t("favoritesLengthHours", [parts.hours, parts.minutes])
+        : t("favoritesLengthMinutes", [parts.minutes]);
+  if (item.episodes === null) return length ?? "–";
+  return length === null ? t("favoritesEpisodes", [item.episodes]) : t("favoritesEpisodesLength", [item.episodes, length]);
+}
+
+/**
+ * What DramaFetch's own records say of these dramas (`lib/favorites.progressStatus`: **on disk**,
+ * **partly**): one read of the stored progress, no request. A read the storage refuses shows none.
+ * @param {readonly string[]} seriesIds
+ * @returns {Promise<void>}
+ */
+async function showFavoriteStatuses(seriesIds) {
+  if (seriesIds.length === 0) return;
+  let states;
+  try {
+    states = await readSeriesStates(seriesIds);
+  } catch {
+    return;
+  }
+  for (const seriesId of seriesIds) {
+    const shown = favoriteRows.get(seriesId);
+    if (shown === undefined) continue;
+    const status = progressStatus(states.get(seriesId), seriesId, shown.item.episodes);
+    if (status === "on-disk") {
+      shown.status.replaceChildren(el("span", { className: "badge ondisk", text: t("badgeOnDisk"), title: t("favoritesOnDiskTitle"), attrs: { "data-status": status } }));
+    } else if (status === "partly") {
+      shown.status.replaceChildren(el("span", { className: "badge partly", text: t("favoritesPartly"), title: t("favoritesPartlyTitle"), attrs: { "data-status": status } }));
+    } else {
+      shown.status.replaceChildren();
+    }
+  }
+}
+
+/** The panel's count line: what is listed, while it loads and once it is done. */
+function renderFavoritesCount() {
+  const shown = app.favorites;
+  if (shown === null) return;
+  const listed = favoriteRows.size;
+  let text;
+  if (shown.loading) text = shown.total !== null ? t("favoritesLoading", [listed, shown.total]) : t("favoritesLoadingCount", [listed]);
+  else if (shown.complete || shown.total === null || listed >= shown.total) text = t("favoritesListed", [listed]);
+  else text = t("favoritesListedOf", [listed, shown.total]);
+  if (!shown.loading && shown.ended === "cap") text += ` ${t("favoritesCapped", [FAVORITES_MAX_PAGES])}`;
+  if (!shown.loading && shown.short) text += ` ${t("favoritesCutShortNote")}`;
+  if (shown.skipped > 0) text += ` ${t("favoritesSkipped", [shown.skipped])}`;
+  $("favorites-count").textContent = text;
+}
+
+/** The filter box: only the dramas whose title holds its text are shown (letter case aside). */
+function applyFavoritesFilter() {
+  const filter = input("favorites-filter").value;
+  for (const { item, row } of favoriteRows.values()) row.hidden = !titleMatches(item.title, filter);
+  input("favorites-select-all").checked = false;
+  updateFavoritesSelection();
+}
+
+/** **Select all shown**: ticks (or unticks) every row the filter shows, and only those. */
+function onFavoritesSelectShown() {
+  const checked = input("favorites-select-all").checked;
+  for (const { item, row, box } of favoriteRows.values()) {
+    if (row.hidden) continue;
+    box.checked = checked;
+    if (checked) favoritesSelected.add(item.seriesId);
+    else favoritesSelected.delete(item.seriesId);
+  }
+  updateFavoritesSelection();
+}
+
+/** The selection line and **Add selected to the box**, which needs a tick. */
+function updateFavoritesSelection() {
+  const rows = [...favoriteRows.values()];
+  const ticked = rows.filter(({ box }) => box.checked).length;
+  $("favorites-selection").textContent = t("favoritesSelection", [ticked, rows.filter(({ row }) => !row.hidden).length]);
+  button("favorites-add-button").disabled = ticked === 0;
+}
+
+/**
+ * **Add selected to the box**: every ticked drama the box does not name yet joins it — a `#
+ * <title>` comment line above its series id — and the page says how many, and that **Download
+ * all** downloads them. Nothing is downloaded from the panel itself, nothing asked of TikTok.
+ */
+function onFavoritesAdd() {
+  const items = [...favoriteRows.values()].filter(({ box }) => box.checked).map(({ item }) => item);
+  if (items.length === 0) return;
+  const added = joinBox(items);
+  if (added > 0) setStatus($("favorites-status"), t("favoritesAdded", [added]), "ok");
+  else setStatus($("favorites-status"), t("favoritesNoneAdded"));
+}
+
+/**
+ * `items` join the box below what it holds — a `# <title>` comment line above each series id the
+ * box does not name yet (`lib/favorites.boxWithFavorites`); how many joined.
+ * @param {readonly FavoriteItem[]} items
+ * @returns {number}
+ */
+function joinBox(items) {
+  const box = textarea("links");
+  const { text, added } = boxWithFavorites(box.value, items);
+  box.value = text;
+  return added.length;
 }
 
 // ------------------------------------------------------------------ the loaded series
@@ -1455,6 +2083,67 @@ function listSeries(ref) {
     return;
   }
   enqueue({ kind: "load", label: t("jobLoad", ref.seriesId), refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false });
+}
+
+/**
+ * Whether a listing of TikTok tab `tabId`'s favorites is running or waiting: a second one queues
+ * nothing.
+ * @param {number} tabId
+ * @returns {boolean}
+ */
+function favoritesPending(tabId) {
+  /** @param {Job} job */
+  const listsIt = (job) => job.kind === "favorites" && job.favoritesTab === tabId;
+  return (app.running !== null && listsIt(app.running)) || app.queue.some(listsIt);
+}
+
+/**
+ * Whether the drama of the same right-clicked card of tab `tabId` is being listed or waits to be.
+ * @param {number} tabId
+ * @param {Card} card
+ * @returns {boolean}
+ */
+function cardPending(tabId, card) {
+  /** @param {Job} job */
+  const listsIt = (job) => job.kind === "load" && job.favoritesTab === tabId && job.card?.title === card.title && job.card.index === card.index;
+  return (app.running !== null && listsIt(app.running)) || app.queue.some(listsIt);
+}
+
+/**
+ * The favorites of a TikTok tab handed over (the popup's **Choose from your favorites**, the
+ * right-click **Download this favorite drama** on a profile page), taken by the engine's tab only,
+ * like a series ({@link loadFromOutside}): a right-click on a card lists that card's drama — one
+ * **Load list** job that resolves the card first —; a right-click that names no card queues
+ * nothing at all (no job, no request) and says why — the tab's content script answered that the
+ * right-click was on no drama (`favoritesNoCard`), or no content script answered, the tab being
+ * older than DramaFetch's load or update (`favoritesNoScript`) —; the popup's hand-over lists the
+ * tab's favorites in the panel (**List favorites**). The tab still answers, so the worker brings it
+ * to the front to say it. Nothing is queued twice.
+ * @param {FavoritesHandover} handover
+ * @returns {boolean} whether this tab took it (the engine's tab)
+ */
+function favoritesFromOutside(handover) {
+  if (!app.owner) return false;
+  const status = $("input-status");
+  const { tabId, card } = handover;
+  if (card !== null) {
+    if (cardPending(tabId, card)) setStatus(status, t("loadAlreadyQueued"), "error");
+    else enqueue({ kind: "load", label: t("jobCard", card.title), refs: [], series: null, numbers: [], includeLocked: false, recheck: false, favoritesTab: tabId, card });
+    return true;
+  }
+  if (handover.menu) {
+    // a right-click that named no drama: nothing to list — never the whole list in its place
+    if (handover.script) setStatus(status, t("favoritesNoCard"), "error");
+    else setStatus(status, t("favoritesNoScript"), "error");
+    return true;
+  }
+  if (favoritesPending(tabId)) {
+    setStatus(status, t("favoritesAlreadyQueued"), "error");
+    return true;
+  }
+  setStatus(status, t("favoritesChoose"));
+  enqueue({ kind: "favorites", label: t("jobFavorites"), refs: [], series: null, numbers: [], includeLocked: false, recheck: false, favoritesTab: tabId, card: null });
+  return true;
 }
 
 /** **Load list**: the one series in the box. */
@@ -1656,6 +2345,10 @@ async function renderHistory() {
       item.append(el("div", { text: `${String(record["name"] ?? record["series_id"] ?? "")}: ${line}` }));
     }
     // a run too large for its share of the history kept only some of its series (storage.js)
+    // a favorites listing: how many dramas it listed
+    if (typeof entry["favorites"] === "number") item.append(el("div", { text: t("favoritesListed", [entry["favorites"]]) }));
+    const unreadable = entry["favorites_skipped"];
+    if (typeof unreadable === "number" && unreadable > 0) item.append(el("div", { className: "meta", text: t("favoritesSkipped", [unreadable]) }));
     const omitted = entry["series_omitted"];
     if (typeof omitted === "number" && omitted > 0) item.append(el("div", { className: "meta", text: t("historySeriesOmitted", [omitted]) }));
     // the episodes that did not download, and the button that queues them again (one selection job
@@ -1786,6 +2479,10 @@ async function main() {
     for (const box of episodeBoxes()) box.checked = input("select-all").checked;
     updateSelection();
   });
+  input("favorites-filter").addEventListener("input", applyFavoritesFilter);
+  input("favorites-select-all").addEventListener("change", onFavoritesSelectShown);
+  button("favorites-add-button").addEventListener("click", onFavoritesAdd);
+  updateFavoritesSelection();
   $("settings-form").addEventListener("submit", (event) => void onSaveSettings(/** @type {SubmitEvent} */ (event)));
   button("settings-reset").addEventListener("click", () => void onResetSettings());
 
@@ -1793,7 +2490,7 @@ async function main() {
     if (area === "local" && Object.hasOwn(changes, COOLDOWN_STORAGE_KEY)) void refreshCooldown();
   });
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (sender.id !== chrome.runtime.id) return; // only this extension's own code
+    if (!isOwnSender(sender)) return; // only this extension's own pages and worker: never a content script
     if (message !== null && typeof message === "object") {
       const record = /** @type {Record<string, unknown>} */ (message);
       // the engine's tab takes it and answers with its tab, which the worker brings to the front;
@@ -1802,6 +2499,9 @@ async function main() {
       if (record["type"] === "dramafetch:load" && typeof record["input"] === "string" && loadFromOutside(record["input"])) {
         sendResponse({ ok: true, tabId: app.tabId ?? null });
       }
+      // the favorites of a TikTok tab (the popup, the right-click on a profile): the same hand-over
+      const handover = record["type"] === "dramafetch:favorites" ? handoverOf(record) : null;
+      if (handover !== null && favoritesFromOutside(handover)) sendResponse({ ok: true, tabId: app.tabId ?? null });
     }
   });
   setInterval(() => {
@@ -1813,9 +2513,11 @@ async function main() {
   await renderHistory();
   renderAppStatus();
   const load = new URLSearchParams(location.search).get("load");
-  if (load) {
+  const favorites = favoritesOfQuery(location.search); // a favorites hand-over no running page took
+  if (load || favorites !== null) {
     history.replaceState(null, "", location.pathname);
-    loadFromOutside(load);
+    if (load) loadFromOutside(load);
+    if (favorites !== null) favoritesFromOutside(favorites);
   }
 }
 

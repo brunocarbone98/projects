@@ -45,6 +45,34 @@
     <p id="input-status" class="status" role="status"></p>
   </section>
 
+  <section class="card" id="favorites-card" hidden>
+    <h2 data-i18n="favoritesHeading">Your favorite dramas</h2>
+    <p id="favorites-count" class="meta"></p>
+    <div class="favorites-tools">
+      <input type="search" id="favorites-filter" spellcheck="false" autocomplete="off" data-i18n-placeholder="favoritesFilterPlaceholder" data-i18n-aria-label="favoritesFilterPlaceholder">
+      <label><input type="checkbox" id="favorites-select-all"> <span data-i18n="favoritesSelectShown">Select all shown</span></label>
+    </div>
+    <div class="buttons">
+      <button type="button" id="favorites-add-button" class="primary" data-i18n="favoritesAddButton">Add selected to the box</button>
+      <span id="favorites-selection" class="meta"></span>
+    </div>
+    <p id="favorites-status" class="status" role="status"></p>
+    <p class="hint" data-i18n="favoritesHint">Tick dramas and press Add selected to the box: they join the box above, and Download all downloads them, one series after the other. Nothing is downloaded from this list itself.</p>
+    <div class="table-wrap">
+      <table id="favorites-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th data-i18n="colTitle">Title</th>
+            <th data-i18n="favoritesColEpisodes">Episodes</th>
+            <th data-i18n="colStatus">Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="card" id="series-card" hidden>
     <h2 id="series-title"></h2>
     <p id="series-meta" class="meta"></p>

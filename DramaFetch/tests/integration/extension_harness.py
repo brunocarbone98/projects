@@ -3,7 +3,9 @@
 `ExtensionHarness` copies the extension's runtime files (`manifest.json`, `_locales`, `icons`,
 `src`) to a temporary directory and adds, to that COPY's manifest only, the two things the shipped
 manifest must never have: `"dramafetch_test": true` (test overrides are honoured only then) and
-the host permission `http://127.0.0.1/*` (the fake server). It writes `Default/Preferences` with
+the host permission `http://127.0.0.1/*` (the fake server) — added to the content script's
+`matches` too, so that the favorites card reader runs on the fake's profile page as it runs on
+TikTok's. It writes `Default/Preferences` with
 the download directory (and any `preferences` a scenario passes: third-party cookies blocked, say)
 before launch, launches Chromium (`DRAMAFETCH_CHROMIUM` or
 `/opt/pw-browsers/chromium`) headless with `--disable-extensions-except` / `--load-extension`,
@@ -24,9 +26,13 @@ Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
 `#result-trimmed`, `#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`,
 `#failed-table` (rows with `data-number`, `data-status`, a `.badge` and a `td.message`),
 `#retry-button`, `#report-button`,
-`#failed-report`, `#setting-report`, `#settings-save`, `#history-list`. Storage keys it reads:
-`history` (most recent run first), `cooldown`, `series:<id>`, `pacing`. A cookie value is never
-printed, logged or asserted on.
+`#failed-report`, `#setting-report`, `#settings-save`, `#history-list`, the favorites panel
+(`#favorites-card`, `#favorites-count`, `#favorites-filter`, `#favorites-select-all`,
+`#favorites-add-button`, `#favorites-status`, `#favorites-table` with one `tr[data-series-id]` per
+drama) and the popup's `#popup-favorites` / `#popup-favorites-hint`. Storage keys it reads:
+`history` (most recent run first), `cooldown`, `series:<id>`, `pacing`, and in
+`chrome.storage.session` `favoritesTemplate:<tab id>`. A cookie value is never printed, logged or
+asserted on.
 """
 
 from __future__ import annotations
@@ -99,6 +105,8 @@ def make_test_copy(target: Path, *, drop_permissions: tuple[str, ...] = ()) -> P
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["dramafetch_test"] = True
     manifest["host_permissions"] = [*manifest["host_permissions"], TEST_HOST_PERMISSION]
+    for script in manifest.get("content_scripts", []):
+        script["matches"] = [*script["matches"], TEST_HOST_PERMISSION]
     missing = [name for name in drop_permissions if name not in manifest["permissions"]]
     assert not missing, f"the manifest has no permission {missing} to leave out"
     manifest["permissions"] = [
