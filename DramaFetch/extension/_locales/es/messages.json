@@ -426,6 +426,284 @@
     "message": "Ya descargado: al descargar de nuevo se omite sin ninguna solicitud",
     "description": "Tooltip of the on-disk badge."
   },
+  "favoritesHeading": {
+    "message": "Tus dramas favoritos",
+    "description": "Heading of the panel that lists the user's TikTok favorites (Favorites → Drama)."
+  },
+  "favoritesFilterPlaceholder": {
+    "message": "Filtrar por título",
+    "description": "Placeholder and label of the favorites panel's filter box (title contains, letter case aside)."
+  },
+  "favoritesSelectShown": {
+    "message": "Seleccionar todos los mostrados",
+    "description": "Checkbox: tick every drama the filter shows."
+  },
+  "favoritesAddButton": {
+    "message": "Añadir los seleccionados al cuadro",
+    "description": "Button: the ticked favorites join the box of series (nothing is downloaded)."
+  },
+  "favoritesHint": {
+    "message": "Marca dramas y pulsa Añadir los seleccionados al cuadro: se suman al cuadro de arriba, y Descargar todo los descarga, una serie tras otra. Desde esta lista no se descarga nada.",
+    "description": "Hint under the favorites panel's buttons."
+  },
+  "favoritesColEpisodes": {
+    "message": "Episodios",
+    "description": "Favorites table column: episodes and length."
+  },
+  "favoritesListing": {
+    "message": "Listando tus favoritos desde tu pestaña de TikTok…",
+    "description": "Status while the favorites list is read."
+  },
+  "favoritesLoading": {
+    "message": "Cargando tus favoritos: $loaded$ de $total$",
+    "description": "Favorites count line while the list loads, TikTok's total known.",
+    "placeholders": {
+      "loaded": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      }
+    }
+  },
+  "favoritesLoadingCount": {
+    "message": "Cargando tus favoritos: $loaded$",
+    "description": "Favorites count line while the list loads, no total known.",
+    "placeholders": {
+      "loaded": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesListed": {
+    "message": "$count$ dramas favoritos listados.",
+    "description": "Favorites count line once the whole list is read (also a past run's line).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesListedOf": {
+    "message": "$count$ de $total$ dramas favoritos listados.",
+    "description": "Favorites count line when the listing ended before the list's end.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      }
+    }
+  },
+  "favoritesCapped": {
+    "message": "DramaFetch lee como mucho $pages$ páginas de la lista: el resto no se lista.",
+    "description": "Added to the count line when the listing stopped at its page limit.",
+    "placeholders": {
+      "pages": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesCutShortNote": {
+    "message": "TikTok no envió más de la lista: el resto no se lista.",
+    "description": "Added to the favorites count line when TikTok stopped sending the list before its end."
+  },
+  "favoritesSkipped": {
+    "message": "$count$ omitidos: TikTok los envió sin un id de serie legible.",
+    "description": "Added to the favorites count line (and to the listing's history entry) when items of the list came without a readable series id (dramaID).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesLoaded": {
+    "message": "$count$ dramas favoritos listados: marca los que quieras descargar y pulsa Añadir los seleccionados al cuadro.",
+    "description": "Status after the favorites list was read.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesCutShort": {
+    "message": "TikTok dejó de enviar tus favoritos tras $count$ (una página llegó vacía, o sin nada nuevo): el resto de la lista no se muestra. Para un drama que no aparece, ábrelo en TikTok y usa el botón de DramaFetch en la barra → Descargar esta serie.",
+    "description": "Status (and history) when TikTok stopped sending the favorites list before its end: it refused nothing, so no cooldown.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesSelection": {
+    "message": "$ticked$ marcados, $shown$ mostrados",
+    "description": "Favorites selection count.",
+    "placeholders": {
+      "ticked": {
+        "content": "$1"
+      },
+      "shown": {
+        "content": "$2"
+      }
+    }
+  },
+  "favoritesEpisodes": {
+    "message": "$episodes$ episodios",
+    "description": "A favorite's episodes, its length unknown.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesEpisodesLength": {
+    "message": "$episodes$ episodios · $length$",
+    "description": "A favorite's episodes and length, e.g. 60 episodes · 1h 19m.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      },
+      "length": {
+        "content": "$2"
+      }
+    }
+  },
+  "favoritesLengthHours": {
+    "message": "$hours$ h $minutes$ min",
+    "description": "A favorite's length in hours and minutes.",
+    "placeholders": {
+      "hours": {
+        "content": "$1"
+      },
+      "minutes": {
+        "content": "$2"
+      }
+    }
+  },
+  "favoritesLengthMinutes": {
+    "message": "$minutes$ min",
+    "description": "A favorite's length under an hour.",
+    "placeholders": {
+      "minutes": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesOnDiskTitle": {
+    "message": "Según los registros de DramaFetch, están guardados todos los episodios que tu cuenta puede ver",
+    "description": "Tooltip of a favorite's on-disk badge."
+  },
+  "favoritesPartly": {
+    "message": "en parte",
+    "description": "Badge: some episodes of a favorite are saved, according to DramaFetch's records."
+  },
+  "favoritesPartlyTitle": {
+    "message": "Según los registros de DramaFetch, algunos de sus episodios están guardados; Descargar todo descarga solo el resto",
+    "description": "Tooltip of a favorite's partly badge."
+  },
+  "favoritesAdded": {
+    "message": "$count$ añadidos al cuadro. Descargar todo los descarga, una serie tras otra.",
+    "description": "Status after Add selected to the box.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesNoneAdded": {
+    "message": "El cuadro ya nombra todos los dramas marcados: no se añadió nada.",
+    "description": "Status after Add selected to the box when the box named them all already."
+  },
+  "favoritesChoose": {
+    "message": "Tus favoritos se listan abajo: marca los dramas que quieras y pulsa Añadir los seleccionados al cuadro.",
+    "description": "Status when the popup's Choose from your favorites was pressed."
+  },
+  "favoritesNoCard": {
+    "message": "Ese clic derecho no fue sobre un drama de tus favoritos: haz clic derecho sobre el título del drama o sobre su portada, o usa el botón de DramaFetch en la barra → Elegir de tus favoritos.",
+    "description": "Status when the right-click on a TikTok profile was on no favorites card (the tab's content script said so): nothing is listed."
+  },
+  "favoritesNoScript": {
+    "message": "DramaFetch no pudo preguntar a tu pestaña de TikTok sobre qué drama hiciste clic derecho (la pestaña ya estaba abierta antes de que DramaFetch se cargara o se actualizara): pulsa F5 en tu perfil de TikTok, abre Favoritos → Drama y vuelve a hacer clic derecho sobre el drama.",
+    "description": "Status when the right-click on a TikTok profile reached no content script in that tab (a tab loaded before DramaFetch was loaded or updated): nothing is listed."
+  },
+  "favoritesAlreadyQueued": {
+    "message": "Tus favoritos ya se están listando; espera al trabajo en curso.",
+    "description": "Input error: a second listing of the same tab's favorites."
+  },
+  "favoritesNoTemplate": {
+    "message": "DramaFetch no ha visto tu lista de favoritos en esa pestaña: en tu perfil de TikTok abre Favoritos → Drama (o pulsa F5 allí y vuelve a abrir Drama) y vuelve a intentarlo.",
+    "description": "No request made: the background worker saw no favorites list request in that TikTok tab."
+  },
+  "favoritesTabGone": {
+    "message": "La pestaña de TikTok con tus favoritos está cerrada o muestra otro sitio: vuelve a abrir tu perfil → Favoritos → Drama y vuelve a intentarlo.",
+    "description": "No request made: the TikTok tab is gone."
+  },
+  "favoritesNotFound": {
+    "message": "“$title$” no está en tu lista de favoritos; puede haber cambiado: pulsa F5 en la página de TikTok y vuelve a intentarlo.",
+    "description": "A right-clicked card's drama is not in the favorites list: nothing listed.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesCardCutShort": {
+    "message": "“$title$” está más abajo en tus favoritos de lo que TikTok envió (se detuvo tras $count$): abre el drama en TikTok y usa el botón de DramaFetch en la barra → Descargar esta serie.",
+    "description": "A right-clicked card lies beyond the part of the favorites list TikTok sent: nothing listed.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      }
+    }
+  },
+  "favoritesShared": {
+    "message": "Varios de tus favoritos se llaman “$title$”: se muestran abajo con sus episodios y su duración; marca aquel sobre el que hiciste clic derecho (su tarjeta muestra lo mismo) y pulsa Añadir los seleccionados al cuadro.",
+    "description": "Several different dramas of the favorites list bear a right-clicked card's title: none is picked, the panel shows them (filtered to that title) for the user to tick; nothing listed.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesStatusError": {
+    "message": "TikTok no envió tu lista de favoritos ($reason$): pulsa F5 en tu perfil de TikTok, vuelve a abrir Favoritos → Drama y vuelve a intentarlo.",
+    "description": "TikTok answered the favorites list with its own error (its status message).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesUnreadable": {
+    "message": "No se pudo leer tu lista de favoritos (TikTok respondió HTTP $status$ sin una lista): pulsa F5 en tu perfil de TikTok, vuelve a abrir Favoritos → Drama y vuelve a intentarlo.",
+    "description": "The favorites list's answer held no list and the tab showed no verification wall.",
+    "placeholders": {
+      "status": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesNoAnswer": {
+    "message": "TikTok no respondió a la solicitud de la lista de favoritos: revisa la conexión, pulsa F5 en tu perfil de TikTok, vuelve a abrir Favoritos → Drama y vuelve a intentarlo.",
+    "description": "The favorites list's request got no answer."
+  },
+  "jobFavorites": {
+    "message": "Listar tus favoritos",
+    "description": "Queue label: the favorites list job."
+  },
+  "jobCard": {
+    "message": "Listar “$title$” de tus favoritos",
+    "description": "Queue label: a right-click on a favorites card lists that drama.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
   "settingsHeading": {
     "message": "Ajustes",
     "description": "Heading of the settings card."
@@ -577,6 +855,10 @@
     "message": "Descargar el drama de esta página",
     "description": "Right-click menu item on a TikTok short-drama series page (not on a link): lists the page's series in the DramaFetch tab."
   },
+  "contextDownloadFavorite": {
+    "message": "Descargar este drama favorito",
+    "description": "Right-click menu item on a drama card of the user's TikTok profile (Favorites → Drama): lists that drama's series in the DramaFetch tab."
+  },
   "popupOpen": {
     "message": "Abrir DramaFetch",
     "description": "Popup button."
@@ -593,6 +875,14 @@
   "popupHint": {
     "message": "Abre un microdrama de TikTok para descargar la serie completa, o pega enlaces en la pestaña de DramaFetch.",
     "description": "Popup hint."
+  },
+  "popupFavorites": {
+    "message": "Elegir de tus favoritos",
+    "description": "Popup button on a TikTok profile page whose Favorites → Drama list DramaFetch saw: lists those dramas in the DramaFetch tab."
+  },
+  "popupFavoritesHint": {
+    "message": "Para elegir de tus favoritos, abre primero Favoritos → Drama en tu perfil de TikTok y vuelve a pulsar DramaFetch.",
+    "description": "Popup hint on a TikTok profile page before its Favorites → Drama list was shown."
   },
   "legalNotice": {
     "message": "DramaFetch is for personal, offline viewing of episodes that your own TikTok account can already watch. It does not unlock paid episodes and does not bypass DRM or access controls; locked episodes are listed and skipped. Downloading may breach TikTok's Terms of Service, and the videos belong to their creators and studios — you are responsible for how you use this tool.",

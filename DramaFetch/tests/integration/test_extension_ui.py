@@ -18,8 +18,22 @@ against the fake TikTok server:
   the engine's tab is closed; a tab whose page is not running — restored but not loaded yet,
   discarded — is the same), the open tab
   reloads with the series in its address, takes the engine and lists it;
-- the right-click **Download this drama**: Chrome itself took both items the worker puts in place
-  at install (a link to a short drama, a series page), and refuses an id it never created;
+- the right-click items: Chrome itself took the three items the worker puts in place at install
+  (**Download this drama** on a link to a short drama, **Download this page's drama** on a series
+  page, **Download this favorite drama** on a card of the profile's favorites), and refuses an id
+  it never created;
+- the user's TikTok favorites (the profile's **Favorites** → **Drama**): the worker keeps the
+  page's own FIRST `drama_list` request — the page's later pages, loaded as the user asks for more,
+  never replace it — (the popup then offers **Choose from your favorites**, and before it a hint),
+  the List favorites job reads every page from inside that tab — the first page that request
+  replayed byte for byte, the later ones the same request with only its `cursor`'s value changed,
+  paced, one at a time — into the DramaFetch tab's panel (hidden until then), whose filter,
+  **Select all shown** and **Add selected to the box** put `# <title>` and id lines in the box,
+  with nothing downloaded; a synthetic `contextmenu` on a card makes the content script answer
+  `dramafetch:card` with that card's title and position, and that card handed over lists its
+  drama in one Load list job — also from the address of a DramaFetch tab opened when no page runs
+  to take it (`?favorites=<tab>&menu=1&card=<json>`); a card whose title two different dramas
+  bear (the fake's two "Snowfall in Two Cities") lists nothing: both are shown in the panel;
 - with Chrome's UI in Spanish (`LANGUAGE=es`: how Chrome on Linux picks its UI language), every
   outcome the fake offers reads in Spanish on screen — no English template word outside the data
   (series and file names, hosts, the payload's `key=value` hints) — while the history keeps the
@@ -31,10 +45,12 @@ No cookie value is set, printed or asserted on here.
 from __future__ import annotations
 
 import itertools
+import json
 import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 import pytest
 
@@ -42,11 +58,18 @@ from dramafetch.models import DRM_MESSAGE, DRM_REMEMBERED_MESSAGE
 
 from .extension_harness import CHROMIUM, EXTENSION_DIR, ExtensionHarness
 from .fake_tiktok import (
+    DRAMA_LIST_PATH,
+    DRAMA_LIST_QUERY,
+    FAVORITES,
+    FAVORITES_CURSORS,
+    LIGHTHOUSE_ID,
+    PROFILE_PATH,
     SECOND_ITEMS,
     SECOND_SERIES_ID,
     SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
+    SNOWFALL_IDS,
     THIRD_SERIES_ID,
     THIRD_SERIES_NAME,
     FakeTikTok,
@@ -113,7 +136,21 @@ MENU_ITEMS_JS = """async (ids) => {
   }
   return found;
 }"""
-MENU_IDS = ["dramafetch-download-link", "dramafetch-download-page"]
+MENU_IDS = ["dramafetch-download-link", "dramafetch-download-page", "dramafetch-download-card"]
+#: What the worker kept of a TikTok tab's favorites list (`chrome.storage.session`), or null.
+TEMPLATE_JS = "async (key) => (await chrome.storage.session.get(key))[key] ?? null"
+#: The tabs whose address starts with a prefix, as `chrome.tabs` sees them (an extension page asks).
+TAB_IDS_JS = (
+    "async (prefix) => (await chrome.tabs.query({}))"
+    ".filter((tab) => (tab.url || tab.pendingUrl || '').startsWith(prefix)).map((tab) => tab.id)"
+)
+#: The favorites list's requests a page made, from its own Resource Timing: the page's own and the
+#: ones the extension replayed from inside it (`chrome.scripting`, the page's own `fetch`).
+DRAMA_LIST_TIMING_JS = """() => performance.getEntriesByType('resource')
+  .filter((entry) => new URL(entry.name).pathname.endsWith('/drama_list/'))
+  .map((entry) => ({query: new URL(entry.name).search, start: entry.startTime,
+                    end: entry.responseEnd}))
+  .sort((a, b) => a.start - b.start)"""
 
 STATUSES = {
     "done",
@@ -552,15 +589,19 @@ def test_a_series_handed_over_reaches_the_engines_tab_or_reloads_a_tab_nobody_ru
 
 
 def test_the_right_click_items_are_in_chromes_menu(tmp_path: Path) -> None:
-    """The right-click **Download this drama** (`menus.js`): Chrome took both items the worker puts
-    in place at install — the one on a link to a short drama and the one on a short-drama page — so
-    their contexts and match patterns are valid (a bad one makes `chrome.contextMenus.create` fail
-    and leaves no item), and an id the extension never created is refused, so the check can fail.
-    Playwright cannot open Chrome's own menu: a click is `loadOfClick` (`tests/menus.test.js`, the
-    worker's wiring too) handed to `openApp`, the popup's path, which the scenario above drives."""
+    """The right-click items (`menus.js`): Chrome took the three items the worker puts in place at
+    install — **Download this drama** on a link to a short drama, **Download this page's drama** on
+    a short-drama page and **Download this favorite drama** on a card of the profile's favorites
+    (contexts `page` and `image`, `www.tiktok.com/@…` pages only) — so their contexts and match
+    patterns are valid (a bad one makes `chrome.contextMenus.create` fail and leaves no item), and
+    an id the extension never created is refused, so the check can fail. Chrome offers no way to
+    read an item's title back; `tests/menus.test.js` checks each item's own title in Chrome's
+    language. Playwright cannot open Chrome's own menu: a click is `loadOfClick` or the card the
+    content script answers (`tests/menus.test.js`, the worker's wiring too) handed to `openApp`,
+    the popup's path, which the scenarios above and below drive."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         ext.wait_for(
-            lambda: ext.page.evaluate(MENU_ITEMS_JS, MENU_IDS) == ["ok", "ok"],
+            lambda: ext.page.evaluate(MENU_ITEMS_JS, MENU_IDS) == ["ok", "ok", "ok"],
             10,
             "the right-click items are not in Chrome's menu",
         )
@@ -568,6 +609,293 @@ def test_the_right_click_items_are_in_chromes_menu(tmp_path: Path) -> None:
         assert missing != "ok"
         assert "dramafetch-no-such-item" in missing
         assert not server.requests  # putting the menu in place asks nothing of TikTok
+
+
+def _open_favorites(ext: ExtensionHarness, base_url: str) -> tuple[Page, Page, int]:
+    """The user's profile in a tab of its own, its Favorites → Drama shown (the page's own first
+    `drama_list` request, which the worker keeps), and an extension page to ask from: `(profile,
+    extension page, the profile tab's id)`."""
+    profile = ext.context.new_page()
+    profile.goto(f"{base_url}{PROFILE_PATH}")
+    sender = ext.context.new_page()
+    sender.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
+    tab_ids: list[int] = sender.evaluate(TAB_IDS_JS, f"{base_url}{PROFILE_PATH}")
+    (tab_id,) = tab_ids
+    profile.click("#tab-favorites")
+    profile.click("#favorites-drama")
+    ext.wait_for(lambda: profile.locator("#drama-grid button").count() == 3, 10, "no cards shown")
+    ext.wait_for(
+        lambda: sender.evaluate(TEMPLATE_JS, f"favoritesTemplate:{tab_id}") is not None,
+        10,
+        "the worker kept no favorites address for the profile's tab",
+    )
+    return profile, sender, tab_id
+
+
+def test_the_favorites_list_is_observed_listed_paced_and_added_to_the_box(tmp_path: Path) -> None:
+    """The profile's **Favorites** → **Drama**: before the page asked for the list the popup shows
+    a hint; once it did, the worker has the list's FIRST page's URL (session storage, never local)
+    — the page's own later pages, loaded with **More**, never replace it — and the popup offers
+    **Choose from your favorites**. Its click lists every favorite in the DramaFetch tab — every
+    page fetched from inside the profile's tab, the first one the page's own first request
+    replayed byte for byte, the later ones that request with only `cursor` changed, one at a time,
+    each after the list-page pause — and the panel's filter, **Select all shown** and **Add
+    selected to the box** put `# <title>` and id lines in the box. Nothing is downloaded, no series
+    listed."""
+    settings = {"pageDelayS": 0.3}  # the list-page pause long enough to measure: 0.3 to 0.6 s
+    with (
+        FakeTikTok() as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
+    ):
+        profile = ext.context.new_page()
+        profile.goto(f"{server.base_url}{PROFILE_PATH}")
+        popup = ext.context.new_page()
+        popup.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
+
+        def active_tabs() -> list[str]:
+            urls: list[str] = popup.evaluate(
+                "async () => (await chrome.tabs.query({active: true, currentWindow: true}))"
+                ".map((tab) => tab.url || '')"
+            )
+            return urls
+
+        profile.bring_to_front()  # the popup reads the active tab of its window: the profile
+        ext.wait_for(
+            lambda: active_tabs() == [f"{server.base_url}{PROFILE_PATH}"], 10, "no active profile"
+        )
+        popup.reload()
+        hint = popup.locator("#popup-favorites-hint")
+        ext.wait_for(hint.is_visible, 10, "no hint on a profile whose favorites were not shown")
+        assert popup.locator("#popup-favorites").is_hidden()
+        assert popup.locator("#popup-download").is_hidden()
+
+        # the user opens Favorites → Drama: the page's own request, which the worker observes
+        profile.click("#tab-favorites")
+        profile.click("#favorites-drama")
+        ext.wait_for(lambda: profile.locator("#drama-grid button").count() == 3, 10, "no cards")
+        tab_ids: list[int] = popup.evaluate(TAB_IDS_JS, f"{server.base_url}{PROFILE_PATH}")
+        (tab_id,) = tab_ids
+        key = f"favoritesTemplate:{tab_id}"
+        ext.wait_for(lambda: popup.evaluate(TEMPLATE_JS, key) is not None, 10, "nothing kept")
+        template = popup.evaluate(TEMPLATE_JS, key)
+        assert template["url"].startswith(f"{server.base_url}{DRAMA_LIST_PATH}?")
+        assert "cursor=0" in template["url"]
+        assert "drama_list" not in str(ext.storage())  # in the session's memory, never on disk
+        # the user scrolls the grid for more: the page's own later pages, which the worker observes
+        # too — they never replace the first page it keeps
+        for cards in (6, len(FAVORITES)):
+            profile.click("#more-dramas")
+            ext.wait_for(
+                lambda cards=cards: profile.locator("#drama-grid button").count() == cards,
+                10,
+                "no more cards",
+            )
+        assert [r.query["cursor"] for r in server.drama_list_requests] == list(FAVORITES_CURSORS)
+        deadline = time.monotonic() + 1.5  # the later pages' completions reach the worker meanwhile
+        while time.monotonic() < deadline:
+            assert popup.evaluate(TEMPLATE_JS, key) == template, "a later page replaced the first"
+            time.sleep(0.1)
+        page_own = server.drama_list_requests[0].raw_query  # the page's own first request
+        assert template["url"].split("?", 1)[1] == page_own
+        popup.reload()
+        choose = popup.locator("#popup-favorites")
+        ext.wait_for(choose.is_visible, 10, "no Choose from your favorites")
+        assert hint.is_hidden()
+        own = len(server.drama_list_requests)
+        assert own == len(FAVORITES_CURSORS)  # the page's own three pages
+        assert ext.page.locator("#favorites-card").is_hidden()  # the panel: hidden until used
+        jobs = ext.finished_jobs()
+        choose.click()  # the popup's dramafetch:open with the tab: the engine's tab takes it
+        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "nothing listed")
+
+        page = ext.page
+        assert page.locator("#favorites-card").is_visible()  # shown by the listing
+        rows = page.locator("#favorites-table tbody tr")
+        assert rows.count() == len(FAVORITES)
+        titles = page.locator("#favorites-table tbody td.favorite-title").all_inner_texts()
+        assert titles == [title for _, title, _, _ in FAVORITES]  # the list's order
+        ids = [rows.nth(n).get_attribute("data-series-id") for n in range(rows.count())]
+        assert ids == [series_id for series_id, _, _, _ in FAVORITES]
+        lighthouse = page.locator(f"#favorites-table tr[data-series-id='{LIGHTHOUSE_ID}']")
+        assert lighthouse.locator("td.favorite-meta").inner_text() == "60 episodes · 1h 19m"
+        assert page.locator("#favorites-count").inner_text() == "8 favorite dramas listed."
+        assert page.locator("#input-status").inner_text().startswith("8 favorite dramas listed")
+        entry = ext.history()[0]
+        assert (entry["kind"], entry["favorites"], entry["error"]) == ("favorites", 8, None)
+        assert "drama_list" not in str(entry)
+
+        # every page from inside the profile's tab: the page's own first request replayed, then
+        # `cursor` alone changed, from 0 to the last page
+        ours = server.drama_list_requests[own:]
+        assert [r.query["cursor"] for r in ours] == list(FAVORITES_CURSORS)
+        for record in server.drama_list_requests:
+            assert {k: v for k, v in record.query.items() if k != "cursor"} == DRAMA_LIST_QUERY
+        # byte for byte: DramaFetch's first request IS the page's own first request; the later ones
+        # its query with only the cursor's value changed — no parameter added, dropped, repeated,
+        # reordered or re-encoded (`browser_version` is percent-encoded)
+        assert "browser_version=5.0%20%28Windows%29" in page_own
+        assert ours[0].raw_query == page_own
+        for record in ours:
+            cursor = record.query["cursor"]
+            assert record.raw_query == page_own.replace("cursor=0", f"cursor={cursor}")
+        # one at a time, each after its pause (the profile page's own Resource Timing)
+        timing: list[dict[str, Any]] = profile.evaluate(DRAMA_LIST_TIMING_JS)
+        replayed = timing[own:]
+        assert len(replayed) == len(FAVORITES_CURSORS)
+        for earlier, later in itertools.pairwise(replayed):
+            assert later["start"] - earlier["end"] >= 280, (earlier, later)  # 0.3 s at least
+
+        # the filter, Select all shown, Add selected to the box: lines in the box, nothing else
+        before = len(server.requests)
+        page.fill("#links", MAIN_LINK)
+        page.fill("#favorites-filter", "SNOWFALL")
+        assert [rows.nth(n).is_visible() for n in range(rows.count())] == [
+            series_id in SNOWFALL_IDS for series_id, _, _, _ in FAVORITES
+        ]
+        page.check("#favorites-select-all")
+        page.click("#favorites-add-button")
+        assert page.input_value("#links") == (
+            f"{MAIN_LINK}\n# Snowfall in Two Cities\n{SNOWFALL_IDS[0]}"
+            f"\n# Snowfall in Two Cities\n{SNOWFALL_IDS[1]}"
+        )
+        assert page.locator("#favorites-status").inner_text() == (
+            "2 added to the box. Download all downloads them, one series after the other."
+        )
+        page.click("#favorites-add-button")  # nothing twice
+        assert page.input_value("#links").count("\n") == 4
+        assert len(server.requests) == before  # the panel asks nothing of TikTok
+        assert ext.idle()
+        assert not server.item_list_requests and not server.media_requests
+        assert ext.saved_files() == []
+
+
+def test_a_right_click_on_a_favorites_card_is_answered_and_lists_that_drama(
+    tmp_path: Path,
+) -> None:
+    """A synthetic `contextmenu` on the second card of the profile's favorites — on its title, then
+    on its cover — makes the content script answer the extension's own `dramafetch:card` (sent with
+    `chrome.tabs.sendMessage`, as the worker sends it on **Download this favorite drama**) with
+    that card's title and position, once; null with no right-click on a card. That card handed
+    over (`dramafetch:favorites`, what the worker hands the engine's tab) lists its drama in ONE
+    Load list job: the favorites list read up to the card's position, the series joining the box
+    as `# <title>` and its id, then listed. With no DramaFetch page running to take it (the
+    engine's tab closed), the same card in the address of a new DramaFetch tab
+    (`app.html?favorites=<tab>&menu=1&card=<json>`, what the worker's `openApp` opens on a first
+    right-click) takes the engine, drops the query and lists that drama the same way, the list's
+    first page read again. Then a right-click on one of the fake's two DIFFERENT dramas called
+    "Snowfall in Two Cities" (the grid's second page, loaded with **More**) picks neither: the list
+    read until both are in view, the panel shows those two rows — with their episodes and length —
+    for the user to tick, and nothing is listed. Nothing is downloaded."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        profile, sender, tab_id = _open_favorites(ext, server.base_url)
+        ask = "(id) => chrome.tabs.sendMessage(id, {type: 'dramafetch:card'})"
+        assert sender.evaluate(ask, tab_id) is None  # nothing right-clicked yet
+        second = profile.locator("#drama-grid button").nth(1)
+        second.locator("p").dispatch_event("contextmenu")
+        card = sender.evaluate(ask, tab_id)
+        assert (card["title"], card["index"]) == (SECOND_SERIES_NAME, 1)
+        assert isinstance(card["at"], int | float)
+        assert sender.evaluate(ask, tab_id) is None  # answered once
+        profile.locator("h1").dispatch_event("contextmenu")  # a right-click on no card
+        assert sender.evaluate(ask, tab_id) is None
+        second.locator("img").dispatch_event("contextmenu")  # the card's cover
+        card = sender.evaluate(ask, tab_id)
+        assert (card["title"], card["index"]) == (SECOND_SERIES_NAME, 1)
+        assert profile.locator("#drama-grid button").count() == 3  # the page as it was
+
+        jobs = ext.finished_jobs()
+        handover = {
+            "type": "dramafetch:favorites",
+            "tabId": tab_id,
+            "card": {"title": card["title"], "index": card["index"]},
+            "menu": True,
+        }
+        answer = sender.evaluate("(message) => chrome.runtime.sendMessage(message)", handover)
+        assert answer["ok"] is True
+        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "nothing listed")
+        page = ext.page
+        assert page.input_value("#links") == f"# {SECOND_SERIES_NAME}\n{SECOND_SERIES_ID}"
+        assert page.locator("#episode-table tbody tr").count() == 3  # that series, listed
+        assert page.locator("#series-title").inner_text() == SECOND_SERIES_NAME
+        entry = ext.history()[0]
+        assert entry["kind"] == "load"
+        assert [series["series_id"] for series in entry["series"]] == [SECOND_SERIES_ID]
+        # the list's first page only (it covers the card's position), from inside the tab
+        assert [r.query["cursor"] for r in server.drama_list_requests] == ["0", "0"]
+        assert {r.query.get("dramaID") for r in server.item_list_requests} == {SECOND_SERIES_ID}
+        assert not server.media_requests and ext.saved_files() == []
+        assert page.locator("#favorites-count").inner_text() == "3 of 8 favorite dramas listed."
+
+        # no DramaFetch page running to take it (the first right-click with no DramaFetch tab open,
+        # a tab Chrome restored without loading it, a read-only tab left alone): the worker opens
+        # the tab with the hand-over in its address, as `openApp` builds it (`favoritesQuery`, the
+        # URL `tests/menus.test.js` checks); that page takes the engine, drops the query and lists
+        # the drama
+        lists = len(server.drama_list_requests)
+        page.close()
+        card_json = json.dumps({"title": SECOND_SERIES_NAME, "index": 1}, separators=(",", ":"))
+        query = urlencode({"favorites": tab_id, "menu": 1, "card": card_json})
+        app = ext.context.new_page()
+        app.goto(f"{ext.app_url}?{query}")
+
+        def listed_there() -> bool:
+            status = app.locator("#app-status")
+            return (
+                app.locator("#duplicate-banner").is_hidden()  # it holds the engine
+                and status.get_attribute("data-state") == "idle"
+                and status.get_attribute("data-finished") == "1"
+            )
+
+        ext.wait_for(listed_there, 60, "the tab opened with the card in its address listed nothing")
+        assert "?" not in app.url  # the address consumed: a reload lists nothing again
+        assert app.input_value("#links") == f"# {SECOND_SERIES_NAME}\n{SECOND_SERIES_ID}"
+        assert app.locator("#episode-table tbody tr").count() == 3
+        # a fresh page has no panel: the list's first page read again, from inside the tab
+        assert [r.query["cursor"] for r in server.drama_list_requests[lists:]] == ["0"]
+        assert not server.media_requests and ext.saved_files() == []
+
+        # two DIFFERENT dramas of the same title, on the grid's second page: a right-click on the
+        # first of them picks neither — the list read until both are in view (its first page again,
+        # then the second), both shown in the panel for the user to tick, nothing listed
+        profile.click("#more-dramas")
+        ext.wait_for(lambda: profile.locator("#drama-grid button").count() == 6, 10, "no more")
+        twin = profile.locator("#drama-grid button").nth(3)
+        twin.locator("p").dispatch_event("contextmenu")
+        card = sender.evaluate(ask, tab_id)
+        assert (card["title"], card["index"]) == ("Snowfall in Two Cities", 3)
+        lists = len(server.drama_list_requests)
+        items = len(server.item_list_requests)
+
+        def finished() -> int:
+            return int(app.locator("#app-status").get_attribute("data-finished") or "0")
+
+        def ended_after(count: int) -> bool:
+            status = app.locator("#app-status")
+            return finished() > count and status.get_attribute("data-state") == "idle"
+
+        done = finished()
+        handover = {
+            "type": "dramafetch:favorites",
+            "tabId": tab_id,
+            "card": {"title": card["title"], "index": card["index"]},
+            "menu": True,
+        }
+        answer = sender.evaluate("(message) => chrome.runtime.sendMessage(message)", handover)
+        assert answer["ok"] is True
+        ext.wait_for(lambda: ended_after(done), 60, "the card of a shared title did not end")
+        read = [r.query["cursor"] for r in server.drama_list_requests[lists:]]
+        assert read == list(FAVORITES_CURSORS[:2])
+        assert len(server.item_list_requests) == items  # nothing listed
+        rows = app.locator("#favorites-table tbody tr")
+        shown = [n for n in range(rows.count()) if rows.nth(n).is_visible()]
+        assert [rows.nth(n).get_attribute("data-series-id") for n in shown] == list(SNOWFALL_IDS)
+        metas = [rows.nth(n).locator("td.favorite-meta").inner_text() for n in shown]
+        assert metas == ["60 episodes · 1h 37m", "60 episodes · 1h 37m"]
+        assert app.input_value("#favorites-filter") == "Snowfall in Two Cities"
+        said = app.locator("#input-status").inner_text()
+        assert said.startswith("Several of your favorites are called “Snowfall in Two Cities”")
+        assert app.input_value("#links") == f"# {SECOND_SERIES_NAME}\n{SECOND_SERIES_ID}"
+        assert not server.media_requests and ext.saved_files() == []
 
 
 def test_the_spanish_ui_shows_every_outcome_in_spanish(

@@ -1,23 +1,76 @@
 // @ts-check
 /**
  * The service worker: opens the DramaFetch tab — or re-focuses the one already open (one per
- * browser) — when the popup asks or the right-click menu's **Download this drama** is clicked
- * (`menus.js`), and hands it a series to list. It holds no long-running work: the engine runs in
- * the DramaFetch tab while that tab is open. When that tab goes away in the middle of a listing —
- * closed, navigated elsewhere or discarded, so its own clean-up never runs — the worker closes the
- * muted TikTok tab the listing had open (`discovery.DISCOVERY_TAB_KEY`).
+ * browser) — when the popup asks or a right-click item is clicked (`menus.js`: **Download this
+ * drama**, **Download this page's drama**, **Download this favorite drama**), and hands it a series
+ * to list, or the favorites of a TikTok tab to show. It holds no long-running work: the engine runs
+ * in the DramaFetch tab while that tab is open. When that tab goes away in the middle of a listing
+ * — closed, navigated elsewhere or discarded, so its own clean-up never runs — the worker closes
+ * the muted TikTok tab the listing had open (`discovery.DISCOVERY_TAB_KEY`). It answers only the
+ * extension's own pages (`senders.isOwnSender`: never a content script).
+ *
+ * It also OBSERVES — URLs and status codes only, never a body, never blocking, never changing
+ * anything — the `drama_list` requests the user's own TikTok tabs make when their profile's
+ * **Favorites** → **Drama** list is shown (the owner's decision of 2026-11-15; Chrome hands the
+ * worker only the URLs holding `drama_list`, {@link favoritesObserverUrls}): per tab, the most
+ * recent FIRST page of the favorites list that completed with HTTP 200 —
+ * `lib/favorites.isFavoritesFirstPageUrl`: its address holds `favorite` and its `cursor` is absent,
+ * empty or `0`; a later page, the page's own as its grid scrolls or one the DramaFetch tab asked
+ * for, never replaces it — is kept in `chrome.storage.session` (`storage.rememberFavoritesTemplate`;
+ * in memory for the browser session, never logged, never in a report or the history: it carries
+ * TikTok's signature parameters) and forgotten when the tab closes. That URL is the template the
+ * DramaFetch tab reads the list with (`favorites.js`): its first page replayed unchanged.
  */
 
+import { cardOf, favoritesQuery, isFavoritesFirstPageUrl } from "../lib/favorites.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
-import { closeLeftoverDiscoveryTab } from "./discovery.js";
+import { closeLeftoverDiscoveryTab, observedUrlPatterns } from "./discovery.js";
 import { t } from "./i18n.js";
-import { loadOfClick, menuItems } from "./menus.js";
-import { loadTestSettings } from "./storage.js";
+import { MENU_CARD, loadOfClick, menuItems } from "./menus.js";
+import { isOwnSender } from "./senders.js";
+import { forgetFavoritesTemplate, loadTestSettings, rememberFavoritesTemplate } from "./storage.js";
 
 const APP_PATH = "src/app/app.html";
 
+/**
+ * @typedef {import("../lib/favorites.js").Card} Card
+ * @typedef {import("../lib/favorites.js").FavoritesHandover} FavoritesHandover
+ *
+ * @typedef {{load: string} | {favorites: FavoritesHandover}} Handover What the DramaFetch tab is
+ *   handed: a series to list (an address or an id, as the box reads it), or the favorites of a
+ *   TikTok tab to show — with the right-clicked card to list, when there is one.
+ */
+
+/**
+ * The URLs the worker hears complete: those holding `drama_list` on TikTok's hosts
+ * (`discovery.observedUrlPatterns`) and — in the harness' test copy only (`dramafetch_test`) — on
+ * the fake TikTok's, the plain-http host permission that copy adds. Chrome filters them, so no other
+ * request of the user's TikTok tabs reaches the worker or starts it; the listener itself keeps only
+ * the favorites list's first page (`isFavoritesFirstPageUrl`).
+ * @param {chrome.runtime.Manifest} manifest
+ * @returns {string[]}
+ */
+export function favoritesObserverUrls(manifest) {
+  /** @param {string} pattern a whole host, `…/*` @returns {string} its URLs that hold `drama_list` */
+  const narrow = (pattern) => pattern.replace(/\/\*$/, "/*drama_list*");
+  const urls = observedUrlPatterns(TIKTOK_BASE_URL).map(narrow);
+  if (manifest.dramafetch_test !== true) return urls;
+  return [...urls, ...(manifest.host_permissions ?? []).filter((pattern) => pattern.startsWith("http://")).map(narrow)];
+}
+
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    // a tab's own first page of its favorites list, answered: its URL and when (never a body, never
+    // a header); a later page never replaces it — the first page is the one replayed unchanged
+    if (details.tabId < 0 || details.statusCode !== 200 || !isFavoritesFirstPageUrl(details.url)) return;
+    void rememberFavoritesTemplate(details.tabId, details.url, details.timeStamp / 1000).catch(() => undefined);
+  },
+  { urls: favoritesObserverUrls(chrome.runtime.getManifest()), types: ["xmlhttprequest"] },
+);
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   void closeLeftoverDiscoveryTab(tabId).catch(() => undefined);
+  void forgetFavoritesTemplate(tabId).catch(() => undefined);
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   const leftTheApp = changeInfo.url !== undefined && !changeInfo.url.startsWith(chrome.runtime.getURL(APP_PATH));
@@ -33,21 +86,34 @@ function isRecord(value) {
 }
 
 /**
- * Open the DramaFetch tab, or bring the open one to the front; with `load`, have it list that
- * series. The engine's tab (one per browser) takes the series and answers with its tab, which
- * comes to the front. When no page answers — no DramaFetch tab is open, or the open one's page is
- * not running (Chrome restored it after a restart without loading it yet, or it was discarded:
- * Chrome never discards an extension's page on its own, but `chrome://discards` or a
- * tab-suspending extension can), or the one open is read-only and its engine's tab was closed —
- * the series travels in the address of a tab that (re)loads with it: the open DramaFetch tab,
- * else a new one. A message to a page that is not running would be lost.
- * @param {string | null} load
+ * @param {unknown} value
+ * @returns {value is number}
+ */
+function isTabId(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Open the DramaFetch tab, or bring the open one to the front; with a hand-over, have it list that
+ * series (`dramafetch:load`) or show that TikTok tab's favorites (`dramafetch:favorites`). The
+ * engine's tab (one per browser) takes it and answers with its tab, which comes to the front. When
+ * no page answers — no DramaFetch tab is open, or the open one's page is not running (Chrome
+ * restored it after a restart without loading it yet, or it was discarded: Chrome never discards
+ * an extension's page on its own, but `chrome://discards` or a tab-suspending extension can), or
+ * the one open is read-only and its engine's tab was closed — the hand-over travels in the address
+ * of a tab that (re)loads with it (`?load=…`, `?favorites=…`): the open DramaFetch tab, else a new
+ * one. A message to a page that is not running would be lost.
+ * @param {Handover | null} handover
  * @returns {Promise<void>}
  */
-async function openApp(load) {
+async function openApp(handover) {
   const appUrl = chrome.runtime.getURL(APP_PATH);
-  if (load) {
-    const answer = await chrome.runtime.sendMessage({ type: "dramafetch:load", input: load }).catch(() => undefined);
+  if (handover !== null) {
+    const message =
+      "load" in handover
+        ? { type: "dramafetch:load", input: handover.load }
+        : { type: "dramafetch:favorites", ...handover.favorites };
+    const answer = await chrome.runtime.sendMessage(message).catch(() => undefined);
     if (isRecord(answer) && answer["ok"] === true) {
       const tabId = answer["tabId"];
       const tab = typeof tabId === "number" ? await chrome.tabs.update(tabId, { active: true }) : undefined;
@@ -55,11 +121,13 @@ async function openApp(load) {
       return;
     }
   }
-  const url = load ? `${appUrl}?load=${encodeURIComponent(load)}` : appUrl;
+  const query =
+    handover === null ? "" : "load" in handover ? `load=${encodeURIComponent(handover.load)}` : favoritesQuery(handover.favorites);
+  const url = query ? `${appUrl}?${query}` : appUrl;
   const tabs = await chrome.tabs.query({});
   const existing = tabs.find((tab) => (tab.url ?? "").startsWith(appUrl));
   if (existing !== undefined && existing.id !== undefined) {
-    await chrome.tabs.update(existing.id, load ? { active: true, url } : { active: true });
+    await chrome.tabs.update(existing.id, query ? { active: true, url } : { active: true });
     await chrome.windows.update(existing.windowId, { focused: true });
     return;
   }
@@ -67,11 +135,19 @@ async function openApp(load) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Only this extension's own code may ask (web pages cannot reach it: no externally_connectable).
-  if (sender.id !== chrome.runtime.id) return false;
+  // Only this extension's own pages may ask (web pages cannot reach it: no externally_connectable;
+  // the content script, which runs in TikTok's pages with this extension's id, never passes)
+  if (!isOwnSender(sender)) return false;
   if (!isRecord(message) || message["type"] !== "dramafetch:open") return false;
   const load = typeof message["load"] === "string" && message["load"] ? message["load"] : null;
-  openApp(load).then(
+  const favorites = message["favorites"];
+  /** @type {Handover | null} the popup's Choose from your favorites (that tab), or its Download this series */
+  const handover = isTabId(favorites)
+    ? { favorites: { tabId: favorites, card: null, menu: false, script: true } }
+    : load !== null
+      ? { load }
+      : null;
+  openApp(handover).then(
     () => sendResponse({ ok: true }),
     (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),
   );
@@ -106,7 +182,7 @@ let menusInPlace = Promise.resolve();
 function installMenus() {
   const install = async () => {
     await menuCall((done) => chrome.contextMenus.removeAll(done));
-    for (const item of menuItems(t("contextDownload"), t("contextDownloadPage"))) {
+    for (const item of menuItems(t("contextDownload"), t("contextDownloadPage"), t("contextDownloadFavorite"))) {
       await menuCall((done) => void chrome.contextMenus.create(item, done));
     }
   };
@@ -114,13 +190,43 @@ function installMenus() {
   return menusInPlace;
 }
 
+/**
+ * The favorites card the right-click of the card item was on: the content script of that tab's
+ * frame remembers it (`src/content/cards.js`) and answers the extension's own message, checked
+ * (`lib/favorites.cardOf`). `script` tells the two ways of having no card apart: true when the
+ * script answered — `card` null then means the right-click was on no card —, false when no content
+ * script answered at all (`chrome.tabs.sendMessage` rejects: a tab loaded before this version of
+ * DramaFetch was, a frame without one), so nothing could say which drama was right-clicked.
+ * @param {number} tabId
+ * @param {number} frameId
+ * @returns {Promise<{card: Card | null, script: boolean}>}
+ */
+async function rightClickedCard(tabId, frameId) {
+  let answer;
+  try {
+    answer = await chrome.tabs.sendMessage(tabId, { type: "dramafetch:card" }, { frameId });
+  } catch {
+    return { card: null, script: false };
+  }
+  return { card: cardOf(answer), script: true };
+}
+
 chrome.runtime.onInstalled.addListener(() => void installMenus().catch(() => undefined));
 chrome.runtime.onStartup.addListener(() => void installMenus().catch(() => undefined));
-chrome.contextMenus.onClicked.addListener((info) => {
+chrome.contextMenus.onClicked.addListener((info, tab) => {
   const answer = async () => {
+    if (info.menuItemId === MENU_CARD) {
+      // a drama of the profile's favorites: its card, from the tab's frame — without one (no card
+      // right-clicked, no script to ask) the DramaFetch tab lists nothing and says why
+      const tabId = tab?.id;
+      if (!isTabId(tabId)) return;
+      const { card, script } = await rightClickedCard(tabId, info.frameId ?? 0);
+      await openApp({ favorites: { tabId, card, menu: true, script } });
+      return;
+    }
     const test = await loadTestSettings();
     const load = loadOfClick(info, test.baseUrl ?? TIKTOK_BASE_URL);
-    if (load !== null) await openApp(load);
+    if (load !== null) await openApp({ load });
   };
   void answer().catch(() => undefined);
 });

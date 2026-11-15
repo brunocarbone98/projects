@@ -7,8 +7,8 @@
  *
  * - `lang: "es"` translates every text the extension can show into Spanish — through ordered rules
  *   built from the real constants and format strings of `src/lib/*.js` and
- *   `src/app/{engine,downloader,discovery,redirects}.js` (imported, never copied, wherever they are
- *   exported) — and translates the texts embedded in a text the same way (a stop reason, the
+ *   `src/app/{engine,downloader,discovery,redirects,favorites}.js` (imported, never copied, wherever
+ *   they are exported) — and translates the texts embedded in a text the same way (a stop reason, the
  *   message after `stopped: `, the reason of a cooldown, …);
  * - `lang: "en"` keeps the English;
  * - in BOTH languages, advice that names a command-line flag is replaced by what to do in the
@@ -66,6 +66,7 @@ import {
   NO_LIST_WARNING,
 } from "../app/discovery.js";
 import { STORAGE_REFUSED_PREFIX, StopRequested } from "../app/engine.js";
+import { FAVORITES_CHALLENGE_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE } from "../app/favorites.js";
 
 /**
  * @typedef {"en" | "es"} Lang
@@ -404,6 +405,11 @@ const EXACT = new Map(
         "60 minutos antes de volver a intentarlo",
     ],
     [
+      FAVORITES_RATE_LIMIT_MESSAGE,
+      "TikTok está limitando las solicitudes de esta dirección (HTTP 429 en tu lista de favoritos): espera de 30 a " +
+        "60 minutos antes de volver a intentarlo",
+    ],
+    [
       LOGIN_REDIRECT_MESSAGE,
       "TikTok redirigió a su página de inicio de sesión: inicia sesión en TikTok en una pestaña normal de este " +
         "Chrome y vuelve a intentarlo",
@@ -412,6 +418,11 @@ const EXACT = new Map(
       CHALLENGE_MESSAGE,
       "TikTok pide una verificación (captcha) en lugar de la serie: cuando termine la espera obligatoria, abre la " +
         "serie en una pestaña normal de este Chrome, resuélvela ahí y vuelve a intentarlo",
+    ],
+    [
+      FAVORITES_CHALLENGE_MESSAGE,
+      "TikTok pide una verificación (captcha) en lugar de tu lista de favoritos: cuando termine la espera " +
+        "obligatoria, resuélvela en tu pestaña de TikTok que muestra la lista y vuelve a intentarlo",
     ],
     [
       EMPTY_LIST_MESSAGE,

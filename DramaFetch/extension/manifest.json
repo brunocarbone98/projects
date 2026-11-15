@@ -3,7 +3,7 @@
   "name": "__MSG_extName__",
   "short_name": "DramaFetch",
   "description": "__MSG_extDescription__",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "default_locale": "en",
   "minimum_chrome_version": "116",
   "icons": {
@@ -24,6 +24,14 @@
     "service_worker": "src/app/background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://www.tiktok.com/*"],
+      "js": ["src/content/cards.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ],
   "permissions": [
     "downloads",
     "storage",

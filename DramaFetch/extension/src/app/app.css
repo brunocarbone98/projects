@@ -41,7 +41,7 @@ main { max-width: 980px; margin: 0 auto; padding: 8px 16px 24px; display: grid; 
 details.card > summary { cursor: pointer; font-weight: 600; }
 details.card[open] > summary { margin-bottom: 10px; }
 label { display: block; margin: 0 0 6px; }
-textarea, input[type="text"], input[type="number"], select { width: 100%; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; }
+textarea, input[type="text"], input[type="number"], input[type="search"], select { width: 100%; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; }
 textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.9rem; }
 .options { margin: 10px 0 0; }
 .options label { display: flex; gap: 8px; align-items: baseline; font-size: 0.92rem; }
@@ -71,7 +71,13 @@ tr.series-row td { font-weight: 600; background: var(--bg); }
 .badge.failed, .badge.incomplete { color: var(--bad); }
 .badge.running { color: var(--accent); }
 .badge.ondisk { color: var(--ok); }
+.badge.partly { color: var(--warn); }
 .hints { display: block; color: var(--muted); font-size: 0.78rem; }
+/* the user's TikTok favorites: the filter box and "select all shown" on one line */
+.favorites-tools { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 8px 0 0; }
+.favorites-tools input[type="search"] { flex: 1 1 220px; width: auto; }
+.favorites-tools label { display: flex; gap: 6px; align-items: baseline; margin: 0; font-size: 0.92rem; }
+#favorites-table td.favorite-meta { white-space: nowrap; color: var(--muted); }
 .pause { font-weight: 600; }
 .report { padding-left: 18px; }
 /* the episodes a job did not download, apart from the ones that completed, with their retry */

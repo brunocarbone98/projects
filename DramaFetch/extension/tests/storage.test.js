@@ -2,7 +2,8 @@
 // The history is the least important thing the extension stores: it is cut to the last 20 runs
 // and to HISTORY_MAX_BYTES of JSON, the oldest first, and when chrome.storage.local refuses it (a
 // full disk under the Chrome profile) it gives way and never throws. A refusal's cooldown the
-// storage will not take stays in force from memory.
+// storage will not take stays in force from memory. A TikTok tab's favorites address lives in the
+// session's memory only, and is read back only as the first page of a favorites list.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -17,8 +18,12 @@ import {
   HISTORY_MAX_BYTES,
   appendHistory,
   cooldownStore,
+  favoritesTemplateKey,
+  forgetFavoritesTemplate,
   historyEntry,
   normalizeSettings,
+  readFavoritesTemplate,
+  rememberFavoritesTemplate,
   settingsProblem,
   trimHistory,
 } from "../src/app/storage.js";
@@ -422,4 +427,32 @@ test("the report switch: on by default, a stored non-boolean falls back to it, a
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, report: /** @type {never} */ ("x") }, false), "the report switch must be on or off");
   // checked before the pacing: a bad switch is named even when the pauses are bad too
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, report: /** @type {never} */ (1), delayMinS: 0 }, false), "the report switch must be on or off");
+});
+
+test("the favorites address: kept per TikTok tab in the session's memory, read back only when it is the first page of a favorites list — anything else is no address", async () => {
+  const { stored, session } = fakeLocal();
+  const first = "https://www.tiktok.com/api/user/favorite/drama_list/?WebIdLastTime=1794300000&aid=1988&count=19&cursor=0&X-Bogus=DFSzswVOxQ";
+  await rememberFavoritesTemplate(42, first, 1_794_351_568);
+  assert.deepEqual(session[favoritesTemplateKey(42)], { url: first, at: 1_794_351_568 });
+  assert.deepEqual(stored, {}); // never chrome.storage.local
+  assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_568 });
+  assert.equal(await readFavoritesTemplate(43), null); // none seen in that tab
+  // a stored address that is no first page of a favorites list — a later page, another list, junk —
+  // is no address: the list is only ever read from its first page, replayed as the page asked for it
+  for (const url of [
+    first.replace("cursor=0", "cursor=1794351568"),
+    "https://www.tiktok.com/api/drama/recommend/drama_list/?aid=1988&cursor=0",
+    "https://www.tiktok.com/api/drama/episode/item_list/?dramaID=7699393770256782354&cursor=0",
+  ]) {
+    session[favoritesTemplateKey(42)] = { url, at: 1_794_351_568 };
+    assert.equal(await readFavoritesTemplate(42), null, url);
+  }
+  for (const junk of [{ url: first }, { url: 5, at: 1 }, "x", null]) {
+    session[favoritesTemplateKey(42)] = junk;
+    assert.equal(await readFavoritesTemplate(42), null, JSON.stringify(junk));
+  }
+  // forgotten when the tab closes
+  session[favoritesTemplateKey(42)] = { url: first, at: 1 };
+  await forgetFavoritesTemplate(42);
+  assert.equal(Object.hasOwn(session, favoritesTemplateKey(42)), false);
 });

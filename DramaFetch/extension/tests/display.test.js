@@ -56,6 +56,7 @@ import {
 import { Downloader, SaveError } from "../src/app/downloader.js";
 import { RedirectTracker, fetchFollowing } from "../src/app/redirects.js";
 import { STORAGE_REFUSED_PREFIX, StopRequested, resolve, storageRefusedReason } from "../src/app/engine.js";
+import { FAVORITES_CHALLENGE_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE } from "../src/app/favorites.js";
 import { settingsProblem, DEFAULT_SETTINGS } from "../src/app/storage.js";
 
 /** @param {string} relative @returns {URL} */
@@ -388,7 +389,15 @@ function warnings() {
 function cooldownTexts() {
   /** @type {string[]} */
   const texts = [];
-  for (const reason of [messages.MEDIA_RATE_LIMIT_MESSAGE, messages.LIST_RATE_LIMIT_MESSAGE, CHALLENGE_MESSAGE, "", "failed-blocked"]) {
+  for (const reason of [
+    messages.MEDIA_RATE_LIMIT_MESSAGE,
+    messages.LIST_RATE_LIMIT_MESSAGE,
+    CHALLENGE_MESSAGE,
+    FAVORITES_RATE_LIMIT_MESSAGE,
+    FAVORITES_CHALLENGE_MESSAGE,
+    "",
+    "failed-blocked",
+  ]) {
     const { cooldown } = makeCooldown(reason, "browser", { now: 1_800_000_000 });
     texts.push(cooldownMessage(cooldown, { now: 1_800_000_000 + 125 }), cooldownSummary(cooldown, { now: 1_800_000_000 }));
   }
@@ -658,7 +667,7 @@ async function discoveryTexts() {
     })
   );
   texts.push(await failure(resolve(engine, ref)));
-  texts.push(LOGIN_REDIRECT_MESSAGE, CHALLENGE_MESSAGE, EMPTY_LIST_MESSAGE);
+  texts.push(LOGIN_REDIRECT_MESSAGE, CHALLENGE_MESSAGE, EMPTY_LIST_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE, FAVORITES_CHALLENGE_MESSAGE);
   return texts;
 }
 

@@ -13,10 +13,16 @@
  * ({@link appendHistory}) and a refusal's cooldown stays in force from this browser session's
  * memory ({@link cooldownStore}).
  *
+ * `chrome.storage.session` (in memory for the browser session, never on disk) holds, besides the
+ * discovery tab's record and a cooldown the local storage refused, the favorites list's address per
+ * TikTok tab ({@link rememberFavoritesTemplate}): the worker saw it, the popup and the DramaFetch
+ * tab read it, and it is forgotten when the tab closes.
+ *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
  */
 
 import { storageAreaStore } from "../lib/cooldown.js";
+import { isFavoritesFirstPageUrl } from "../lib/favorites.js";
 import { DEFAULT_NAME_FORMAT, QUALITY_MODES, THUMBNAIL_MODES } from "../lib/messages.js";
 import { nameFormatProblem } from "../lib/naming.js";
 import { PACES, PACING_DEFAULTS, PacingState, pacingOptions, pacingProblem } from "../lib/pacing.js";
@@ -350,6 +356,67 @@ export async function storedCooldownUntil() {
 }
 
 /**
+ * The `chrome.storage.session` key prefix of the favorites list's address seen in a TikTok tab
+ * ({@link favoritesTemplateKey}).
+ */
+export const FAVORITES_TEMPLATE_PREFIX = "favoritesTemplate:";
+
+/**
+ * @typedef {object} FavoritesTemplate The most recent first page of the favorites list a TikTok
+ * tab asked for (`lib/favorites.isFavoritesFirstPageUrl`), as the background worker saw it complete
+ * (its URL and status only): the address the favorites list is read with — its first page
+ * replayed unchanged, the later pages with only `cursor` changed.
+ * @property {string} url carries TikTok's signature parameters: kept in the browser session's
+ *   memory only — never in `chrome.storage.local`, a log, a report or the history
+ * @property {number} at when it completed, seconds since the epoch
+ */
+
+/**
+ * The session key of a TikTok tab's favorites address.
+ * @param {number} tabId
+ * @returns {string}
+ */
+export function favoritesTemplateKey(tabId) {
+  return `${FAVORITES_TEMPLATE_PREFIX}${tabId}`;
+}
+
+/**
+ * Keep a TikTok tab's latest first page of its favorites list (the background worker, as it
+ * completes) in `chrome.storage.session`: in memory for the browser session, never written to disk.
+ * @param {number} tabId
+ * @param {string} url
+ * @param {number} at seconds since the epoch
+ * @returns {Promise<void>}
+ */
+export async function rememberFavoritesTemplate(tabId, url, at) {
+  await chrome.storage.session.set({ [favoritesTemplateKey(tabId)]: { url, at } });
+}
+
+/**
+ * A TikTok tab's favorites address, or null when the worker saw none in it — or when what is
+ * stored is not the first page of a favorites list (`lib/favorites.isFavoritesFirstPageUrl`): the
+ * list is only ever read from its first page, replayed as the page asked for it.
+ * @param {number} tabId
+ * @returns {Promise<FavoritesTemplate | null>}
+ */
+export async function readFavoritesTemplate(tabId) {
+  const key = favoritesTemplateKey(tabId);
+  const record = (await chrome.storage.session.get(key))[key];
+  if (!isRecord(record) || typeof record["url"] !== "string" || typeof record["at"] !== "number") return null;
+  if (!isFavoritesFirstPageUrl(record["url"])) return null;
+  return { url: record["url"], at: record["at"] };
+}
+
+/**
+ * Forget a TikTok tab's favorites address (the tab was closed).
+ * @param {number} tabId
+ * @returns {Promise<void>}
+ */
+export async function forgetFavoritesTemplate(tabId) {
+  await chrome.storage.session.remove(favoritesTemplateKey(tabId));
+}
+
+/**
  * The storage key of a series' state.
  * @param {string} seriesId
  * @returns {string}
@@ -366,6 +433,18 @@ export function seriesKey(seriesId) {
 export async function readSeriesState(seriesId) {
   const key = seriesKey(seriesId);
   return (await chrome.storage.local.get(key))[key];
+}
+
+/**
+ * The stored states of several series at once, raw, by series id (one read for a whole list: the
+ * favorites panel's statuses).
+ * @param {readonly string[]} seriesIds
+ * @returns {Promise<Map<string, unknown>>}
+ */
+export async function readSeriesStates(seriesIds) {
+  if (seriesIds.length === 0) return new Map();
+  const stored = await chrome.storage.local.get(seriesIds.map(seriesKey));
+  return new Map(seriesIds.map((seriesId) => [seriesId, stored[seriesKey(seriesId)]]));
 }
 
 /**

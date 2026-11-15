@@ -45,7 +45,7 @@ declare namespace chrome {
   // ------------------------------------------------------------------------- contextMenus
   /** The right-click menu ("Download this drama"): its items and their clicks, never the page's content. */
   namespace contextMenus {
-    type ContextType = "page" | "link";
+    type ContextType = "page" | "link" | "image";
     interface CreateProperties {
       id: string;
       title: string;
@@ -62,6 +62,8 @@ declare namespace chrome {
       pageUrl?: string;
       /** The right-clicked frame's address (Chrome 116 sends it only from inside a frame). */
       frameUrl?: string;
+      /** The right-clicked frame's id in its tab (0: the top frame). */
+      frameId?: number;
       /** The selected text, when there is one (never read). */
       selectionText?: string;
     }
@@ -127,6 +129,11 @@ declare namespace chrome {
     function getCurrent(): Promise<Tab | undefined>;
     function remove(tabIds: number | number[]): Promise<void>;
     function query(queryInfo: QueryInfo): Promise<Tab[]>;
+    /**
+     * A message to the extension's own content script in a tab (one frame of it with `frameId`):
+     * the worker asks `src/content/cards.js` for the right-clicked favorites card.
+     */
+    function sendMessage(tabId: number, message: unknown, options?: { frameId?: number }): Promise<unknown>;
     const onRemoved: ChromeEvent<(tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void>;
     const onUpdated: ChromeEvent<(tabId: number, changeInfo: TabChangeInfo, tab: Tab) => void>;
   }
