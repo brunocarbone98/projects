@@ -4141,6 +4141,81 @@ test("the page: while a write was refused (app.unsaved) Download selected dramas
   }
 });
 
+test("the page: Download selected dramas pressed while Update from TikTok still reads the list queues what the bar counts — the ticked dramas read so far — and unticks only those: a ticked drama the update has not reached yet stays ticked, its card ticked again once TikTok's whole list is read, or once the library comes back as it was (an update cut short), for the next press", async () => {
+  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
+  const NEW_ID = "7712345678901234568";
+  // TikTok's list now: a favorite added since on top — the smart refresh's first page differs, so the
+  // update reads the whole list, the library refilling page by page
+  const first = { ...FAVORITES_CAPTURE, total: "6", dramaList: [{ ...shape, dramaID: NEW_ID, dramaName: "A New Favorite" }, .../** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"])] };
+  for (const [why, secondPage, after] of /** @type {[string, Record<string, unknown>, string[]][]} */ ([
+    ["TikTok's whole list read", { .../** @type {Record<string, unknown>} */ (favoritesPages()["1794351568"]), total: "6" }, [NEW_ID, ...FIVE.map(([seriesId]) => seriesId)]],
+    ["page 2 answered HTTP 404: the library as it was", { __dramafetch_status: 404, __dramafetch_text: "" }, FIVE.map(([seriesId]) => seriesId)],
+  ])) {
+    const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) }, testSettings: { pageDelayS: 0.001 } });
+    try {
+      const { element } = page;
+      // The Lighthouse Keeper's Promise (on TikTok's page 1) and Moonlight Over the Harbor (on page 2) ticked
+      for (const seriesId of [LIGHTHOUSE, MOON]) {
+        const box = tickOf(page, seriesId);
+        assert.ok(box !== undefined, why);
+        box.checked = true;
+        box.fire("change");
+      }
+      assert.equal(element("favorites-selection").textContent, "2 selected · 72 episodes", why);
+      const tab = favoritesTab({ pages: { "0": first, "1794351568": secondPage } });
+      tab.remember(1_794_351_500);
+      // page 2 held until released: the update is between its two pages
+      let asked = false;
+      /** @type {() => void} */
+      let release = () => undefined;
+      const held = new Promise((resolve) => (release = () => resolve(undefined)));
+      const fake = /** @type {{scripting: {executeScript: (injection: chrome.scripting.ScriptInjection<unknown[], unknown>) => Promise<unknown>}}} */ (
+        /** @type {unknown} */ (globalThis.chrome)
+      );
+      const read = fake.scripting.executeScript;
+      fake.scripting.executeScript = async (injection) => {
+        if (injection.world === "MAIN" && /[?&]cursor=1794351568/.test(String(injection.args?.[0]))) {
+          asked = true;
+          await held;
+        }
+        return read(injection);
+      };
+      Object.assign(chrome.tabs, { query: async () => [{ id: FAVORITES_TAB, index: 0, windowId: 1, active: false, url: "https://www.tiktok.com/@invented_viewer" }] });
+      element("library-refresh").fire("click");
+      for (let turn = 0; turn < 500 && !asked; turn += 1) await page.turn();
+      assert.ok(asked, why);
+      await settled(page);
+      // the library shows page 1's dramas so far: the bar counts the one ticked drama among them
+      assert.deepEqual(favoriteRows(page).map(([id]) => id), [NEW_ID, LIGHTHOUSE, SNOW_A, SNOW_B], why);
+      assert.equal(element("favorites-selection").textContent, "1 selected · 60 episodes", why);
+      element("library-download").fire("click");
+      await settled(page);
+      // ONE job, waiting behind the update, over what the bar counted; that drama's tick cleared
+      assert.deepEqual(queuedLabels(page), [`Series ${LIGHTHOUSE}`], why);
+      assert.equal(element("favorites-status").textContent, "1 series queued: they download one after the other, with the usual pauses.", why);
+      assert.equal(element("favorites-selection").textContent, "0 selected · 0 episodes", why);
+      page.hold(); // the batch's tabs.getCurrent never answers: it starts, and asks nothing of TikTok
+      release();
+      for (let turn = 0; turn < 500 && element("progress-current").textContent !== `Series ${LIGHTHOUSE}`; turn += 1) await page.turn();
+      await settled(page);
+      assert.equal(element("progress-current").textContent, `Series ${LIGHTHOUSE}`, why);
+      // the update over: the drama it had not reached when the button was pressed is still ticked
+      assert.deepEqual(favoriteRows(page).map(([id]) => id), after, why);
+      assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [MOON], why);
+      assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "queued", why);
+      assert.equal(element("favorites-selection").textContent, "1 selected · 12 episodes", why);
+      // the next press queues it: its own job, behind the running one
+      element("library-download").fire("click");
+      await settled(page);
+      assert.deepEqual(queuedLabels(page), [`Series ${MOON}`], why);
+      assert.equal(element("favorites-selection").textContent, "0 selected · 0 episodes", why);
+      assert.equal(cardOf(page, MOON)?.getAttribute("data-status"), "queued", why);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
 test("the page: a card's status follows a batch job — Queued while it waits, Downloading S/N after every episode, then what the records say once its series is done", async () => {
   const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
   try {

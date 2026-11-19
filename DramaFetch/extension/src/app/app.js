@@ -1483,8 +1483,8 @@ export async function runLoad(job, engine, entry) {
 /**
  * The series ticked in the library, by series id: never cleared by another tab's listing (a card
  * built for a ticked id shows ticked), pruned only by a COMPLETE listing that becomes the library —
- * the ids it does not hold are dropped ({@link endFavorites}) —, and emptied by **Clear selection**
- * and by **Download selected**.
+ * the ids it does not hold are dropped ({@link endFavorites}) —, emptied by **Clear selection**,
+ * and cleared by **Download selected** of the dramas it queues, those only ({@link onLibraryDownload}).
  */
 const favoritesSelected = new Set();
 
@@ -2849,8 +2849,12 @@ function onFavoritesAdd() {
  * **Download selected**: ONE `batch` job over exactly the ticked dramas' series ids, in the order
  * the library shows them — what **Download all** does with those ids in the box (the same refs,
  * label, `includeLocked` false, `recheck` false), through `enqueue`, so the job gate, the cooldown
- * and a refused write behave as for **Download all**. The box is not touched; the ticks are
- * cleared and the cards say **Queued**. Nothing for an empty selection.
+ * and a refused write behave as for **Download all**. The box is not touched; the queued dramas'
+ * ticks are cleared and their cards say **Queued** — theirs only: pressed while a listing refills
+ * the library (**Update from TikTok**, the popup's **Open my library**), it queues the ticked
+ * dramas read so far, what the selection bar counts, and a tick on one the listing has not read
+ * back yet stays, its card ticked again once read, or once the library comes back as it was
+ * ({@link restoreKeptLibrary}), for the next press. Nothing for an empty selection.
  */
 function onLibraryDownload() {
   const items = selectedItems();
@@ -2863,7 +2867,7 @@ function onLibraryDownload() {
   if (parsed.refs.length === 0) return;
   const label = parsed.refs.length === 1 ? t("jobSeries", /** @type {SeriesRef} */ (parsed.refs[0]).seriesId) : t("jobBatch", [parsed.refs.length]);
   enqueue({ kind: "batch", label, refs: parsed.refs, series: null, numbers: [], includeLocked: false, recheck: false });
-  favoritesSelected.clear();
+  for (const ref of parsed.refs) favoritesSelected.delete(ref.seriesId); // the queued ones only: a tick a listing has not read back yet stays
   input("favorites-select-all").checked = false;
   setStatus($("favorites-status"), t("libraryQueuedJob", [parsed.refs.length]), "ok");
   renderLibrary();
