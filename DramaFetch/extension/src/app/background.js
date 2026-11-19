@@ -18,17 +18,20 @@
  * empty or `0`; a later page, the page's own as its grid scrolls or one the DramaFetch tab asked
  * for, never replaces it — is kept in `chrome.storage.session` (`storage.rememberFavoritesTemplate`;
  * in memory for the browser session, never logged, never in a report or the history: it carries
- * TikTok's signature parameters) and forgotten when the tab closes. That URL is the template the
- * DramaFetch tab reads the list with (`favorites.js`): its first page replayed unchanged.
+ * TikTok's signature parameters) with whose list it reads — the `@handle` of the profile page that
+ * asked for it ({@link keepFavoritesTemplate}) — and forgotten when the tab closes. That URL is the
+ * template the DramaFetch tab reads the list with (`favorites.js`): its first page replayed
+ * unchanged; that handle is the library's profile when the list becomes the library.
  */
 
 import { cardOf, favoritesQuery, isFavoritesFirstPageUrl } from "../lib/favorites.js";
+import { profileHandleOf } from "../lib/library.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import { closeLeftoverDiscoveryTab, observedUrlPatterns } from "./discovery.js";
 import { t } from "./i18n.js";
 import { MENU_CARD, loadOfClick, menuItems } from "./menus.js";
 import { isOwnSender } from "./senders.js";
-import { forgetFavoritesTemplate, loadTestSettings, rememberFavoritesTemplate } from "./storage.js";
+import { forgetFavoritesTemplate, loadTestSettings, readFavoritesTemplate, rememberFavoritesTemplate } from "./storage.js";
 
 const APP_PATH = "src/app/app.html";
 
@@ -36,9 +39,11 @@ const APP_PATH = "src/app/app.html";
  * @typedef {import("../lib/favorites.js").Card} Card
  * @typedef {import("../lib/favorites.js").FavoritesHandover} FavoritesHandover
  *
- * @typedef {{load: string} | {favorites: FavoritesHandover}} Handover What the DramaFetch tab is
- *   handed: a series to list (an address or an id, as the box reads it), or the favorites of a
- *   TikTok tab to show — with the right-clicked card to list, when there is one.
+ * @typedef {{load: string} | {favorites: FavoritesHandover} | {library: true}} Handover What the
+ *   DramaFetch tab is handed: a series to list (an address or an id, as the box reads it), the
+ *   favorites of a TikTok tab to show — with the right-clicked card to list, when there is one —,
+ *   or the library to show as it is kept (the popup's **Open my library** away from a TikTok
+ *   profile: no job, no request).
  */
 
 /**
@@ -63,10 +68,33 @@ chrome.webRequest.onCompleted.addListener(
     // a tab's own first page of its favorites list, answered: its URL and when (never a body, never
     // a header); a later page never replaces it — the first page is the one replayed unchanged
     if (details.tabId < 0 || details.statusCode !== 200 || !isFavoritesFirstPageUrl(details.url)) return;
-    void rememberFavoritesTemplate(details.tabId, details.url, details.timeStamp / 1000).catch(() => undefined);
+    void keepFavoritesTemplate(details.tabId, details.url, details.timeStamp / 1000).catch(() => undefined);
   },
   { urls: favoritesObserverUrls(chrome.runtime.getManifest()), types: ["xmlhttprequest"] },
 );
+
+/**
+ * Keep TikTok tab `tabId`'s first page of its favorites list with whose list it reads: the
+ * `@handle` of the profile page that asked for it — the tab's address as it completed
+ * (`lib/library.profileHandleOf`; null on no profile page, or the tab gone) —, unless it is the
+ * address kept for that tab already, byte for byte: DramaFetch's own replay of it (a listing's first
+ * page, the count after a removal), made from wherever the tab is by then, keeps the handle kept
+ * with it. The tab's address is read with the `tabs` permission DramaFetch holds; nothing else.
+ * @param {number} tabId
+ * @param {string} url
+ * @param {number} at seconds since the epoch
+ * @returns {Promise<void>}
+ */
+async function keepFavoritesTemplate(tabId, url, at) {
+  const kept = await readFavoritesTemplate(tabId).catch(() => null);
+  let profile;
+  if (kept !== null && kept.url === url) profile = kept.profile;
+  else {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    profile = profileHandleOf(tab?.url || tab?.pendingUrl || "");
+  }
+  await rememberFavoritesTemplate(tabId, url, at, profile);
+}
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   void closeLeftoverDiscoveryTab(tabId).catch(() => undefined);
@@ -95,14 +123,15 @@ function isTabId(value) {
 
 /**
  * Open the DramaFetch tab, or bring the open one to the front; with a hand-over, have it list that
- * series (`dramafetch:load`) or show that TikTok tab's favorites (`dramafetch:favorites`). The
- * engine's tab (one per browser) takes it and answers with its tab, which comes to the front. When
- * no page answers — no DramaFetch tab is open, or the open one's page is not running (Chrome
- * restored it after a restart without loading it yet, or it was discarded: Chrome never discards
- * an extension's page on its own, but `chrome://discards` or a tab-suspending extension can), or
- * the one open is read-only and its engine's tab was closed — the hand-over travels in the address
- * of a tab that (re)loads with it (`?load=…`, `?favorites=…`): the open DramaFetch tab, else a new
- * one. A message to a page that is not running would be lost.
+ * series (`dramafetch:load`), show that TikTok tab's favorites (`dramafetch:favorites`) or show the
+ * library as it is kept (`dramafetch:library`: no job, no request). The engine's tab (one per
+ * browser) takes it and answers with its tab, which comes to the front. When no page answers — no
+ * DramaFetch tab is open, or the open one's page is not running (Chrome restored it after a restart
+ * without loading it yet, or it was discarded: Chrome never discards an extension's page on its
+ * own, but `chrome://discards` or a tab-suspending extension can), or the one open is read-only and
+ * its engine's tab was closed — the hand-over travels in the address of a tab that (re)loads with
+ * it (`?load=…`, `?favorites=…`, `?library=1`): the open DramaFetch tab, else a new one. A message
+ * to a page that is not running would be lost.
  * @param {Handover | null} handover
  * @returns {Promise<void>}
  */
@@ -112,7 +141,9 @@ async function openApp(handover) {
     const message =
       "load" in handover
         ? { type: "dramafetch:load", input: handover.load }
-        : { type: "dramafetch:favorites", ...handover.favorites };
+        : "favorites" in handover
+          ? { type: "dramafetch:favorites", ...handover.favorites }
+          : { type: "dramafetch:library" };
     const answer = await chrome.runtime.sendMessage(message).catch(() => undefined);
     if (isRecord(answer) && answer["ok"] === true) {
       const tabId = answer["tabId"];
@@ -121,13 +152,19 @@ async function openApp(handover) {
       return;
     }
   }
-  const query =
-    handover === null ? "" : "load" in handover ? `load=${encodeURIComponent(handover.load)}` : favoritesQuery(handover.favorites);
-  const url = query ? `${appUrl}?${query}` : appUrl;
+  const suffix =
+    handover === null
+      ? ""
+      : "load" in handover
+        ? `?load=${encodeURIComponent(handover.load)}`
+        : "favorites" in handover
+          ? `?${favoritesQuery(handover.favorites)}`
+          : "?library=1"; // a query, not a fragment: an open DramaFetch tab reloads, as for `?load=`
+  const url = `${appUrl}${suffix}`;
   const tabs = await chrome.tabs.query({});
   const existing = tabs.find((tab) => (tab.url ?? "").startsWith(appUrl));
   if (existing !== undefined && existing.id !== undefined) {
-    await chrome.tabs.update(existing.id, query ? { active: true, url } : { active: true });
+    await chrome.tabs.update(existing.id, suffix ? { active: true, url } : { active: true });
     await chrome.windows.update(existing.windowId, { focused: true });
     return;
   }
@@ -141,12 +178,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isRecord(message) || message["type"] !== "dramafetch:open") return false;
   const load = typeof message["load"] === "string" && message["load"] ? message["load"] : null;
   const favorites = message["favorites"];
-  /** @type {Handover | null} the popup's Choose from your favorites (that tab), or its Download this series */
+  /** @type {Handover | null} the popup's Open my library on a profile (that tab), its Download this series, or its Open my library elsewhere */
   const handover = isTabId(favorites)
     ? { favorites: { tabId: favorites, card: null, menu: false, script: true } }
     : load !== null
       ? { load }
-      : null;
+      : message["library"] === true
+        ? { library: true }
+        : null;
   openApp(handover).then(
     () => sendResponse({ ok: true }),
     (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),

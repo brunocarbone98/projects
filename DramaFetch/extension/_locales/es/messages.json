@@ -427,11 +427,11 @@
     "description": "Tooltip of the on-disk badge."
   },
   "favoritesHeading": {
-    "message": "Tus dramas favoritos",
+    "message": "Tu biblioteca de TikTok",
     "description": "Heading of the panel that lists the user's TikTok favorites (Favorites → Drama)."
   },
   "favoritesFilterPlaceholder": {
-    "message": "Filtrar por título",
+    "message": "Buscar por título",
     "description": "Placeholder and label of the favorites panel's filter box (title contains, letter case aside)."
   },
   "favoritesSelectShown": {
@@ -439,16 +439,12 @@
     "description": "Checkbox: tick every drama the filter shows."
   },
   "favoritesAddButton": {
-    "message": "Añadir los seleccionados al cuadro",
+    "message": "Añadir al cuadro",
     "description": "Button: the ticked favorites join the box of series (nothing is downloaded)."
   },
   "favoritesHint": {
-    "message": "Marca dramas y pulsa Añadir los seleccionados al cuadro: se suman al cuadro de arriba, y Descargar todo los descarga, una serie tras otra. Desde esta lista no se descarga nada.",
+    "message": "Leer la lista completa tarda 1–2 minutos (unas 50 páginas, con pausa antes de cada una). “En disco” = todos los episodios que tu cuenta puede ver, guardados y verificados. Descargar seleccionados descarga los marcados una serie tras otra, exactamente como Descargar todo.",
     "description": "Hint under the favorites panel's buttons."
-  },
-  "favoritesColEpisodes": {
-    "message": "Episodios",
-    "description": "Favorites table column: episodes and length."
   },
   "favoritesListing": {
     "message": "Listando tus favoritos desde tu pestaña de TikTok…",
@@ -519,7 +515,7 @@
     }
   },
   "favoritesLoaded": {
-    "message": "$count$ dramas favoritos listados: marca los que quieras descargar y pulsa Añadir los seleccionados al cuadro.",
+    "message": "$count$ dramas favoritos listados: marca los que quieras descargar y pulsa Descargar seleccionados (o Añadir al cuadro).",
     "description": "Status after the favorites list was read.",
     "placeholders": {
       "count": {
@@ -536,17 +532,18 @@
       }
     }
   },
-  "favoritesSelection": {
-    "message": "$ticked$ marcados, $shown$ mostrados",
-    "description": "Favorites selection count.",
+  "libraryKept": {
+    "message": "Tu biblioteca no se actualizó: se leyeron $count$ de tus favoritos, no la lista entera de TikTok, así que se queda como estaba. Pulsa F5 en tu perfil de TikTok, vuelve a abrir Favoritos → Drama y pulsa Actualizar desde TikTok.",
+    "description": "Status when an update over a library that held dramas did not read TikTok's whole list: the library came back as it was (no stop, no cooldown).",
     "placeholders": {
-      "ticked": {
+      "count": {
         "content": "$1"
-      },
-      "shown": {
-        "content": "$2"
       }
     }
+  },
+  "libraryKeptEmpty": {
+    "message": "Tu biblioteca no se actualizó: TikTok respondió con una lista vacía de tus favoritos, así que se queda como estaba. Pulsa F5 en tu perfil de TikTok, vuelve a abrir Favoritos → Drama y pulsa Actualizar desde TikTok.",
+    "description": "Status when an update over a library that held dramas got an empty answer (TikTok may answer a replay it no longer accepts so): the library came back as it was."
   },
   "favoritesEpisodes": {
     "message": "$episodes$ episodios",
@@ -590,18 +587,6 @@
       }
     }
   },
-  "favoritesOnDiskTitle": {
-    "message": "Según los registros de DramaFetch, están guardados todos los episodios que tu cuenta puede ver",
-    "description": "Tooltip of a favorite's on-disk badge."
-  },
-  "favoritesPartly": {
-    "message": "en parte",
-    "description": "Badge: some episodes of a favorite are saved, according to DramaFetch's records."
-  },
-  "favoritesPartlyTitle": {
-    "message": "Según los registros de DramaFetch, algunos de sus episodios están guardados; Descargar todo descarga solo el resto",
-    "description": "Tooltip of a favorite's partly badge."
-  },
   "favoritesAdded": {
     "message": "$count$ añadidos al cuadro. Descargar todo los descarga, una serie tras otra.",
     "description": "Status after Add selected to the box.",
@@ -616,11 +601,11 @@
     "description": "Status after Add selected to the box when the box named them all already."
   },
   "favoritesChoose": {
-    "message": "Tus favoritos se listan abajo: marca los dramas que quieras y pulsa Añadir los seleccionados al cuadro.",
-    "description": "Status when the popup's Choose from your favorites was pressed."
+    "message": "Tus favoritos se listan abajo: marca los dramas que quieras y pulsa Añadir al cuadro.",
+    "description": "Status when a TikTok profile's favorites are handed over: the popup's Open my library there, or Update from TikTok."
   },
   "favoritesNoCard": {
-    "message": "Ese clic derecho no fue sobre un drama de tus favoritos: haz clic derecho sobre el título del drama o sobre su portada, o usa el botón de DramaFetch en la barra → Elegir de tus favoritos.",
+    "message": "Ese clic derecho no fue sobre un drama de tus favoritos: haz clic derecho sobre el título del drama o sobre su portada, o usa el botón de DramaFetch en la barra → Abrir mi biblioteca.",
     "description": "Status when the right-click on a TikTok profile was on no favorites card (the tab's content script said so): nothing is listed."
   },
   "favoritesNoScript": {
@@ -661,8 +646,17 @@
     }
   },
   "favoritesShared": {
-    "message": "Varios de tus favoritos se llaman “$title$”: se muestran abajo con sus episodios y su duración; marca aquel sobre el que hiciste clic derecho (su tarjeta muestra lo mismo) y pulsa Añadir los seleccionados al cuadro.",
+    "message": "Varios de tus favoritos se llaman “$title$”: se muestran abajo con sus episodios y su duración; marca aquel sobre el que hiciste clic derecho (su tarjeta muestra lo mismo) y pulsa Añadir al cuadro.",
     "description": "Several different dramas of the favorites list bear a right-clicked card's title: none is picked, the panel shows them (filtered to that title) for the user to tick; nothing listed.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "favoritesSharedElsewhere": {
+    "message": "Varios dramas de los favoritos de este perfil de TikTok se llaman “$title$”, y DramaFetch nunca adivina cuál quisiste decir: abre en TikTok el que quieras y usa el botón de DramaFetch en la barra → Descargar esta serie.",
+    "description": "A right-clicked card's title is shared by several dramas of a TikTok profile other than the library's: the library is left as it was, none is picked, nothing listed.",
     "placeholders": {
       "title": {
         "content": "$1"
@@ -690,6 +684,507 @@
   "favoritesNoAnswer": {
     "message": "TikTok no respondió a la solicitud de la lista de favoritos: revisa la conexión, pulsa F5 en tu perfil de TikTok, vuelve a abrir Favoritos → Drama y vuelve a intentarlo.",
     "description": "The favorites list's request got no answer."
+  },
+  "navLabel": {
+    "message": "Secciones",
+    "description": "aria-label of the header's section links."
+  },
+  "navDownload": {
+    "message": "Descargar",
+    "description": "Header link to the box (Series to download)."
+  },
+  "navLibrary": {
+    "message": "Biblioteca",
+    "description": "Header link to the library section."
+  },
+  "navHistory": {
+    "message": "Historial",
+    "description": "Header link to Past runs."
+  },
+  "navSettings": {
+    "message": "Ajustes",
+    "description": "Header link to the settings."
+  },
+  "libraryEmpty": {
+    "message": "Tu biblioteca está vacía: abre tu perfil de TikTok → Favoritos → Drama y luego el botón de DramaFetch en la barra → Abrir mi biblioteca. DramaFetch mostrará entonces cada drama que guardas allí, con lo que ya está en disco.",
+    "description": "Shown instead of the library while none exists."
+  },
+  "libraryRefresh": {
+    "message": "Actualizar desde TikTok",
+    "description": "Button: the smart refresh of the library from the TikTok tab that shows the list."
+  },
+  "libraryRefreshHint": {
+    "message": "Para actualizar, abre tu perfil de TikTok → Favoritos → Drama en una pestaña de este Chrome.",
+    "description": "Under the connection line while no TikTok tab shows the favorites list."
+  },
+  "libraryRefreshHintProfile": {
+    "message": "Para actualizar, abre tu perfil de TikTok ($profile$) → Favoritos → Drama en una pestaña de este Chrome.",
+    "description": "Under the connection line while no tab of the library's own TikTok profile shows the favorites list; $profile$ is that profile's @handle.",
+    "placeholders": {
+      "profile": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryHint": {
+    "message": "Sin contraseña ni API aparte: DramaFetch lee la misma lista que muestra tu perfil, desde tu propia pestaña de TikTok y con pausas. Nada se descarga hasta que lo pidas.",
+    "description": "How the library connects to TikTok."
+  },
+  "libraryReadFrom": {
+    "message": "Leída de tu pestaña de TikTok",
+    "description": "Connection line, first part (no profile known)."
+  },
+  "libraryReadFromProfile": {
+    "message": "Leída de tu pestaña de TikTok ($profile$)",
+    "description": "Connection line, first part: $profile$ is the @handle.",
+    "placeholders": {
+      "profile": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryAgeNow": {
+    "message": "hace un momento",
+    "description": "Connection line: when the list or its count was read."
+  },
+  "libraryAgeMinutes": {
+    "message": "hace $count$ min",
+    "description": "Connection line: minutes since the last read.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryAgeHours": {
+    "message": "hace $count$ h",
+    "description": "Connection line: hours since the last read.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryAgeDays": {
+    "message": "hace $count$ d",
+    "description": "Connection line: days since the last read.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryTotal": {
+    "message": "TikTok cuenta $count$ dramas",
+    "description": "Connection line: TikTok's own count of the Bookmark (the list's total).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryTotalUnconfirmed": {
+    "message": "TikTok cuenta $count$ dramas (sin confirmar: abre tu perfil → Favoritos → Drama y pulsa Actualizar desde TikTok)",
+    "description": "Connection line after a removal made with no TikTok tab to read the count from: the last count minus one.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryTotalUnknown": {
+    "message": "TikTok no dijo cuántos dramas cuenta",
+    "description": "Connection line when the list carried no total."
+  },
+  "libraryStale": {
+    "message": "Esta lista tiene $count$: pulsa Actualizar desde TikTok para ponerla al día",
+    "description": "Under the connection line when the library holds another number of dramas than TikTok counts.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryUnchanged": {
+    "message": "Sin cambios: TikTok cuenta $count$ dramas.",
+    "description": "The smart refresh's first page found the library as it was (one request).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryChipsLabel": {
+    "message": "Filtrar por estado",
+    "description": "aria-label of the status chips."
+  },
+  "libraryChipAll": {
+    "message": "Todos · $count$",
+    "description": "Status chip: every drama still in the Bookmark.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryChipNone": {
+    "message": "Sin descargar · $count$",
+    "description": "Status chip.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryChipPartly": {
+    "message": "En parte · $count$",
+    "description": "Status chip.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryChipOnDisk": {
+    "message": "En disco · $count$",
+    "description": "Status chip.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "librarySortLabel": {
+    "message": "Ordenar",
+    "description": "aria-label of the sort menu."
+  },
+  "librarySortRecent": {
+    "message": "Más recientes primero",
+    "description": "Sort: the list's own order."
+  },
+  "librarySortTitle": {
+    "message": "Título A–Z",
+    "description": "Sort by title."
+  },
+  "librarySortEpisodes": {
+    "message": "Más episodios",
+    "description": "Sort by episodes."
+  },
+  "libraryRemovedLine": {
+    "message": "$count$ quitados de tu Bookmark por DramaFetch desde la última lectura: salen de la biblioteca al actualizarla.",
+    "description": "The removed dramas' own line (they are in no filter count).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "librarySelection": {
+    "message": "$count$ seleccionados · $episodes$ episodios",
+    "description": "Selection bar.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "episodes": {
+        "content": "$2"
+      }
+    }
+  },
+  "librarySelectionNote": {
+    "message": "se descargan uno tras otro, con las pausas de siempre",
+    "description": "Selection bar, after the count."
+  },
+  "libraryClear": {
+    "message": "Quitar selección",
+    "description": "Selection bar button."
+  },
+  "libraryDownload": {
+    "message": "Descargar seleccionados",
+    "description": "Selection bar button: one batch job with the ticked dramas."
+  },
+  "libraryQueuedJob": {
+    "message": "$count$ series en cola: se descargan una tras otra, con las pausas de siempre.",
+    "description": "After Download selected dramas.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryShown": {
+    "message": "Mostrando $shown$ de $count$",
+    "description": "Under the grid.",
+    "placeholders": {
+      "shown": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      }
+    }
+  },
+  "libraryMore": {
+    "message": "Mostrar $count$ más",
+    "description": "Button under the grid.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryChoose": {
+    "message": "Elegir",
+    "description": "A card's tick."
+  },
+  "libraryChooseLabel": {
+    "message": "Elegir “$title$”",
+    "description": "aria-label of a card's tick.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryTwin": {
+    "message": "Mismo título que otro favorito",
+    "description": "Badge of a drama whose title another different drama of the library bears."
+  },
+  "libraryOnDisk": {
+    "message": "En disco",
+    "description": "Card status (followed by saved/total)."
+  },
+  "libraryPartly": {
+    "message": "En parte",
+    "description": "Card status (followed by saved/total)."
+  },
+  "libraryRunning": {
+    "message": "Descargando",
+    "description": "Card status (followed by saved/total)."
+  },
+  "libraryQueued": {
+    "message": "En cola",
+    "description": "Card status: a waiting job will download it."
+  },
+  "libraryNone": {
+    "message": "Sin descargar",
+    "description": "Card status."
+  },
+  "libraryRemoved": {
+    "message": "Quitado de tu Bookmark",
+    "description": "Card status: removed by DramaFetch since the last read."
+  },
+  "libraryRemovedNote": {
+    "message": "Ya no está en tu Bookmark · desaparece al actualizar",
+    "description": "A removed card's note."
+  },
+  "libraryRemove": {
+    "message": "Quitar de Bookmark",
+    "description": "Card button of an on-disk drama: opens the confirmation."
+  },
+  "libraryBrowse": {
+    "message": "Ver episodios",
+    "description": "Card button: queues Load list of that series."
+  },
+  "libraryOpen": {
+    "message": "Abrir en TikTok",
+    "description": "Card button: the drama in a normal tab."
+  },
+  "librarySaveRefused": {
+    "message": "No se pudo guardar la biblioteca en este equipo ($reason$): se vuelve a leer de TikTok la próxima vez.",
+    "description": "Said once when chrome.storage.local refused the library (a cache: nothing stops).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkDialogTitle": {
+    "message": "¿Quitar de tu Bookmark en TikTok?",
+    "description": "Confirmation title."
+  },
+  "bookmarkDialogHow": {
+    "message": "DramaFetch abrirá el drama en una pestaña en segundo plano, pulsará su botón Bookmark una sola vez y comprobará, tras recargar la página, que TikTok guardó el cambio. Si cambias de idea, vuelve a pulsar Bookmark en TikTok.",
+    "description": "Confirmation: what will happen."
+  },
+  "bookmarkCancel": {
+    "message": "Cancelar",
+    "description": "Confirmation button."
+  },
+  "bookmarkConfirm": {
+    "message": "Quitar de Bookmark",
+    "description": "Confirmation button: queues the removal."
+  },
+  "bookmarkFactSaved": {
+    "message": "$saved$ de $total$ episodios en disco",
+    "description": "Confirmation fact from DramaFetch's records.",
+    "placeholders": {
+      "saved": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      }
+    }
+  },
+  "bookmarkFactSavedCount": {
+    "message": "$saved$ episodios en disco",
+    "description": "Confirmation fact when the episode count is unknown.",
+    "placeholders": {
+      "saved": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkFactVerified": {
+    "message": "Cada uno descargado y verificado por DramaFetch: video, audio y duración",
+    "description": "Confirmation fact: only when every saved episode is DramaFetch's own download."
+  },
+  "bookmarkFactComplete": {
+    "message": "Completo desde el $date$",
+    "description": "Confirmation fact: when a run found the series complete.",
+    "placeholders": {
+      "date": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkFactCover": {
+    "message": "Portada incluida en cada episodio",
+    "description": "Confirmation fact: only when every saved episode's record says its cover was embedded."
+  },
+  "bookmarkAlreadyQueued": {
+    "message": "“$title$” ya está en espera para quitarse de tu Bookmark.",
+    "description": "A second removal of the same drama.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "jobUnbookmark": {
+    "message": "Quitar “$title$” de tu Bookmark",
+    "description": "Job label.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkWorking": {
+    "message": "Quitando “$title$” de tu Bookmark: se abre una pestaña de TikTok en segundo plano…",
+    "description": "While the removal runs.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkRemoved": {
+    "message": "“$title$” quitado de tu Bookmark: TikTok guardó el cambio.",
+    "description": "The removal's outcome.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkAlready": {
+    "message": "En la página de “$title$”, Bookmark ya aparece sin marcar: DramaFetch no pulsó nada ni cambió tu biblioteca. Si lo quitaste tú en TikTok, pulsa Actualizar desde TikTok.",
+    "description": "The page showed the Bookmark off before anything was pressed: nothing pressed, the library and the count left as they were.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkCountUnconfirmed": {
+    "message": "El recuento de TikTok no está confirmado: abre tu perfil → Favoritos → Drama y pulsa Actualizar desde TikTok.",
+    "description": "After a removal with no TikTok tab to read the count from."
+  },
+  "bookmarkNotOnDisk": {
+    "message": "“$title$” no se quitó: los registros de DramaFetch no muestran en disco todos sus episodios. No se pidió nada a TikTok.",
+    "description": "Removal refused at the gate.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkStale": {
+    "message": "“$title$” no se quitó: su número de episodios se leyó de TikTok hace más de 24 horas y puede haber episodios nuevos. Pulsa primero Actualizar desde TikTok y luego quítalo. No se pidió nada a TikTok.",
+    "description": "Removal refused at the gate: the episode count the records were compared with is older than 24 hours.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkMissing": {
+    "message": "“$title$” no se quitó: DramaFetch no encontró un único botón Bookmark que pulsar en su página, así que no pulsó nada. Quítalo tú mismo: Abrir en TikTok.",
+    "description": "No button (or several).",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkTabGone": {
+    "message": "“$title$” no se quitó: la pestaña que abrió DramaFetch se cerró antes de pulsar nada.",
+    "description": "The background tab closed.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkNotConfirmed": {
+    "message": "TikTok no confirmó que “$title$” se quitara: DramaFetch pulsó Bookmark una vez y no pudo comprobar que TikTok guardara el cambio (el botón no se apagó, o la página no se pudo volver a leer). No lo vuelve a pulsar: compruébalo con Abrir en TikTok.",
+    "description": "Pressed once, then no check that TikTok kept it: the button did not turn off, or the page could not be read again.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkNotKept": {
+    "message": "TikTok no guardó el cambio: “$title$” sigue en tu Bookmark. Quítalo tú mismo: Abrir en TikTok.",
+    "description": "After the reload (or on the list's first page) the drama is still saved.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkUnknown": {
+    "message": "Detuviste DramaFetch después de que pulsara Bookmark en “$title$”: no se sabe el resultado; compruébalo con Abrir en TikTok.",
+    "description": "Stop after the click.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "historyBookmarkRemoved": {
+    "message": "Quitado de tu Bookmark: TikTok guardó el cambio",
+    "description": "Past runs: a removal's outcome."
+  },
+  "historyBookmarkAlready": {
+    "message": "Su página ya mostraba Bookmark sin marcar: no se pulsó nada ni se cambió nada",
+    "description": "Past runs: the drama's page showed the Bookmark off before anything was pressed; nothing changed."
+  },
+  "popupLibrary": {
+    "message": "Abrir mi biblioteca · $count$ dramas",
+    "description": "Popup button; $count$ is TikTok's count the library kept.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "popupLibraryOpen": {
+    "message": "Abrir mi biblioteca",
+    "description": "Popup button before the library has a count."
   },
   "jobFavorites": {
     "message": "Listar tus favoritos",
@@ -876,12 +1371,8 @@
     "message": "Abre un microdrama de TikTok para descargar la serie completa, o pega enlaces en la pestaña de DramaFetch.",
     "description": "Popup hint."
   },
-  "popupFavorites": {
-    "message": "Elegir de tus favoritos",
-    "description": "Popup button on a TikTok profile page whose Favorites → Drama list DramaFetch saw: lists those dramas in the DramaFetch tab."
-  },
   "popupFavoritesHint": {
-    "message": "Para elegir de tus favoritos, abre primero Favoritos → Drama en tu perfil de TikTok y vuelve a pulsar DramaFetch.",
+    "message": "Para abrir tu biblioteca, muestra primero Favoritos → Drama en tu perfil de TikTok y vuelve a pulsar DramaFetch.",
     "description": "Popup hint on a TikTok profile page before its Favorites → Drama list was shown."
   },
   "legalNotice": {

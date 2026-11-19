@@ -23,7 +23,16 @@ Routes (all GET):
                                  `/api/drama/episode/item_list/?dramaID=<id>&cursor=0&count=10&...`
                                  and renders the titles into `[data-testid="short-drama-detail"]`;
                                  302 to /login when `require_login` and no `sessionid` cookie;
-                                 a "Verify to continue" page when `challenge`
+                                 a "Verify to continue" page when `challenge`. It also shows the
+                                 drama's Bookmark as TikTok's episode page does (the owner's capture
+                                 of 2026-11-19): `div[role=button][data-e2e="favorite-icon"]
+                                 [data-key-interaction="action_favorite"]` with an svg that has
+                                 `color="#FACE15"` while the series is in the server's favorites
+                                 (`FakeTikTokServer.favorites`) and the count next to it — none
+                                 with `bookmark_missing`; a click makes the page's own script
+                                 fetch `/api/item/collect/?…&action=<0|1>&aid=1988&itemId=<an
+                                 episode item id of that series>&…` and draw the button again from
+                                 TikTok's answer
   /api/drama/episode/item_list/  JSON built from the fixtures: for the main series cursor 0 -> page
                                  1, 3 -> page 2; for the second series cursor 0 -> its only page;
                                  for the third, its logged-in or logged-out page (the `sessionid`
@@ -49,11 +58,22 @@ Routes (all GET):
                                  loads the next page the same way (the page's own later pages,
                                  with the next `cursor`: what the worker must never keep as the
                                  list's address)
-  /api/user/favorite/drama_list/ the favorites list (`FAVORITES_PAGES`, by `cursor`): three pages
-                                 of the anonymized capture's item shape
+  /api/item/collect/             the Bookmark button's request (the page's own): `action=0` takes
+                                 the series of `itemId` out of the server's favorites, `action=1`
+                                 puts it back on top (newest first); answers TikTok's
+                                 `{"status_code": 0, …}` — `collect_ignored` answers the same and
+                                 changes nothing (a reload shows the drama saved again),
+                                 `collect_rate_limit` answers HTTP 429 (`collect_requests`: path
+                                 and `action` of each)
+  /api/user/favorite/drama_list/ the favorites list (the server's own `favorites`, a copy of
+                                 `FAVORITES` at start that the Bookmark changes; by `cursor`):
+                                 three dramas a page of the anonymized capture's item shape, their
+                                 covers on the fake image CDN (`zoomCover["240"]` and
+                                 `cover.urlList` → `/cover/<drama id>.jpg`)
                                  (`fixtures/drama_list_page.json`) — the fake's four series among
                                  invented dramas, two DIFFERENT dramas of the same title, as in the
-                                 owner's list —; a request any of whose other query parameters'
+                                 owner's list; `total` and the profile's "Drama N" follow the
+                                 server's list —; a request any of whose other query parameters'
                                  values differ from the page's own (`DRAMA_LIST_QUERY`, compared
                                  decoded) gets TikTok's kind of error (`statusCode` 10201): the
                                  fake accepts a change of `cursor` only. Whether TikTok itself
@@ -295,6 +315,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </style></head>
 <body>
 <h1>Series __SERIES_ID__</h1>
+__BOOKMARK__
 <div data-testid="short-drama-detail" id="detail">loading</div>
 <script>
 (async () => {
@@ -350,6 +371,54 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </script>
 </body></html>
 """
+#: The drama's Bookmark on its episode page, as TikTok draws it (the owner's capture of
+#: 2026-11-19): the button, its svg yellow while saved, the count next to it; a click makes the
+#: page's own request (`COLLECT_PATH`) and the button is drawn again from TikTok's answer.
+BOOKMARK_HTML = """<div class="actions">
+  <div role="button" tabindex="0" data-e2e="favorite-icon" data-key-interaction="action_favorite"
+       id="favorite" aria-label="Add to Favorites. __COUNT__ added to Favorites">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+      <path d="M6 3h12v18l-6-4-6 4z"></path>
+    </svg>
+  </div>
+  <strong data-e2e="favorite-count" id="favorite-count">__COUNT__</strong>
+</div>
+<script>
+(() => {
+  const button = document.getElementById('favorite');
+  const count = document.getElementById('favorite-count');
+  const base = __BASE_COUNT__;
+  let saved = __SAVED__;
+  let busy = false;
+  const draw = () => {
+    const svg = button.querySelector('svg');
+    if (saved) svg.setAttribute('color', '#FACE15'); else svg.removeAttribute('color');
+    count.textContent = String(base + (saved ? 1 : 0));
+    const label = 'Add to Favorites. ' + count.textContent + ' added to Favorites';
+    button.setAttribute('aria-label', label);
+  };
+  button.addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
+    const u = '__COLLECT_PATH__?WebIdLastTime=1794300000&action=' + (saved ? 0 : 1)
+      + '&aid=1988&itemId=__ITEM_ID__&X-Bogus=fake-bogus';
+    try {
+      const r = await fetch(u, { credentials: 'include' });
+      const j = await r.json();
+      if (r.ok && j.status_code === 0) saved = !saved;
+    } catch (e) {
+      // the page keeps the button as it was
+    }
+    busy = false;
+    draw();
+  });
+  draw();
+})();
+</script>"""
+#: The Bookmark button's request, the page's own (`…/collect/?…&action=<n>&…&itemId=<item>`).
+COLLECT_PATH = "/api/item/collect/"
+#: How many users had the drama saved besides this one (the count next to the Bookmark).
+BOOKMARK_BASE_COUNT = 7056
 CHALLENGE_PAGE = (
     "<!DOCTYPE html><html><head><title>Security check</title></head><body>"
     "<h1>Verify to continue</h1><p>Drag the puzzle piece into place.</p></body></html>"
@@ -450,6 +519,10 @@ class FakeOptions:
     cdn_rate_limit: bool = False  # every /cdn/ request answers HTTP 429
     # Integrity failures (both make the engines fail the episode without a retry):
     truncate_media: bool = False  # Content-Length says all, the body stops at 60 %, then EOF
+    # Episodes, as (series id, episode number), whose FIRST media request is cut short the way
+    # `truncate_media` cuts every one (a transfer the network dropped once); every later request
+    # of them gets the whole file — what **Retry** is for.
+    truncate_once: frozenset[tuple[str, int]] = frozenset()
     short_media: bool = False  # lists keep the fixtures' 92 s durations; the CDN serves 3 s
     # Not a failure: a gzip-encoded body whose Content-Length is the compressed size.
     gzip_media: bool = False
@@ -477,6 +550,12 @@ class FakeOptions:
     origin_probe: bool = False
     # The `/cookie-control/…` routes: does the profile send a third-party cookie at all?
     cookie_control: bool = False
+    # The Bookmark (Remove from Favorites): `collect_rate_limit` answers the page's `collect` with
+    # HTTP 429; `collect_ignored` answers it like TikTok (status 0) but keeps the series in the
+    # favorites, so a reload shows it saved again; `bookmark_missing` draws no Bookmark button.
+    collect_rate_limit: bool = False
+    collect_ignored: bool = False
+    bookmark_missing: bool = False
 
     @property
     def page_scrolls(self) -> bool:
@@ -506,7 +585,12 @@ class FakeTikTokServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _Handler)
         self.options = options
         self.requests: list[RequestRecord] = []
+        #: The user's favorites as this server holds them now (newest first): a copy of
+        #: `FAVORITES` that the Bookmark button's `collect` changes.
+        self.favorites: list[tuple[str, str, int, int]] = list(FAVORITES)
         self.media_lists_served = 0  # item_list responses that carried (rewritten) play URLs
+        #: The `truncate_once` episodes whose one cut-short request has been served.
+        self.cut_once: set[tuple[str, int]] = set()
         self.lock = threading.Lock()
         self.release = threading.Event()  # set at shutdown: wakes handlers sleeping on purpose
 
@@ -528,6 +612,17 @@ class FakeTikTokServer(ThreadingHTTPServer):
     def record(self, record: RequestRecord) -> None:
         with self.lock:
             self.requests.append(record)
+
+    def cut_first(self, episode: tuple[str, int] | None) -> bool:
+        """Whether this media request of `episode` is to be cut short: its first one, when it is
+        one of `truncate_once`."""
+        if episode is None or episode not in self.options.truncate_once:
+            return False
+        with self.lock:
+            if episode in self.cut_once:
+                return False
+            self.cut_once.add(episode)
+            return True
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A client that gave up (the browser aborted a deliberately slow answer) is not an error
@@ -590,6 +685,7 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 page = PAGE_TEMPLATE.replace("__SERIES_ID__", match.group("id"))
                 page = page.replace("__LAZY__", "true" if options.page_scrolls else "false")
+                page = page.replace("__BOOKMARK__", self._bookmark(server, match.group("id")))
                 self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
         elif path == "/api/drama/episode/item_list/":
             later_page = (query.get("cursor", "0") or "0") != "0"
@@ -630,11 +726,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._control(server, path[len(CONTROL_PREFIX) :])
         elif path.rstrip("/") == PROFILE_PATH:
             page = PROFILE_PAGE.replace("__USER__", PROFILE_USER)
-            page = page.replace("__TOTAL__", str(len(FAVORITES)))
+            with server.lock:
+                page = page.replace("__TOTAL__", str(len(server.favorites)))
             page = page.replace("__LIST_PATH__", DRAMA_LIST_PATH)
             self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
         elif path == DRAMA_LIST_PATH:
-            self._json(favorites_page(query))
+            with server.lock:
+                favorites = list(server.favorites)
+            self._json(favorites_page(query, favorites, server.base_url))
+        elif path == COLLECT_PATH:
+            self._collect(server, query)
         elif path == "/api/drama/detail/":
             if query.get("dramaID") == SECOND_SERIES_ID:
                 name, total = SECOND_SERIES_NAME, SECOND_TOTAL_EPISODES
@@ -649,6 +750,42 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, LOGIN_PAGE.encode(), "text/html; charset=utf-8")
         else:
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
+
+    @staticmethod
+    def _bookmark(server: FakeTikTokServer, series_id: str) -> str:
+        """The drama's Bookmark for its page: saved while the series is in the server's favorites,
+        none with `bookmark_missing`."""
+        if server.options.bookmark_missing:
+            return ""
+        with server.lock:
+            saved = any(entry[0] == series_id for entry in server.favorites)
+        html = BOOKMARK_HTML.replace("__SAVED__", "true" if saved else "false")
+        html = html.replace("__BASE_COUNT__", str(BOOKMARK_BASE_COUNT))
+        html = html.replace("__COUNT__", str(BOOKMARK_BASE_COUNT + (1 if saved else 0)))
+        html = html.replace("__COLLECT_PATH__", COLLECT_PATH)
+        return html.replace("__ITEM_ID__", bookmark_item_id(series_id))
+
+    def _collect(self, server: FakeTikTokServer, query: dict[str, str]) -> None:
+        """The Bookmark button's request: TikTok's answer, and the favorites changed — unless
+        `collect_rate_limit` (HTTP 429) or `collect_ignored` (answered, nothing changed)."""
+        if server.options.collect_rate_limit:
+            self._send(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                b'{"status_code": 429, "status_msg": "too many requests"}',
+                "application/json",
+            )
+            return
+        series_id = SERIES_OF_BOOKMARK_ITEM.get(query.get("itemId", ""))
+        action = query.get("action")
+        if series_id is not None and not server.options.collect_ignored:
+            with server.lock:
+                entry = next((e for e in FAVORITES if e[0] == series_id), None)
+                kept = [e for e in server.favorites if e[0] != series_id]
+                if action == "0":
+                    server.favorites = kept
+                elif action == "1" and entry is not None:
+                    server.favorites = [entry, *kept]
+        self._json({"status_code": 0, "status_msg": "", "log_pb": {"impr_id": "fake"}})
 
     @staticmethod
     def _item_list(
@@ -718,12 +855,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, drm_media_bytes(item_id, index), "video/mp4")
         elif EPISODE_OF_ITEM.get(item_id) in options.short_header_media:
             self._send(HTTPStatus.OK, short_header_media_bytes(item_id, index), "video/mp4")
-        elif options.truncate_media:
+        elif options.truncate_media or self._cut_first(EPISODE_OF_ITEM.get(item_id)):
             self._send_truncated(media_bytes(item_id, index), "video/mp4")
         elif options.gzip_media:
             self._send_gzipped(media_bytes(item_id, index), "video/mp4")
         else:
             self._send(HTTPStatus.OK, media_bytes(item_id, index), "video/mp4")
+
+    def _cut_first(self, episode: tuple[str, int] | None) -> bool:
+        """`FakeTikTokServer.cut_first` of this request's server."""
+        server = self.server
+        assert isinstance(server, FakeTikTokServer)
+        return server.cut_first(episode)
 
     def _cover(self, options: FakeOptions, item_id: str) -> None:
         if options.cdn_rate_limit:
@@ -911,14 +1054,21 @@ def _item_lists(payload: dict[str, Any]) -> list[list[Any]]:
     return found
 
 
-def favorites_page(query: dict[str, str]) -> dict[str, Any]:
+def favorites_page(
+    query: dict[str, str],
+    favorites: list[tuple[str, str, int, int]] | None = None,
+    base_url: str = "",
+) -> dict[str, Any]:
     """The favorites list's page for `query`'s `cursor` (`FAVORITES_CURSORS`), three dramas of
-    `FAVORITES` a page in the capture's item shape, the next page's cursor, `hasMore` and the total
-    as a string — or, when any other query parameter differs from the profile page's own request
-    (`DRAMA_LIST_QUERY`, compared decoded, by value), TikTok's kind of error: the fake accepts a
-    change of `cursor` and nothing else (DramaFetch's first page changes nothing at all, its later
-    pages only `cursor`). The bytes of each request are the scenario's to compare
-    (`RequestRecord.raw_query`)."""
+    `favorites` (the server's list; `FAVORITES` by default) a page in the capture's item shape, the
+    next page's cursor, `hasMore` and the total as a string — or, when any other query parameter
+    differs from the profile page's own request (`DRAMA_LIST_QUERY`, compared decoded, by value),
+    TikTok's kind of error: the fake accepts a change of `cursor` and nothing else (DramaFetch's
+    first page changes nothing at all, its later pages only `cursor`). The bytes of each request
+    are the scenario's to compare (`RequestRecord.raw_query`). Each drama's cover —
+    `zoomCover["240"]` and `cover.urlList` — is the fake image CDN's `/cover/<drama id>.jpg` on
+    `base_url` (never TikTok's CDN the capture names)."""
+    listed = list(FAVORITES) if favorites is None else favorites
     if {key: value for key, value in query.items() if key != "cursor"} != DRAMA_LIST_QUERY:
         return {"statusCode": 10201, "status_code": 10201, "status_msg": "invalid parameters"}
     cursor = query.get("cursor", "0")
@@ -933,17 +1083,28 @@ def favorites_page(query: dict[str, str]) -> dict[str, Any]:
             "dramaName": name,
             "numVideos": episodes,
             "totalDuration": str(seconds),
+            "zoomCover": {"240": f"{base_url}/cover/{drama_id}.jpg"},
+            "cover": {"urlList": [f"{base_url}/cover/{drama_id}.jpg"]},
         }
-        for drama_id, name, episodes, seconds in FAVORITES[index * 3 : index * 3 + 3]
+        for drama_id, name, episodes, seconds in listed[index * 3 : index * 3 + 3]
     ]
-    last = index == len(FAVORITES_CURSORS) - 1
+    last = index == len(FAVORITES_CURSORS) - 1 or (index + 1) * 3 >= len(listed)
     return {
         **FAVORITES_CAPTURE,
         "dramaList": items,
         "cursor": "1794349000" if last else FAVORITES_CURSORS[index + 1],
         "hasMore": not last,
-        "total": str(len(FAVORITES)),
+        "total": str(len(listed)),
     }
+
+
+def bookmark_item_id(series_id: str) -> str:
+    """The episode item id a series' Bookmark request names (`itemId`): its first episode's in the
+    fixtures, an invented one for the dramas the fake has no list of."""
+    for item_id, (owner, number) in EPISODE_OF_ITEM.items():
+        if owner == series_id and number == 1:
+            return item_id
+    return f"7699{series_id[-15:]}"
 
 
 def media_bytes(item_id: str, index: str, *, base: bytes = TINY_MP4) -> bytes:
@@ -991,6 +1152,9 @@ def _episodes_of_items() -> dict[str, tuple[str, int]]:
 #: Which episode an item id of the fixtures is: how `drm_media` / `short_header_media` (series id,
 #: number) pairs reach the CDN, whose paths carry item ids only.
 EPISODE_OF_ITEM = _episodes_of_items()
+
+#: Which series a Bookmark request's `itemId` is (`bookmark_item_id` of every favorite).
+SERIES_OF_BOOKMARK_ITEM = {bookmark_item_id(entry[0]): entry[0] for entry in FAVORITES}
 
 
 #: A real 16x16 baseline JPEG, 222 bytes, made once with ffmpeg (`-f lavfi -i color=c=0x404040:
@@ -1068,6 +1232,18 @@ class FakeTikTok:
     def drama_list_requests(self) -> list[RequestRecord]:
         """The favorites list's requests: the profile page's own and the ones replayed from it."""
         return [r for r in self.requests if r.path == DRAMA_LIST_PATH]
+
+    @property
+    def collect_requests(self) -> list[tuple[str, str | None]]:
+        """The Bookmark button's requests, the page's own: their path and `action`, nothing else."""
+        return [(r.path, r.query.get("action")) for r in self.requests if r.path == COLLECT_PATH]
+
+    @property
+    def favorite_ids(self) -> list[str]:
+        """The series in the user's favorites as the server holds them now, newest first."""
+        assert self._server is not None
+        with self._server.lock:
+            return [entry[0] for entry in self._server.favorites]
 
     @property
     def cover_requests(self) -> list[RequestRecord]:

@@ -47,6 +47,8 @@ const TEMPLATE =
 /** @type {Record<string, unknown>} the anonymized capture: three dramas, the next cursor, hasMore, total 946 */
 const CAPTURE = JSON.parse(readFileSync(new URL("../../tests/fixtures/drama_list_page.json", import.meta.url), "utf8"));
 const CAPTURE_ITEMS = /** @type {Record<string, unknown>[]} */ (CAPTURE["dramaList"]);
+/** The capture's first item's `zoomCover["240"]`: the cover of every item {@link favorite} makes. */
+const COVER_240 = String(/** @type {Record<string, string>} */ (CAPTURE_ITEMS[0]?.["zoomCover"])["240"]);
 
 /**
  * An item of the list, shaped like the capture's.
@@ -365,7 +367,13 @@ test("a right-clicked card whose drama is not where the card sits — a favorite
     assert.equal(listing.ended, "until");
     assert.deepEqual(
       resolveCard(listing.items, card),
-      { kind: "shared", items: [{ seriesId: "7712345678901240002", title: "Snowfall in Two Cities", episodes: 40, durationS: 3000 }, { seriesId: "7712345678901240018", title: "Snowfall in Two Cities", episodes: 40, durationS: 3000 }] },
+      {
+        kind: "shared",
+        items: [
+          { seriesId: "7712345678901240002", title: "Snowfall in Two Cities", episodes: 40, durationS: 3000, coverUrl: COVER_240 },
+          { seriesId: "7712345678901240018", title: "Snowfall in Two Cities", episodes: 40, durationS: 3000, coverUrl: COVER_240 },
+        ],
+      },
     );
   } finally {
     fake.restore();

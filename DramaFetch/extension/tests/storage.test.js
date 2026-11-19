@@ -23,10 +23,15 @@ import {
   historyEntry,
   normalizeSettings,
   readFavoritesTemplate,
+  readLibrary,
+  readLibraryCovers,
   rememberFavoritesTemplate,
   settingsProblem,
   trimHistory,
+  writeLibrary,
+  writeLibraryCovers,
 } from "../src/app/storage.js";
+import { libraryRecord } from "../src/lib/library.js";
 
 /** What Chrome 153 rejects a `chrome.storage.local.set` with when the disk under its profile is full. */
 const REFUSED = "IO error: .../000003.log: FILE_ERROR_NO_SPACE (ChromeMethodBFE: 3::WritableFileAppend::8)";
@@ -429,14 +434,22 @@ test("the report switch: on by default, a stored non-boolean falls back to it, a
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, report: /** @type {never} */ (1), delayMinS: 0 }, false), "the report switch must be on or off");
 });
 
-test("the favorites address: kept per TikTok tab in the session's memory, read back only when it is the first page of a favorites list — anything else is no address", async () => {
+test("the favorites address: kept per TikTok tab in the session's memory with whose list it reads (an @handle, else null), read back only when it is the first page of a favorites list — anything else is no address", async () => {
   const { stored, session } = fakeLocal();
   const first = "https://www.tiktok.com/api/user/favorite/drama_list/?WebIdLastTime=1794300000&aid=1988&count=19&cursor=0&X-Bogus=DFSzswVOxQ";
-  await rememberFavoritesTemplate(42, first, 1_794_351_568);
-  assert.deepEqual(session[favoritesTemplateKey(42)], { url: first, at: 1_794_351_568 });
+  // the stored record carries the profile since 1.6.0's review (it was `{url, at}`)
+  await rememberFavoritesTemplate(42, first, 1_794_351_568, "@invented_viewer");
+  assert.deepEqual(session[favoritesTemplateKey(42)], { url: first, at: 1_794_351_568, profile: "@invented_viewer" });
   assert.deepEqual(stored, {}); // never chrome.storage.local
-  assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_568 });
+  assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_568, profile: "@invented_viewer" });
   assert.equal(await readFavoritesTemplate(43), null); // none seen in that tab
+  // whose list it reads not known (the tab on no profile page): null; anything but an @handle read back as null
+  await rememberFavoritesTemplate(42, first, 1_794_351_569);
+  assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_569, profile: null });
+  for (const profile of ["invented_viewer", "@", "@a b", "@a/b", 5, null, undefined]) {
+    session[favoritesTemplateKey(42)] = { url: first, at: 1_794_351_568, profile };
+    assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_568, profile: null }, String(profile));
+  }
   // a stored address that is no first page of a favorites list — a later page, another list, junk —
   // is no address: the list is only ever read from its first page, replayed as the page asked for it
   for (const url of [
@@ -455,4 +468,26 @@ test("the favorites address: kept per TikTok tab in the session's memory, read b
   session[favoritesTemplateKey(42)] = { url: first, at: 1 };
   await forgetFavoritesTemplate(42);
   assert.equal(Object.hasOwn(session, favoritesTemplateKey(42)), false);
+});
+
+test("the library's covers: signed addresses kept in the browser session's memory only — never chrome.storage.local —, read back as http(s) addresses only; the library itself, nothing signed in it, kept on disk — a refused write thrown for its caller to say", async () => {
+  const { stored, session, switches } = fakeLocal();
+  const signed = "https://p16-common-sign.tiktokcdn.com/c/1.avif?x-expires=1794895200&x-signature=INVENTED%3D";
+  await writeLibraryCovers(new Map([["7712345678901234561", signed]]));
+  assert.deepEqual(stored, {}); // never chrome.storage.local
+  assert.deepEqual(session["favoritesCovers"], { "7712345678901234561": signed });
+  assert.deepEqual(await readLibraryCovers(), new Map([["7712345678901234561", signed]]));
+  // anything else stored there is no cover address
+  session["favoritesCovers"] = { "7712345678901234561": signed, "7712345678901234562": "javascript:alert(1)", "7712345678901234563": 5 };
+  assert.deepEqual(await readLibraryCovers(), new Map([["7712345678901234561", signed]]));
+  session["favoritesCovers"] = "junk";
+  assert.deepEqual(await readLibraryCovers(), new Map());
+  // the library: on disk, read back checked; a write the storage refuses is thrown — a cache, the caller says so once
+  const record = libraryRecord({ listedAt: 1_800_000_000, total: 1, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A drama", episodes: 3, durationS: 237, coverUrl: signed }], removed: new Map() });
+  await writeLibrary(record);
+  assert.doesNotMatch(JSON.stringify(stored["favoritesLibrary"]), /https?:|x-signature/);
+  assert.deepEqual(await readLibrary(), record);
+  switches.refuseWrites = true;
+  await assert.rejects(writeLibrary(record), new RegExp("FILE_ERROR_NO_SPACE"));
+  switches.refuseWrites = false;
 });

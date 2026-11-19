@@ -26,11 +26,14 @@ Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
 `#result-trimmed`, `#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`,
 `#failed-table` (rows with `data-number`, `data-status`, a `.badge` and a `td.message`),
 `#retry-button`, `#report-button`,
-`#failed-report`, `#setting-report`, `#settings-save`, `#history-list`, the favorites panel
+`#failed-report`, `#setting-report`, `#settings-save`, `#history-list`, the library
 (`#favorites-card`, `#favorites-count`, `#favorites-filter`, `#favorites-select-all`,
-`#favorites-add-button`, `#favorites-status`, `#favorites-table` with one `tr[data-series-id]` per
-drama) and the popup's `#popup-favorites` / `#popup-favorites-hint`. Storage keys it reads:
-`history` (most recent run first), `cooldown`, `series:<id>`, `pacing`, and in
+`#favorites-add-button`, `#favorites-status`, `#favorites-grid` with one `article[data-series-id]`
+per drama — its `.favorite-title`, `.favorite-meta`, `.favorite-status[data-status]`, its tick and
+its `[data-action]` buttons —, `#library-chip-<filter>`, `#library-total`, `#library-download`,
+`#library-refresh`, and the confirmation `#bookmark-dialog` with `#bookmark-confirm`) and the
+popup's `#popup-favorites` / `#popup-favorites-hint` / `#popup-library`. Storage keys it reads:
+`history` (most recent run first), `cooldown`, `series:<id>`, `pacing`, `favoritesLibrary`, and in
 `chrome.storage.session` `favoritesTemplate:<tab id>`. A cookie value is never printed, logged or
 asserted on.
 """

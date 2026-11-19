@@ -1266,7 +1266,42 @@ export const COVER_MARGIN_PX = 64;
  * @property {(blob: Blob) => string} [objectUrl] `URL.createObjectURL`
  * @property {CoverWatcherFactory} [watcher] how cover cells are watched: an IntersectionObserver
  *   with a {@link COVER_MARGIN_PX} root margin by default
+ * @property {CoverLane} [lane] the page's one lane for thumbnail requests, shared by every loader
+ *   of the page (the episode list's and the library's): one request at a time across them all
+ * @property {(url: string) => boolean} [usable] whether a thumbnail's URL may be asked for now —
+ *   the library's: its signature not expired —, asked right before each request; one that may not
+ *   is skipped without a request and without being marked asked, so that a fresh URL shown later
+ *   for that item still loads
  */
+
+/**
+ * One thumbnail request at a time across the loaders of a page — the episode list's and the
+ * library's (DramaFetch 1.6.0) —, each after its own pause: a loader's turn (`allowed()`, its
+ * pause, `allowed()` again, its one request) starts only once the turn before it, of whichever
+ * loader, has ended. Without it two loaders resumed together (a job's end resumes both) would
+ * have two requests in flight at once.
+ */
+export class CoverLane {
+  constructor() {
+    /** @type {Promise<void>} the end of the last turn handed out */
+    this.tail = Promise.resolve();
+  }
+
+  /**
+   * Run `turn` once every turn handed out before it has ended (a turn that fails ends too).
+   * @template T
+   * @param {() => Promise<T>} turn
+   * @returns {Promise<T>}
+   */
+  run(turn) {
+    const result = this.tail.then(turn);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
 
 /**
  * The cover thumbnails of the episode list (**Load list**), fetched by the extension itself — not
@@ -1274,10 +1309,11 @@ export const COVER_MARGIN_PX = 64;
  * nothing of a cooldown or a running job — and only for the rows someone can see: a row's
  * thumbnail is wanted once its cover cell comes into view ({@link watch}: an IntersectionObserver,
  * {@link COVER_MARGIN_PX} around the window), and no longer once it leaves before its request went
- * out. The wanted ones go out in the list's order, ONE request at a time, each after its pause,
- * only while `allowed()` — asked before the pause and again right before the request, so nothing
- * goes out during a job or a cooldown — through {@link fetchImage} (the manifest's hosts, the
- * extension's own request rule). Each thumbnail is kept by item id for the page's life, so showing
+ * out. The wanted ones go out in the list's order, ONE request at a time — across every loader of
+ * the page when they share a {@link CoverLane}, as the episode list's and the library's do —, each
+ * after its pause, only while `allowed()` — asked before the pause and again right before the
+ * request, so nothing goes out during a job or a cooldown — through {@link fetchImage} (the
+ * manifest's hosts, the extension's own request rule). Each thumbnail is kept by item id for the page's life, so showing
  * the list again costs no request; one that failed is not asked for again.
  */
 export class CoverLoader {
@@ -1401,12 +1437,15 @@ export class CoverLoader {
 
   /**
    * The next thumbnail to ask for, or null; one whose host the manifest does not cover is marked
-   * asked on the way (never requested, so no pause either).
+   * asked on the way (never requested, so no pause either), one the loader may not use now
+   * (`usable`: an expired signature) is passed over — not requested, not marked asked.
    * @returns {string | null}
    */
   next() {
     for (const id of this.wanted()) {
-      if (hostCovered(/** @type {string} */ (this.urls.get(id)), this.options.hostPatterns)) return id;
+      const url = /** @type {string} */ (this.urls.get(id));
+      if (this.options.usable !== undefined && !this.options.usable(url)) continue;
+      if (hostCovered(url, this.options.hostPatterns)) return id;
       this.asked.add(id);
       this.forget(id);
     }
@@ -1427,23 +1466,35 @@ export class CoverLoader {
   /** @returns {Promise<void>} */
   async loop() {
     while (this.next() !== null) {
-      if (!(await this.options.allowed())) return;
-      await this.options.pause();
-      if (!(await this.options.allowed())) return; // asked again right before the request
-      const id = this.next(); // what is in view NOW: the list may have scrolled during the pause
-      if (id === null) return;
-      const url = /** @type {string} */ (this.urls.get(id));
-      this.asked.add(id);
-      this.forget(id);
-      /** @type {ImageOptions} */
-      const request = { fetch: this.fetch, hostPatterns: this.options.hostPatterns };
-      if (this.options.baseUrl !== undefined) request.baseUrl = this.options.baseUrl();
-      const image = await fetchImage(url, request);
-      if (!image.ok) continue;
-      const blob = new Blob([/** @type {Uint8Array<ArrayBuffer>} */ (image.data)], { type: mimeTypeFor(image.kind) });
-      const objectUrl = this.objectUrl(blob);
-      this.loaded.set(id, objectUrl);
-      this.options.onCover(id, objectUrl);
+      const lane = this.options.lane;
+      const goOn = lane === undefined ? await this.turn() : await lane.run(() => this.turn());
+      if (!goOn) return;
     }
+  }
+
+  /**
+   * One turn: `allowed()`, the pause, `allowed()` again right before the request, then the one
+   * request for what is in view now — inside the page's lane when the loader has one.
+   * @returns {Promise<boolean>} whether the loop goes on
+   */
+  async turn() {
+    if (!(await this.options.allowed())) return false;
+    await this.options.pause();
+    if (!(await this.options.allowed())) return false; // asked again right before the request
+    const id = this.next(); // what is in view NOW: the list may have scrolled during the pause
+    if (id === null) return false;
+    const url = /** @type {string} */ (this.urls.get(id));
+    this.asked.add(id);
+    this.forget(id);
+    /** @type {ImageOptions} */
+    const request = { fetch: this.fetch, hostPatterns: this.options.hostPatterns };
+    if (this.options.baseUrl !== undefined) request.baseUrl = this.options.baseUrl();
+    const image = await fetchImage(url, request);
+    if (!image.ok) return true;
+    const blob = new Blob([/** @type {Uint8Array<ArrayBuffer>} */ (image.data)], { type: mimeTypeFor(image.kind) });
+    const objectUrl = this.objectUrl(blob);
+    this.loaded.set(id, objectUrl);
+    this.options.onCover(id, objectUrl);
+    return true;
   }
 }

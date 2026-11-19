@@ -7,7 +7,7 @@
  *
  * - `lang: "es"` translates every text the extension can show into Spanish — through ordered rules
  *   built from the real constants and format strings of `src/lib/*.js` and
- *   `src/app/{engine,downloader,discovery,redirects,favorites}.js` (imported, never copied, wherever
+ *   `src/app/{engine,downloader,discovery,redirects,favorites,bookmark}.js` (imported, never copied, wherever
  *   they are exported) — and translates the texts embedded in a text the same way (a stop reason, the
  *   message after `stopped: `, the reason of a cooldown, …);
  * - `lang: "en"` keeps the English;
@@ -67,6 +67,7 @@ import {
 } from "../app/discovery.js";
 import { STORAGE_REFUSED_PREFIX, StopRequested } from "../app/engine.js";
 import { FAVORITES_CHALLENGE_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE } from "../app/favorites.js";
+import { BOOKMARK_CHALLENGE_MESSAGE, BOOKMARK_MESSAGES, BOOKMARK_RATE_LIMIT_MESSAGE } from "../app/bookmark.js";
 
 /**
  * @typedef {"en" | "es"} Lang
@@ -423,6 +424,46 @@ const EXACT = new Map(
       FAVORITES_CHALLENGE_MESSAGE,
       "TikTok pide una verificación (captcha) en lugar de tu lista de favoritos: cuando termine la espera " +
         "obligatoria, resuélvela en tu pestaña de TikTok que muestra la lista y vuelve a intentarlo",
+    ],
+    // bookmark.js: Remove from Favorites (Quitar de Bookmark), the extension's own texts
+    [
+      BOOKMARK_RATE_LIMIT_MESSAGE,
+      "TikTok está limitando las solicitudes de esta dirección (HTTP 429 en la solicitud del botón Bookmark): " +
+        "espera de 30 a 60 minutos antes de volver a intentarlo",
+    ],
+    [
+      BOOKMARK_CHALLENGE_MESSAGE,
+      "TikTok pide una verificación (captcha) en la página del drama mientras se quita de tu Bookmark: cuando " +
+        "termine la espera obligatoria, resuélvela en una pestaña normal de este Chrome y vuelve a intentarlo",
+    ],
+    [
+      BOOKMARK_MESSAGES["not-on-disk"],
+      "no se quitó de tu Bookmark: los registros de DramaFetch no muestran en disco todos los episodios de este " +
+        "drama; no se pidió nada a TikTok",
+    ],
+    [
+      BOOKMARK_MESSAGES.stale,
+      "no se quitó de tu Bookmark: su número de episodios se leyó de TikTok hace más de 24 horas y puede haber " +
+        "episodios nuevos — actualiza antes la biblioteca desde TikTok; no se pidió nada a TikTok",
+    ],
+    [
+      BOOKMARK_MESSAGES["bookmark-missing"],
+      "no se quitó de tu Bookmark: DramaFetch no encontró un único botón Bookmark que pulsar en la página del " +
+        "drama; no se pulsó nada — quítalo tú mismo en TikTok",
+    ],
+    [
+      BOOKMARK_MESSAGES["tab-gone"],
+      "no se quitó de tu Bookmark: la pestaña que DramaFetch abrió para el drama se cerró antes de pulsar nada",
+    ],
+    [
+      BOOKMARK_MESSAGES["not-confirmed"],
+      "TikTok no confirmó que se quitara: DramaFetch pulsó Bookmark una vez y no pudo comprobar que TikTok guardara " +
+        "el cambio (el botón no se apagó, o la página no se pudo volver a leer); no lo vuelve a pulsar — compruébalo en TikTok",
+    ],
+    [BOOKMARK_MESSAGES["not-kept"], "TikTok no guardó el cambio: el drama sigue en tu Bookmark — quítalo tú mismo en TikTok"],
+    [
+      BOOKMARK_MESSAGES.unknown,
+      "detenido por ti después de que DramaFetch pulsara Bookmark: no se sabe el resultado — compruébalo en TikTok",
     ],
     [
       EMPTY_LIST_MESSAGE,
