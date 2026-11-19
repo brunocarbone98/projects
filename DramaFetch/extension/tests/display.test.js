@@ -57,6 +57,7 @@ import { Downloader, SaveError } from "../src/app/downloader.js";
 import { RedirectTracker, fetchFollowing } from "../src/app/redirects.js";
 import { STORAGE_REFUSED_PREFIX, StopRequested, resolve, storageRefusedReason } from "../src/app/engine.js";
 import { FAVORITES_CHALLENGE_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE } from "../src/app/favorites.js";
+import { BOOKMARK_CHALLENGE_MESSAGE, BOOKMARK_MESSAGES, BOOKMARK_RATE_LIMIT_MESSAGE } from "../src/app/bookmark.js";
 import { settingsProblem, DEFAULT_SETTINGS } from "../src/app/storage.js";
 
 /** @param {string} relative @returns {URL} */
@@ -395,6 +396,8 @@ function cooldownTexts() {
     CHALLENGE_MESSAGE,
     FAVORITES_RATE_LIMIT_MESSAGE,
     FAVORITES_CHALLENGE_MESSAGE,
+    BOOKMARK_RATE_LIMIT_MESSAGE,
+    BOOKMARK_CHALLENGE_MESSAGE,
     "",
     "failed-blocked",
   ]) {
@@ -668,6 +671,8 @@ async function discoveryTexts() {
   );
   texts.push(await failure(resolve(engine, ref)));
   texts.push(LOGIN_REDIRECT_MESSAGE, CHALLENGE_MESSAGE, EMPTY_LIST_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE, FAVORITES_CHALLENGE_MESSAGE);
+  // Remove from Favorites: its refusals and every reason it removed nothing (the history keeps them)
+  texts.push(BOOKMARK_RATE_LIMIT_MESSAGE, BOOKMARK_CHALLENGE_MESSAGE, ...Object.values(BOOKMARK_MESSAGES));
   return texts;
 }
 
@@ -841,6 +846,21 @@ test("the discovery's failures read in Spanish; the login advice stays the exten
   for (const text of [LOGIN_REDIRECT_MESSAGE, EMPTY_LIST_MESSAGE, CHALLENGE_MESSAGE]) {
     assert.match(es(text), /pestaña normal de este Chrome/);
     assert.doesNotMatch(en(text), /cookies|--/);
+  }
+});
+
+test("Remove from Favorites: its refusals and every reason it removed nothing read in Spanish — also as a cooldown's reason —, the English kept as it is", () => {
+  for (const text of [BOOKMARK_RATE_LIMIT_MESSAGE, BOOKMARK_CHALLENGE_MESSAGE, ...Object.values(BOOKMARK_MESSAGES)]) {
+    assertSpanish(text);
+    assert.equal(en(text), text);
+  }
+  assert.equal(es(BOOKMARK_MESSAGES["not-kept"]), "TikTok no guardó el cambio: el drama sigue en tu Bookmark — quítalo tú mismo en TikTok");
+  // the cooldown keeps at most 200 characters of a reason: the texts fit, so the banner translates them whole
+  for (const reason of [BOOKMARK_RATE_LIMIT_MESSAGE, BOOKMARK_CHALLENGE_MESSAGE]) {
+    assert.ok(reason.length <= 200, reason);
+    const { cooldown } = makeCooldown(reason, "discovery", { now: 1_800_000_000 });
+    assert.equal(cooldown.reason, reason);
+    assert.match(es(cooldownMessage(cooldown, { now: 1_800_000_000 + 60 })), /Bookmark/);
   }
 });
 

@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { COVER_MARGIN_PX, CoverLoader } from "../src/app/downloader.js";
+import { COVER_MARGIN_PX, CoverLane, CoverLoader } from "../src/app/downloader.js";
 
 /** A JPEG-looking cover of 600 bytes (the magic decides; nothing decodes it). */
 const COVER = (() => {
@@ -31,8 +31,11 @@ const settle = () => new Promise((done) => setTimeout(done, 0));
 
 /**
  * A loader over fakes: a watcher whose callback the test calls, a fetch that logs (and may be held
- * back), scriptable `allowed()` and pauses.
- * @param {{allowed?: () => boolean, pause?: () => Promise<void>, hold?: boolean, failing?: Set<string>}} [options]
+ * back), scriptable `allowed()` and pauses. With `lane`, the loader takes its turns in that lane;
+ * with `journal`, its steps also go there, prefixed with `name` (several loaders, one journal).
+ * With `usable`, the loader asks it of each URL right before its request (the library's: an
+ * expired signature is not usable).
+ * @param {{allowed?: () => boolean, pause?: () => Promise<void>, hold?: boolean, failing?: Set<string>, lane?: CoverLane, name?: string, journal?: string[], usable?: (url: string) => boolean}} [options]
  */
 function harness(options = {}) {
   /** @type {string[]} */
@@ -47,28 +50,36 @@ function harness(options = {}) {
   const held = [];
   /** @type {{callback: (entries: readonly {target: Element, isIntersecting: boolean}[]) => void, init: {rootMargin: string}, observed: Set<Element>, unobserved: Element[], disconnected: boolean}[]} */
   const watchers = [];
-  const loader = new CoverLoader({
+  /** @param {string} event */
+  const note = (event) => {
+    events.push(event);
+    options.journal?.push(`${options.name ?? ""} ${event}`);
+  };
+  /** @type {import("../src/app/downloader.js").CoverLoaderOptions} */
+  const loaderOptions = {
     hostPatterns: ["https://*.tiktokcdn.com/*"],
     allowed: async () => {
-      events.push("allowed?");
+      note("allowed?");
       return options.allowed ? options.allowed() : true;
     },
     pause: async () => {
-      events.push("pause");
+      note("pause");
       if (options.pause) await options.pause();
     },
     onCover: (itemId, url) => void shown.push(`${itemId} ${url}`),
     fetch: /** @type {typeof fetch} */ (
       async (input, init) => {
         const url = String(input);
+        const file = url.slice(url.lastIndexOf("/") + 1);
         log.push(url);
-        events.push(`GET ${url.slice(url.lastIndexOf("/") + 1)}`);
+        note(`GET ${file}`);
         assert.equal(init?.redirect, "manual");
         inFlight += 1;
         most = Math.max(most, inFlight);
         if (options.hold) await new Promise((done) => held.push(() => done(undefined)));
         else await settle();
         inFlight -= 1;
+        options.journal?.push(`${options.name ?? ""} done ${file}`);
         if (options.failing?.has(url)) return new Response("no", { status: 404 });
         return new Response(COVER, { headers: { "content-type": "image/jpeg" } });
       }
@@ -89,7 +100,10 @@ function harness(options = {}) {
         },
       };
     },
-  });
+  };
+  if (options.lane !== undefined) loaderOptions.lane = options.lane;
+  if (options.usable !== undefined) loaderOptions.usable = options.usable;
+  const loader = new CoverLoader(loaderOptions);
   return { loader, log, events, shown, watchers, held, most: () => most };
 }
 
@@ -267,4 +281,82 @@ test("a job waits for the thumbnail in flight: idle() settles only once it is do
   if (h.held.length > 0) /** @type {() => void} */ (h.held.shift())();
   await h.loader.idle();
   assert.equal(idle, true);
+});
+
+test("the loaders of one page — the episode list's and the library's — share its lane: one request in flight across both, each after its own pause taken once the request before it ended; a job still waits for the one in flight", async () => {
+  const lane = new CoverLane();
+  /** @type {string[]} */
+  const journal = [];
+  const list = harness({ hold: true, lane, name: "list", journal });
+  const library = harness({ hold: true, lane, name: "library", journal });
+  const listCells = render(list.loader);
+  const libraryCells = render(library.loader);
+  // a job's end resumes both loaders at once
+  report(list, listCells, [["i1", true], ["i2", true]]);
+  report(library, libraryCells, [["i3", true], ["i4", true]]);
+  for (let round = 0; round < 4; round += 1) {
+    while (list.held.length + library.held.length === 0) await settle();
+    for (let turn = 0; turn < 10; turn += 1) await settle(); // a second request would be out by now
+    assert.equal(list.held.length + library.held.length, 1, "never two requests in flight");
+    /** @type {() => void} */ ((list.held.length === 1 ? list : library).held.shift())();
+  }
+  await list.loader.idle();
+  await library.loader.idle();
+  assert.deepEqual(list.log, [cover(1), cover(2)]);
+  assert.deepEqual(library.log, [cover(3), cover(4)]);
+  // each turn whole before the next one starts: allowed, its own pause, allowed, the request, its end
+  assert.deepEqual(journal, [
+    ...["list allowed?", "list pause", "list allowed?", "list GET 1.jpeg", "list done 1.jpeg"],
+    ...["library allowed?", "library pause", "library allowed?", "library GET 3.jpeg", "library done 3.jpeg"],
+    ...["list allowed?", "list pause", "list allowed?", "list GET 2.jpeg", "list done 2.jpeg"],
+    ...["library allowed?", "library pause", "library allowed?", "library GET 4.jpeg", "library done 4.jpeg"],
+  ]);
+  // a job starting while one loader's request is out and the other waits for its turn: both idle
+  // once that request has ended — the waiting turn asks allowed() and goes no further
+  let allowed = true;
+  const journal2 = /** @type {string[]} */ ([]);
+  const lane2 = new CoverLane();
+  const first = harness({ hold: true, lane: lane2, name: "list", journal: journal2, allowed: () => allowed });
+  const second = harness({ hold: true, lane: lane2, name: "library", journal: journal2, allowed: () => allowed });
+  report(first, render(first.loader), [["i1", true]]);
+  report(second, render(second.loader), [["i2", true]]);
+  while (first.held.length === 0) await settle();
+  allowed = false; // the job is queued now
+  let idle = false;
+  void Promise.all([first.loader.idle(), second.loader.idle()]).then(() => {
+    idle = true;
+  });
+  await settle();
+  assert.equal(idle, false);
+  /** @type {() => void} */ (first.held.shift())();
+  while (!idle) await settle();
+  assert.deepEqual(second.log, []);
+  assert.deepEqual(journal2, ["list allowed?", "list pause", "list allowed?", "list GET 1.jpeg", "list done 1.jpeg", "library allowed?"]);
+});
+
+test("a thumbnail its loader may not use now — the library's cover whose signed address expired — is never asked for, nor paused for, and never marked asked: shown again with a fresh address (a later listing), it goes out", async () => {
+  /** @type {Set<string>} the addresses whose signature has expired */
+  const expired = new Set([cover(2)]);
+  const h = harness({ usable: (url) => !expired.has(url) });
+  const cells = render(h.loader);
+  report(h, cells, [["i2", true], ["i3", true]]);
+  await h.loader.idle();
+  assert.deepEqual(h.log, [cover(3)]); // i2 never asked for
+  assert.deepEqual(h.events.filter((event) => event === "pause"), ["pause"]); // nor paused for
+  // the same address expiring while the page shows it: asked right before the request, so not asked for
+  expired.add(cover(4));
+  report(h, cells, [["i4", true]]);
+  await h.loader.idle();
+  assert.deepEqual(h.log, [cover(3)]);
+  // a fresh address for i2: its card is watched again and its cover goes out
+  const fresh = "https://p16.tiktokcdn.com/c/2-fresh.jpeg";
+  h.loader.show([{ itemId: "i2", coverUrl: fresh }]);
+  const cell = /** @type {Element} */ (/** @type {unknown} */ ({ itemId: "i2" }));
+  h.loader.watch(cell, "i2");
+  const watcher = h.watchers.at(-1);
+  assert.ok(watcher !== undefined && watcher.observed.has(cell));
+  watcher.callback([{ target: cell, isIntersecting: true }]);
+  await h.loader.idle();
+  assert.deepEqual(h.log, [cover(3), fresh]);
+  assert.equal(h.loader.urlOf("i2"), "blob:image/jpeg:600");
 });

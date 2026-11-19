@@ -24,16 +24,18 @@ against the fake TikTok server:
   it never created;
 - the user's TikTok favorites (the profile's **Favorites** → **Drama**): the worker keeps the
   page's own FIRST `drama_list` request — the page's later pages, loaded as the user asks for more,
-  never replace it — (the popup then offers **Choose from your favorites**, and before it a hint),
-  the List favorites job reads every page from inside that tab — the first page that request
-  replayed byte for byte, the later ones the same request with only its `cursor`'s value changed,
-  paced, one at a time — into the DramaFetch tab's panel (hidden until then), whose filter,
+  never replace it — (the popup then offers **Open my library**, and before it a hint), the List
+  favorites job reads every page from inside that tab — the first page that request replayed byte
+  for byte, the later ones the same request with only its `cursor`'s value changed, paced, one at a
+  time — into the DramaFetch tab's library (hidden until then: one card per drama), whose search,
   **Select all shown** and **Add selected to the box** put `# <title>` and id lines in the box,
-  with nothing downloaded; a synthetic `contextmenu` on a card makes the content script answer
+  with nothing downloaded and nothing asked of TikTok but the covers in view; a synthetic
+  `contextmenu` on a card makes the content script answer
   `dramafetch:card` with that card's title and position, and that card handed over lists its
   drama in one Load list job — also from the address of a DramaFetch tab opened when no page runs
   to take it (`?favorites=<tab>&menu=1&card=<json>`); a card whose title two different dramas
-  bear (the fake's two "Snowfall in Two Cities") lists nothing: both are shown in the panel;
+  bear (the fake's two "Snowfall in Two Cities") lists nothing: both are shown in the library,
+  searched to that title;
 - with Chrome's UI in Spanish (`LANGUAGE=es`: how Chrome on Linux picks its UI language), every
   outcome the fake offers reads in Spanish on screen — no English template word outside the data
   (series and file names, hosts, the payload's `key=value` hints) — while the history keeps the
@@ -636,10 +638,10 @@ def test_the_favorites_list_is_observed_listed_paced_and_added_to_the_box(tmp_pa
     """The profile's **Favorites** → **Drama**: before the page asked for the list the popup shows
     a hint; once it did, the worker has the list's FIRST page's URL (session storage, never local)
     — the page's own later pages, loaded with **More**, never replace it — and the popup offers
-    **Choose from your favorites**. Its click lists every favorite in the DramaFetch tab — every
+    **Open my library**. Its click lists every favorite in the DramaFetch tab's library — every
     page fetched from inside the profile's tab, the first one the page's own first request
     replayed byte for byte, the later ones that request with only `cursor` changed, one at a time,
-    each after the list-page pause — and the panel's filter, **Select all shown** and **Add
+    each after the list-page pause — and the library's search, **Select all shown** and **Add
     selected to the box** put `# <title>` and id lines in the box. Nothing is downloaded, no series
     listed."""
     settings = {"pageDelayS": 0.3}  # the list-page pause long enough to measure: 0.3 to 0.6 s
@@ -680,6 +682,8 @@ def test_the_favorites_list_is_observed_listed_paced_and_added_to_the_box(tmp_pa
         template = popup.evaluate(TEMPLATE_JS, key)
         assert template["url"].startswith(f"{server.base_url}{DRAMA_LIST_PATH}?")
         assert "cursor=0" in template["url"]
+        # with whose list it reads: the handle of the profile page that asked for it
+        assert template["profile"] == PROFILE_PATH.removeprefix("/")
         assert "drama_list" not in str(ext.storage())  # in the session's memory, never on disk
         # the user scrolls the grid for more: the page's own later pages, which the worker observes
         # too — they never replace the first page it keeps
@@ -699,25 +703,25 @@ def test_the_favorites_list_is_observed_listed_paced_and_added_to_the_box(tmp_pa
         assert template["url"].split("?", 1)[1] == page_own
         popup.reload()
         choose = popup.locator("#popup-favorites")
-        ext.wait_for(choose.is_visible, 10, "no Choose from your favorites")
+        ext.wait_for(choose.is_visible, 10, "no Open my library")
         assert hint.is_hidden()
         own = len(server.drama_list_requests)
         assert own == len(FAVORITES_CURSORS)  # the page's own three pages
-        assert ext.page.locator("#favorites-card").is_hidden()  # the panel: hidden until used
+        assert ext.page.locator("#favorites-card").is_hidden()  # the library: hidden until listed
         jobs = ext.finished_jobs()
         choose.click()  # the popup's dramafetch:open with the tab: the engine's tab takes it
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "nothing listed")
 
         page = ext.page
         assert page.locator("#favorites-card").is_visible()  # shown by the listing
-        rows = page.locator("#favorites-table tbody tr")
+        rows = page.locator("#favorites-grid article[data-series-id]")
         assert rows.count() == len(FAVORITES)
-        titles = page.locator("#favorites-table tbody td.favorite-title").all_inner_texts()
+        titles = page.locator("#favorites-grid .favorite-title").all_inner_texts()
         assert titles == [title for _, title, _, _ in FAVORITES]  # the list's order
         ids = [rows.nth(n).get_attribute("data-series-id") for n in range(rows.count())]
         assert ids == [series_id for series_id, _, _, _ in FAVORITES]
-        lighthouse = page.locator(f"#favorites-table tr[data-series-id='{LIGHTHOUSE_ID}']")
-        assert lighthouse.locator("td.favorite-meta").inner_text() == "60 episodes · 1h 19m"
+        lighthouse = page.locator(f"#favorites-grid article[data-series-id='{LIGHTHOUSE_ID}']")
+        assert lighthouse.locator(".favorite-meta").inner_text() == "60 episodes · 1h 19m"
         assert page.locator("#favorites-count").inner_text() == "8 favorite dramas listed."
         assert page.locator("#input-status").inner_text().startswith("8 favorite dramas listed")
         entry = ext.history()[0]
@@ -745,13 +749,13 @@ def test_the_favorites_list_is_observed_listed_paced_and_added_to_the_box(tmp_pa
         for earlier, later in itertools.pairwise(replayed):
             assert later["start"] - earlier["end"] >= 280, (earlier, later)  # 0.3 s at least
 
-        # the filter, Select all shown, Add selected to the box: lines in the box, nothing else
+        # the search, Select all shown, Add selected to the box: lines in the box, nothing else
         before = len(server.requests)
         page.fill("#links", MAIN_LINK)
         page.fill("#favorites-filter", "SNOWFALL")
-        assert [rows.nth(n).is_visible() for n in range(rows.count())] == [
-            series_id in SNOWFALL_IDS for series_id, _, _, _ in FAVORITES
-        ]
+        shown = [rows.nth(n).get_attribute("data-series-id") for n in range(rows.count())]
+        assert shown == list(SNOWFALL_IDS)  # only the dramas the search matches are drawn
+        assert page.locator("#library-chip-all").inner_text() == f"All · {len(FAVORITES)}"
         page.check("#favorites-select-all")
         page.click("#favorites-add-button")
         assert page.input_value("#links") == (
@@ -763,7 +767,11 @@ def test_the_favorites_list_is_observed_listed_paced_and_added_to_the_box(tmp_pa
         )
         page.click("#favorites-add-button")  # nothing twice
         assert page.input_value("#links").count("\n") == 4
-        assert len(server.requests) == before  # the panel asks nothing of TikTok
+        # the library asks nothing of TikTok but the covers of the cards in view (the fake's image
+        # CDN, one at a time, never during a job): no list, no series, no media
+        asked = [r.path for r in server.requests[before:]]
+        favorite_covers = {f"/cover/{series_id}.jpg" for series_id, _, _, _ in FAVORITES}
+        assert set(asked) <= favorite_covers, asked
         assert ext.idle()
         assert not server.item_list_requests and not server.media_requests
         assert ext.saved_files() == []
@@ -886,10 +894,10 @@ def test_a_right_click_on_a_favorites_card_is_answered_and_lists_that_drama(
         read = [r.query["cursor"] for r in server.drama_list_requests[lists:]]
         assert read == list(FAVORITES_CURSORS[:2])
         assert len(server.item_list_requests) == items  # nothing listed
-        rows = app.locator("#favorites-table tbody tr")
-        shown = [n for n in range(rows.count()) if rows.nth(n).is_visible()]
-        assert [rows.nth(n).get_attribute("data-series-id") for n in shown] == list(SNOWFALL_IDS)
-        metas = [rows.nth(n).locator("td.favorite-meta").inner_text() for n in shown]
+        rows = app.locator("#favorites-grid article[data-series-id]")  # the cards drawn: searched
+        shown = [rows.nth(n).get_attribute("data-series-id") for n in range(rows.count())]
+        assert shown == list(SNOWFALL_IDS)
+        metas = [rows.nth(n).locator(".favorite-meta").inner_text() for n in range(rows.count())]
         assert metas == ["60 episodes · 1h 37m", "60 episodes · 1h 37m"]
         assert app.input_value("#favorites-filter") == "Snowfall in Two Cities"
         said = app.locator("#input-status").inner_text()

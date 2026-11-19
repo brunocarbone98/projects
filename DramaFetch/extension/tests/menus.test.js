@@ -397,6 +397,8 @@ test("the worker: the card item asks the right-clicked tab's frame for the card 
   let content = null;
   /** @type {Map<string, unknown>} chrome.storage.session */
   const session = new Map();
+  /** @type {Map<number, string>} the address each TikTok tab shows (`chrome.tabs.get`; none: the tab is gone) */
+  const shows = new Map();
   const runtime = {
     id: "dramafetch-test-id",
     lastError: undefined,
@@ -417,6 +419,11 @@ test("the worker: the card item asks the right-clicked tab's frame for the card 
       i18n: { getMessage: () => "", getUILanguage: () => "en" },
       tabs: {
         query: async () => tabs,
+        get: async (/** @type {number} */ id) => {
+          const url = shows.get(id);
+          if (url === undefined) throw new Error(`No tab with id: ${id}.`);
+          return { id, index: 0, windowId: 3, active: false, url };
+        },
         create: async (/** @type {unknown} */ properties) => void calls.push(["create", properties]),
         update: async (/** @type {number} */ id, /** @type {unknown} */ properties) => {
           calls.push(["update", id, properties]);
@@ -490,10 +497,15 @@ test("the worker: the card item asks the right-clicked tab's frame for the card 
       worker.favoritesObserverUrls({ manifest_version: 3, name: "x", version: "1", dramafetch_test: true, host_permissions: ["https://www.tiktok.com/*", "http://127.0.0.1/*"] }),
       ["https://www.tiktok.com/*drama_list*", "https://*.tiktok.com/*drama_list*", "http://127.0.0.1/*drama_list*"],
     );
-    // kept per tab: the list's first page of a tab, answered 200 — its URL and when, nothing else
+    // kept per tab: the list's first page of a tab, answered 200 — its URL and when, nothing else —,
+    // with whose list it reads: the @handle of the profile page that asked for it (since 1.6.0's
+    // review; the record was `{url, at}`)
+    const viewer = "https://www.tiktok.com/@invented_viewer";
+    shows.set(5, viewer);
+    shows.set(6, viewer);
     hear(completed({}));
     await settle();
-    assert.deepEqual([...session.entries()], [["favoritesTemplate:5", { url: FAVORITES, at: 1794351568 }]]);
+    assert.deepEqual([...session.entries()], [["favoritesTemplate:5", { url: FAVORITES, at: 1794351568, profile: "@invented_viewer" }]]);
     // never kept, never replacing it: a later page — the page's own as its grid scrolls, or one the
     // DramaFetch tab asked for (cursor ≠ 0) —, a drama_list without `favorite`, another status, no
     // tab (the extension's own worker or a request of no tab), another list
@@ -508,18 +520,39 @@ test("the worker: the card item asks the right-clicked tab's frame for the card 
     hear(completed({ url: `https://www.tiktok.com/api/drama/episode/item_list/?dramaID=${SERIES}&cursor=0` }));
     hear(completed({ url: "https://www.tiktok.com/api/user/detail/?from=favorite_drama_list" })); // drama_list in the query only
     await settle();
-    assert.deepEqual([...session.entries()], [["favoritesTemplate:5", { url: FAVORITES, at: 1794351568 }]]);
+    assert.deepEqual([...session.entries()], [["favoritesTemplate:5", { url: FAVORITES, at: 1794351568, profile: "@invented_viewer" }]]);
     // the most recent FIRST page wins (the profile shown again, or the DramaFetch tab's own replay of
     // it, byte for byte); a first page without a cursor counts; another tab has its own
     const noCursor = FAVORITES.replace("&cursor=0", "");
     hear(completed({ timeStamp: 1794351573000 }));
     hear(completed({ tabId: 6, url: noCursor, timeStamp: 1794351574000 }));
     await settle();
-    assert.deepEqual(session.get("favoritesTemplate:5"), { url: FAVORITES, at: 1794351573 });
-    assert.deepEqual(session.get("favoritesTemplate:6"), { url: noCursor, at: 1794351574 });
+    assert.deepEqual(session.get("favoritesTemplate:5"), { url: FAVORITES, at: 1794351573, profile: "@invented_viewer" });
+    assert.deepEqual(session.get("favoritesTemplate:6"), { url: noCursor, at: 1794351574, profile: "@invented_viewer" });
     hear(completed({ tabId: 6, url: next.replace("&cursor=0", ""), timeStamp: 1794351575000 })); // a later page of tab 6
     await settle();
-    assert.deepEqual(session.get("favoritesTemplate:6"), { url: noCursor, at: 1794351574 });
+    assert.deepEqual(session.get("favoritesTemplate:6"), { url: noCursor, at: 1794351574, profile: "@invented_viewer" });
+    // whose list an address reads is the profile that asked for it, never the page the tab shows
+    // later: DramaFetch's own replay of tab 5's address, byte for byte, made while the tab shows
+    // another creator's video (the user browsed on during a listing) keeps the handle kept with it
+    shows.set(5, "https://www.tiktok.com/@some_creator/video/7412345678901234567");
+    hear(completed({ timeStamp: 1794351576000 }));
+    await settle();
+    assert.deepEqual(session.get("favoritesTemplate:5"), { url: FAVORITES, at: 1794351576, profile: "@invented_viewer" });
+    // a new first page that tab asks for on another profile: that profile's list, and its handle
+    const other = FAVORITES.replace("X-Bogus=DFSzswVO", "X-Bogus=OtHeRsIgN");
+    shows.set(5, "https://www.tiktok.com/@some_creator");
+    hear(completed({ url: other, timeStamp: 1794351577000 }));
+    await settle();
+    assert.deepEqual(session.get("favoritesTemplate:5"), { url: other, at: 1794351577, profile: "@some_creator" });
+    // asked for on no profile page, or by a tab already gone: whose list it is cannot be told
+    shows.set(6, "https://www.tiktok.com/foryou");
+    hear(completed({ tabId: 6, url: other, timeStamp: 1794351578000 }));
+    hear(completed({ tabId: 7, timeStamp: 1794351579000 }));
+    await settle();
+    assert.deepEqual(session.get("favoritesTemplate:6"), { url: other, at: 1794351578, profile: null });
+    assert.deepEqual(session.get("favoritesTemplate:7"), { url: FAVORITES, at: 1794351579, profile: null });
+    session.delete("favoritesTemplate:7");
     // forgotten when its tab closes
     removed(5);
     await settle();
@@ -631,6 +664,87 @@ test("the worker: the card item asks the right-clicked tab's frame for the card 
       assert.deepEqual(said, heard ? [{ ok: true }] : [], JSON.stringify(sender));
       calls.length = 0;
     }
+  } finally {
+    Reflect.deleteProperty(globalThis, "chrome");
+  }
+});
+
+test("the worker: the popup's Open my library away from a TikTok profile shows the library — the engine's tab answers and comes to the front; with no page to answer, the open DramaFetch tab (or a new one) opens on the library: no job, no request", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  /** @type {((message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => boolean) | undefined} */
+  let message;
+  /** @type {unknown} what the DramaFetch pages answer: an Error when none is running */
+  let pages = { ok: true, tabId: 9 };
+  /** @type {{ id: number, windowId: number, url: string }[]} */
+  let tabs = [];
+  Object.assign(globalThis, {
+    chrome: {
+      runtime: {
+        id: "dramafetch-test-id",
+        lastError: undefined,
+        getURL: (/** @type {string} */ path) => `${ROOT}${path}`,
+        getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "1.6.0", host_permissions: ["https://www.tiktok.com/*"] }),
+        sendMessage: async (/** @type {unknown} */ sent) => {
+          calls.push(["sendMessage", sent]);
+          if (pages instanceof Error) throw pages;
+          return pages;
+        },
+        onMessage: { addListener: (/** @type {NonNullable<typeof message>} */ listener) => void (message = listener) },
+        onInstalled: { addListener: () => undefined },
+        onStartup: { addListener: () => undefined },
+      },
+      i18n: { getMessage: () => "", getUILanguage: () => "en" },
+      tabs: {
+        query: async () => tabs,
+        create: async (/** @type {unknown} */ properties) => void calls.push(["create", properties]),
+        update: async (/** @type {number} */ id, /** @type {unknown} */ properties) => {
+          calls.push(["update", id, properties]);
+          return { id, windowId: 3, active: true, index: 0 };
+        },
+        onRemoved: { addListener: () => undefined },
+        onUpdated: { addListener: () => undefined },
+      },
+      windows: { update: async (/** @type {number} */ id, /** @type {unknown} */ info) => void calls.push(["focus", id, info]) },
+      contextMenus: { removeAll: () => undefined, create: () => "", onClicked: { addListener: () => undefined } },
+      storage: { local: { get: async () => ({}) }, session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined } },
+      webRequest: { onCompleted: { addListener: () => undefined } },
+    },
+  });
+  const settle = async () => {
+    for (let round = 0; round < 30; round += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  try {
+    const url = new URL("../src/app/background.js", import.meta.url);
+    url.search = "?library"; // a fresh worker over this fake
+    await import(url.href);
+    assert.ok(message, "the worker listens to the popup");
+    const popup = { id: "dramafetch-test-id", url: `${ROOT}src/app/popup.html` };
+    /** @type {unknown[]} */
+    const answers = [];
+    // the engine's tab takes it (it scrolls to its library) and comes to the front
+    assert.equal(message({ type: "dramafetch:open", library: true }, popup, (response) => void answers.push(response)), true);
+    await settle();
+    assert.deepEqual(calls, [["sendMessage", { type: "dramafetch:library" }], ["update", 9, { active: true }], ["focus", 3, { focused: true }]]);
+    assert.deepEqual(answers, [{ ok: true }]);
+    calls.length = 0;
+    // no page running to answer: the open DramaFetch tab on the library
+    pages = new Error("Could not establish connection. Receiving end does not exist.");
+    tabs = [{ id: 9, windowId: 4, url: `${ROOT}src/app/app.html` }];
+    message({ type: "dramafetch:open", library: true }, popup, () => undefined);
+    await settle();
+    assert.deepEqual(calls.slice(1), [["update", 9, { active: true, url: `${ROOT}src/app/app.html?library=1` }], ["focus", 4, { focused: true }]]);
+    calls.length = 0;
+    // no DramaFetch tab at all: a new one, on the library
+    tabs = [];
+    message({ type: "dramafetch:open", library: true }, popup, () => undefined);
+    await settle();
+    assert.deepEqual(calls.slice(1), [["create", { url: `${ROOT}src/app/app.html?library=1` }]]);
+    calls.length = 0;
+    // only `library: true` asks for it; anything else is the plain Open DramaFetch
+    message({ type: "dramafetch:open", library: "yes" }, popup, () => undefined);
+    await settle();
+    assert.deepEqual(calls, [["create", { url: `${ROOT}src/app/app.html` }]]);
   } finally {
     Reflect.deleteProperty(globalThis, "chrome");
   }

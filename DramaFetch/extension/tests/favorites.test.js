@@ -22,6 +22,7 @@ import {
   boxWithFavorites,
   cardOf,
   cleanTitle,
+  coverUrlOf,
   coversCard,
   coversShift,
   durationParts,
@@ -32,11 +33,12 @@ import {
   isFavoritesFirstPageUrl,
   isProfilePageUrl,
   parseDramaListPayload,
+  knownEpisodes,
   progressStatus,
   resolveCard,
   titleMatches,
 } from "../src/lib/favorites.js";
-import { markComplete, newState, record } from "../src/lib/state.js";
+import { completeSince, markComplete, newState, record } from "../src/lib/state.js";
 import { parseSeriesList } from "../src/lib/urls.js";
 
 /** @type {Record<string, unknown>} the anonymized capture of one page of the owner's list */
@@ -53,7 +55,16 @@ const SNOW_B = "7712345678901234563";
 const page = (changes) => ({ ...JSON.parse(JSON.stringify(CAPTURE)), ...changes });
 
 /** @param {string} seriesId @param {string | null} title @returns {import("../src/lib/favorites.js").FavoriteItem} */
-const item = (seriesId, title) => ({ seriesId, title, episodes: 60, durationS: 4743 });
+const item = (seriesId, title) => ({ seriesId, title, episodes: 60, durationS: 4743, coverUrl: null });
+/**
+ * The capture's item `index`'s `zoomCover["240"]`: the cover the library shows for it.
+ * @param {number} index
+ * @returns {string}
+ */
+const zoom240 = (index) => {
+  const entry = /** @type {Record<string, Record<string, string>>} */ (/** @type {unknown[]} */ (CAPTURE["dramaList"])[index]);
+  return String(entry["zoomCover"]?.["240"]);
+};
 
 test("the constants: 100 pages at most, the card's selector and age, the drama_list path", () => {
   assert.equal(FAVORITES_MAX_PAGES, 100);
@@ -123,9 +134,9 @@ test("a page of the list: the capture's three dramas in its order — the two of
   const parsed = parseDramaListPayload(CAPTURE);
   assert.deepEqual(parsed, {
     items: [
-      { seriesId: LIGHTHOUSE, title: "The Lighthouse Keeper's Promise", episodes: 60, durationS: 4743 },
-      { seriesId: SNOW_A, title: "Snowfall in Two Cities", episodes: 60, durationS: 5827 },
-      { seriesId: SNOW_B, title: "Snowfall in Two Cities", episodes: 60, durationS: 5827 },
+      { seriesId: LIGHTHOUSE, title: "The Lighthouse Keeper's Promise", episodes: 60, durationS: 4743, coverUrl: zoom240(0) },
+      { seriesId: SNOW_A, title: "Snowfall in Two Cities", episodes: 60, durationS: 5827, coverUrl: zoom240(1) },
+      { seriesId: SNOW_B, title: "Snowfall in Two Cities", episodes: 60, durationS: 5827, coverUrl: zoom240(2) },
     ],
     cursor: "1794351568",
     hasMore: true,
@@ -143,7 +154,7 @@ test("a page of the list: the capture's three dramas in its order — the two of
   const list = /** @type {Record<string, unknown>[]} */ (page({})["dramaList"]);
   const odd = { ...list[0], dramaName: "  Café\n  at\tNight  ", numVideos: "12", totalDuration: 59.6 };
   assert.deepEqual(parseDramaListPayload({ dramaList: [odd], hasMore: false }).items, [
-    { seriesId: LIGHTHOUSE, title: "Café at Night", episodes: 12, durationS: 59.6 },
+    { seriesId: LIGHTHOUSE, title: "Café at Night", episodes: 12, durationS: 59.6, coverUrl: zoom240(0) },
   ]);
 });
 
@@ -166,7 +177,7 @@ test("an item without a valid dramaID is left out and counted; a page missing fi
   assert.equal(parsed.total, null);
   // missing numbers and title: null, never an error
   assert.deepEqual(parseDramaListPayload({ dramaList: [{ dramaID: ` ${SNOW_B} ` }] }), {
-    items: [{ seriesId: SNOW_B, title: null, episodes: null, durationS: null }],
+    items: [{ seriesId: SNOW_B, title: null, episodes: null, durationS: null, coverUrl: null }],
     cursor: null,
     hasMore: false,
     total: null,
@@ -182,6 +193,30 @@ test("an item without a valid dramaID is left out and counted; a page missing fi
   assert.deepEqual(parseDramaListPayload({ dramaList: [], hasMore: false, statusCode: 0 }).items, []);
   assert.deepEqual(parseDramaListPayload({ statusCode: 0, hasMore: false, total: "0" }), { items: [], cursor: null, hasMore: false, total: 0, skipped: 0 });
   assert.deepEqual(parseDramaListPayload({ dramaList: null, hasMore: false }).items, []);
+});
+
+test("a drama's cover: its zoomCover 240 when that is an http(s) URL, else the first http(s) URL of cover.urlList, else none — never anything else of the item", () => {
+  const list = /** @type {Record<string, unknown>[]} */ (page({})["dramaList"]);
+  const [first] = list;
+  assert.ok(first !== undefined);
+  const urls = /** @type {{urlList: string[]}} */ (first["cover"]).urlList;
+  // the capture: zoomCover["240"], an .avif TikTok signs — as the list gives it, byte for byte
+  assert.equal(coverUrlOf(first), zoom240(0));
+  assert.match(String(coverUrlOf(first)), /^https:\/\/p16-common-sign\.tiktokcdn\.com\/.+zoomcover:240:240\.avif\?.+x-signature=/);
+  // no 240 (or a 240 that is no web address): the first web address of cover.urlList
+  for (const zoomCover of [undefined, null, {}, { 480: "https://example.invalid/480.avif" }, { 240: "" }, { 240: 240 }, { 240: "javascript:alert(1)" }, { 240: "/relative/cover.avif" }, { 240: "data:image/avif;base64,AAAA" }]) {
+    assert.equal(coverUrlOf({ ...first, zoomCover }), urls[0], JSON.stringify(zoomCover));
+  }
+  assert.equal(coverUrlOf({ ...first, zoomCover: null, cover: { urlList: ["", 42, "ftp://x/y.jpg", urls[2]] } }), urls[2]);
+  // nothing usable: none — never the author's avatar, never another field of the item
+  for (const cover of [undefined, null, {}, { urlList: [] }, { urlList: "https://p16.tiktokcdn.com/x.jpeg" }, { urlList: [null, "not a url", "https:// spaced.example/x"] }]) {
+    assert.equal(coverUrlOf({ ...first, zoomCover: undefined, cover }), null, JSON.stringify(cover));
+  }
+  assert.equal(coverUrlOf(null), null);
+  assert.equal(coverUrlOf("https://p16.tiktokcdn.com/x.jpeg"), null);
+  // parsed with every item of a page
+  const parsed = parseDramaListPayload({ dramaList: [{ ...first, zoomCover: undefined }, { ...first, dramaID: SNOW_A, zoomCover: undefined, cover: undefined }], hasMore: false });
+  assert.deepEqual(parsed.items.map((entry) => entry.coverUrl), [urls[0], null]);
 });
 
 test("TikTok's own error (statusCode or status_code not 0) is an error carrying status_msg; an answer that is no list too — JSON without a `dramaList` array and without the list's `hasMore`", () => {
@@ -446,6 +481,78 @@ test("the status from DramaFetch's own records: on disk when complete and the li
   record(locked, result(1, "skipped-locked"), { exists, now: 1_800_000_000 });
   markComplete(locked, 1_800_000_100, 0);
   assert.equal(progressStatus(locked, SNOW_B, 1), null);
+});
+
+test("the status never says on disk while the records hold an episode beyond the list's count that is not saved (TikTok added it after the list was read, and a run failed to save it or stopped before it): the count is raised to the records' highest number", () => {
+  const exists = () => true;
+  /** @param {number} number @param {string} status */
+  const result = (number, status) => ({
+    episode: { number, itemId: `i${number}` },
+    status,
+    path: status === "done" ? `/dl/S/E${number}.mp4` : null,
+    message: status,
+    downloadId: status === "done" ? number : null,
+  });
+  const state = newState(SNOW_A, "Snowfall in Two Cities");
+  for (const number of [1, 2, 3]) record(state, result(number, "done"), { exists, now: 1_800_000_000 });
+  assert.equal(progressStatus(state, SNOW_A, 3), "on-disk");
+  assert.equal(knownEpisodes(state, 3), 3);
+  record(state, result(4, "failed"), { exists, now: 1_800_000_000 });
+  record(state, result(5, "failed-unavailable"), { exists, now: 1_800_000_000 });
+  assert.equal(knownEpisodes(state, 3), 5);
+  assert.equal(progressStatus(state, SNOW_A, 3), "partly"); // the list said 3: the records know 5
+  // a stopped run, or a whole-series run's complete mark from before the new episodes, alike
+  const stopped = newState(SNOW_B);
+  for (const number of [1, 2]) record(stopped, result(number, "done"), { exists, now: 1_800_000_000 });
+  markComplete(stopped, 1_800_000_100, 2);
+  assert.equal(progressStatus(stopped, SNOW_B, 2), "on-disk");
+  // the failed attempt recorded as a run records it — after the mark, which every attempt clears
+  // (written straight under the mark before 1.6.0's review: a state the records never hold)
+  record(stopped, { ...result(3, "failed"), message: "stopped: 3 consecutive failures" }, { exists, now: 1_800_000_200 });
+  assert.equal(stopped.complete_at, null);
+  assert.equal(progressStatus(stopped, SNOW_B, 2), "partly");
+  // the records alone never raise an unknown count: a selection may have saved only some
+  assert.equal(knownEpisodes(state, null), null);
+  assert.equal(progressStatus(state, SNOW_A, null), "partly");
+  // a locked episode beyond the count still counts as accounted for (saved or locked), as before
+  const paid = newState(SNOW_B);
+  for (const number of [1, 2]) record(paid, result(number, "done"), { exists, now: 1_800_000_000 });
+  record(paid, result(3, "skipped-locked"), { exists, now: 1_800_000_000 });
+  assert.equal(progressStatus(paid, SNOW_B, 2), "on-disk");
+});
+
+test("the status of a drama whose list shrank: TikTok withdrew its last episodes after a run failed on them, and a later whole-series run found the 60 it lists now complete — On disk, 60/60, removable; the old failed entries under that complete mark never raise the count (every attempt clears the mark, so they predate the run that set it and lie past every episode it listed); while the library still says 62, Partly", () => {
+  const exists = () => true;
+  /** @param {number} number @param {string} status */
+  const result = (number, status) => ({
+    episode: { number, itemId: `i${number}` },
+    status,
+    path: status === "done" || status === "skipped-exists" ? `/dl/S/E${number}.mp4` : null,
+    message: status,
+    downloadId: status === "done" ? number : null,
+  });
+  const shrunk = newState(SNOW_A, "Snowfall in Two Cities");
+  // run 1: TikTok listed 62; 1–60 saved, 61 and 62 failed — no complete mark
+  for (let number = 1; number <= 60; number += 1) record(shrunk, result(number, "done"), { exists, now: 1_800_000_000 });
+  for (const number of [61, 62]) record(shrunk, result(number, "failed-unavailable"), { exists, now: 1_800_000_000 });
+  assert.equal(completeSince(shrunk), null);
+  assert.equal(progressStatus(shrunk, SNOW_A, 62), "partly");
+  // run 2: TikTok lists 60; every one found on disk (no attempt), the series complete with 60
+  for (let number = 1; number <= 60; number += 1) record(shrunk, result(number, "skipped-exists"), { exists, now: 1_800_100_000 });
+  markComplete(shrunk, 1_800_100_100, 60);
+  assert.equal(shrunk.episodes["62"]?.status, "failed-unavailable"); // left as it was: that run never listed it
+  assert.equal(knownEpisodes(shrunk, 60), 60);
+  assert.equal(progressStatus(shrunk, SNOW_A, 60), "on-disk");
+  // the library not updated yet (TikTok's list read when it named 62): still Partly
+  assert.equal(knownEpisodes(shrunk, 62), 62);
+  assert.equal(progressStatus(shrunk, SNOW_A, 62), "partly");
+  // a locked episode beyond the count under a complete mark still raises it, as before
+  const paid = newState(SNOW_B);
+  for (const number of [1, 2]) record(paid, result(number, "done"), { exists, now: 1_800_000_000 });
+  record(paid, result(3, "skipped-locked"), { exists, now: 1_800_000_000 });
+  markComplete(paid, 1_800_000_100, 2);
+  assert.equal(knownEpisodes(paid, 2), 3);
+  assert.equal(progressStatus(paid, SNOW_B, 2), "on-disk");
 });
 
 test("a drama's length: whole hours and minutes, as the card shows it", () => {

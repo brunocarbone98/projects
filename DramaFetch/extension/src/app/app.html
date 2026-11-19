@@ -15,6 +15,12 @@
     <div class="title-line"><h1 data-i18n="appTitle">DramaFetch</h1><span id="version" class="version"></span></div>
     <p class="sub" data-i18n="appSubtitle">Whole TikTok short-drama series, for offline viewing</p>
   </div>
+  <nav class="sections" data-i18n-aria-label="navLabel" aria-label="Sections">
+    <a href="#input-card" data-i18n="navDownload">Download</a>
+    <a href="#library" data-i18n="navLibrary">Library</a>
+    <a href="#history-card" data-i18n="navHistory">History</a>
+    <a href="#settings-card" data-i18n="navSettings">Settings</a>
+  </nav>
   <span id="app-status" class="badge idle" data-state="idle" data-finished="0" data-i18n="statusIdle">idle</span>
 </header>
 
@@ -45,33 +51,71 @@
     <p id="input-status" class="status" role="status"></p>
   </section>
 
-  <section class="card" id="favorites-card" hidden>
-    <h2 data-i18n="favoritesHeading">Your favorite dramas</h2>
-    <p id="favorites-count" class="meta"></p>
-    <div class="favorites-tools">
-      <input type="search" id="favorites-filter" spellcheck="false" autocomplete="off" data-i18n-placeholder="favoritesFilterPlaceholder" data-i18n-aria-label="favoritesFilterPlaceholder">
-      <label><input type="checkbox" id="favorites-select-all"> <span data-i18n="favoritesSelectShown">Select all shown</span></label>
+  <div id="library" class="library">
+    <p id="library-empty" class="card hint" data-i18n="libraryEmpty">Your library is empty: open your TikTok profile → Favorites → Drama, then DramaFetch's toolbar button → Open my library. DramaFetch then shows every drama you keep there, with what is already on disk.</p>
+    <section class="card" id="favorites-card" hidden aria-labelledby="favorites-heading">
+      <h2 id="favorites-heading" data-i18n="favoritesHeading">Your TikTok library</h2>
+      <div class="connection">
+        <span id="library-dot" class="dot" aria-hidden="true"></span>
+        <div class="connection-text">
+          <p id="library-connection" class="connection-line"><span id="library-source"></span> · <span id="library-age"></span> · <span id="library-total"></span></p>
+          <p id="favorites-count" class="meta"></p>
+          <p id="library-stale" class="meta stale" hidden></p>
+          <p id="library-refresh-hint" class="meta" hidden data-i18n="libraryRefreshHint">To update, open your TikTok profile → Favorites → Drama in a tab of this Chrome.</p>
+        </div>
+        <button type="button" id="library-refresh" class="refresh"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 4v5h-5"></path></svg><span data-i18n="libraryRefresh">Update from TikTok</span></button>
+      </div>
+      <p class="hint" data-i18n="libraryHint">No password and no separate API: DramaFetch reads the same list your profile shows, from your own TikTok tab, with pauses. Nothing downloads until you ask.</p>
+      <div class="library-tools">
+        <input type="search" id="favorites-filter" spellcheck="false" autocomplete="off" data-i18n-placeholder="favoritesFilterPlaceholder" data-i18n-aria-label="favoritesFilterPlaceholder">
+        <div class="chips" role="group" data-i18n-aria-label="libraryChipsLabel" aria-label="Filter by status">
+          <button type="button" class="chip pressed" id="library-chip-all" data-filter="all" aria-pressed="true"></button>
+          <button type="button" class="chip" id="library-chip-none" data-filter="none" aria-pressed="false"></button>
+          <button type="button" class="chip" id="library-chip-partly" data-filter="partly" aria-pressed="false"></button>
+          <button type="button" class="chip" id="library-chip-on-disk" data-filter="on-disk" aria-pressed="false"></button>
+        </div>
+        <select id="library-sort" data-i18n-aria-label="librarySortLabel" aria-label="Sort">
+          <option value="recent" data-i18n="librarySortRecent">Most recent first</option>
+          <option value="title" data-i18n="librarySortTitle">Title A–Z</option>
+          <option value="episodes" data-i18n="librarySortEpisodes">Most episodes</option>
+        </select>
+        <label class="select-shown"><input type="checkbox" id="favorites-select-all"> <span data-i18n="favoritesSelectShown">Select all shown</span></label>
+      </div>
+      <p id="library-removed" class="meta" hidden></p>
+      <div class="selection-bar">
+        <span id="favorites-selection" class="selection-count"></span>
+        <span class="selection-note" data-i18n="librarySelectionNote">downloaded one after the other, with the usual pauses</span>
+        <span class="spacer"></span>
+        <button type="button" id="library-clear" data-i18n="libraryClear">Clear selection</button>
+        <button type="button" id="favorites-add-button" data-i18n="favoritesAddButton">Add selected to the box</button>
+        <button type="button" id="library-download" class="primary"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"></path><path d="M7 10l5 5 5-5"></path><path d="M5 20h14"></path></svg><span data-i18n="libraryDownload">Download selected</span></button>
+      </div>
+      <p id="favorites-status" class="status" role="status"></p>
+      <div id="favorites-grid" class="drama-grid"></div>
+      <div class="library-foot">
+        <span id="library-shown" class="meta"></span>
+        <button type="button" id="library-more" hidden></button>
+      </div>
+      <p class="hint" data-i18n="favoritesHint">Reading the whole list takes 1–2 minutes (about 50 pages, a pause before each). “On disk” = every episode your account may watch, saved and checked. Download selected downloads the ticked dramas one series after the other, exactly as Download all would.</p>
+    </section>
+  </div>
+
+  <dialog id="bookmark-dialog" aria-labelledby="bookmark-dialog-title">
+    <h2 id="bookmark-dialog-title" data-i18n="bookmarkDialogTitle">Remove from your Favorites on TikTok?</h2>
+    <div class="dialog-drama">
+      <span id="bookmark-dialog-cover" class="dialog-cover"></span>
+      <div>
+        <div id="bookmark-dialog-name" class="dialog-name"></div>
+        <div id="bookmark-dialog-meta" class="meta"></div>
+      </div>
     </div>
-    <div class="buttons">
-      <button type="button" id="favorites-add-button" class="primary" data-i18n="favoritesAddButton">Add selected to the box</button>
-      <span id="favorites-selection" class="meta"></span>
+    <ul id="bookmark-dialog-facts" class="facts"></ul>
+    <p class="hint" data-i18n="bookmarkDialogHow">DramaFetch will open the drama in a background tab, press its Bookmark button once and check, after reloading the page, that TikTok kept the change. If you change your mind, press Bookmark again on TikTok.</p>
+    <div class="buttons dialog-buttons">
+      <button type="button" id="bookmark-cancel" data-i18n="bookmarkCancel">Cancel</button>
+      <button type="button" id="bookmark-confirm" class="danger" data-i18n="bookmarkConfirm">Remove from Favorites</button>
     </div>
-    <p id="favorites-status" class="status" role="status"></p>
-    <p class="hint" data-i18n="favoritesHint">Tick dramas and press Add selected to the box: they join the box above, and Download all downloads them, one series after the other. Nothing is downloaded from this list itself.</p>
-    <div class="table-wrap">
-      <table id="favorites-table">
-        <thead>
-          <tr>
-            <th></th>
-            <th data-i18n="colTitle">Title</th>
-            <th data-i18n="favoritesColEpisodes">Episodes</th>
-            <th data-i18n="colStatus">Status</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
+  </dialog>
 
   <section class="card" id="series-card" hidden>
     <h2 id="series-title"></h2>

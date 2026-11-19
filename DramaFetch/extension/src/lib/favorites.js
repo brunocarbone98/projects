@@ -23,16 +23,23 @@
  *   status_code: 0, status_msg: "", total: "<count as a string>", …}`; an item: `{dramaID: "<19
  *   digits>", dramaName, numVideos: <int>, totalDuration: "<seconds as a string>", author, cover,
  *   zoomCover, themes, …}` — `dramaID` is DramaFetch's series id (`lib/urls.js`), `totalDuration`
- *   is seconds (4743 → the card's "1h 19m"). Two different dramas may share a title and a cover:
+ *   is seconds (4743 → the card's "1h 19m"), `zoomCover` maps sizes (`"240"`, `"480"`, …) to
+ *   signed https URLs of the drama's cover (`.avif` in the capture) and `cover.urlList` holds more
+ *   of them ({@link coverUrlOf}: the library's thumbnail — a signed URL, kept in the page's memory
+ *   and `chrome.storage.session` only, never in `chrome.storage.local`, a log, a report or the
+ *   history). Two different dramas may share a title and a cover:
  *   a card of such a title is never resolved by guessing between them ({@link resolveCard}), and
  *   its listing reads on until both are in view — a page past the card's position when its drama
  *   is not where the card sits ({@link coversCard}, {@link coversShift}, which names the limit).
  */
 
 import { isDict } from "./catalog.js";
-import { TIKTOK_BASE_URL, pyStrip } from "./messages.js";
+import { DONE, SKIPPED_EXISTS, SKIPPED_LOCKED, TIKTOK_BASE_URL, pyStrip } from "./messages.js";
 import { completeSince, doneEntries, lockedNumbers, readState } from "./state.js";
 import { parseSeriesList } from "./urls.js";
+
+/** The records' statuses of an episode on disk or locked: under a complete mark, only these raise a drama's episode count ({@link knownEpisodes}). */
+const ACCOUNTED_STATUSES = new Set([DONE, SKIPPED_EXISTS, SKIPPED_LOCKED]);
 
 /** At most this many pages of the favorites list are read per listing (19 items a page: 1 900). */
 export const FAVORITES_MAX_PAGES = 100;
@@ -70,6 +77,8 @@ const PROFILE_RE = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@[^/?#\s]/i;
  * @property {string | null} title `dramaName` on one line, null when missing
  * @property {number | null} episodes `numVideos`, null when missing
  * @property {number | null} durationS `totalDuration` in seconds, null when missing
+ * @property {string | null} coverUrl the drama's cover ({@link coverUrlOf}): a signed URL, null
+ *   when the item has none — never stored on disk
  *
  * @typedef {object} FavoritesPage One page of the list ({@link parseDramaListPayload}).
  * @property {FavoriteItem[]} items in the page's order
@@ -251,6 +260,34 @@ function asCursor(value) {
 }
 
 /**
+ * Whether `value` is an http(s) URL as a string: a cover address of the list, else nothing.
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+function isWebUrl(value) {
+  return typeof value === "string" && /^https?:\/\/[^\s/?#]+[^\s]*$/i.test(value) && value.length <= 4096;
+}
+
+/**
+ * The cover of one item of `dramaList`: its `zoomCover["240"]` when that is an http(s) URL, else
+ * the first http(s) URL of `cover.urlList`, else null — never anything else of the item (the
+ * author's avatars, the list's other fields). A signed URL: the page keeps it in its memory and
+ * `chrome.storage.session` only.
+ * @param {unknown} raw
+ * @returns {string | null}
+ */
+export function coverUrlOf(raw) {
+  if (!isDict(raw)) return null;
+  const zoom = Object.hasOwn(raw, "zoomCover") ? raw["zoomCover"] : undefined;
+  if (isDict(zoom) && Object.hasOwn(zoom, "240") && isWebUrl(zoom["240"])) return zoom["240"];
+  const cover = Object.hasOwn(raw, "cover") ? raw["cover"] : undefined;
+  const list = isDict(cover) && Object.hasOwn(cover, "urlList") ? cover["urlList"] : undefined;
+  if (!Array.isArray(list)) return null;
+  const found = list.find(isWebUrl);
+  return found === undefined ? null : found;
+}
+
+/**
  * One item of `dramaList`, or null without a valid `dramaID` (ASCII digits, 15–22 of them, as the
  * box reads a series id; a JSON number is never one — 19 digits are past JavaScript's exact
  * integers).
@@ -268,6 +305,7 @@ function itemOf(raw) {
     title,
     episodes: asCount(Object.hasOwn(raw, "numVideos") ? raw["numVideos"] : undefined),
     durationS: asSeconds(Object.hasOwn(raw, "totalDuration") ? raw["totalDuration"] : undefined),
+    coverUrl: coverUrlOf(raw),
   };
 }
 
@@ -507,11 +545,37 @@ export function favoritesOfQuery(search) {
 }
 
 /**
+ * How many episodes a drama has as far as DramaFetch knows: the list's `episodes`, raised to the
+ * highest episode number its own records hold — a run may have listed episodes TikTok added after
+ * the list was read and failed to save them (or stopped before them): they count, so such a drama
+ * is never `on-disk`. Under a complete mark only an entry on disk or locked raises it: every attempt
+ * clears the mark (`state.record`), so a failed or stopped entry under one predates the run that
+ * found the series complete and lies past every episode that run listed — TikTok no longer lists it
+ * (episodes withdrawn). Null without the list's count: the records alone never tell how many
+ * episodes a series has (a selection may have saved only some).
+ * @param {import("./state.js").SeriesState} state
+ * @param {number | null} episodes the list's episode count
+ * @returns {number | null}
+ */
+export function knownEpisodes(state, episodes) {
+  if (episodes === null || !(episodes > 0)) return null;
+  const marked = completeSince(state) !== null;
+  let known = episodes;
+  for (const entry of Object.values(state.episodes)) {
+    if (marked && !ACCOUNTED_STATUSES.has(entry.status)) continue;
+    if (entry.number > known) known = entry.number;
+  }
+  return known;
+}
+
+/**
  * What DramaFetch's own records say of a favorite (read-only, no request): `on-disk` when a run
  * found the series complete — every episode the account may play saved — and the list names no
  * more `episodes` than that run saw (saved, plus the ones recorded locked), or the records hold
  * every one of its `episodes` saved or locked; `partly` when some are saved — also for a series
- * found complete whose list has grown since; null when none is (or the series was never run).
+ * found complete whose list has grown since, and for one whose records hold an episode beyond the
+ * list's count that is not saved while no complete mark covers it ({@link knownEpisodes}); null when
+ * none is (or the series was never run).
  * @param {unknown} raw the stored state (`series:<id>`)
  * @param {string} seriesId
  * @param {number | null} episodes the list's episode count
@@ -523,7 +587,7 @@ export function progressStatus(raw, seriesId, episodes) {
   const saved = doneEntries(state, () => true).length;
   if (saved === 0) return null;
   const locked = lockedNumbers(state).length;
-  const listed = episodes !== null && episodes > 0 ? episodes : null;
+  const listed = knownEpisodes(state, episodes);
   if (completeSince(state) !== null && (listed === null || (state.complete_episodes ?? 0) + locked >= listed)) return "on-disk";
   if (listed !== null && saved + locked >= listed) return "on-disk";
   return "partly";

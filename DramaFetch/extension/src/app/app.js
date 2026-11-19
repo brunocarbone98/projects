@@ -1,14 +1,15 @@
 // @ts-check
 /**
  * The DramaFetch tab: the text box (one link or id per line, the CLI's `--from-file` rules), the
- * episode list of one series (**Load list**), the user's TikTok favorites (**Your favorite
- * dramas**: a list job, a filter, ticks and **Add selected to the box**), the jobs — one at a
- * time, FIFO, the web job manager's rules — and their progress (the episodes a job did not
- * download shown apart from the ones that completed, with the button that queues them again), the
- * cooldown banner, the settings, the history of the last 20 runs — each past run's failures
- * retryable the same way —, and (only in the test harness' copy) the test settings. The engine
- * runs here while the tab is open; one tab per browser holds it (a Web Lock), a second one stays
- * read-only.
+ * episode list of one series (**Load list**), the user's TikTok library (DramaFetch 1.6.0: their
+ * Bookmark — **Favorites** → **Drama** — as cards, kept across sessions, its count TikTok's, with
+ * filters, a search, ticks, **Download selected**, **Add selected to the box** and **Remove from
+ * Favorites**), the jobs — one at a time, FIFO, the web job manager's rules — and their progress
+ * (the episodes a job did not download shown apart from the ones that completed, with the button
+ * that queues them again), the cooldown banner, the settings, the history of the last 20 runs —
+ * each past run's failures retryable the same way —, and (only in the test harness' copy) the test
+ * settings. The engine runs here while the tab is open; one tab per browser holds it (a Web Lock),
+ * a second one stays read-only.
  */
 
 import { isLocked } from "../lib/catalog.js";
@@ -24,10 +25,29 @@ import {
   durationParts,
   favoritesOfQuery,
   handoverOf,
+  isProfilePageUrl,
   progressStatus,
   resolveCard,
   titleMatches,
 } from "../lib/favorites.js";
+import {
+  LIBRARY_PIECE,
+  LIBRARY_SORTS,
+  ageOf,
+  chipCounts,
+  countsFresh,
+  coverExpired,
+  distinctItems,
+  inFilter,
+  libraryRecord,
+  libraryStatus,
+  progressOf,
+  removalFacts,
+  selectionEpisodes,
+  sortedItems,
+  twinIds,
+  unchangedSince,
+} from "../lib/library.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import { fileBaseName } from "../lib/naming.js";
 import {
@@ -42,9 +62,10 @@ import {
 } from "../lib/pacing.js";
 import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib/report.js";
 import { doneEntries, readState } from "../lib/state.js";
-import { parseSeriesList } from "../lib/urls.js";
+import { parseSeriesList, seriesPageUrl } from "../lib/urls.js";
+import { BOOKMARK_MESSAGES, BookmarkCooldown, BookmarkError, countAfterRemoval, removeFromBookmark } from "./bookmark.js";
 import { DiscoveryError, closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
-import { CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
+import { CoverLane, CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
 import { initPageRedirects } from "./redirects.js";
 import {
   StopRequested,
@@ -62,6 +83,7 @@ import { displayLabels, displayLanguage, localize, t } from "./i18n.js";
 import { isOwnSender } from "./senders.js";
 import {
   DEFAULT_SETTINGS,
+  FAVORITES_TEMPLATE_PREFIX,
   appendHistory,
   cooldownStore,
   isTestMode,
@@ -70,12 +92,16 @@ import {
   loadTestSettings,
   readFavoritesTemplate,
   readHistory,
+  readLibrary,
+  readLibraryCovers,
   readSeriesState,
   readSeriesStates,
   savePacing,
   saveSettings,
   saveTestSettings,
   storedCooldownUntil,
+  writeLibrary,
+  writeLibraryCovers,
   writeSeriesState,
 } from "./storage.js";
 import { TabKeeper } from "./tabkeeper.js";
@@ -99,9 +125,16 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @typedef {import("../lib/favorites.js").FavoritesHandover} FavoritesHandover
  * @typedef {import("./favorites.js").FavoritesListing} FavoritesListing
  *
+ * @typedef {import("../lib/library.js").Progress} Progress
+ * @typedef {import("../lib/library.js").LibraryEntry} LibraryEntry
+ * @typedef {import("../lib/library.js").LibraryFilter} LibraryFilter
+ * @typedef {import("../lib/library.js").LibrarySort} LibrarySort
+ * @typedef {import("../lib/library.js").LibraryStatus} LibraryStatus
+ *
  * @typedef {object} Job
  * @property {number} id
- * @property {"load" | "batch" | "selection" | "favorites"} kind `favorites`: **List favorites**
+ * @property {"load" | "batch" | "selection" | "favorites" | "unbookmark"} kind `favorites`: **List
+ *   favorites** (the library's refresh); `unbookmark`: **Remove from Favorites**
  * @property {string} label
  * @property {SeriesRef[]} refs a `load` job from a favorites card has none until the card is resolved
  * @property {Series | null} series
@@ -112,9 +145,17 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @property {number} [favoritesTab] the user's TikTok tab whose favorites a `favorites` job lists, or
  *   whose right-clicked card a `load` job resolves first
  * @property {Card | null} [card] the right-clicked favorites card a `load` job lists the drama of
+ * @property {{seriesId: string, title: string | null, episodes: number | null}} [bookmark] the drama
+ *   an `unbookmark` job removes from the Bookmark
+ * @property {{count: number, skipped: number}} [listed] what a listing that filled the library
+ *   listed — its dramas, and the list's items it left out for want of a readable series id —: what
+ *   the job's status line and history entry say, whatever became of the library
+ *   ({@link fetchFavorites}: a listing that stops short of TikTok's end leaves a library that held
+ *   dramas as it was)
  *
- * @typedef {object} FavoritesShown The favorites list the panel shows: one TikTok tab's.
- * @property {number} tabId
+ * @typedef {object} FavoritesShown The favorites list the library shows: one TikTok tab's, or the
+ *   library kept from an earlier session (no tab: a card's resolution never trusts it).
+ * @property {number | null} tabId
  * @property {FavoriteItem[]} items the list's dramas in its order (a drama listed twice: twice)
  * @property {number | null} total how many favorites TikTok counts
  * @property {boolean} complete the list's end was reached
@@ -125,7 +166,30 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @property {boolean} loading a listing is filling it now
  * @property {number} listedAt when the listing ended, seconds since the epoch
  *
- * @typedef {{item: FavoriteItem} | {template: string} | {done: string | null}} CardStart What a
+ * @typedef {object} LibrarySnapshot The library as it was before a listing that fills it, when it
+ *   held dramas ({@link fetchFavorites}): what comes back when that listing does not end as
+ *   TikTok's whole list ({@link restoreKeptLibrary}).
+ * @property {FavoritesShown} favorites `app.favorites` itself — the listing puts a new object in
+ *   its place ({@link startFavorites}), and nothing changes this one meanwhile
+ * @property {[string, number][]} removed `library.removed`'s entries
+ * @property {number} shown `library.shown`: how many cards the grid drew
+ * @property {KeptCardList | null} cardList {@link cardList}: the list a right-click read of a tab
+ *
+ * @typedef {object} FavoritesAddress A TikTok tab's favorites address, as the worker kept it
+ *   (`storage.readFavoritesTemplate`).
+ * @property {string} url the list's first page, replayed unchanged
+ * @property {string | null} profile whose favorites it reads: the `@handle` of the profile page
+ *   that asked for it, recorded with it — never the page the tab shows later; null when the worker
+ *   could not tell
+ *
+ * @typedef {object} KeptCardList A card's listing of a tab's favorites kept apart from the library
+ *   ({@link cardList}).
+ * @property {number} tabId
+ * @property {FavoritesListing} listing
+ * @property {number} listedAt when it ended, seconds since the epoch
+ * @property {string | null} profile whose favorites it read ({@link FavoritesAddress})
+ *
+ * @typedef {{item: FavoriteItem} | {template: FavoritesAddress} | {done: string | null}} CardStart What a
  *   right-clicked card's job has before its first request ({@link cardStart}): the drama itself
  *   (from the panel's list, no request), the tab's favorites address to read the list with, or the
  *   end of the job, said on the page — the job's stop (a login wall) or null
@@ -530,6 +594,7 @@ export function buildEngine(job, jobRecord) {
     },
     onStart: (start) => {
       clearPause();
+      libraryRunning(start.ref.seriesId);
       $("progress-current").textContent = t("progressSeries", start.name);
       const body = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
       body.append(
@@ -541,15 +606,19 @@ export function buildEngine(job, jobRecord) {
     onResult: (result) => {
       clearPause();
       renderResult(result);
+      // the library's card of the series being downloaded: its count after every episode
+      if (result.episode.seriesId === library.running) void refreshLibraryStatuses([result.episode.seriesId]);
     },
     onSeriesStart: (index, total, ref) => {
       $("progress-current").textContent = t("progressBatch", [index, total, ref.seriesId]);
+      libraryRunning(ref.seriesId);
     },
     onSeriesDone: (_index, _total, run) => {
       clearPause();
       renderReportLine(run);
       releaseSeries(run, downloader, jobRecord);
       trimResultRows();
+      libraryFinished(run.ref.seriesId);
     },
   };
 }
@@ -578,6 +647,26 @@ export function releaseSeries(run, downloader, jobRecord) {
   downloader.forgetSeries(run.ref.seriesId);
   for (const episode of run.series?.episodes ?? []) episode.raw = null;
   for (const result of run.results) result.episode.raw = null;
+}
+
+/**
+ * The running job downloads `seriesId` now: its library card says **Downloading**.
+ * @param {string} seriesId
+ */
+function libraryRunning(seriesId) {
+  if (library.running === seriesId) return;
+  library.running = seriesId;
+  if (app.favorites !== null && app.favorites.items.some((item) => item.seriesId === seriesId)) renderLibrary();
+}
+
+/**
+ * The running job finished `seriesId`: its library card reads the records again (on disk, partly).
+ * @param {string} seriesId
+ */
+function libraryFinished(seriesId) {
+  library.finished.add(seriesId);
+  if (library.running === seriesId) library.running = null;
+  void refreshLibraryStatuses([seriesId]);
 }
 
 // --------------------------------------------------------------------------- progress
@@ -1081,6 +1170,7 @@ function renderAppStatus() {
   list.textContent = "";
   for (const job of app.queue) list.append(el("li", { text: job.label }));
   $("queue-card").hidden = app.queue.length === 0;
+  renderLibrary(); // the library's cards: queued, downloading
   updateButtons();
   // never discarded while a job runs or waits; discardable again once the queue is done (a Stop
   // and an error end the job too). Only the engine's tab ever runs one: a read-only tab stays
@@ -1109,19 +1199,28 @@ async function pump() {
   if (app.running !== null || !app.owner) return;
   if (app.queue.length === 0) {
     covers.resume(); // nothing to run: the list's thumbnails may go on
+    libraryCovers.resume(); // and the library's
     return;
   }
   const job = /** @type {Job} */ (app.queue.shift());
   app.running = job;
   app.stopRequested = false;
+  library.running = null;
+  library.finished.clear();
   renderAppStatus();
   try {
     await covers.idle(); // a thumbnail request in flight ends first: one request at a time
+    await libraryCovers.idle();
     await runJob(job);
   } finally {
     app.running = null;
     app.finished += 1;
     app.stopRequested = false;
+    library.running = null;
+    library.finished.clear();
+    // the library's cards of what the job downloaded read the records again
+    if (job.kind === "batch" || job.kind === "selection") void refreshLibraryStatuses(job.refs.map((ref) => ref.seriesId));
+    void updateLibrarySource();
     renderAppStatus();
     void refreshCooldown();
     void renderHistory();
@@ -1209,6 +1308,8 @@ async function runJob(job) {
       stop = await runLoad(job, engine, entry);
     } else if (job.kind === "favorites") {
       stop = await runFavorites(job, engine, entry);
+    } else if (job.kind === "unbookmark") {
+      stop = await runUnbookmark(job, engine, entry);
     } else if (job.kind === "batch") {
       const lastContactAt = app.lastContactAt; // the previous job's: this one's own come later
       runs = await runBatch(engine, job.refs, {
@@ -1235,7 +1336,7 @@ async function runJob(job) {
     }
     entry["refreshes"] = engine.downloader.refreshes;
     const listed = app.loaded;
-    if (job.kind !== "load" && listed !== null && job.refs.some((ref) => ref.seriesId === listed.series.seriesId)) {
+    if ((job.kind === "batch" || job.kind === "selection") && listed !== null && job.refs.some((ref) => ref.seriesId === listed.series.seriesId)) {
       await renderSeries(listed.series, engine.view); // the "on disk" badges now (Chrome's history only)
     }
   } catch (error) {
@@ -1340,7 +1441,9 @@ export async function runLoad(job, engine, entry) {
       }
       if (resolved.kind === "missing") return cardNotFound(card, entry);
       if (resolved.kind === "shared") {
-        if (!read.shown) showFavoritesListing(tabId, listing); // the list consulted, in the panel
+        // the list consulted, in the library — unless the library is larger and holds those dramas;
+        // a library of another TikTok profile stays as it was, and offers nothing to pick from
+        if (!read.shown && takesLibraryPlace(listing, card) && !(await showFavoritesListing(tabId, listing, start.template.profile))) return cardSharedElsewhere(card, entry);
         return cardShared(card, entry);
       }
       item = resolved.item;
@@ -1378,25 +1481,145 @@ export async function runLoad(job, engine, entry) {
 // ------------------------------------------------------------ the user's TikTok favorites
 
 /**
- * The panel's rows, one per series, in the list's order (a drama the list holds twice: one row).
- * @type {Map<string, {item: FavoriteItem, row: HTMLElement, box: HTMLInputElement, status: HTMLElement}>}
- */
-const favoriteRows = new Map();
-/**
- * The series ticked in the panel, by series id: never cleared by another tab's listing (a row
- * built for a ticked id shows ticked), pruned only by a COMPLETE listing shown in the panel — the
- * ids it does not hold are dropped ({@link endFavorites}).
+ * The series ticked in the library, by series id: never cleared by another tab's listing (a card
+ * built for a ticked id shows ticked), pruned only by a COMPLETE listing that becomes the library —
+ * the ids it does not hold are dropped ({@link endFavorites}) —, and emptied by **Clear selection**
+ * and by **Download selected**.
  */
 const favoritesSelected = new Set();
 
 /**
- * **List favorites** — the popup's **Choose from your favorites**: every page of a TikTok tab's
- * favorites list into the panel, a job like any other — nothing asked of TikTok without that tab
- * and its favorites address, then the rest between jobs, the cooldown before it and before every
- * page ({@link fetchFavorites}). **Stop** ends it between two pages; what was listed stays. When
- * TikTok stopped sending the list before its end (`favorites.cutShort`) the page says so, and the
- * history keeps it — TikTok refused nothing, so it is no stop. Returns why the job stopped (a
- * cooldown met, a refusal, a login wall — also one met before the first request), or null.
+ * The library around `app.favorites` (DramaFetch 1.6.0, the user's TikTok Bookmark): what is kept
+ * with the list (`favoritesLibrary`) and what the grid shows of it.
+ */
+const library = {
+  /** @type {string | null} the `@handle` of the TikTok tab the list was read from */
+  profile: null,
+  /** @type {number | null} when TikTok's count was last read (seconds since the epoch) */
+  countedAt: null,
+  /**
+   * @type {number | null} when a listing last read the whole list, each drama's episode count with
+   * it (seconds since the epoch): the smart refresh's one-page shortcut and the removal's gate trust
+   * those counts for 24 h after it (`lib/library.countsFresh`); a first page read since changes it not
+   */
+  fullReadAt: null,
+  /** whether the count is the last one minus DramaFetch's removals since — not read from TikTok */
+  unconfirmed: false,
+  /** @type {Map<string, number>} the dramas DramaFetch removed from the Bookmark since the list was read: series id → when */
+  removed: new Map(),
+  /** @type {Map<string, Progress>} what DramaFetch's own records say of each drama (`lib/library.progressOf`) */
+  progress: new Map(),
+  /** @type {string | null} the series the running job is downloading now */
+  running: null,
+  /** @type {Set<string>} the series the running job has finished */
+  finished: new Set(),
+  /** @type {LibraryFilter} the status filter (a chip) */
+  filter: "all",
+  /** how many of the matching dramas the grid shows: pieces of `LIBRARY_PIECE` */
+  shown: LIBRARY_PIECE,
+  /** whether a write of the library `chrome.storage.local` refused was said already (once a page) */
+  saveRefusedSaid: false,
+  /**
+   * when the library last changed in this page (seconds since the epoch): a listing taken, a count
+   * read, a removal — every change is kept at once ({@link saveLibrary}); a card's listing kept
+   * apart that is older never enters it ({@link cardStart})
+   */
+  changedAt: 0,
+  /** @type {{tabId: number, url: string, profile: string | null} | null} a TikTok tab with a favorites address, as last looked ({@link findFavoritesTab}) */
+  source: null,
+  /** when the connection line was drawn last (seconds) */
+  drawnAt: 0,
+  /** when the TikTok tabs were looked at last (seconds) */
+  lookedAt: 0,
+};
+
+/**
+ * The grid's cards as drawn last, by series id: the drama, its card, its tick and the buttons that
+ * would start a job (disabled when no job may start: `updateButtons`).
+ * @type {Map<string, {item: FavoriteItem, article: HTMLElement, box: HTMLInputElement | null, cover: HTMLElement, actions: HTMLButtonElement[]}>}
+ */
+const libraryCards = new Map();
+
+/**
+ * The last listing a right-clicked card read of a TikTok tab's favorites WITHOUT filling the
+ * library — the library showing another list: one kept from an earlier session (no tab), or
+ * another tab's —, kept apart from the library view: 1.5.0's panel list of that tab, which the
+ * next right-click on that tab is resolved from under the same rules ({@link cardStart}: with no
+ * request where it reaches the card). Replaced by a later card listing of another tab, extended by
+ * a longer one of the same tab (1.5.0's rule), dropped once a listing of that tab fills the library
+ * (and back when that listing leaves the library as it was: {@link restoreKeptLibrary}). It enters
+ * the library — two dramas of a card's title the library lacks one of — only while the library has
+ * learned nothing since it was read, dated from then; older, it is dropped and the list read again
+ * ({@link cardStart}).
+ * @type {KeptCardList | null}
+ */
+let cardList = null;
+
+/**
+ * {@link cardList} as the list a card's resolution reads ({@link FavoritesShown}).
+ * @param {KeptCardList} kept
+ * @returns {FavoritesShown}
+ */
+function cardListShown(kept) {
+  const { listing } = kept;
+  return {
+    tabId: kept.tabId,
+    items: listing.items,
+    total: listing.total,
+    complete: listing.complete,
+    ended: listing.ended,
+    short: cutShort(listing),
+    skipped: listing.skipped,
+    perPage: listing.perPage,
+    loading: false,
+    listedAt: kept.listedAt,
+  };
+}
+
+/**
+ * A card's listing of TikTok tab `tabId` that did not fill the library: kept as that tab's list for
+ * the next right-clicks ({@link cardList}) — unless a list of that tab known whole, or one as long,
+ * is kept already (a card listing extends it only when it holds more, as 1.5.0's panel).
+ * @param {number} tabId
+ * @param {FavoritesListing} listing
+ * @param {string | null} profile whose favorites it read ({@link FavoritesAddress})
+ */
+function keepCardList(tabId, listing, profile) {
+  const kept = cardList !== null && cardList.tabId === tabId ? cardList : null;
+  if (kept !== null && (kept.listing.complete || listing.items.length <= kept.listing.items.length)) return;
+  cardList = { tabId, listing: { ...listing, items: [...listing.items] }, listedAt: now(), profile };
+}
+
+/** @returns {FavoriteItem[]} the library's dramas, each once, in the list's order */
+function libraryItems() {
+  return app.favorites === null ? [] : distinctItems(app.favorites.items);
+}
+
+/** @returns {FavoriteItem[]} the library's dramas DramaFetch has not removed from the Bookmark */
+function keptItems() {
+  return libraryItems().filter((item) => !library.removed.has(item.seriesId));
+}
+
+/** @returns {number} how many dramas the library holds that are still in the Bookmark */
+function keptCount() {
+  return keptItems().length;
+}
+
+/**
+ * **List favorites** — the popup's **Open my library** on a TikTok profile, and **Update from
+ * TikTok**: the smart refresh of the library, a job like any other — nothing asked of TikTok
+ * without that tab and its favorites address, then the rest between jobs, the cooldown before it
+ * and before every page ({@link fetchFavorites}). When the library holds a list read from this
+ * TikTok profile, the first page may say it is TikTok's list as it is (`lib/library.unchangedSince`):
+ * one request, `libraryUnchanged`; otherwise every page, into the library as pages arrive — kept
+ * only when it may be (a library that held dramas comes back as it was unless TikTok's whole list
+ * was read: {@link fetchFavorites}). **Stop** ends it between two pages. When TikTok stopped sending
+ * the list before its end (`favorites.cutShort`) the page says so, and the history keeps it — TikTok
+ * refused nothing, so it is no stop. The status line and the history entry count what the listing
+ * listed ({@link listedOf}); when a library that held dramas came back as it was, the status line
+ * says so (`libraryKept`, `libraryKeptEmpty`: an error, no stop) and the history keeps why. Returns
+ * why the job stopped (a cooldown met, a refusal, a login wall — also one met before the first
+ * request), or null.
  * (Exported for the unit tests, which cannot run a job.)
  * @param {Job} job
  * @param {Engine} engine
@@ -1421,48 +1644,77 @@ export async function runFavorites(job, engine, entry) {
     entry["error"] = app.unsaved;
     return app.unsaved;
   }
-  let listing;
+  let read;
   try {
-    ({ listing } = await fetchFavorites(job, engine, tabId, template.url));
+    read = await fetchFavorites(job, engine, tabId, template);
   } catch (error) {
     if (error instanceof StopRequested) {
-      noteListed(entry); // what was listed before the Stop stays listed
+      noteListed(entry, job); // the history keeps how many were listed before the Stop
       throw error;
     }
     return favoritesFailed(error, entry);
   }
-  noteListed(entry);
+  noteListed(entry, job);
+  const { listing } = read;
+  if (read.unchanged) {
+    // the library is TikTok's list as it is: one request, and its count TikTok's
+    setStatus($("input-status"), t("libraryUnchanged", [listing.total ?? keptCount()]), "ok");
+    return null;
+  }
+  if (!read.shown) {
+    // a library that held dramas came back as it was — not TikTok's whole list ({@link fetchFavorites}):
+    // the page says so, an error; TikTok refused nothing, so no stop. The history keeps why: TikTok
+    // cutting the list short, as before, else this text
+    const text = listing.items.length + listing.skipped === 0 ? t("libraryKeptEmpty") : t("libraryKept", [listedOf(job).count]);
+    setStatus($("input-status"), text, "error");
+    entry["error"] = cutShort(listing) ? t("favoritesCutShort", [listedOf(job).count]) : text;
+    return null;
+  }
   if (cutShort(listing)) {
     // TikTok sent no more than this: said, and kept in the history — it refused nothing, so no stop
-    const text = t("favoritesCutShort", [favoriteRows.size]);
+    const text = t("favoritesCutShort", [listedOf(job).count]);
     setStatus($("input-status"), text, "error");
     entry["error"] = text;
     return null;
   }
-  setStatus($("input-status"), t("favoritesLoaded", [favoriteRows.size]), "ok");
+  setStatus($("input-status"), t("favoritesLoaded", [listedOf(job).count]), "ok");
   return null;
 }
 
 /**
- * A favorites listing's history entry: how many dramas it listed, and — when some were — how many
- * of the list's items it left out for want of a readable series id.
- * @param {Record<string, unknown>} entry
+ * What a favorites job's listing listed — its dramas, each once, and the list's items it left out
+ * for want of a readable series id —, whatever became of the library (a listing that stops short
+ * of TikTok's end leaves a library that held dramas as it was: {@link fetchFavorites}); the
+ * library's own when no page of the listing filled it (the smart refresh's first page that found it
+ * unchanged, a Stop before the first page).
+ * @param {Job} job
+ * @returns {{count: number, skipped: number}}
  */
-function noteListed(entry) {
-  entry["favorites"] = favoriteRows.size;
-  const skipped = app.favorites?.skipped ?? 0;
+function listedOf(job) {
+  return job.listed ?? { count: keptCount(), skipped: app.favorites?.skipped ?? 0 };
+}
+
+/**
+ * A favorites listing's history entry: how many dramas it listed, and — when some were — how many
+ * of the list's items it left out for want of a readable series id ({@link listedOf}).
+ * @param {Record<string, unknown>} entry
+ * @param {Job} job
+ */
+function noteListed(entry, job) {
+  const { count, skipped } = listedOf(job);
+  entry["favorites"] = count;
   if (skipped > 0) entry["favorites_skipped"] = skipped;
 }
 
 /**
  * The favorites address of TikTok tab `tabId` — the first page of its favorites list, as the tab
- * asked for it and the worker saw it — once that tab is still there and on TikTok; else the page
- * says what to do and the job's stop comes back instead (`favoritesFailed`: the login wall in the
- * tab is a stop, the jobs waiting behind end without a request; no address seen or the tab gone,
- * null): no request either way.
+ * asked for it and the worker saw it, with whose list it reads ({@link FavoritesAddress}) — once
+ * that tab is still there and on TikTok; else the page says what to do and the job's stop comes back
+ * instead (`favoritesFailed`: the login wall in the tab is a stop, the jobs waiting behind end
+ * without a request; no address seen or the tab gone, null): no request either way.
  * @param {number} tabId
  * @param {Record<string, unknown>} entry
- * @returns {Promise<{url: string} | {stop: string | null}>}
+ * @returns {Promise<FavoritesAddress | {stop: string | null}>}
  */
 async function favoritesTemplate(tabId, entry) {
   const template = await readFavoritesTemplate(tabId).catch(() => null);
@@ -1472,25 +1724,32 @@ async function favoritesTemplate(tabId, entry) {
   } catch (error) {
     return { stop: favoritesFailed(error, entry) };
   }
-  return { url: template.url };
+  return { url: template.url, profile: template.profile };
 }
 
 /**
  * What a right-click on a favorites card needs before the job's first request — from the list the
- * panel shows for that tab, when it can tell, with no request at all (a list read from the top,
- * `lib/favorites.resolveCard`):
- * - unless the tab has listed its favorites again since the panel's list (its grid may have moved,
- *   and TikTok may send more of it now): TikTok stopped sending that list before it could tell the
- *   card's drama (`favorites.cutShort`, {@link stoppedShortOfCard}) → `favoritesCardCutShort`,
- *   since a new listing would end the same; several dramas of the card's title in it, the card's
- *   position covered → those dramas shown in the panel for the user to pick ({@link cardShared});
- *   the list known whole without the title → `favoritesNotFound`;
+ * library shows for that tab, or else the list an earlier card of that tab read ({@link cardList}:
+ * 1.5.0's panel list), when it can tell, with no request at all (a list read from the top,
+ * `lib/favorites.resolveCard`; a library restored from an earlier session is no tab's list:
+ * `tabId` null, never trusted here):
+ * - unless the tab has listed its favorites again since the library's list (its grid may have
+ *   moved, and TikTok may send more of it now): TikTok stopped sending that list before it could
+ *   tell the card's drama (`favorites.cutShort`, {@link stoppedShortOfCard}) →
+ *   `favoritesCardCutShort`, since a new listing would end the same; several dramas of the card's
+ *   title in it, the card's position covered → those dramas shown in the library for the user to
+ *   pick ({@link cardShared}; a library of another TikTok profile than the tab's stays as it was:
+ *   {@link cardSharedElsewhere}) — when that list is an earlier card's listing that would change
+ *   the library ({@link takesLibraryPlace}), it goes into the library, dated from when it was read,
+ *   only while the library has learned nothing since (`library.changedAt`: no listing, count or
+ *   removal since); older, it would bring back a drama removed since or an old count, so it is
+ *   dropped and the list read again; the list known whole without the title → `favoritesNotFound`;
  * - the one drama of the card's title, where a fresh listing would stop too
  *   (`lib/favorites.coversCard`: away from the card's position, a page past it read), or in a list
  *   known whole or one TikTok sent no more of → that drama; once the tab has listed its favorites
  *   again since, only when it sits at the card's very position (a drama of that title favorited
- *   since may be in the grid and not in the panel's list: it moved every card).
- * Anything else — no list of that tab in the panel, one that does not reach the card or lacks its
+ *   since may be in the grid and not in the library's list: it moved every card).
+ * Anything else — no list of that tab in the library, one that does not reach the card or lacks its
  * title, dramas of the same title in a list the tab has listed again since, the one drama of the
  * title away from the card's position in such a list — needs the list read again from its top: the
  * tab's favorites address, checked ({@link favoritesTemplate}).
@@ -1501,7 +1760,9 @@ async function favoritesTemplate(tabId, entry) {
 async function cardStart(job, entry) {
   const tabId = /** @type {number} */ (job.favoritesTab);
   const card = /** @type {Card} */ (job.card);
-  const shown = app.favorites;
+  // the library's list when it is that tab's; else an earlier card's listing of that tab
+  const kept = app.favorites?.tabId !== tabId && cardList !== null && cardList.tabId === tabId ? cardList : null;
+  const shown = kept !== null ? cardListShown(kept) : app.favorites;
   if (shown !== null && shown.tabId === tabId && !shown.loading && shown.items.length > 0) {
     const latest = await readFavoritesTemplate(tabId).catch(() => null);
     const listedSince = latest !== null && latest.at > shown.listedAt;
@@ -1509,11 +1770,27 @@ async function cardStart(job, entry) {
     const resolved = resolveCard(shown.items, card);
     if (!listedSince) {
       if (shown.short && stoppedShortOfCard(shown.items, card, shown.perPage, resolved)) return { done: cardCutShort(card, shown.items.length, entry) };
-      if (resolved.kind === "shared" && reached) return { done: cardShared(card, entry) };
+      if (resolved.kind === "shared" && reached) {
+        if (kept === null || !takesLibraryPlace(kept.listing, card)) return { done: cardShared(card, entry) };
+        // an earlier card's listing of that tab that would change the library was read at its own
+        // time: into the library — stamped with that time — only while the library has learned
+        // nothing since (no listing, count or removal: every change is kept at once,
+        // `library.changedAt`), and never into a library of another TikTok profile, which stays as
+        // it was — no request either way
+        if (kept.listedAt > Math.max(library.changedAt, app.favorites?.listedAt ?? 0)) {
+          if (!(await showFavoritesListing(tabId, kept.listing, kept.profile, kept.listedAt))) return { done: cardSharedElsewhere(card, entry) };
+          return { done: cardShared(card, entry) };
+        }
+        if (libraryItems().length > 0 && library.profile !== null && kept.profile !== library.profile) return { done: cardSharedElsewhere(card, entry) };
+        // older than what the library learned since — it would bring back a drama removed since,
+        // or an old count —: the list is read again from its top (below), and that listing is the
+        // tab's kept list from now on
+        cardList = null;
+      }
       if (resolved.kind === "missing" && shown.complete) return { done: cardNotFound(card, entry) };
     }
     // the tab listed its favorites again since: the grid may hold a drama of that title favorited
-    // since, which the panel's list lacks — its one drama of the title is still the card's only
+    // since, which the library's list lacks — its one drama of the title is still the card's only
     // where it sits at the card's very position (a favorite added or removed moves every card)
     if (
       resolved.kind === "found" &&
@@ -1524,7 +1801,7 @@ async function cardStart(job, entry) {
     }
   }
   const template = await favoritesTemplate(tabId, entry);
-  return "url" in template ? { template: template.url } : { done: template.stop };
+  return "url" in template ? { template } : { done: template.stop };
 }
 
 /**
@@ -1547,21 +1824,64 @@ function stoppedShortOfCard(items, card, perPage, resolved) {
 
 /**
  * Several of the user's favorites bear the right-clicked card's title: none is picked — its
- * position cannot tell them apart. The panel shows them (its filter set to that title), each with
- * its episodes and length, and the page asks the user to tick the one they right-clicked and press
- * **Add selected to the box**; the job lists nothing, and its history entry keeps the text.
+ * position cannot tell them apart. The library shows them — its search box set to that title, every
+ * status shown, the section scrolled into view —, each with its episodes and length, and the page
+ * asks the user to tick the one they right-clicked and press **Add selected to the box**; the job
+ * lists nothing, and its history entry keeps the text.
  * @param {Card} card
  * @param {Record<string, unknown>} entry
  * @returns {null}
  */
 function cardShared(card, entry) {
   input("favorites-filter").value = cleanTitle(card.title);
+  library.filter = "all";
   applyFavoritesFilter();
   $("favorites-card").hidden = false;
+  showLibrarySection();
   const message = t("favoritesShared", card.title);
   setStatus($("input-status"), message, "error");
   entry["error"] = message;
   return null;
+}
+
+/**
+ * Several dramas of the right-clicked tab's favorites bear the card's title, and the library is
+ * another TikTok profile's ({@link showFavoritesListing} left it untouched: one account's list never
+ * enters another's library): none is picked — DramaFetch never guesses —, the library stays exactly
+ * as it was, and the page says to open the one wanted on TikTok and use the toolbar button →
+ * **Download this series** (`favoritesSharedElsewhere`, an error); the job lists nothing, and its
+ * history entry keeps the text.
+ * @param {Card} card
+ * @param {Record<string, unknown>} entry
+ * @returns {null}
+ */
+function cardSharedElsewhere(card, entry) {
+  const message = t("favoritesSharedElsewhere", card.title);
+  setStatus($("input-status"), message, "error");
+  entry["error"] = message;
+  return null;
+}
+
+/**
+ * Whether the listing in which a card's title was found shared by several dramas goes into the
+ * library (so that the user sees them all to pick from; {@link showFavoritesListing} decides how:
+ * in the library's place, joined into it, or — a library of another TikTok profile — not at all):
+ * when it is TikTok's whole list ({@link readWhole}: newer than the library), or the library holds fewer
+ * dramas than it, or the listing found a drama of that title the library does not hold among the
+ * dramas still in the Bookmark (one favorited since, or one DramaFetch removed and the user
+ * bookmarked again) — the library, filtered to the title, would not offer it. Otherwise the library
+ * — larger, and holding every drama of that title the listing found — stays as it is, filtered to
+ * the title. A partial listing never shrinks it either way.
+ * @param {FavoritesListing} listing
+ * @param {Card} card
+ * @returns {boolean}
+ */
+function takesLibraryPlace(listing, card) {
+  if (readWhole(listing)) return true;
+  if (libraryItems().length < distinctItems(listing.items).length) return true;
+  const wanted = cleanTitle(card.title);
+  const held = new Set(keptItems().map((item) => item.seriesId));
+  return listing.items.some((item) => item.title !== null && cleanTitle(item.title) === wanted && !held.has(item.seriesId));
 }
 
 /**
@@ -1596,44 +1916,210 @@ function cardCutShort(card, count, entry) {
 /**
  * Read TikTok tab `tabId`'s favorites list (`favorites.listFavorites`: from inside that tab, from
  * its top, paced, one request at a time, the cooldown before every page, a refusal recorded) — all
- * of it (**List favorites**, into the panel as pages arrive), or, for a right-clicked `card`, until
- * it reaches the card (`lib/favorites.coversCard`). A card's listing fills the panel only when the
- * panel shows nothing yet, or — at its end — when the panel shows the same tab's list, not
- * complete, and the listing holds more dramas than it (it extends it); otherwise the panel — rows,
- * count line, ticks — stays exactly as it was, and the card is resolved from the listing alone.
- * The job's contact with TikTok is noted at both ends, as a listing's; nothing is asked when this
- * page could not store a write.
+ * of it (**List favorites**, into the library as pages arrive), or, for a right-clicked `card`,
+ * until it reaches the card (`lib/favorites.coversCard`). A card's listing fills the library only
+ * when it shows nothing yet, or — at its end — when the library shows the same tab's list, not
+ * complete, and the listing holds more dramas than it (it extends it, {@link showFavoritesListing}:
+ * never a library of another TikTok profile); otherwise the library — cards, count line, ticks —
+ * stays exactly as it was, the card is resolved from the listing, and the listing is kept as that
+ * tab's list for the next right-clicks ({@link keepCardList}).
+ * **List favorites** over a library read from this TikTok profile, its whole list read less than
+ * 24 h ago (`lib/library.countsFresh`: the episode counts it holds), is the smart refresh: its
+ * first page decides (`lib/library.unchangedSince`) — the list as it was, and the listing stops
+ * there (one request: the library keeps its dramas, without the ones DramaFetch removed, and takes
+ * TikTok's count), else it reads on. A library that shows a list keeps showing it until the
+ * listing's first page arrives (a refusal before it leaves it as it was). What a listing that filled
+ * the library read becomes the library kept across sessions (`favoritesLibrary`, with the profile
+ * recorded with `template`: whose list it is) only when it may ({@link adoptable}): over a library
+ * that held dramas, TikTok's whole list alone ({@link readWhole}) — with a drama, or with TikTok
+ * counting none —; over one that held none, a drama at least (the list complete or not), or
+ * TikTok's whole list counting none. A listing that stops short of that never shrinks a library that
+ * held dramas — a refusal, a login wall, the tab gone or **Stop** on a later page, TikTok cutting
+ * the list short, an empty first page (TikTok may answer a replay it no longer accepts so,
+ * `favorites.js`) —: the library comes back as it was ({@link restoreKeptLibrary}), taking only what
+ * the listing read of the library's own profile — TikTok's count, and the fresh entries of the dramas
+ * it read —; over a library that held none, what was read stays shown, not kept. The job's contact with TikTok is noted at both ends, as a listing's; nothing is asked when
+ * this page could not store a write.
  * @param {Job} job
  * @param {Engine} engine
  * @param {number} tabId
- * @param {string} template
+ * @param {FavoritesAddress} template the tab's favorites address, and whose list it reads: the
+ *   profile the library takes, never the page the tab shows by the listing's end
  * @param {Card} [card]
- * @returns {Promise<{listing: FavoritesListing, shown: boolean}>} the listing, and whether the panel shows it
+ * @returns {Promise<{listing: FavoritesListing, shown: boolean, unchanged: boolean}>} the listing,
+ *   whether the library shows it, and whether its first page found the library unchanged
  */
 async function fetchFavorites(job, engine, tabId, template, card) {
   await noteContact(job);
   if (app.unsaved !== null) throw new StorageRefusedError(app.unsaved); // that save refused: not one request
   const test = app.testMode ? app.testSettings : {};
   const before = app.favorites;
-  const fills = card === undefined || before === null || before.items.length === 0;
+  const empty = before === null || before.items.length === 0;
+  const fills = card === undefined || empty;
+  // a library that holds dramas, as it is before any request: what comes back unless the listing
+  // that fills it ends as TikTok's whole list (the listing puts a new object in `app.favorites`)
+  /** @type {LibrarySnapshot | null} */
+  const snapshot = fills && before !== null && !empty ? { favorites: before, removed: [...library.removed], shown: library.shown, cardList } : null;
+  job.listed = undefined; // what THIS listing lists
+  // the smart refresh: a library read from this TikTok profile may be TikTok's list as it is — while
+  // its episode counts are fresh: a series that gained episodes moves neither TikTok's count nor its first page
+  const { profile } = template;
+  const smart = card === undefined && !empty && library.profile !== null && countsFresh(library.fullReadAt, now()) && profile === library.profile;
+  const kept = smart ? keptItems().map((item) => item.seriesId) : [];
+  let unchanged = false;
+  let started = false;
+  let filled = 0;
   /** @type {import("./favorites.js").FavoritesOptions} */
-  const options = { onPage: fills ? (listing) => showFavoritesPage(listing) : (listing) => showListingProgress(listing) };
+  const options = {
+    onPage: (listing, page) => {
+      if (smart && listing.pages === 1) unchanged = unchangedSince(kept, page.items.map((item) => item.seriesId), listing.total);
+      if (unchanged || !fills) {
+        showListingProgress(listing); // the library stays as it was
+        return;
+      }
+      if (!started) {
+        started = true;
+        startFavorites(tabId);
+      }
+      filled += 1;
+      job.listed = { count: distinctItems(listing.items).length, skipped: listing.skipped };
+      showFavoritesPage(listing);
+    },
+  };
   if (test.pageDelayS !== undefined) options.pageDelayS = test.pageDelayS;
   if (test.discoveryTimeoutS !== undefined) options.timeoutS = test.discoveryTimeoutS;
   if (card !== undefined) options.until = (items, perPage) => coversCard(items, card, perPage);
-  if (fills) startFavorites(tabId);
+  else if (smart) options.until = () => unchanged;
+  if (fills && empty) {
+    started = true; // an empty library shows the listing from its start, as 1.5.0's panel did
+    startFavorites(tabId);
+  }
   /** @type {FavoritesListing | null} */
   let listing = null;
+  let shown = false;
   try {
-    listing = await listFavorites(engine, tabId, template, options);
-    if (fills) return { listing, shown: true };
-    const extending = before !== null && before.tabId === tabId && !before.complete && listing.items.length > before.items.length;
-    if (extending) showFavoritesListing(tabId, listing);
-    return { listing, shown: extending };
+    listing = await listFavorites(engine, tabId, template.url, options);
+    if (unchanged) {
+      await keepLibrary(tabId, listing);
+      return { listing, shown: true, unchanged: true };
+    }
+    if (!fills) {
+      const extending = before !== null && before.tabId === tabId && !before.complete && listing.items.length > before.items.length;
+      if (extending) shown = await showFavoritesListing(tabId, listing, profile);
+      else if (before !== null && before.tabId !== tabId) keepCardList(tabId, listing, profile); // the library is another list: kept apart
+    }
   } finally {
-    if (fills) endFavorites(listing);
+    // a listing that filled the library: kept, or the library as it was — on every path, errors and Stop included
+    if (fills && started) shown = await endListing(tabId, listing, filled, snapshot, profile);
     await noteContact(job);
   }
+  return { listing, shown, unchanged: false };
+}
+
+/**
+ * A listing that filled the library ended ({@link fetchFavorites}) — at TikTok's end, or before it
+ * (a card's position reached, the page cap, TikTok cutting the list short, an error, **Stop**):
+ * what it read becomes the library kept across sessions when it may ({@link adoptable}); else a
+ * library that held dramas comes back as it was ({@link restoreKeptLibrary}), and one that held none
+ * shows what was read without keeping it. Only a listing that becomes the library prunes the ticks
+ * ({@link endFavorites}). Returns whether the library shows what the listing read.
+ * @param {number} tabId
+ * @param {FavoritesListing | null} listing null when it ended without one (an error, a Stop)
+ * @param {number} filled how many of its pages the library showed
+ * @param {LibrarySnapshot | null} snapshot the library before the listing, when it held dramas
+ * @param {string | null} profile whose favorites the listing read ({@link FavoritesAddress})
+ * @returns {Promise<boolean>}
+ */
+async function endListing(tabId, listing, filled, snapshot, profile) {
+  const read = app.favorites;
+  const adopt = filled > 0 && read !== null && adoptable(read, listing, snapshot !== null);
+  endFavorites(listing, adopt);
+  if (adopt) {
+    await adoptListing(profile);
+    return true;
+  }
+  if (filled > 0 && snapshot !== null) {
+    await restoreKeptLibrary(snapshot, read, profile);
+    return false;
+  }
+  return true; // a library that held none: what was read stays shown, and is not kept
+}
+
+/**
+ * Whether what a listing that filled the library read may become the library kept across sessions:
+ * over a library that held dramas (`held`), only TikTok's whole list ({@link readWhole}) with a
+ * drama at least, or with TikTok counting none (the user really has no favorites left); over one
+ * that held none, a drama at least (the list complete or not, as 1.5.0's panel kept what it read),
+ * or TikTok's whole list counting none. An empty read is kept in no other case: TikTok may answer a
+ * replay it no longer accepts with an empty list (`favorites.js`).
+ * @param {FavoritesShown} read what the listing's pages filled the library with
+ * @param {FavoritesListing | null} listing null when it ended without one (an error, a Stop)
+ * @param {boolean} held whether the library held dramas before the listing
+ * @returns {boolean}
+ */
+function adoptable(read, listing, held) {
+  const whole = readWhole(listing);
+  const dramas = read.items.length > 0;
+  return held ? whole && (dramas || read.total === 0) : dramas || (whole && read.total === 0);
+}
+
+/**
+ * Whether a listing read TikTok's whole list: it reached the list's end (`hasMore` false), or it
+ * ended at a cursor that did not move or came again, a page TikTok served again, or empty pages
+ * (`favorites.listFavorites`) once TikTok had sent every favorite it counts — one at least: its
+ * distinct dramas and the items without a readable series id reach TikTok's count, so nothing is
+ * missing (`favorites.cutShort` says the opposite). The page cap and a card's `until` never count;
+ * an empty answer with TikTok counting none is whole only at the list's end.
+ * @param {FavoritesListing | null} listing
+ * @returns {boolean}
+ */
+function readWhole(listing) {
+  if (listing === null) return false;
+  if (listing.complete) return true;
+  if (listing.ended !== "cursor" && listing.ended !== "empty") return false;
+  return listing.total !== null && listing.total > 0 && distinctItems(listing.items).length + listing.skipped >= listing.total;
+}
+
+/**
+ * A listing that filled a library which held dramas did not end as TikTok's whole list
+ * ({@link adoptable}): the library comes back as it was — its dramas and their order, the dramas
+ * DramaFetch removed, how many cards the grid drew, the list a right-click read of a tab — and is
+ * not written again, but for what the listing read of the library's own profile (another account's
+ * list and count are never this library's): every drama of the library the listing read takes the
+ * listing's fresh entry (title, episodes, cover — an episode count TikTok raised since the whole
+ * list was read is never put back: such a drama is Partly, never removed), no drama added or
+ * dropped, the order kept; and TikTok's count, when the listing read one (`read.total`, as its pages
+ * set it — also when it ended with an error), is the library's, read now; both kept. When its whole
+ * list was last read (`fullReadAt`), its profile and its covers in the browser session's memory stay
+ * as they were; what the records say of the dramas the listing showed is read again (their cards may
+ * have been drawn from its entries).
+ * @param {LibrarySnapshot} snapshot
+ * @param {FavoritesShown | null} read what the listing's pages filled the library with
+ * @param {string | null} profile whose favorites the listing read ({@link FavoritesAddress})
+ * @returns {Promise<void>}
+ */
+async function restoreKeptLibrary(snapshot, read, profile) {
+  const total = read?.total ?? null;
+  const kept = snapshot.favorites;
+  kept.loading = false;
+  app.favorites = kept;
+  library.removed = new Map(snapshot.removed);
+  library.shown = snapshot.shown;
+  cardList = snapshot.cardList;
+  const listed = read === null ? [] : distinctItems(read.items);
+  if (library.profile !== null && profile === library.profile) {
+    const fresh = new Map(listed.map((item) => [item.seriesId, item]));
+    const renewed = kept.items.some((item) => fresh.has(item.seriesId));
+    if (renewed) kept.items = kept.items.map((item) => fresh.get(item.seriesId) ?? item);
+    if (total !== null) {
+      kept.total = total;
+      library.countedAt = now();
+      library.unconfirmed = false;
+    }
+    if (renewed || total !== null) await saveLibrary();
+  }
+  renderLibrary();
+  await refreshLibraryStatuses(listed.map((item) => item.seriesId));
 }
 
 /**
@@ -1675,88 +2161,153 @@ function favoritesErrorText(error) {
 }
 
 /**
- * A listing of TikTok tab `tabId`'s favorites starts: the panel shows, emptied of an earlier
- * listing's rows; the ticks stay (another tab's list too: a row built for a ticked drama shows
- * ticked), until a complete listing prunes them ({@link endFavorites}).
+ * A listing of TikTok tab `tabId`'s favorites takes the library's place: the library shows,
+ * emptied of an earlier list's dramas and of the removals since (a new `app.favorites`: the one it
+ * replaces is left as it was, for a listing that stops short of TikTok's end to put back,
+ * {@link restoreKeptLibrary}); the ticks stay (another tab's list too: a card built for a ticked
+ * drama shows ticked), until a complete listing that becomes the library prunes them
+ * ({@link endFavorites}).
  * @param {number} tabId
  */
 function startFavorites(tabId) {
   app.favorites = { tabId, items: [], total: null, complete: false, ended: null, short: false, skipped: 0, perPage: 0, loading: true, listedAt: now() };
-  favoriteRows.clear();
-  /** @type {HTMLTableSectionElement} */ ($("favorites-table").querySelector("tbody")).textContent = "";
+  if (cardList?.tabId === tabId) cardList = null; // the library is that tab's list now
+  library.removed.clear();
+  library.shown = LIBRARY_PIECE;
   setStatus($("favorites-status"), "");
   input("favorites-select-all").checked = false;
-  $("favorites-card").hidden = false;
-  renderFavoritesCount();
-  updateFavoritesSelection();
+  renderLibrary();
 }
 
 /**
- * A page of the list arrived: its dramas join the panel as rows (a drama listed already keeps its
- * row), with what DramaFetch's records say of them.
+ * A page of the list arrived: its dramas join the library (a drama listed already keeps its card),
+ * with what DramaFetch's records say of them.
  * @param {FavoritesListing} listing
  */
 function showFavoritesPage(listing) {
   const shown = app.favorites;
   if (shown === null) return;
+  const before = new Set(shown.items.map((item) => item.seriesId));
   shown.items = [...listing.items];
   shown.total = listing.total;
   shown.skipped = listing.skipped;
   shown.perPage = listing.perPage;
-  const body = /** @type {HTMLTableSectionElement} */ ($("favorites-table").querySelector("tbody"));
-  /** @type {string[]} */
-  const added = [];
-  for (const item of listing.items) {
-    if (favoriteRows.has(item.seriesId)) continue;
-    const shownRow = favoriteRow(item);
-    favoriteRows.set(item.seriesId, shownRow);
-    body.append(shownRow.row);
-    added.push(item.seriesId);
-  }
-  renderFavoritesCount();
+  const added = distinctItems(listing.items)
+    .map((item) => item.seriesId)
+    .filter((seriesId) => !before.has(seriesId));
+  renderLibrary();
   $("progress-activity").textContent = $("favorites-count").textContent ?? "";
-  updateFavoritesSelection();
-  void showFavoriteStatuses(added);
+  void refreshLibraryStatuses(added);
 }
 
 /**
  * The listing ended — at the list's end, or before it (a card's position reached, a limit, a
- * refusal, **Stop**): the count says how much the panel holds. Only a COMPLETE listing prunes the
- * ticks — a drama it does not hold is no favorite any more —; a partial one may simply not have
- * reached a ticked drama yet.
+ * refusal, **Stop**): the count says how much the library holds. Only a listing of TikTok's whole
+ * list ({@link readWhole}) that becomes the library (`prune`: {@link adoptable}) is the library's
+ * whole list and prunes the ticks — a drama it does not hold is no favorite any more —; a partial
+ * one may simply not have reached a ticked drama yet, and an empty one that is not kept (TikTok
+ * counting dramas it did not send) says nothing of them.
  * @param {FavoritesListing | null} listing null when it ended without one (an error, a Stop)
+ * @param {boolean} prune whether the listing becomes the library
+ * @param {number} [listedAt] when the listing ended: now, or a card's listing kept apart since ({@link cardStart})
  */
-function endFavorites(listing) {
+function endFavorites(listing, prune, listedAt = now()) {
   const shown = app.favorites;
   if (shown === null) return;
   shown.loading = false;
-  shown.listedAt = now();
+  shown.listedAt = listedAt;
   if (listing !== null) {
-    shown.complete = listing.complete;
-    shown.ended = listing.ended;
+    // a listing that becomes the library having read TikTok's whole list ({@link readWhole}) is its
+    // whole list, though it ended at a cursor or on empty pages
+    const whole = prune && readWhole(listing);
+    shown.complete = listing.complete || whole;
+    shown.ended = whole ? null : listing.ended;
     shown.short = cutShort(listing);
-    if (listing.complete) for (const seriesId of [...favoritesSelected]) if (!favoriteRows.has(seriesId)) favoritesSelected.delete(seriesId);
+    if (whole) {
+      const listed = new Set(shown.items.map((item) => item.seriesId));
+      for (const seriesId of [...favoritesSelected]) if (!listed.has(seriesId)) favoritesSelected.delete(seriesId);
+    }
   }
-  renderFavoritesCount();
-  updateFavoritesSelection();
+  renderLibrary();
 }
 
 /**
- * A finished listing of TikTok tab `tabId` takes the panel's place — a card's listing that extends
- * the panel's list of that tab, or the list a card's dramas of the same title were found in
- * ({@link cardShared}) —: rows and count line anew, the ticks kept.
+ * A finished listing of TikTok tab `tabId` the library is to show — a card's listing that extends
+ * the library's list of that tab, or the list a card's dramas of the same title were found in
+ * ({@link cardShared}, {@link takesLibraryPlace}) —; returns whether the library shows it:
+ * - the library holds dramas of another TikTok profile than the tab's (its profile known, the
+ *   tab's another one or unknown): the library stays exactly as it was — false (one account's list
+ *   never enters another's library: {@link cardSharedElsewhere});
+ * - the listing reached TikTok's end, or the library holds none, or the library is itself a partial
+ *   list and the listing — read from the list's top too — holds at least as many dramas: it takes
+ *   the library's place, in the list's order — cards and count line anew, the ticks kept — and
+ *   becomes the library kept across sessions when it holds a drama, or is TikTok's whole list
+ *   counting none ({@link adoptListing});
+ * - otherwise — the library's own profile, a partial listing over a library that holds TikTok's
+ *   whole list, or one smaller than a partial library (a right-click's: two dramas of a title, one
+ *   of them not in the library) — it is joined into the library, which never shrinks
+ *   ({@link joinListing}): a library that holds TikTok's whole list is never replaced by part of
+ *   one.
+ * The listing is the library's as read at `listedAt` — now, or when a card's listing kept apart
+ * was read ({@link cardStart}): its count and, when it reached TikTok's end, its episode counts
+ * date from then.
  * @param {number} tabId
  * @param {FavoritesListing} listing
+ * @param {string | null} profile whose favorites the listing read ({@link FavoritesAddress})
+ * @param {number} [listedAt] when it was read (seconds since the epoch)
+ * @returns {Promise<boolean>}
  */
-function showFavoritesListing(tabId, listing) {
-  startFavorites(tabId);
-  showFavoritesPage(listing);
-  endFavorites(listing);
+async function showFavoritesListing(tabId, listing, profile, listedAt = now()) {
+  const held = libraryItems().length;
+  if (held > 0 && library.profile !== null && profile !== library.profile) return false;
+  if (readWhole(listing) || held === 0 || (app.favorites?.complete !== true && distinctItems(listing.items).length >= held)) {
+    const adopt = listing.items.length > 0 || (listing.complete && listing.total === 0);
+    startFavorites(tabId);
+    showFavoritesPage(listing);
+    endFavorites(listing, adopt, listedAt);
+    if (listing.pages > 0 && adopt) await adoptListing(profile, listedAt);
+    return true;
+  }
+  await joinListing(listing, listedAt);
+  return true;
 }
 
 /**
- * A card's listing that does not fill the panel says how far it read on the progress card only:
- * the panel stays as it was.
+ * A right-click's partial listing of the library's own profile, smaller than the library, joined
+ * into it — the library never shrinks: the listing's dramas the library lacks go on top, in the
+ * listing's order (TikTok lists the newest favorite first: a drama the library lacks was favorited
+ * after the library was read); every drama the listing read takes its fresh entry (title, episodes,
+ * cover); one DramaFetch removed that the listing holds (bookmarked again since) is no longer
+ * marked removed; TikTok's count is the listing's, read now. The library is kept (its covers in the
+ * browser session's memory), drawn again, and what the records say of the dramas the listing read
+ * is read again. The tab whose list it is, whether its end was reached and when its whole list was
+ * read stay as they were: a join is no list read from its top.
+ * @param {FavoritesListing} listing
+ * @param {number} [listedAt] when it was read (seconds since the epoch): TikTok's count dates from then
+ * @returns {Promise<void>}
+ */
+async function joinListing(listing, listedAt = now()) {
+  const shown = app.favorites;
+  if (shown === null) return;
+  const read = distinctItems(listing.items);
+  const fresh = new Map(read.map((item) => [item.seriesId, item]));
+  const held = new Set(shown.items.map((item) => item.seriesId));
+  shown.items = [...read.filter((item) => !held.has(item.seriesId)), ...shown.items.map((item) => fresh.get(item.seriesId) ?? item)];
+  for (const item of read) library.removed.delete(item.seriesId);
+  if (listing.total !== null) {
+    shown.total = listing.total;
+    library.countedAt = listedAt;
+    library.unconfirmed = false;
+  }
+  await writeLibraryCovers(coversOf(libraryItems()));
+  await saveLibrary();
+  renderLibrary();
+  await refreshLibraryStatuses(read.map((item) => item.seriesId));
+}
+
+/**
+ * A card's listing that does not fill the library — and a smart refresh's first page that found it
+ * unchanged — says how far it read on the progress card only: the library stays as it was.
  * @param {FavoritesListing} listing
  */
 function showListingProgress(listing) {
@@ -1766,27 +2317,350 @@ function showListingProgress(listing) {
 }
 
 /**
- * One drama's row: its tick, its title, its episodes and length, and DramaFetch's status of it.
- * @param {FavoriteItem} item
- * @returns {{item: FavoriteItem, row: HTMLElement, box: HTMLInputElement, status: HTMLElement}}
+ * The library's covers: series id → the cover URL its listing gave (signed: memory and
+ * `chrome.storage.session` only).
+ * @param {readonly FavoriteItem[]} items
+ * @returns {Map<string, string>}
  */
-function favoriteRow(item) {
-  const box = /** @type {HTMLInputElement} */ (el("input", { attrs: { type: "checkbox", "data-series-id": item.seriesId } }));
-  box.checked = favoritesSelected.has(item.seriesId);
-  box.addEventListener("change", () => {
-    if (box.checked) favoritesSelected.add(item.seriesId);
-    else favoritesSelected.delete(item.seriesId);
-    updateFavoritesSelection();
+function coversOf(items) {
+  /** @type {Map<string, string>} */
+  const covers = new Map();
+  for (const item of items) if (item.coverUrl !== null) covers.set(item.seriesId, item.coverUrl);
+  return covers;
+}
+
+/**
+ * The library becomes the list a listing filled it with: its profile — whose favorites the
+ * listing's address reads ({@link FavoritesAddress}), never the page its tab shows by then —,
+ * TikTok's count as read (confirmed), every drama's episode count as read when the listing reached
+ * the list's end (`fullReadAt`; a partial list has none) — read now, or when a card's listing kept
+ * apart was read (`listedAt`) —, the covers kept in the browser session's memory, the library kept
+ * on disk without them (best effort).
+ * @param {string | null} profile
+ * @param {number} [listedAt] when the listing was read (seconds since the epoch)
+ * @returns {Promise<void>}
+ */
+async function adoptListing(profile, listedAt = now()) {
+  library.profile = profile;
+  library.countedAt = listedAt;
+  library.fullReadAt = app.favorites?.complete === true ? listedAt : null;
+  library.unconfirmed = false;
+  await writeLibraryCovers(coversOf(libraryItems()));
+  await saveLibrary();
+  renderLibrary();
+}
+
+/**
+ * The smart refresh's first page found the library unchanged (`lib/library.unchangedSince`): it is
+ * TikTok's list as it is — the dramas DramaFetch removed leave it, the first page's own entries
+ * (title, episodes, cover) take their place, TikTok's count is the library's, read now from TikTok
+ * tab `tabId` (whose list it now is), and the library is kept. When the whole list was last read
+ * (`fullReadAt`) stays as it was: the other dramas' episode counts are that read's.
+ * @param {number} tabId
+ * @param {FavoritesListing} listing the first page
+ * @returns {Promise<void>}
+ */
+async function keepLibrary(tabId, listing) {
+  const shown = app.favorites;
+  if (shown === null) return;
+  const fresh = new Map(listing.items.map((item) => [item.seriesId, item]));
+  shown.items = shown.items.filter((item) => !library.removed.has(item.seriesId)).map((item) => fresh.get(item.seriesId) ?? item);
+  shown.tabId = tabId;
+  if (cardList?.tabId === tabId) cardList = null; // the library is that tab's list now
+  shown.total = listing.total;
+  shown.complete = true;
+  shown.ended = null;
+  shown.short = false;
+  shown.loading = false;
+  shown.perPage = Math.max(shown.perPage, listing.perPage);
+  shown.listedAt = now();
+  library.removed.clear();
+  library.countedAt = now();
+  library.unconfirmed = false;
+  const listed = new Set(shown.items.map((item) => item.seriesId));
+  for (const seriesId of [...favoritesSelected]) if (!listed.has(seriesId)) favoritesSelected.delete(seriesId);
+  await writeLibraryCovers(coversOf(libraryItems()));
+  await saveLibrary();
+  renderLibrary();
+  void refreshLibraryStatuses(listing.items.map((item) => item.seriesId));
+}
+
+/**
+ * Keep the library in `chrome.storage.local` (`lib/library.libraryRecord`: no cover URL, nothing
+ * signed). A cache, best effort: a refused write never stops anything and never counts as this
+ * page's refused write (`app.unsaved`) — the library's status line says so, once.
+ * @returns {Promise<void>}
+ */
+async function saveLibrary() {
+  const shown = app.favorites;
+  if (shown === null) return;
+  library.changedAt = now(); // what the library learned, kept at once: a card's listing kept apart from before never enters it
+  const record = libraryRecord({
+    listedAt: shown.listedAt,
+    total: shown.total,
+    countedAt: library.countedAt,
+    fullReadAt: library.fullReadAt,
+    unconfirmed: library.unconfirmed,
+    complete: shown.complete,
+    short: shown.short,
+    ended: shown.ended,
+    profile: library.profile,
+    items: shown.items,
+    removed: library.removed,
   });
-  const status = el("td", { className: "favorite-status" });
-  const row = el("tr", { attrs: { "data-series-id": item.seriesId } }, [
-    el("td", {}, [box]),
-    el("td", { className: "favorite-title", text: item.title ?? item.seriesId }),
-    el("td", { className: "favorite-meta", text: favoriteMeta(item) }),
-    status,
+  try {
+    await writeLibrary(record);
+  } catch (error) {
+    if (library.saveRefusedSaid) return;
+    library.saveRefusedSaid = true;
+    setStatus($("favorites-status"), t("librarySaveRefused", [oneLine(error)]), "error");
+  }
+}
+
+/**
+ * The library kept across sessions, shown at once with no request: `app.favorites` restored from it
+ * with no tab (a card's resolution never trusts a restored list: it reads the list again), the
+ * covers from the browser session's memory — only those whose signature has not expired
+ * (`lib/library.coverExpired`: an expired one would be refused; its card shows the title) —, then
+ * one read of the stored progress for the statuses.
+ * @returns {Promise<void>}
+ */
+async function restoreLibrary() {
+  const stored = await readLibrary();
+  if (stored === null) {
+    renderLibrary();
+    return;
+  }
+  const covers = await readLibraryCovers();
+  app.favorites = {
+    tabId: null,
+    items: stored.items.map((item) => ({ ...item, coverUrl: liveCover(covers.get(item.seriesId) ?? null) })),
+    total: stored.total,
+    complete: stored.complete,
+    ended: stored.ended,
+    short: stored.short,
+    skipped: 0,
+    perPage: 0,
+    loading: false,
+    listedAt: stored.listedAt,
+  };
+  library.profile = stored.profile;
+  library.countedAt = stored.countedAt;
+  library.fullReadAt = stored.fullReadAt;
+  library.unconfirmed = stored.unconfirmed;
+  library.removed = new Map(stored.removed.map((removal) => [removal.seriesId, removal.at]));
+  renderLibrary();
+  await refreshLibraryStatuses(stored.items.map((item) => item.seriesId));
+}
+
+/**
+ * A cover address the library may still ask for: null when there is none or its signature has
+ * expired (`lib/library.coverExpired`) — never requested, the card shows its title.
+ * @param {string | null} url
+ * @returns {string | null}
+ */
+function liveCover(url) {
+  return url === null || coverExpired(url, now()) ? null : url;
+}
+
+/**
+ * What DramaFetch's own records say of these dramas (`lib/library.progressOf`): one read of the
+ * stored progress, no request; the library drawn again. A read the storage refuses changes nothing.
+ * @param {readonly string[]} seriesIds
+ * @returns {Promise<void>}
+ */
+async function refreshLibraryStatuses(seriesIds) {
+  if (seriesIds.length === 0 || app.favorites === null) return;
+  let states;
+  try {
+    states = await readSeriesStates(seriesIds);
+  } catch {
+    return;
+  }
+  const byId = new Map(libraryItems().map((item) => [item.seriesId, item]));
+  for (const seriesId of seriesIds) {
+    const item = byId.get(seriesId);
+    if (item !== undefined) library.progress.set(seriesId, progressOf(states.get(seriesId), seriesId, item.episodes));
+  }
+  renderLibrary();
+}
+
+/** @returns {LibraryEntry[]} the library's dramas with what the records say and whether DramaFetch removed them */
+function libraryEntries() {
+  return libraryItems().map((item) => ({
+    item,
+    progress: library.progress.get(item.seriesId) ?? { status: /** @type {const} */ ("none"), saved: 0, total: item.episodes },
+    removed: library.removed.has(item.seriesId),
+  }));
+}
+
+/**
+ * The series a waiting `batch` or `selection` job will download, and those of the running one it
+ * has not reached yet: their cards say **Queued**.
+ * @returns {Set<string>}
+ */
+function queuedSeries() {
+  /** @type {Set<string>} */
+  const queued = new Set();
+  const downloads = (/** @type {Job} */ job) => job.kind === "batch" || job.kind === "selection";
+  for (const job of app.queue) if (downloads(job)) for (const ref of job.refs) queued.add(ref.seriesId);
+  if (app.running !== null && downloads(app.running)) {
+    for (const ref of app.running.refs) if (ref.seriesId !== library.running && !library.finished.has(ref.seriesId)) queued.add(ref.seriesId);
+  }
+  return queued;
+}
+
+/** @returns {LibrarySort} the sort order chosen (the list's own when none) */
+function librarySort() {
+  const value = select("library-sort").value;
+  return /** @type {readonly string[]} */ (LIBRARY_SORTS).includes(value) ? /** @type {LibrarySort} */ (value) : "recent";
+}
+
+/**
+ * Draw the library: the section (or the line saying how to fill it), the connection and count
+ * lines, the filters' counts, the removed line, the first matching dramas as cards (pieces of
+ * `LIBRARY_PIECE`: 946 dramas never build 946 cards), their covers watched, the selection bar.
+ */
+function renderLibrary() {
+  const shown = app.favorites;
+  $("favorites-card").hidden = shown === null;
+  $("library-empty").hidden = shown !== null;
+  renderFavoritesCount();
+  renderConnection();
+  libraryCards.clear();
+  if (shown === null) {
+    $("favorites-grid").replaceChildren();
+    updateFavoritesSelection();
+    return;
+  }
+  const entries = libraryEntries();
+  const counts = chipCounts(entries);
+  /** @type {[LibraryFilter, string, number][]} */
+  const chips = [
+    ["all", "libraryChipAll", counts.all],
+    ["none", "libraryChipNone", counts.none],
+    ["partly", "libraryChipPartly", counts.partly],
+    ["on-disk", "libraryChipOnDisk", counts.onDisk],
+  ];
+  for (const [filter, key, count] of chips) {
+    const chip = button(`library-chip-${filter}`);
+    chip.textContent = t(key, [count]);
+    chip.setAttribute("aria-pressed", String(library.filter === filter));
+    chip.className = library.filter === filter ? "chip pressed" : "chip";
+  }
+  const removedLine = $("library-removed");
+  removedLine.hidden = counts.removed === 0;
+  removedLine.textContent = counts.removed === 0 ? "" : t("libraryRemovedLine", [counts.removed]);
+  const search = input("favorites-filter").value;
+  const matching = sortedItems(entries, librarySort()).filter((entry) => inFilter(library.filter, entry) && titleMatches(entry.item.title, search));
+  const drawn = matching.slice(0, library.shown);
+  const twins = twinIds(entries.map((entry) => entry.item));
+  const queued = queuedSeries();
+  libraryCovers.show(entries.map((entry) => ({ itemId: entry.item.seriesId, coverUrl: liveCover(entry.item.coverUrl) }))); // an expired signature: no request
+  const cards = drawn.map((entry) => {
+    const seriesId = entry.item.seriesId;
+    const status = libraryStatus(entry.progress, { queued: queued.has(seriesId), running: library.running === seriesId, removed: entry.removed });
+    return libraryCard(entry, status, twins.has(seriesId));
+  });
+  $("favorites-grid").replaceChildren(...cards);
+  for (const [seriesId, card] of libraryCards) if (libraryCovers.urlOf(seriesId) === null) libraryCovers.watch(card.cover, seriesId);
+  $("library-shown").textContent = t("libraryShown", [drawn.length, matching.length]);
+  const more = button("library-more");
+  const left = matching.length - drawn.length;
+  more.hidden = left <= 0;
+  more.textContent = left > 0 ? t("libraryMore", [Math.min(LIBRARY_PIECE, left)]) : "";
+  updateFavoritesSelection();
+}
+
+/**
+ * One drama's card: its cover (or a plain placeholder with the title), its tick (none once it left
+ * the Bookmark), its title, episodes and length, its status from the records and the jobs, the
+ * twins' badge, a thin progress bar while it is partly saved or downloading, and its actions.
+ * @param {LibraryEntry} entry
+ * @param {LibraryStatus} status
+ * @param {boolean} twin another different drama of the library bears its title
+ * @returns {HTMLElement}
+ */
+function libraryCard(entry, status, twin) {
+  const { item, progress } = entry;
+  const seriesId = item.seriesId;
+  const title = item.title ?? seriesId;
+  const cover = el("div", { className: "drama-cover" });
+  const loaded = libraryCovers.urlOf(seriesId);
+  cover.append(loaded !== null ? el("img", { className: "drama-img", attrs: { src: loaded, alt: "" } }) : el("span", { className: "drama-placeholder", text: title }));
+  /** @type {HTMLInputElement | null} */
+  let box = null;
+  if (status !== "removed") {
+    const tick = /** @type {HTMLInputElement} */ (el("input", { attrs: { type: "checkbox", "data-series-id": seriesId, "aria-label": t("libraryChooseLabel", [title]) } }));
+    tick.checked = favoritesSelected.has(seriesId);
+    tick.addEventListener("change", () => {
+      if (tick.checked) favoritesSelected.add(seriesId);
+      else favoritesSelected.delete(seriesId);
+      updateFavoritesSelection();
+    });
+    cover.append(el("label", { className: "pick" }, [tick, el("span", { text: t("libraryChoose") })]));
+    box = tick;
+  }
+  const badges = el("p", { className: "drama-badges" }, [
+    el("span", { className: `badge favorite-status ${status}`, text: libraryStatusText(status, progress), attrs: { "data-status": status } }),
   ]);
-  row.hidden = !titleMatches(item.title, input("favorites-filter").value);
-  return { item, row, box, status };
+  if (twin) badges.append(el("span", { className: "badge twin", text: t("libraryTwin"), attrs: { "data-twin": "1" } }));
+  const body = el("div", { className: "drama-body" }, [
+    el("h3", { className: "favorite-title", text: title }),
+    el("p", { className: "favorite-meta", text: favoriteMeta(item) }),
+    badges,
+  ]);
+  if (status === "partly" || status === "running") {
+    const total = progress.total ?? Math.max(progress.saved, 1);
+    body.append(el("progress", { className: "drama-progress", attrs: { max: String(total), value: String(Math.min(progress.saved, total)), "aria-hidden": "true" } }));
+  }
+  /** @type {HTMLButtonElement[]} */
+  const actions = [];
+  const row = el("div", { className: "drama-actions" });
+  /**
+   * @param {string} action
+   * @param {string} text
+   * @param {string} className
+   * @param {() => void} onClick
+   * @returns {HTMLButtonElement}
+   */
+  const action = (action, text, className, onClick) => {
+    const made = /** @type {HTMLButtonElement} */ (el("button", { className, text, attrs: { type: "button", "data-action": action } }));
+    made.addEventListener("click", onClick);
+    row.append(made);
+    return made;
+  };
+  if (status === "removed") {
+    row.append(el("span", { className: "meta", text: t("libraryRemovedNote") }));
+  } else {
+    if (status === "on-disk") actions.push(action("remove", t("libraryRemove"), "danger-outline", () => void openRemoval(item)));
+    else actions.push(action("browse", t("libraryBrowse"), "link", () => listSeries({ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId })));
+    action("open", t("libraryOpen"), "link", () => void openOnTikTok(seriesId));
+  }
+  body.append(row);
+  const blocked = !app.owner || app.cooldown !== null || app.unsaved !== null;
+  for (const made of actions) made.disabled = blocked;
+  const article = el("article", { className: `drama-card ${status}`, attrs: { "data-series-id": seriesId, "data-status": status } }, [cover, body]);
+  libraryCards.set(seriesId, { item, article, box, cover, actions });
+  return article;
+}
+
+/**
+ * A card's status, in the page's language: `On disk · 60/60`, `Partly · 23/44`, `Downloading ·
+ * 12/30` (saved / how many it has; the saved count alone when that is unknown), `Not downloaded`,
+ * `Queued`, `Removed from your Favorites`.
+ * @param {LibraryStatus} status
+ * @param {Progress} progress
+ * @returns {string}
+ */
+function libraryStatusText(status, progress) {
+  const fraction = progress.total === null ? String(progress.saved) : `${progress.saved}/${progress.total}`;
+  if (status === "on-disk") return `${t("libraryOnDisk")} · ${fraction}`;
+  if (status === "partly") return `${t("libraryPartly")} · ${fraction}`;
+  if (status === "running") return `${t("libraryRunning")} · ${fraction}`;
+  if (status === "queued") return t("libraryQueued");
+  if (status === "removed") return t("libraryRemoved");
+  return t("libraryNone");
 }
 
 /**
@@ -1806,39 +2680,11 @@ function favoriteMeta(item) {
   return length === null ? t("favoritesEpisodes", [item.episodes]) : t("favoritesEpisodesLength", [item.episodes, length]);
 }
 
-/**
- * What DramaFetch's own records say of these dramas (`lib/favorites.progressStatus`: **on disk**,
- * **partly**): one read of the stored progress, no request. A read the storage refuses shows none.
- * @param {readonly string[]} seriesIds
- * @returns {Promise<void>}
- */
-async function showFavoriteStatuses(seriesIds) {
-  if (seriesIds.length === 0) return;
-  let states;
-  try {
-    states = await readSeriesStates(seriesIds);
-  } catch {
-    return;
-  }
-  for (const seriesId of seriesIds) {
-    const shown = favoriteRows.get(seriesId);
-    if (shown === undefined) continue;
-    const status = progressStatus(states.get(seriesId), seriesId, shown.item.episodes);
-    if (status === "on-disk") {
-      shown.status.replaceChildren(el("span", { className: "badge ondisk", text: t("badgeOnDisk"), title: t("favoritesOnDiskTitle"), attrs: { "data-status": status } }));
-    } else if (status === "partly") {
-      shown.status.replaceChildren(el("span", { className: "badge partly", text: t("favoritesPartly"), title: t("favoritesPartlyTitle"), attrs: { "data-status": status } }));
-    } else {
-      shown.status.replaceChildren();
-    }
-  }
-}
-
-/** The panel's count line: what is listed, while it loads and once it is done. */
+/** The count line: what is listed, while it loads and once it is done (the dramas DramaFetch removed left out). */
 function renderFavoritesCount() {
   const shown = app.favorites;
   if (shown === null) return;
-  const listed = favoriteRows.size;
+  const listed = keptCount();
   let text;
   if (shown.loading) text = shown.total !== null ? t("favoritesLoading", [listed, shown.total]) : t("favoritesLoadingCount", [listed]);
   else if (shown.complete || shown.total === null || listed >= shown.total) text = t("favoritesListed", [listed]);
@@ -1849,45 +2695,192 @@ function renderFavoritesCount() {
   $("favorites-count").textContent = text;
 }
 
-/** The filter box: only the dramas whose title holds its text are shown (letter case aside). */
-function applyFavoritesFilter() {
-  const filter = input("favorites-filter").value;
-  for (const { item, row } of favoriteRows.values()) row.hidden = !titleMatches(item.title, filter);
-  input("favorites-select-all").checked = false;
-  updateFavoritesSelection();
+/**
+ * The connection line — `Read from your TikTok tab (@handle) · 2 min ago · TikTok counts 946
+ * dramas` (the count of the last read; not confirmed after a removal made with no TikTok tab to
+ * read it from) —, the line saying the library holds another number than TikTok counts, and
+ * **Update from TikTok** (disabled, with the hint to open the profile — the library's own, named,
+ * when it knows it —, while no TikTok tab of it shows the favorites list: {@link findFavoritesTab}).
+ */
+function renderConnection() {
+  const shown = app.favorites;
+  const source = library.source;
+  $("library-dot").className = source !== null ? "dot connected" : "dot";
+  const hint = $("library-refresh-hint");
+  hint.hidden = source !== null;
+  hint.textContent = library.profile !== null ? t("libraryRefreshHintProfile", [library.profile]) : t("libraryRefreshHint");
+  if (shown === null) return;
+  library.drawnAt = now();
+  $("library-source").textContent = library.profile !== null ? t("libraryReadFromProfile", [library.profile]) : t("libraryReadFrom");
+  const age = ageOf(now(), Math.max(shown.listedAt, library.countedAt ?? 0));
+  $("library-age").textContent =
+    age.unit === "now"
+      ? t("libraryAgeNow")
+      : age.unit === "minutes"
+        ? t("libraryAgeMinutes", [age.count])
+        : age.unit === "hours"
+          ? t("libraryAgeHours", [age.count])
+          : t("libraryAgeDays", [age.count]);
+  $("library-total").textContent =
+    shown.total === null ? t("libraryTotalUnknown") : library.unconfirmed ? t("libraryTotalUnconfirmed", [shown.total]) : t("libraryTotal", [shown.total]);
+  const kept = keptCount();
+  const stale = $("library-stale");
+  stale.hidden = shown.loading || shown.total === null || kept === shown.total;
+  stale.textContent = stale.hidden ? "" : t("libraryStale", [kept]);
 }
 
-/** **Select all shown**: ticks (or unticks) every row the filter shows, and only those. */
+/**
+ * The TikTok tab **Update from TikTok** reads the library from: a tab on a profile page (`/@…`)
+ * whose favorites address the worker kept, the one whose list it saw last, with the `@handle` whose
+ * list that address reads (recorded with it: {@link FavoritesAddress}). When the library knows its
+ * profile, only an address of that profile: another account's list is never this library's source —
+ * null while none is open, so the button is disabled and its hint names the profile
+ * ({@link renderConnection}). Null when none is open. Reads the tabs' addresses and the session
+ * storage only: no request.
+ * @returns {Promise<{tabId: number, url: string, profile: string | null} | null>}
+ */
+async function findFavoritesTab() {
+  /** @type {chrome.tabs.Tab[]} */
+  let tabs;
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch {
+    return null;
+  }
+  /** @type {{tabId: number, url: string, profile: string | null, at: number} | null} */
+  let best = null;
+  for (const tab of tabs) {
+    const page = tab.url || tab.pendingUrl || "";
+    if (tab.id === undefined || !isProfilePageUrl(page, baseUrl())) continue;
+    const template = await readFavoritesTemplate(tab.id).catch(() => null);
+    if (template === null) continue;
+    // whose list that address reads — recorded with it, never the page the tab shows now —: another account's is never this library's
+    if (library.profile !== null && template.profile !== library.profile) continue;
+    if (best === null || template.at > best.at) best = { tabId: tab.id, url: template.url, profile: template.profile, at: template.at };
+  }
+  return best === null ? null : { tabId: best.tabId, url: best.url, profile: best.profile };
+}
+
+/** Look again for a TikTok tab with the favorites list — of the library's own profile when it knows it (**Update from TikTok**'s source). */
+async function updateLibrarySource() {
+  library.lookedAt = now();
+  library.source = await findFavoritesTab();
+  renderConnection();
+  updateButtons();
+}
+
+/** **Update from TikTok**: the smart refresh of the library from the TikTok tab that shows the list (the popup's hand-over). */
+async function onLibraryRefresh() {
+  await updateLibrarySource();
+  const source = library.source;
+  if (source === null) return;
+  favoritesFromOutside({ tabId: source.tabId, card: null, menu: false, script: true });
+}
+
+/** The search box: only the dramas whose title holds its text are shown (letter case aside). */
+function applyFavoritesFilter() {
+  library.shown = LIBRARY_PIECE;
+  input("favorites-select-all").checked = false;
+  renderLibrary();
+}
+
+/**
+ * A status filter (a chip): only the dramas of that status, `all` with the removed ones.
+ * @param {LibraryFilter} filter
+ */
+function setLibraryFilter(filter) {
+  library.filter = filter;
+  applyFavoritesFilter();
+}
+
+/** **Select all shown**: ticks (or unticks) every card the grid shows, and only those. */
 function onFavoritesSelectShown() {
   const checked = input("favorites-select-all").checked;
-  for (const { item, row, box } of favoriteRows.values()) {
-    if (row.hidden) continue;
+  for (const [seriesId, { box }] of libraryCards) {
+    if (box === null) continue;
     box.checked = checked;
-    if (checked) favoritesSelected.add(item.seriesId);
-    else favoritesSelected.delete(item.seriesId);
+    if (checked) favoritesSelected.add(seriesId);
+    else favoritesSelected.delete(seriesId);
   }
   updateFavoritesSelection();
 }
 
-/** The selection line and **Add selected to the box**, which needs a tick. */
+/**
+ * The ticked dramas the library holds, still in the Bookmark, in the order the library shows them
+ * (its sort; the list's own by default).
+ * @returns {FavoriteItem[]}
+ */
+function selectedItems() {
+  const entries = libraryEntries().filter((entry) => !entry.removed && favoritesSelected.has(entry.item.seriesId));
+  return sortedItems(entries, librarySort()).map((entry) => entry.item);
+}
+
+/** The selection bar: `K selected · E episodes`, and the buttons that need a tick. */
 function updateFavoritesSelection() {
-  const rows = [...favoriteRows.values()];
-  const ticked = rows.filter(({ box }) => box.checked).length;
-  $("favorites-selection").textContent = t("favoritesSelection", [ticked, rows.filter(({ row }) => !row.hidden).length]);
-  button("favorites-add-button").disabled = ticked === 0;
+  const items = selectedItems();
+  const episodes = selectionEpisodes(items, new Set(items.map((item) => item.seriesId)));
+  $("favorites-selection").textContent = t("librarySelection", [items.length, episodes]);
+  button("favorites-add-button").disabled = items.length === 0;
+  button("library-clear").disabled = items.length === 0;
+  updateButtons();
+}
+
+/** **Clear selection**: no drama ticked. */
+function onLibraryClear() {
+  favoritesSelected.clear();
+  input("favorites-select-all").checked = false;
+  renderLibrary();
 }
 
 /**
  * **Add selected to the box**: every ticked drama the box does not name yet joins it — a `#
  * <title>` comment line above its series id — and the page says how many, and that **Download
- * all** downloads them. Nothing is downloaded from the panel itself, nothing asked of TikTok.
+ * all** downloads them. Nothing is downloaded from the library itself, nothing asked of TikTok.
  */
 function onFavoritesAdd() {
-  const items = [...favoriteRows.values()].filter(({ box }) => box.checked).map(({ item }) => item);
+  const items = selectedItems();
   if (items.length === 0) return;
   const added = joinBox(items);
   if (added > 0) setStatus($("favorites-status"), t("favoritesAdded", [added]), "ok");
   else setStatus($("favorites-status"), t("favoritesNoneAdded"));
+}
+
+/**
+ * **Download selected**: ONE `batch` job over exactly the ticked dramas' series ids, in the order
+ * the library shows them — what **Download all** does with those ids in the box (the same refs,
+ * label, `includeLocked` false, `recheck` false), through `enqueue`, so the job gate, the cooldown
+ * and a refused write behave as for **Download all**. The box is not touched; the ticks are
+ * cleared and the cards say **Queued**. Nothing for an empty selection.
+ */
+function onLibraryDownload() {
+  const items = selectedItems();
+  if (items.length === 0 || !app.owner) return;
+  if (app.unsaved !== null) {
+    void showStorageRefused(); // as Download all: nothing queued
+    return;
+  }
+  const parsed = parseSeriesList(items.map((item) => item.seriesId).join("\n"));
+  if (parsed.refs.length === 0) return;
+  const label = parsed.refs.length === 1 ? t("jobSeries", /** @type {SeriesRef} */ (parsed.refs[0]).seriesId) : t("jobBatch", [parsed.refs.length]);
+  enqueue({ kind: "batch", label, refs: parsed.refs, series: null, numbers: [], includeLocked: false, recheck: false });
+  favoritesSelected.clear();
+  input("favorites-select-all").checked = false;
+  setStatus($("favorites-status"), t("libraryQueuedJob", [parsed.refs.length]), "ok");
+  renderLibrary();
+}
+
+/**
+ * **Open on TikTok**: the drama's first episode in a normal tab of this Chrome, in front — nothing
+ * else (the user removes it from the Bookmark there by hand, or watches it).
+ * @param {string} seriesId
+ * @returns {Promise<void>}
+ */
+async function openOnTikTok(seriesId) {
+  try {
+    await chrome.tabs.create({ url: seriesPageUrl(seriesId, 1, baseUrl()), active: true });
+  } catch {
+    // no tab could be opened: nothing else happens
+  }
 }
 
 /**
@@ -1901,6 +2894,371 @@ function joinBox(items) {
   const { text, added } = boxWithFavorites(box.value, items);
   box.value = text;
   return added.length;
+}
+
+/** The library section in view (the popup's **Open my library**, a card's shared title). */
+function showLibrarySection() {
+  const section = $("library");
+  if (typeof section.scrollIntoView === "function") section.scrollIntoView({ block: "start" });
+}
+
+/**
+ * A thumbnail of the library arrived: into its card (in place of the placeholder), when the grid
+ * still shows that drama.
+ * @param {string} seriesId
+ * @param {string} url
+ */
+function showLibraryCover(seriesId, url) {
+  const card = libraryCards.get(seriesId);
+  if (card === undefined || card.cover.querySelector("img") !== null) return;
+  const placeholder = card.cover.querySelector(".drama-placeholder");
+  const image = el("img", { className: "drama-img", attrs: { src: url, alt: "" } });
+  if (placeholder !== null) placeholder.replaceWith(image);
+  else card.cover.prepend(image);
+}
+
+/**
+ * The page's one lane for thumbnail requests: the episode list's ({@link covers}) and the
+ * library's ({@link libraryCovers}) share it, so that the page never has two in flight at once —
+ * a job's end resumes both loaders together.
+ */
+const coverLane = new CoverLane();
+
+/**
+ * The library's covers: the extension's own requests, as the episode list's thumbnails — only the
+ * cards in view, one at a time (in the page's one lane, {@link coverLane}), a pause before each,
+ * never during a job or a cooldown, nor after a refused write ({@link coversAllowed}), and never
+ * one whose signed address has expired ({@link liveCover}, asked again right before the request: a
+ * fresh address a later listing brings for that drama still loads); kept by series id for the
+ * page's life.
+ */
+const libraryCovers = new CoverLoader({
+  hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
+  allowed: coversAllowed,
+  pause: () => sleepSeconds(pagePause(defaultRng, app.testMode ? (app.testSettings.pageDelayS ?? PAGE_DELAY_S) : PAGE_DELAY_S)),
+  onCover: showLibraryCover,
+  baseUrl,
+  lane: coverLane,
+  usable: (url) => liveCover(url) !== null, // asked right before each request: the page may outlive a signature
+});
+
+// --------------------------------------------------------- Remove from Favorites (Quitar de Bookmark)
+
+/** @type {FavoriteItem | null} the drama the confirmation is about, while it is open */
+let pendingRemoval = null;
+
+/**
+ * Whether the removal of `seriesId` is running or waiting: a second one queues nothing.
+ * @param {string} seriesId
+ * @returns {boolean}
+ */
+function removalPending(seriesId) {
+  /** @param {Job} job */
+  const removesIt = (job) => job.kind === "unbookmark" && job.bookmark?.seriesId === seriesId;
+  return (app.running !== null && removesIt(app.running)) || app.queue.some(removesIt);
+}
+
+/**
+ * **Remove from Favorites** on an on-disk card: the confirmation, with what DramaFetch's records say
+ * of the drama — `S of N episodes on disk`, that DramaFetch downloaded and checked each one (only
+ * when every saved episode is its own download), when it was found complete, and the cover line
+ * ONLY when every saved episode's stored message says its cover was embedded
+ * (`lib/library.removalFacts`) — and what will happen. One read of the stored progress, no request.
+ * @param {FavoriteItem} item
+ * @returns {Promise<void>}
+ */
+async function openRemoval(item) {
+  if (!app.owner) return;
+  let raw;
+  try {
+    raw = await readSeriesState(item.seriesId);
+  } catch {
+    raw = undefined;
+  }
+  const facts = removalFacts(raw, item.seriesId, item.episodes);
+  const title = item.title ?? item.seriesId;
+  $("bookmark-dialog-name").textContent = title;
+  $("bookmark-dialog-meta").textContent = favoriteMeta(item);
+  const loaded = libraryCovers.urlOf(item.seriesId);
+  $("bookmark-dialog-cover").replaceChildren(loaded !== null ? el("img", { className: "drama-img", attrs: { src: loaded, alt: "" } }) : el("span", { className: "drama-placeholder" }));
+  /** @type {HTMLElement[]} */
+  const lines = [];
+  /** @param {string} fact @param {string} text */
+  const line = (fact, text) => lines.push(el("li", { text, attrs: { "data-fact": fact } }));
+  line("saved", facts.total === null ? t("bookmarkFactSavedCount", [facts.saved]) : t("bookmarkFactSaved", [facts.saved, facts.total]));
+  if (facts.verified) line("verified", t("bookmarkFactVerified"));
+  if (facts.completeAt !== null) line("complete", t("bookmarkFactComplete", [new Date(facts.completeAt * 1000).toLocaleDateString()]));
+  if (facts.coverEmbedded) line("cover", t("bookmarkFactCover"));
+  $("bookmark-dialog-facts").replaceChildren(...lines);
+  pendingRemoval = item;
+  const dialog = /** @type {HTMLDialogElement} */ ($("bookmark-dialog"));
+  if (!dialog.open) dialog.showModal();
+}
+
+/** **Cancel** (or Esc): nothing queued. */
+function closeRemoval() {
+  pendingRemoval = null;
+  const dialog = /** @type {HTMLDialogElement} */ ($("bookmark-dialog"));
+  if (dialog.open) dialog.close();
+}
+
+/** **Remove from Favorites** in the confirmation: the removal job queued — once per drama. */
+function onConfirmRemoval() {
+  const item = pendingRemoval;
+  closeRemoval();
+  if (item === null || !app.owner) return;
+  const title = item.title ?? item.seriesId;
+  if (removalPending(item.seriesId)) {
+    setStatus($("favorites-status"), t("bookmarkAlreadyQueued", [title]), "error");
+    return;
+  }
+  enqueue({
+    kind: "unbookmark",
+    label: t("jobUnbookmark", [title]),
+    refs: [{ kind: "series", seriesId: item.seriesId, episodeHint: null, sourceUrl: item.seriesId }],
+    series: null,
+    numbers: [],
+    includeLocked: false,
+    recheck: false,
+    bookmark: { seriesId: item.seriesId, title: item.title, episodes: item.episodes },
+  });
+}
+
+/**
+ * The page's words for why a removal removed nothing, by the error's kind.
+ * @type {Readonly<Record<import("./bookmark.js").BookmarkErrorKind, string>>}
+ */
+const BOOKMARK_TEXT_KEYS = Object.freeze({
+  "not-on-disk": "bookmarkNotOnDisk",
+  stale: "bookmarkStale",
+  "bookmark-missing": "bookmarkMissing",
+  "tab-gone": "bookmarkTabGone",
+  "not-confirmed": "bookmarkNotConfirmed",
+  "not-kept": "bookmarkNotKept",
+  unknown: "bookmarkUnknown",
+});
+
+/**
+ * A removal that removed nothing: the drama stays in the library as it was, the reason in the
+ * library's status line in the page's language and in the history in the engine's English. Returns
+ * the job's stop — TikTok refused (HTTP 429 or 403, a captcha: the cooldown is recorded), its login
+ * wall, a cooldown met before a step, and TikTok not confirming or not keeping the change (no
+ * second click on anything after TikTok ignored one: the jobs waiting behind end without a
+ * request) —, or null (nothing was pressed: the records, an episode count older than 24 h, no
+ * button, the tab closed).
+ * @param {unknown} error
+ * @param {string} title
+ * @param {Record<string, unknown>} record the history entry's `bookmark`
+ * @param {Record<string, unknown>} entry
+ * @returns {string | null}
+ */
+function bookmarkFailed(error, title, record, entry) {
+  if (error instanceof BookmarkError) {
+    record["outcome"] = error.message;
+    entry["error"] = error.message;
+    setStatus($("favorites-status"), t(BOOKMARK_TEXT_KEYS[error.kind], [title]), "error");
+    return error.kind === "not-confirmed" || error.kind === "not-kept" ? error.message : null;
+  }
+  const stored = error instanceof BookmarkCooldown || error instanceof DiscoveryError ? error.message : oneLine(error);
+  record["outcome"] = stored;
+  entry["error"] = stored;
+  setStatus($("favorites-status"), shownText(stored), "error");
+  return stored;
+}
+
+/**
+ * **Remove from Favorites** — the `unbookmark` job (`bookmark.removeFromBookmark`): the gate first —
+ * DramaFetch's records say every episode is on disk (else nothing is asked of TikTok) against an
+ * episode count read from TikTok less than 24 h ago (the library's whole list, or a run that found
+ * the series complete: else `stale`, nothing asked either), the cooldown, the rest between jobs, the
+ * cooldown again, a write that can be stored (asked again after the job's contact is noted) — then TikTok's own Bookmark
+ * pressed once in a background tab and checked after a reload. Removed: the library marks the drama
+ * removed at once — its card says so, the filters' counts follow — and is kept; then TikTok's count
+ * ({@link countAfterRemoval}). The page showing the button off before anything was pressed
+ * (`already`) changes nothing — no proof that TikTok's list lost the drama (a page may draw the
+ * button before it knows): the status line says so and points to Update from TikTok, which reads
+ * what TikTok lists. Every error leaves the drama as it was too.
+ * The history entry carries `bookmark`: the drama's id and title and the outcome (`removed`,
+ * `already`, or the reason in the engine's English) — never a URL. **Stop** after the click leaves
+ * the outcome unknown, and the history says to check on TikTok. Returns the job's stop, or null.
+ * (Exported for the unit tests, which cannot run a job.)
+ * @param {Job} job
+ * @param {Engine} engine
+ * @param {Record<string, unknown>} entry
+ * @returns {Promise<string | null>}
+ */
+export async function runUnbookmark(job, engine, entry) {
+  const target = /** @type {NonNullable<Job["bookmark"]>} */ (job.bookmark);
+  const title = target.title ?? target.seriesId;
+  /** @type {Record<string, unknown>} */
+  const record = { series_id: target.seriesId, title: target.title, outcome: null };
+  entry["bookmark"] = record;
+  let raw;
+  try {
+    raw = await readSeriesState(target.seriesId);
+  } catch {
+    raw = undefined;
+  }
+  if (progressStatus(raw, target.seriesId, target.episodes) !== "on-disk") return bookmarkFailed(new BookmarkError("not-on-disk"), title, record, entry);
+  // that on disk compared the records with an episode count TikTok gave less than 24 h ago: the
+  // library's whole list read since, or a run that found the series complete since — a series
+  // that gained episodes changes neither TikTok's count nor its first page
+  const completeAt = removalFacts(raw, target.seriesId, target.episodes).completeAt;
+  if (!countsFresh(library.fullReadAt, now()) && !countsFresh(completeAt, now())) return bookmarkFailed(new BookmarkError("stale"), title, record, entry);
+  setStatus($("favorites-status"), t("bookmarkWorking", [title]));
+  for (const rest of [false, true]) {
+    const refused = await checkCooldown(engine);
+    if (refused !== null) return bookmarkFailed(new BookmarkCooldown(cooldownMessage(refused, { now: now() })), title, record, entry);
+    if (!rest) await restBetweenJobs(engine, { lastContactAt: app.lastContactAt, batchJob: false });
+  }
+  await storePacing(); // can anything be stored? asked before the first request, as the engine does
+  if (app.unsaved !== null) {
+    entry["error"] = app.unsaved;
+    return app.unsaved;
+  }
+  const test = app.testMode ? app.testSettings : {};
+  let pressed = false;
+  /** @type {import("./bookmark.js").BookmarkOptions} */
+  const options = { baseUrl: baseUrl(), onPressed: () => void (pressed = true) };
+  if (app.windowId !== undefined) options.windowId = app.windowId;
+  if (app.tabId !== undefined) options.appTabId = app.tabId;
+  if (test.discoveryTimeoutS !== undefined) options.timeoutS = test.discoveryTimeoutS;
+  if (test.bookmarkWaitS !== undefined) options.waitS = test.bookmarkWaitS;
+  if (test.bookmarkPollS !== undefined) options.pollS = test.bookmarkPollS;
+  if (test.pageDelayS !== undefined) options.pageDelayS = test.pageDelayS;
+  await noteContact(job);
+  if (app.unsaved !== null) {
+    entry["error"] = app.unsaved; // that save refused: not one request
+    return app.unsaved;
+  }
+  let outcome;
+  /** @type {string | undefined} TikTok refused the drama page's own episode list after the click */
+  let refused;
+  try {
+    ({ outcome, refused } = await removeFromBookmark(engine, target.seriesId, options));
+  } catch (error) {
+    if (error instanceof StopRequested) {
+      if (pressed) {
+        record["outcome"] = BOOKMARK_MESSAGES.unknown; // pressed, never checked: the history says to look
+        setStatus($("favorites-status"), t("bookmarkUnknown", [title]), "error");
+      }
+      throw error;
+    }
+    return bookmarkFailed(error, title, record, entry);
+  } finally {
+    await noteContact(job);
+  }
+  record["outcome"] = outcome;
+  if (outcome === "already") {
+    // shown off before anything was pressed: nothing done here, and no proof TikTok's list lost it —
+    // the library and the count stay as they were; Update from TikTok reads what TikTok lists
+    setStatus($("favorites-status"), t("bookmarkAlready", [title]));
+    return null;
+  }
+  library.removed.set(target.seriesId, now()); // the card says so at once, the counts follow
+  await saveLibrary();
+  renderLibrary();
+  return countAfterRemovalStep(job, engine, target.seriesId, title, record, entry, refused ?? null);
+}
+
+/**
+ * After a removal: TikTok's count. With a TikTok tab whose favorites
+ * address the worker kept — a tab of the library's own profile, when the library knows it: another
+ * account's list never counts for this one —, ONE request — that tab's first page, its address
+ * replayed byte for byte (`bookmark.countAfterRemoval`: the pause, the cooldown, a refusal a stop
+ * with the cooldown) —: the count becomes TikTok's new total; the drama still on that page means
+ * TikTok did not keep the change after all (`not-kept`: its card back to on disk). Without such a
+ * tab — or when that request brought no count: refused, a cooldown met, a write this page could not
+ * store, **Stop** before it went out — the count is the last one minus one, shown as not confirmed;
+ * `refused` (TikTok answered the drama page's own episode list 429 after the click, the cooldown
+ * recorded) asks nothing more and is the job's stop.
+ * @param {Job} job
+ * @param {Engine} engine
+ * @param {string} seriesId
+ * @param {string} title
+ * @param {Record<string, unknown>} record the history entry's `bookmark`
+ * @param {Record<string, unknown>} entry
+ * @param {string | null} refused
+ * @returns {Promise<string | null>} the job's stop, or null
+ */
+async function countAfterRemovalStep(job, engine, seriesId, title, record, entry, refused) {
+  const done = t("bookmarkRemoved", [title]);
+  /** @param {string} [why] the reason the count could not be read, when it is the job's stop */
+  const unconfirmed = async (why) => {
+    const shown = app.favorites;
+    if (shown !== null && shown.total !== null) shown.total = Math.max(0, shown.total - 1);
+    library.unconfirmed = true;
+    await saveLibrary();
+    renderLibrary();
+    setStatus($("favorites-status"), why === undefined ? `${done} ${t("bookmarkCountUnconfirmed")}` : `${done} ${shownText(why)}`, why === undefined ? "ok" : "error");
+  };
+  if (refused !== null) {
+    // TikTok refused the drama page's own list meanwhile (the cooldown recorded): no request now — a stop
+    entry["error"] = refused;
+    await unconfirmed(refused);
+    return refused;
+  }
+  await updateLibrarySource();
+  const source = library.source;
+  // the count of THIS library's profile only: another account's list (or none) counts nothing here
+  if (source === null || (library.profile !== null && source.profile !== library.profile)) {
+    await unconfirmed();
+    return null;
+  }
+  const test = app.testMode ? app.testSettings : {};
+  /** @type {Omit<import("./favorites.js").FavoritesOptions, "maxPages" | "until" | "onPage">} */
+  const options = {};
+  if (test.pageDelayS !== undefined) options.pageDelayS = test.pageDelayS;
+  if (test.discoveryTimeoutS !== undefined) options.timeoutS = test.discoveryTimeoutS;
+  await noteContact(job);
+  if (app.unsaved !== null) {
+    // a write this page could not store (during the removal, or just now): not one request more
+    entry["error"] = app.unsaved;
+    await unconfirmed(app.unsaved);
+    return app.unsaved;
+  }
+  let counted;
+  try {
+    counted = await countAfterRemoval(engine, source.tabId, source.url, seriesId, options);
+  } catch (error) {
+    if (error instanceof StopRequested) {
+      await unconfirmed(); // stopped before its one request went out: the last count minus one, not confirmed
+      throw error;
+    }
+    // the removal stands (the reloaded page showed it); TikTok's count could not be read
+    if (error instanceof FavoritesError && error.kind !== "cooldown") {
+      await unconfirmed();
+      return null;
+    }
+    const stored = error instanceof FavoritesError ? error.detail : error instanceof DiscoveryError ? error.message : oneLine(error);
+    entry["error"] = stored;
+    await unconfirmed(stored);
+    return stored; // TikTok refused (the cooldown recorded), its login wall, a cooldown: a stop
+  } finally {
+    await noteContact(job);
+  }
+  const shown = app.favorites;
+  if (counted.stillListed) {
+    // TikTok still lists it first thing: it did not keep the change after all
+    library.removed.delete(seriesId);
+    if (shown !== null && counted.total !== null) shown.total = counted.total;
+    library.countedAt = now();
+    library.unconfirmed = false;
+    await saveLibrary();
+    renderLibrary();
+    return bookmarkFailed(new BookmarkError("not-kept"), title, record, entry);
+  }
+  if (counted.total === null) {
+    await unconfirmed();
+    return null;
+  }
+  if (shown !== null) shown.total = counted.total;
+  library.countedAt = now();
+  library.unconfirmed = false;
+  await saveLibrary();
+  renderLibrary();
+  setStatus($("favorites-status"), `${done} ${t("libraryTotal", [counted.total])}.`, "ok");
+  return null;
 }
 
 // ------------------------------------------------------------------ the loaded series
@@ -1996,8 +3354,9 @@ export async function coversAllowed() {
 }
 
 /**
- * The list's thumbnails: the extension's own requests, only for the rows in view, one at a time,
- * never during a job or a cooldown, nor after a refused write ({@link coversAllowed}).
+ * The list's thumbnails: the extension's own requests, only for the rows in view, one at a time
+ * (in the page's one lane with the library's, {@link coverLane}), never during a job or a
+ * cooldown, nor after a refused write ({@link coversAllowed}).
  */
 const covers = new CoverLoader({
   hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
@@ -2005,7 +3364,17 @@ const covers = new CoverLoader({
   pause: () => sleepSeconds(pagePause(defaultRng, app.testMode ? (app.testSettings.pageDelayS ?? PAGE_DELAY_S) : PAGE_DELAY_S)),
   onCover: showCover,
   baseUrl,
+  lane: coverLane,
 });
+
+/**
+ * The page's two thumbnail loaders — the episode list's and the library's —, which share one lane.
+ * (Exported for the unit tests.)
+ * @returns {{list: CoverLoader, library: CoverLoader}}
+ */
+export function coverLoaders() {
+  return { list: covers, library: libraryCovers };
+}
 
 /** @returns {HTMLInputElement[]} */
 function episodeBoxes() {
@@ -2037,6 +3406,11 @@ function updateButtons() {
   retry.disabled = blocked || app.failed === null || spentRetries.has(retry);
   for (const historyButton of historyRetryButtons) historyButton.disabled = blocked || spentRetries.has(historyButton);
   button("report-button").disabled = app.lastReport === null; // a save, no request: the cooldown does not matter
+  // the library: Download selected and Update from TikTok queue jobs; Remove from Favorites and See
+  // episodes too — the same rule (Open on TikTok is a normal tab: never disabled)
+  button("library-download").disabled = blocked || selectedItems().length === 0;
+  button("library-refresh").disabled = blocked || library.source === null;
+  for (const card of libraryCards.values()) for (const action of card.actions) action.disabled = blocked;
 }
 
 /**
@@ -2110,14 +3484,16 @@ function cardPending(tabId, card) {
 }
 
 /**
- * The favorites of a TikTok tab handed over (the popup's **Choose from your favorites**, the
- * right-click **Download this favorite drama** on a profile page), taken by the engine's tab only,
+ * The favorites of a TikTok tab handed over (the popup's **Open my library** on that profile —
+ * 1.5.0's **Choose from your favorites** —, **Update from TikTok**, the right-click **Download this
+ * favorite drama** on a profile page), taken by the engine's tab only,
  * like a series ({@link loadFromOutside}): a right-click on a card lists that card's drama — one
  * **Load list** job that resolves the card first —; a right-click that names no card queues
  * nothing at all (no job, no request) and says why — the tab's content script answered that the
  * right-click was on no drama (`favoritesNoCard`), or no content script answered, the tab being
- * older than DramaFetch's load or update (`favoritesNoScript`) —; the popup's hand-over lists the
- * tab's favorites in the panel (**List favorites**). The tab still answers, so the worker brings it
+ * older than DramaFetch's load or update (`favoritesNoScript`) —; the popup's hand-over (**Open my
+ * library**, **Update from TikTok**) brings the library into view and updates it from the tab's
+ * favorites (**List favorites**: the smart refresh). The tab still answers, so the worker brings it
  * to the front to say it. Nothing is queued twice.
  * @param {FavoritesHandover} handover
  * @returns {boolean} whether this tab took it (the engine's tab)
@@ -2137,6 +3513,7 @@ function favoritesFromOutside(handover) {
     else setStatus(status, t("favoritesNoScript"), "error");
     return true;
   }
+  showLibrarySection(); // the popup's Open my library: the library in view, updated by the job
   if (favoritesPending(tabId)) {
     setStatus(status, t("favoritesAlreadyQueued"), "error");
     return true;
@@ -2222,7 +3599,10 @@ async function refreshCooldown() {
   }
   tickCooldown();
   updateButtons();
-  if (app.cooldown === null && app.running === null) covers.resume(); // the cooldown is over
+  if (app.cooldown === null && app.running === null) {
+    covers.resume(); // the cooldown is over
+    libraryCovers.resume();
+  }
 }
 
 /** @returns {Promise<import("../lib/cooldown.js").Cooldown | null>} */
@@ -2343,6 +3723,14 @@ async function renderHistory() {
       else if (typeof record["episodes"] === "number") line = t("loaded", [record["episodes"]]); // a listing
       else line = "";
       item.append(el("div", { text: `${String(record["name"] ?? record["series_id"] ?? "")}: ${line}` }));
+    }
+    // a removal from the Bookmark: what came of it (never a URL)
+    const bookmark = entry["bookmark"];
+    if (entry["kind"] === "unbookmark" && bookmark !== null && typeof bookmark === "object") {
+      const outcome = /** @type {Record<string, unknown>} */ (bookmark)["outcome"];
+      if (outcome === "removed") item.append(el("div", { text: t("historyBookmarkRemoved") }));
+      else if (outcome === "already") item.append(el("div", { text: t("historyBookmarkAlready") }));
+      else if (typeof outcome === "string" && outcome !== entry["error"]) item.append(el("div", { className: "meta", text: shownText(outcome) }));
     }
     // a run too large for its share of the history kept only some of its series (storage.js)
     // a favorites listing: how many dramas it listed
@@ -2479,15 +3867,40 @@ async function main() {
     for (const box of episodeBoxes()) box.checked = input("select-all").checked;
     updateSelection();
   });
+  // the library
   input("favorites-filter").addEventListener("input", applyFavoritesFilter);
   input("favorites-select-all").addEventListener("change", onFavoritesSelectShown);
   button("favorites-add-button").addEventListener("click", onFavoritesAdd);
-  updateFavoritesSelection();
+  for (const filter of /** @type {LibraryFilter[]} */ (["all", "none", "partly", "on-disk"])) {
+    button(`library-chip-${filter}`).addEventListener("click", () => setLibraryFilter(filter));
+  }
+  select("library-sort").addEventListener("change", applyFavoritesFilter);
+  button("library-more").addEventListener("click", () => {
+    library.shown += LIBRARY_PIECE;
+    renderLibrary();
+  });
+  button("library-clear").addEventListener("click", onLibraryClear);
+  button("library-download").addEventListener("click", onLibraryDownload);
+  button("library-refresh").addEventListener("click", () => void onLibraryRefresh());
+  button("bookmark-cancel").addEventListener("click", closeRemoval);
+  button("bookmark-confirm").addEventListener("click", onConfirmRemoval);
+  $("bookmark-dialog").addEventListener("cancel", () => {
+    pendingRemoval = null; // Esc: nothing queued
+  });
+  // the section links of the header: History and Settings open when one goes there
+  for (const link of document.querySelectorAll("nav.sections a[href^='#']")) {
+    link.addEventListener("click", () => {
+      const target = document.getElementById((link.getAttribute("href") ?? "").slice(1));
+      if (target instanceof HTMLDetailsElement) target.open = true;
+    });
+  }
   $("settings-form").addEventListener("submit", (event) => void onSaveSettings(/** @type {SubmitEvent} */ (event)));
   button("settings-reset").addEventListener("click", () => void onResetSettings());
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && Object.hasOwn(changes, COOLDOWN_STORAGE_KEY)) void refreshCooldown();
+    // a TikTok tab showed its favorites list (or closed): Update from TikTok follows
+    if (area === "session" && Object.keys(changes).some((key) => key.startsWith(FAVORITES_TEMPLATE_PREFIX))) void updateLibrarySource();
   });
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isOwnSender(sender)) return; // only this extension's own pages and worker: never a content script
@@ -2502,22 +3915,33 @@ async function main() {
       // the favorites of a TikTok tab (the popup, the right-click on a profile): the same hand-over
       const handover = record["type"] === "dramafetch:favorites" ? handoverOf(record) : null;
       if (handover !== null && favoritesFromOutside(handover)) sendResponse({ ok: true, tabId: app.tabId ?? null });
+      // the popup's Open my library away from a TikTok profile: the library shown, no job, no request
+      if (record["type"] === "dramafetch:library" && app.owner) {
+        showLibrarySection();
+        sendResponse({ ok: true, tabId: app.tabId ?? null });
+      }
     }
   });
   setInterval(() => {
     tickCooldown();
     if (app.pauseUntil !== null) renderPause();
+    if (now() - library.drawnAt >= 30) renderConnection(); // "2 min ago" moves on
+    if (now() - library.lookedAt >= 15) void updateLibrarySource(); // a TikTok profile tab opened or closed
   }, 1000);
 
   await refreshCooldown();
   await renderHistory();
+  await restoreLibrary(); // the library kept from an earlier session, shown at once: no request
+  await updateLibrarySource();
   renderAppStatus();
   const load = new URLSearchParams(location.search).get("load");
   const favorites = favoritesOfQuery(location.search); // a favorites hand-over no running page took
-  if (load || favorites !== null) {
+  const toLibrary = new URLSearchParams(location.search).get("library") === "1"; // the popup's Open my library no running page took
+  if (load || favorites !== null || toLibrary) {
     history.replaceState(null, "", location.pathname);
     if (load) loadFromOutside(load);
     if (favorites !== null) favoritesFromOutside(favorites);
+    if (toLibrary) showLibrarySection();
   }
 }
 

@@ -16,13 +16,21 @@
  * `chrome.storage.session` (in memory for the browser session, never on disk) holds, besides the
  * discovery tab's record and a cooldown the local storage refused, the favorites list's address per
  * TikTok tab ({@link rememberFavoritesTemplate}): the worker saw it, the popup and the DramaFetch
- * tab read it, and it is forgotten when the tab closes.
+ * tab read it, and it is forgotten when the tab closes — and the library's covers
+ * ({@link LIBRARY_COVERS_KEY}: signed URLs, by series id).
+ *
+ * The library (DramaFetch 1.6.0: the user's TikTok Bookmark as the DramaFetch tab shows it) is kept
+ * in `chrome.storage.local` as {@link LIBRARY_KEY} — a cache, best effort: the dramas' ids, titles,
+ * episodes and lengths, TikTok's count, when and from which profile the list was read and the
+ * dramas DramaFetch removed since (`lib/library.libraryRecord`); no cover URL, no address, nothing
+ * signed. A refused write of it never stops anything.
  *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
  */
 
 import { storageAreaStore } from "../lib/cooldown.js";
 import { isFavoritesFirstPageUrl } from "../lib/favorites.js";
+import { libraryOf, storedHandle } from "../lib/library.js";
 import { DEFAULT_NAME_FORMAT, QUALITY_MODES, THUMBNAIL_MODES } from "../lib/messages.js";
 import { nameFormatProblem } from "../lib/naming.js";
 import { PACES, PACING_DEFAULTS, PacingState, pacingOptions, pacingProblem } from "../lib/pacing.js";
@@ -33,6 +41,13 @@ export const TEST_SETTINGS_KEY = "testSettings";
 export const HISTORY_KEY = "history";
 export const PACING_KEY = "pacing";
 export const SERIES_KEY_PREFIX = "series:";
+/** The library kept across sessions (`lib/library.StoredLibrary`): nothing signed in it. */
+export const LIBRARY_KEY = "favoritesLibrary";
+/**
+ * The `chrome.storage.session` key of the library's covers: series id → the cover URL the last
+ * listing gave (signed: in the browser session's memory only, never on disk).
+ */
+export const LIBRARY_COVERS_KEY = "favoritesCovers";
 /** How many past runs the history keeps. */
 export const HISTORY_LIMIT = 20;
 /** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB. */
@@ -78,6 +93,10 @@ export const HISTORY_ENTRY_MAX_BYTES = Math.floor((HISTORY_MAX_BYTES - 2) / HIST
  *   first look at the downloads waits out; 0: never wait (tests that delete no file)
  * @property {number} [maxResultRows] how many rows the result table keeps while a job runs (2000
  *   outside test mode: `app.MAX_RESULT_ROWS`)
+ * @property {number} [bookmarkWaitS] how long **Remove from Favorites** waits for the Bookmark
+ *   button to turn off after its one click (15 s outside test mode: `bookmark.CHANGE_WAIT_S`)
+ * @property {number} [bookmarkPollS] how often the drama's page is looked at while it loads and
+ *   after the click (1 s outside test mode: `bookmark.POLL_S`)
  *
  * @typedef {object} StoredPacing The run's pacing as stored (wall-clock seconds).
  * @property {PacingState} pacing
@@ -116,6 +135,8 @@ const TEST_NUMBER_KEYS = /** @type {const} */ ([
   "existenceDelayMs",
   "existenceRateLimitS",
   "maxResultRows",
+  "bookmarkWaitS",
+  "bookmarkPollS",
 ]);
 
 /**
@@ -369,6 +390,11 @@ export const FAVORITES_TEMPLATE_PREFIX = "favoritesTemplate:";
  * @property {string} url carries TikTok's signature parameters: kept in the browser session's
  *   memory only — never in `chrome.storage.local`, a log, a report or the history
  * @property {number} at when it completed, seconds since the epoch
+ * @property {string | null} profile whose favorites that address reads: the `@handle` of the profile
+ *   page that asked for it — the tab's address as that first page completed
+ *   (`lib/library.profileHandleOf`); DramaFetch's own replay of the address kept, byte for byte,
+ *   keeps the handle kept with it, wherever the tab is by then —, null when the worker could not
+ *   tell (the tab on no profile page, or gone)
  */
 
 /**
@@ -382,20 +408,23 @@ export function favoritesTemplateKey(tabId) {
 
 /**
  * Keep a TikTok tab's latest first page of its favorites list (the background worker, as it
- * completes) in `chrome.storage.session`: in memory for the browser session, never written to disk.
+ * completes) in `chrome.storage.session`, with whose list it reads: in memory for the browser
+ * session, never written to disk.
  * @param {number} tabId
  * @param {string} url
  * @param {number} at seconds since the epoch
+ * @param {string | null} [profile] the `@handle` whose favorites `url` reads ({@link FavoritesTemplate})
  * @returns {Promise<void>}
  */
-export async function rememberFavoritesTemplate(tabId, url, at) {
-  await chrome.storage.session.set({ [favoritesTemplateKey(tabId)]: { url, at } });
+export async function rememberFavoritesTemplate(tabId, url, at, profile = null) {
+  await chrome.storage.session.set({ [favoritesTemplateKey(tabId)]: { url, at, profile } });
 }
 
 /**
- * A TikTok tab's favorites address, or null when the worker saw none in it — or when what is
- * stored is not the first page of a favorites list (`lib/favorites.isFavoritesFirstPageUrl`): the
- * list is only ever read from its first page, replayed as the page asked for it.
+ * A TikTok tab's favorites address, with whose list it reads (an `@handle`, else null), or null
+ * when the worker saw none in it — or when what is stored is not the first page of a favorites
+ * list (`lib/favorites.isFavoritesFirstPageUrl`): the list is only ever read from its first page,
+ * replayed as the page asked for it.
  * @param {number} tabId
  * @returns {Promise<FavoritesTemplate | null>}
  */
@@ -404,7 +433,7 @@ export async function readFavoritesTemplate(tabId) {
   const record = (await chrome.storage.session.get(key))[key];
   if (!isRecord(record) || typeof record["url"] !== "string" || typeof record["at"] !== "number") return null;
   if (!isFavoritesFirstPageUrl(record["url"])) return null;
-  return { url: record["url"], at: record["at"] };
+  return { url: record["url"], at: record["at"], profile: storedHandle(record["profile"]) };
 }
 
 /**
@@ -414,6 +443,61 @@ export async function readFavoritesTemplate(tabId) {
  */
 export async function forgetFavoritesTemplate(tabId) {
   await chrome.storage.session.remove(favoritesTemplateKey(tabId));
+}
+
+/**
+ * The library kept across sessions, checked (`lib/library.libraryOf`), or null when there is none
+ * — or none that can be read: a cache.
+ * @returns {Promise<import("../lib/library.js").StoredLibrary | null>}
+ */
+export async function readLibrary() {
+  try {
+    return libraryOf((await chrome.storage.local.get(LIBRARY_KEY))[LIBRARY_KEY]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Keep the library (`lib/library.libraryRecord`: nothing signed in it). Throws when
+ * `chrome.storage.local` refuses: the caller says so once and goes on — a cache, never a stop.
+ * @param {import("../lib/library.js").StoredLibrary} library
+ * @returns {Promise<void>}
+ */
+export async function writeLibrary(library) {
+  await chrome.storage.local.set({ [LIBRARY_KEY]: library });
+}
+
+/**
+ * The library's covers the last listing gave, by series id, from `chrome.storage.session` (signed
+ * URLs: the browser session's memory); an empty map when there are none or they cannot be read.
+ * @returns {Promise<Map<string, string>>}
+ */
+export async function readLibraryCovers() {
+  try {
+    const raw = (await chrome.storage.session.get(LIBRARY_COVERS_KEY))[LIBRARY_COVERS_KEY];
+    if (!isRecord(raw)) return new Map();
+    /** @type {Map<string, string>} */
+    const covers = new Map();
+    for (const [seriesId, url] of Object.entries(raw)) if (typeof url === "string" && /^https?:\/\//i.test(url)) covers.set(seriesId, url);
+    return covers;
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Keep the library's covers in `chrome.storage.session` (never on disk); a refusal is ignored —
+ * the page keeps them in its memory all the same.
+ * @param {ReadonlyMap<string, string>} covers series id → cover URL
+ * @returns {Promise<void>}
+ */
+export async function writeLibraryCovers(covers) {
+  try {
+    await chrome.storage.session.set({ [LIBRARY_COVERS_KEY]: Object.fromEntries(covers) });
+  } catch {
+    // the page's memory holds them for this page's life
+  }
 }
 
 /**
