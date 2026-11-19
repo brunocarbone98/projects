@@ -5295,6 +5295,145 @@ test("the page: the library's episode counts are trusted for 24 hours after its 
   }
 });
 
+test("the page: a removal's gate reads the drama as the library holds it when the job runs, never the count its confirmation showed — confirmed while a library read 25 h ago said On disk · 30/30, queued behind Update from TikTok, which reads 40 episodes: nothing asked (not on disk); the same update reading 30 still removes it —; a whole read that gave no episode count for the drama vouches for nothing (a run that found the series complete within 24 h does); a drama the library no longer holds, or marks removed, is asked nothing", async () => {
+  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
+  /** @param {string} seriesId @param {string} title @param {number} episodes */
+  const entryOf = (seriesId, title, episodes) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 79) });
+  /**
+   * TikTok's whole list in two pages: the five dramas, Paper Crowns with `paper` episodes, or left out
+   * @param {number | null} paper
+   */
+  const pagesWith = (paper) => {
+    const kept = FIVE.filter(([seriesId]) => paper !== null || seriesId !== PAPER);
+    const entries = kept.map(([seriesId, title, episodes]) => entryOf(seriesId, title, seriesId === PAPER && paper !== null ? paper : episodes));
+    const total = String(entries.length);
+    return {
+      "0": { ...FAVORITES_CAPTURE, total, cursor: "1794351568", hasMore: true, dramaList: entries.slice(0, 3) },
+      "1794351568": { ...FAVORITES_CAPTURE, total, cursor: "1794350100", hasMore: false, dramaList: entries.slice(3) },
+    };
+  };
+  const stale = Date.now() / 1000 - 25 * 3600;
+  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
+  const threeDaysAgo = Date.now() / 1000 - 3 * 86_400;
+  const NOT_ON_DISK = "“Paper Crowns” was not removed: DramaFetch's records do not show every episode of it on disk. Nothing was asked of TikTok.";
+  const STALE = "“Paper Crowns” was not removed: its episode count was read from TikTok more than 24 hours ago, and new episodes may have come since. Press Update from TikTok first, then remove it. Nothing was asked of TikTok.";
+  /**
+   * Update from TikTok — the whole list read (its first page could not tell) —, then the removal
+   * the user confirmed before it: `episodes` the count its dialog showed
+   * @param {Awaited<ReturnType<typeof fakePage>>} page
+   * @param {number | null} paper Paper Crowns' episodes in TikTok's list now, or null: not in it any more
+   * @param {number | null} episodes
+   */
+  const updateThenRemove = async (page, paper, episodes) => {
+    const tab = favoritesTab({ pages: pagesWith(paper) });
+    tab.remember(1_794_351_500);
+    const listing = favoritesJob("favorites", null);
+    assert.equal(await page.module.runFavorites(listing, favoritesEngine(page, listing).engine, {}), null);
+    assert.equal(tab.fetched.length, 2);
+    await settled(page);
+    const site = bookmarkChrome();
+    const { job, engine, pauses } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (episodes));
+    /** @type {Record<string, unknown>} */
+    const entry = {};
+    const stop = await page.module.runUnbookmark(job, engine, entry);
+    return { ...site, pauses, entry, stop };
+  };
+  // confirmed on the old count, run after an update that read 40: Partly · 30/40 — nothing asked of TikTok
+  let page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
+  try {
+    await settled(page);
+    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], "On disk · 30/30"); // what the dialog was shown
+    assert.notEqual(actionOf(page, PAPER, "remove"), undefined);
+    const { site, log, pauses, entry, stop } = await updateThenRemove(page, 40, 30);
+    assert.equal(stop, null); // nothing pressed: no stop
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.deepEqual(pauses, []);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES["not-on-disk"]);
+    assert.deepEqual(entry["bookmark"], { series_id: PAPER, title: "Paper Crowns", outcome: BOOKMARK_MESSAGES["not-on-disk"] });
+    assert.equal(page.element("favorites-status").textContent, NOT_ON_DISK);
+    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], "Partly · 30/40");
+    assert.deepEqual(/** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"))["removed"], []);
+  } finally {
+    page.restore();
+  }
+  // the same, the update reading 30 again: that count is TikTok's, read now — removed as usual
+  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
+  try {
+    await settled(page);
+    const { site, entry } = await updateThenRemove(page, 30, 30);
+    assert.equal(site.clicks, 1);
+    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
+    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "removed");
+  } finally {
+    page.restore();
+  }
+  // the update no longer lists it (removed on TikTok meanwhile): no card, nothing asked — even with a run that found it complete an hour ago
+  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: Date.now() / 1000 - 3600 }) } });
+  try {
+    await settled(page);
+    const { site, log, entry, stop } = await updateThenRemove(page, null, 30);
+    assert.equal(stop, null);
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
+    assert.equal(page.element("favorites-status").textContent, STALE);
+    assert.equal(cardOf(page, PAPER), undefined);
+  } finally {
+    page.restore();
+  }
+  // a drama the library marks removed (an earlier removal ran first): nothing asked
+  const removedAt = Date.now() / 1000 - 600;
+  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { removed: [{ seriesId: PAPER, at: removedAt }] }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: Date.now() / 1000 - 3600 }) } });
+  try {
+    await settled(page);
+    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "removed");
+    const { site, log } = bookmarkChrome();
+    const { job, engine } = removalJob(page, PAPER, "Paper Crowns", 30);
+    /** @type {Record<string, unknown>} */
+    const entry = {};
+    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
+  } finally {
+    page.restore();
+  }
+  // the whole list read two hours ago gave no episode count for the drama: it vouches for none —
+  // the records' complete mark of 3 days ago says On disk, and nothing is asked of TikTok
+  /** @type {[string, string, number | null][]} */
+  const countless = FIVE.map(([seriesId, title, episodes]) => [seriesId, title, seriesId === PAPER ? null : episodes]);
+  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(countless), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
+  try {
+    await settled(page);
+    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "on-disk");
+    const { site, log } = bookmarkChrome();
+    const { job, engine, pauses } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (/** @type {unknown} */ (null)));
+    /** @type {Record<string, unknown>} */
+    const entry = {};
+    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.deepEqual(pauses, []);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
+    assert.equal(page.element("favorites-status").textContent, STALE);
+  } finally {
+    page.restore();
+  }
+  // ... while a run that found the series complete an hour ago does: removed as usual
+  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(countless), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: Date.now() / 1000 - 3600 }) } });
+  try {
+    await settled(page);
+    const { site } = bookmarkChrome();
+    const { job, engine } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (/** @type {unknown} */ (null)));
+    assert.equal(await page.module.runUnbookmark(job, engine, {}), null);
+    assert.equal(site.clicks, 1);
+    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "removed");
+  } finally {
+    page.restore();
+  }
+});
+
 test("the page: a cover whose signed address has expired is never asked for — restored from the browser session's memory, or one the page still shows past its signature (asked right before each request) —, while a fresh one is", async () => {
   /** @param {string} seriesId @param {number} expires */
   const signed = (seriesId, expires) => `https://p16-common-sign.tiktokcdn.com/c/${seriesId}.avif?x-expires=${expires}&x-signature=INVENTED%3D`;

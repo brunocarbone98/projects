@@ -146,7 +146,8 @@ const ENGINE_LOCK = "dramafetch-engine";
  *   whose right-clicked card a `load` job resolves first
  * @property {Card | null} [card] the right-clicked favorites card a `load` job lists the drama of
  * @property {{seriesId: string, title: string | null, episodes: number | null}} [bookmark] the drama
- *   an `unbookmark` job removes from the Bookmark
+ *   an `unbookmark` job removes from the Bookmark (`episodes`: the count its confirmation showed —
+ *   the job's gate reads the library's own count when it runs, {@link runUnbookmark})
  * @property {{count: number, skipped: number}} [listed] what a listing that filled the library
  *   listed — its dramas, and the list's items it left out for want of a readable series id —: what
  *   the job's status line and history entry say, whatever became of the library
@@ -3071,10 +3072,13 @@ function bookmarkFailed(error, title, record, entry) {
 }
 
 /**
- * **Remove from Favorites** — the `unbookmark` job (`bookmark.removeFromBookmark`): the gate first —
- * DramaFetch's records say every episode is on disk (else nothing is asked of TikTok) against an
- * episode count read from TikTok less than 24 h ago (the library's whole list, or a run that found
- * the series complete: else `stale`, nothing asked either), the cooldown, the rest between jobs, the
+ * **Remove from Favorites** — the `unbookmark` job (`bookmark.removeFromBookmark`): the gate first,
+ * over the drama as the library holds it when the job runs — a listing queued before it may have
+ * read another episode count since the confirmation; a drama the library no longer holds or marks
+ * removed is `stale`, nothing asked —: DramaFetch's records say every episode is on disk (else
+ * nothing is asked of TikTok) against an episode count read from TikTok less than 24 h ago (the
+ * library's whole list, when it held a count for the drama, or a run that found the series
+ * complete: else `stale`, nothing asked either), the cooldown, the rest between jobs, the
  * cooldown again, a write that can be stored (asked again after the job's contact is noted) — then TikTok's own Bookmark
  * pressed once in a background tab and checked after a reload. Removed: the library marks the drama
  * removed at once — its card says so, the filters' counts follow — and is kept; then TikTok's count
@@ -3103,12 +3107,20 @@ export async function runUnbookmark(job, engine, entry) {
   } catch {
     raw = undefined;
   }
-  if (progressStatus(raw, target.seriesId, target.episodes) !== "on-disk") return bookmarkFailed(new BookmarkError("not-on-disk"), title, record, entry);
+  // the drama as the library holds it NOW, never the count the dialog showed: a listing that ran
+  // between the confirmation and this job (Update from TikTok, a card's listing joined) may have
+  // read another episode count — new episodes, not on disk —; a drama the library no longer holds
+  // (TikTok's whole list read without it) or marks removed is asked nothing
+  const held = library.removed.has(target.seriesId) ? undefined : app.favorites?.items.find((item) => item.seriesId === target.seriesId);
+  if (held === undefined) return bookmarkFailed(new BookmarkError("stale"), title, record, entry);
+  if (progressStatus(raw, target.seriesId, held.episodes) !== "on-disk") return bookmarkFailed(new BookmarkError("not-on-disk"), title, record, entry);
   // that on disk compared the records with an episode count TikTok gave less than 24 h ago: the
-  // library's whole list read since, or a run that found the series complete since — a series
-  // that gained episodes changes neither TikTok's count nor its first page
-  const completeAt = removalFacts(raw, target.seriesId, target.episodes).completeAt;
-  if (!countsFresh(library.fullReadAt, now()) && !countsFresh(completeAt, now())) return bookmarkFailed(new BookmarkError("stale"), title, record, entry);
+  // library's whole list read since — only for a drama it holds a count for —, or a run that found
+  // the series complete since — a series that gained episodes changes neither TikTok's count nor
+  // its first page
+  const completeAt = removalFacts(raw, target.seriesId, held.episodes).completeAt;
+  const listed = held.episodes !== null && countsFresh(library.fullReadAt, now());
+  if (!listed && !countsFresh(completeAt, now())) return bookmarkFailed(new BookmarkError("stale"), title, record, entry);
   setStatus($("favorites-status"), t("bookmarkWorking", [title]));
   for (const rest of [false, true]) {
     const refused = await checkCooldown(engine);
