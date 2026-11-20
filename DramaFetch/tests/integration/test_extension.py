@@ -413,47 +413,37 @@ def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: P
         assert len(server.series_page_requests) == listings + 1  # its own fresh list, as always
 
 
-def test_d2_a_job_stopped_by_hand_draws_see_episodes_again(tmp_path: Path) -> None:
-    """See episodes shows the drama; a paste of it downloads E1, finds E2 encrypted (stored as it
-    is found) and is stopped by hand in the pause after it: the list is drawn again all the same —
-    E1 on disk, E2 locked with its DRM hint and not counted available — so Download all available
-    never takes the episode the engine would skip."""
-    drm = frozenset({(SERIES_ID, 2)})
-    settings = {"delayMinS": 3, "delayMaxS": 3}  # a pause after E2 to press Stop in
+def test_d2_a_job_stopped_by_hand_leaves_see_episodes_as_the_owner_left_it(tmp_path: Path) -> None:
+    """See episodes shows the drama; the owner unticks E3 and presses Download selected (E1, E2
+    and E4), then Stop in the pause after E1: the list stays as the owner left it — E3 still
+    unticked, never ticked again by a redraw, so pressing Download selected again takes only what
+    the owner chose — and the stop is not held up by a redraw."""
+    settings = {"delayMinS": 3, "delayMaxS": 3}  # a pause after E1 to press Stop in
     with (
-        FakeTikTok(drm_media=drm) as server,
+        FakeTikTok() as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
     ):
         page = ext.page
         ext.keep_library((SERIES_ID, SERIES_NAME, 5))
         ext.see_episodes(SERIES_ID)
-        meta = page.locator("#series-meta")
-        assert (meta.text_content() or "").startswith("5 episodes listed, 4 available")
+        table = page.locator("#episode-table tbody")
+        table.locator("input[data-number='3']").set_checked(False)
+        ticked = lambda: [  # noqa: E731
+            box.get_attribute("data-number")
+            for box in table.locator("input[type=checkbox]").all()
+            if box.is_checked()
+        ]
+        assert ticked() == ["1", "2", "4"]
         jobs = ext.finished_jobs()
-        ext.paste(MAIN_LINK)
-
-        def drm_stored() -> bool:
-            entry = ((ext.series_state(SERIES_ID) or {}).get("episodes") or {}).get("2")
-            return entry is not None and entry["message"] == DRM_MESSAGE
-
-        ext.wait_for(drm_stored, 60, "E2's verdict was not stored")
+        page.click("#download-selected-button")
+        ext.wait_for(lambda: _episode_file(ext, 1).exists(), 60, "E1 was not saved")
         ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 10, "no pause")
         page.click("#stop-button")
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30, "not stopped")
-        assert ext.history()[0]["stopped"] == "stopped by you"
-        ext.wait_for(
-            lambda: (meta.text_content() or "").startswith("5 episodes listed, 3 available"),
-            10,
-            "See episodes was not drawn again after the stop",
-        )
-        assert (meta.text_content() or "").endswith("1 already on disk.")
-        row = page.locator("#episode-table tbody tr[data-number='2']")
-        box = row.locator("input[type=checkbox]")
-        assert box.get_attribute("data-locked") == "1" and not box.is_checked()
-        assert (row.locator(".hints").text_content() or "").startswith(
-            "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; tick it"
-        )
-        assert page.locator("#download-available-button").is_enabled()
+        entry = ext.history()[0]
+        assert (entry["kind"], entry["stopped"]) == ("selection", "stopped by you")
+        assert ticked() == ["1", "2", "4"]  # E3 never ticked again
+        assert len(_media_of(server, MAIN_ITEMS[3])) == 0
 
 
 def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(

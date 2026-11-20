@@ -1420,8 +1420,6 @@ async function runJob(job) {
   let stopping = null;
   /** @type {SeriesRun[] | null} the runs the job produced (none when it threw before producing them) */
   let runs = null;
-  /** whether the job got past its gates (the cooldown, a refused write): what it downloads is recorded as it goes */
-  let worked = false;
   /** @type {Series | null} a selection job's fresh list of its series, listed for this job */
   let fresh = null;
   try {
@@ -1436,7 +1434,6 @@ async function runJob(job) {
       return;
     }
     await applyRefererRule(baseUrl());
-    worked = true;
     if (job.kind === "load") {
       stop = await runLoad(job, engine, entry);
     } else if (job.kind === "favorites") {
@@ -1469,6 +1466,7 @@ async function runJob(job) {
       }
     }
     entry["refreshes"] = engine.downloader.refreshes;
+    await redrawListed(job, fresh, engine.view);
   } catch (error) {
     if (error instanceof StopRequested) {
       entry["error"] = stop = error.message; // stored in English, like every engine text
@@ -1510,17 +1508,19 @@ async function runJob(job) {
       (episode) => engine.downloader.traceOf(episode),
       jobRecord.inputs,
     );
-    if (worked) await redrawListed(job, fresh, engine.view);
   }
 }
 
 /**
- * After a download job — however it ended: done, stopped by hand or by a refusal, failed —, the
- * episode list (**See episodes**) drawn again: a selection job's fresh list of its series (listed
- * again for this job: the list the page then acts on, as before), else the list on screen when it
- * is a series the job downloaded — its "on disk" badges, its counts and the DRM verdicts the job
- * recorded, which **Download all available** then leaves out. Every episode's record is stored as
- * it is made, so a stop loses none of them. Never a failure that masks how the job ended.
+ * After a download job that ran its course — done, or stopped by a refusal its runs report (a 429,
+ * a captcha, three failures) —, the episode list (**See episodes**) drawn again: a selection job's
+ * fresh list of its series (listed again for this job: the list the page then acts on), else the
+ * list on screen when it is a series the job downloaded — its "on disk" badges, its counts and the
+ * DRM verdicts the job recorded, which **Download all available** then leaves out. A job stopped
+ * by hand (**Stop**) or ended by an error is not: the list stays as the user left it, ticks
+ * included, and the stop is not held up by Chrome's download history (its file checks can wait
+ * seconds); the next listing of the drama, or the next job that ends on it, draws it again. A
+ * failure here never fails the job.
  * @param {Job} job
  * @param {Series | null} fresh
  * @param {DownloadsView} view
