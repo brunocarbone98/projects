@@ -156,14 +156,17 @@ export function videoPageUrl(itemId, author = null, base = TIKTOK_BASE_URL) {
 
 /**
  * The series a tab shows — a short-drama page URL of TikTok (or, in test mode, of `base`) — or
- * null: a bare id, a video page or any other page is no series tab.
+ * null: a bare id, a video page or any other page is no series tab. The address of ONE page, as
+ * Chrome gives a tab's or a link's: its query and fragment are not read — they name no series,
+ * and may even hold another TikTok address (a referer, say), which the parser refuses in a
+ * pasted line (two links glued together) but which is never a second link here.
  * @param {string} url
  * @param {string} [base]
  * @returns {SeriesRef | null}
  */
 export function seriesRefFromUrl(url, base = TIKTOK_BASE_URL) {
   if (typeof url !== "string") return null;
-  let text = url;
+  let text = url.replace(/[?#][\s\S]*$/, "");
   const root = trimBase(base);
   if (root !== TIKTOK_BASE_URL && text.startsWith(`${root}/`)) {
     text = TIKTOK_BASE_URL + text.slice(root.length);

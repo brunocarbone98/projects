@@ -90,6 +90,12 @@ test("page URLs and the tab check, test base included", () => {
   assert.equal(isShortDramaUrl("https://www.tiktok.com/foryou"), false);
   assert.equal(seriesRefFromUrl(`http://127.0.0.1:8123/shortdrama/episode/${ID}/4`, "http://127.0.0.1:8123")?.seriesId, ID);
   assert.equal(seriesRefFromUrl(`http://127.0.0.1:8123/shortdrama/episode/${ID}/4`), null);
+  // a tab's or a link's address is one page: its query and fragment are not read — not even one
+  // holding another TikTok address (a referer), which a pasted line could not hold
+  const referred = seriesRefFromUrl(`https://www.tiktok.com/shortdrama/episode/${ID}/2?referer_url=https://www.tiktok.com/foryou#top`);
+  assert.deepEqual([referred?.seriesId, referred?.episodeHint], [ID, 2]);
+  assert.equal(isShortDramaUrl(`https://www.tiktok.com/shortdrama/${ID}?enter_from=https://www.tiktok.com/@a/collection`), true);
+  assert.equal(isShortDramaUrl("https://www.tiktok.com/foryou?next=https://www.tiktok.com/shortdrama/7699393770256782399"), false);
 });
 
 test("the text box follows --from-file: comments, blank lines, BOM, duplicates, refused lines", () => {

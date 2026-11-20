@@ -171,6 +171,8 @@ test("a click asks for the series of the link, or of the right-clicked page; any
   const list = "https://www.tiktok.com/shortdrama/foryou";
   assert.equal(loadOfClick({ menuItemId: MENU_LINK, linkUrl: episode, pageUrl: list }), SERIES);
   assert.equal(loadOfClick({ menuItemId: MENU_LINK, linkUrl: `${episode}?enter_from=drama_list&is_from_webapp=1` }), SERIES);
+  // another TikTok address in the query (a referer): still that one page's series
+  assert.equal(loadOfClick({ menuItemId: MENU_LINK, linkUrl: `${episode}?referer_url=https://www.tiktok.com/foryou` }), SERIES);
   assert.equal(loadOfClick({ menuItemId: MENU_LINK, linkUrl: `https://m.tiktok.com/shortdrama/${SERIES}` }), SERIES);
   assert.equal(loadOfClick({ menuItemId: MENU_PAGE, pageUrl: episode }), SERIES);
   // the link item reads the link, the page item the page — never the other one, nor the selection
