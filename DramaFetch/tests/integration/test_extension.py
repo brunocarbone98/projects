@@ -394,7 +394,8 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
     """HTTP 429 from the CDN: the stop, the 30-minute cooldown stored, the rest of the series
     `stopped`, the batch's next series `not started` with no request, and the next actions — a
     paste into the box (nothing queued: the text stays there, the status line names the
-    cooldown), the popup's "Download this series" (its job refused at the gate) — refused by the
+    cooldown; a second link pasted after it lands on a line of its own, never glued onto the
+    first), the popup's "Download this series" (its job refused at the gate) — refused by the
     cooldown with zero requests."""
     with (
         FakeTikTok(cdn_rate_limit=True) as server,
@@ -429,6 +430,12 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
         ext.paste(MAIN_LINK)  # refused: no job, the paste lands in the box
         ext.wait_for(
             lambda: page.input_value("#links") == MAIN_LINK, 10, "the paste is not in the box"
+        )
+        ext.paste(SECOND_LINK)  # refused too: on a line of its own, never glued onto the first
+        ext.wait_for(
+            lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}",
+            10,
+            "the second paste is not on a line of its own",
         )
         status = page.locator("#input-status")
         assert (status.text_content() or "").startswith("TikTok refused a request at ")

@@ -117,6 +117,7 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @typedef {import("../lib/catalog.js").Episode} Episode
  * @typedef {import("../lib/catalog.js").Series} Series
  * @typedef {import("../lib/urls.js").SeriesRef} SeriesRef
+ * @typedef {import("../lib/urls.js").SeriesListLine} SeriesListLine
  * @typedef {import("../lib/report.js").DownloadResult} DownloadResult
  * @typedef {import("./engine.js").SeriesRun} SeriesRun
  * @typedef {import("./engine.js").Engine} Engine
@@ -3632,14 +3633,19 @@ function updateButtons() {
  * `text` — the box's, or what was pasted into it — as series refs (the box's rules,
  * `lib/urls.parseSeriesList`: duplicates dropped with a note), or null with the reason on the
  * status line: a line the parser refuses (nothing may start while one is), or no series at all.
+ * `offset`: how many of the box's lines come before the text's first line — a refused line is
+ * named by the box's own number (`line 3: …`), the one the user sees it on.
  * @param {string} text
+ * @param {number} [offset]
  * @returns {{refs: SeriesRef[], notes: string[]} | null}
  */
-function parsedLinks(text) {
+function parsedLinks(text, offset = 0) {
   const parsed = parseSeriesList(text);
   const status = $("input-status");
   if (parsed.errors.length > 0) {
-    setStatus(status, parsed.errors.map((error) => shownText(error.message)).join(" · "), "error");
+    /** @param {SeriesListLine} error */
+    const onBoxLine = (error) => (offset === 0 ? error.message : error.message.replace(/^line \d+: /, `line ${error.line + offset}: `));
+    setStatus(status, parsed.errors.map((error) => shownText(onBoxLine(error))).join(" · "), "error");
     return null;
   }
   if (parsed.refs.length === 0) {
@@ -3702,15 +3708,16 @@ function queuedText(result) {
  * taken — queued, or every series of it found being downloaded already (named, nothing queued
  * twice) —: Enter's box is emptied then, a paste never lands in it; refused — a line the parser
  * refuses, no series, the gate — the text stays in the box, with the reason on the status line.
- * `kept`: the box holds lines besides a paste taken, which stay there — said (`linksKept`), for
- * Enter.
+ * `where.rest`: what the box keeps besides a paste taken (null for Enter, which takes the whole
+ * box) — said (`linksKept`) only when Enter would download something of it ({@link enterTakes});
+ * `where.offset`: the box's lines before the pasted text's first line ({@link parsedLinks}).
  * @param {string} text
- * @param {boolean} [kept]
+ * @param {{rest?: string | null, offset?: number}} [where]
  * @returns {boolean}
  */
-function downloadFromBox(text, kept = false) {
+function downloadFromBox(text, where = {}) {
   if (!app.owner) return false;
-  const parsed = parsedLinks(text);
+  const parsed = parsedLinks(text, where.offset ?? 0);
   if (parsed === null) return false;
   if (app.unsaved !== null) {
     void showStorageRefused();
@@ -3726,27 +3733,79 @@ function downloadFromBox(text, kept = false) {
     input("include-locked").checked = false; // per run, as Download all had them
     input("recheck").checked = false;
   }
-  const said = [queuedText(result), ...parsed.notes.map(shownText), ...(kept ? [t("linksKept")] : [])].join(" · ");
+  const said = [queuedText(result), ...parsed.notes.map(shownText), ...(enterTakes(where.rest ?? null) ? [t("linksKept")] : [])].join(" · ");
   setStatus($("input-status"), said, result.queued.length > 0 ? "ok" : "error");
   return true;
 }
 
 /**
+ * Whether Enter would download something of `rest`, what the box keeps besides a paste taken: no
+ * line the parser refuses (Enter would then queue nothing at all) and a series not being
+ * downloaded already (asked once the paste is queued: one the paste just queued counts as such).
+ * Null — Enter's own run, which takes the whole box — never.
+ * @param {string | null} rest
+ * @returns {boolean}
+ */
+function enterTakes(rest) {
+  if (rest === null) return false;
+  const kept = parseSeriesList(rest);
+  const pending = pendingDownloads();
+  return kept.errors.length === 0 && kept.refs.some((ref) => !pending.has(ref.seriesId));
+}
+
+/**
+ * Where a paste the page does not take lands in the box. Text that names a series or a video — a
+ * link, an id — lands on lines of its own, never glued onto, nor into, a line the box holds: in
+ * place of the selection, or, with none, after the caret's line, with a line break before it when
+ * the text before does not end one and after it when the text after does not start one — so links
+ * pasted one after the other while nothing may start (the cooldown) stay one per line, each taken
+ * by Enter later. Other text lands as any paste does: in place of the selection (`own` false).
+ * `offset` is how many of the box's lines come before the pasted text's first line.
+ * @param {string} value the box's text
+ * @param {number} start its selection's start (the caret)
+ * @param {number} end its selection's end
+ * @param {string} pasted
+ * @returns {{from: number, to: number, text: string, own: boolean, offset: number}}
+ */
+function pasteLanding(value, start, end, pasted) {
+  const breaks = (/** @type {string} */ text) => text.split("\n").length - 1;
+  const named = parseSeriesList(pasted);
+  if (named.refs.length === 0 && !named.errors.some((error) => error.kind === "video")) {
+    return { from: start, to: end, text: pasted, own: false, offset: breaks(value.slice(0, start)) };
+  }
+  const lineEnd = value.indexOf("\n", end);
+  const [from, to] = start !== end ? [start, end] : lineEnd === -1 ? [value.length, value.length] : [lineEnd, lineEnd];
+  const before = value.slice(0, from);
+  const after = value.slice(to);
+  const lead = before !== "" && !before.endsWith("\n") && !pasted.startsWith("\n") ? "\n" : "";
+  const trail = after !== "" && !after.startsWith("\n") && !pasted.endsWith("\n") ? "\n" : "";
+  return { from, to, text: `${lead}${pasted}${trail}`, own: true, offset: breaks(before) + (lead === "" ? 0 : 1) };
+}
+
+/**
  * A paste into the box: what was pasted — the clipboard's text, never the rest of the box — is
  * downloaded at once ({@link downloadFromBox}). Taken, it never lands in the box, and the text it
- * would replace (a selection) goes, as with any paste; whatever else the box held — a refused
- * paste's lines, typed ids — stays there, never lost, and the status line says so when it holds a
- * line to download (Enter takes the whole box). Refused, it lands there as any paste does, for the
- * user to correct (then Enter), the reason on the status line.
+ * would replace (a selection) goes, as with any paste, the caret left where it was; whatever else
+ * the box held — a refused paste's lines, typed ids — stays there, never lost, and the status line
+ * says so when Enter would download something of it ({@link enterTakes}). Refused, it lands there
+ * for the user to correct (then Enter), the reason on the status line — a link or an id on lines of
+ * its own ({@link pasteLanding}); in a read-only tab, as any paste does.
  * @param {ClipboardEvent} event
  */
 function onLinksPaste(event) {
-  const pasted = event.clipboardData?.getData("text/plain") ?? "";
+  const pasted = (event.clipboardData?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n");
   const box = textarea("links");
-  const rest = box.value.slice(0, box.selectionStart) + box.value.slice(box.selectionEnd);
-  if (!downloadFromBox(pasted, parseSeriesList(rest).lines > 0)) return; // refused: the paste lands in the box
+  const { value, selectionStart: start, selectionEnd: end } = box;
+  const landing = pasteLanding(value, start, end, pasted);
+  if (downloadFromBox(pasted, { rest: value.slice(0, start) + value.slice(end), offset: landing.offset })) {
+    event.preventDefault(); // taken: it never lands in the box
+    box.setRangeText("", start, end, "start");
+    if (box.value.trim() === "") box.value = "";
+    return;
+  }
+  if (!app.owner || !landing.own || (landing.from === start && landing.to === end && landing.text === pasted)) return; // it lands as any paste does
   event.preventDefault();
-  box.value = rest.trim() === "" ? "" : rest;
+  box.setRangeText(landing.text, landing.from, landing.to, "end");
 }
 
 /**

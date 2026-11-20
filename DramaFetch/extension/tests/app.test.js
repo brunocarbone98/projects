@@ -1382,6 +1382,32 @@ class FakeElement {
     this.current = value;
     this.selectionStart = this.selectionEnd = String(value).length;
   }
+  /**
+   * A text field's `setRangeText`, as the HTML standard and Chrome do it: `start`..`end` replaced
+   * by `replacement`, then the selection — `start`: collapsed before the replacement, `end`: after
+   * it, `select`: around it, `preserve`: kept where it was relative to the text around it.
+   * @param {string} replacement
+   * @param {number} start
+   * @param {number} end
+   * @param {"select" | "start" | "end" | "preserve"} [mode]
+   */
+  setRangeText(replacement, start, end, mode = "preserve") {
+    const length = this.current.length;
+    const [from, to] = [Math.min(start, length), Math.min(end, length)];
+    if (from > to) throw new RangeError("IndexSizeError: start is after end");
+    const [oldStart, oldEnd] = [this.selectionStart, this.selectionEnd];
+    this.current = this.current.slice(0, from) + replacement + this.current.slice(to);
+    const newEnd = from + replacement.length;
+    if (mode === "start") this.selectionStart = this.selectionEnd = from;
+    else if (mode === "end") this.selectionStart = this.selectionEnd = newEnd;
+    else if (mode === "select") [this.selectionStart, this.selectionEnd] = [from, newEnd];
+    else {
+      const delta = replacement.length - (to - from);
+      /** @param {number} at @param {number} inside where a point inside the replaced range goes */
+      const moved = (at, inside) => (at > to ? at + delta : at > from ? inside : at);
+      [this.selectionStart, this.selectionEnd] = [moved(oldStart, from), moved(oldEnd, newEnd)];
+    }
+  }
   /** @param {string} name @param {string} value */
   setAttribute(name, value) {
     this.attributes.set(name, String(value));
@@ -1869,14 +1895,15 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(status.textContent, `Series ${SERIES_ID} queued: it downloads whole, with the usual pauses.`);
     assert.equal(status.className, "status ok");
     // three lines (a comment, a duplicate): ONE batch of the series not being downloaded already,
-    // the one running named; only the PASTED text counts — what the box holds besides stays
-    // there, never lost, and the status line says so
+    // the one running named; only the PASTED text counts — what the box holds besides (an id typed
+    // there) stays there, never lost, and the status line says so
     const kept = "What the box held before stays there: press Enter to download it.";
     assert.equal(page.catalog["linksKept"]?.message, kept);
-    links.value = "typed, not pasted";
+    const typedFirst = "7699393770256782377";
+    links.value = typedFirst;
     const three = `# this week\nhttps://www.tiktok.com/shortdrama/episode/${other}/2\n${third}\n${SERIES_ID}\n${third}`;
     assert.equal(paste(page, three), true);
-    assert.equal(links.value, "typed, not pasted");
+    assert.equal(links.value, typedFirst);
     assert.deepEqual(module.queuedJobs().map(jobSummary), [
       ["batch", `Series ${SERIES_ID}`, [SERIES_ID], true, true],
       ["batch", "2 series", [other, third], false, false],
@@ -1889,7 +1916,7 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     // out of the box, which keeps what it held
     element("recheck").checked = true;
     assert.equal(paste(page, `${other}\n${third}`), true);
-    assert.equal(links.value, "typed, not pasted");
+    assert.equal(links.value, typedFirst);
     assert.equal(module.queuedJobs().length, 2);
     assert.equal(status.textContent, `Already being downloaded, or waiting to be — not queued twice: ${other}, ${third}. · ${kept}`);
     assert.equal(status.className, "status error");
@@ -1905,8 +1932,11 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(module.queuedJobs().length, 2);
     assert.equal(status.className, "status error");
     assert.match(String(status.textContent), /^line 2: 'https:\/\/www\.tiktok\.com\/@someone\/video\/7699400000000000001' is a single video, not a series/);
+    // a refused line is named by the box's own number, the line the user sees it on: the pasted
+    // text's second line lands on the box's third
     assert.equal(paste(page, "\nnot a link at all"), false);
-    assert.match(String(status.textContent), /^line 2: Not a TikTok short-drama or video URL: 'not a link at all'/);
+    assert.equal(links.value, `${refusedPaste}\nnot a link at all`);
+    assert.match(String(status.textContent), /^line 3: Not a TikTok short-drama or video URL: 'not a link at all'/);
     assert.equal(paste(page, "# only a comment"), false); // no series at all
     assert.equal(status.textContent, page.catalog["noLinks"]?.message);
     // corrected by hand, then Enter: the whole box, as a paste — and emptied
@@ -1981,6 +2011,51 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(links.value, "# to watch\n");
     assert.equal(status.textContent, `Already being downloaded, or waiting to be — not queued twice: ${typed}.`);
     assert.equal(module.queuedJobs().length, 7);
+    // what the box keeps is said only when Enter would download something of it: never for text
+    // that names no series, nor next to a line the parser refuses (Enter would refuse the whole
+    // box), nor for a series already waiting — the one the paste just queued included
+    const [eighth, ninth, tenth] = ["7699393770256782366", "7699393770256782301", "7699393770256782302"];
+    const video = "https://www.tiktok.com/@someone/video/7699400000000000005";
+    links.value = "typed, not pasted";
+    assert.equal(paste(page, eighth), true);
+    assert.equal(links.value, "typed, not pasted");
+    assert.equal(status.textContent, `Series ${eighth} queued: it downloads whole, with the usual pauses.`);
+    links.value = `${ninth}\n${video}`; // a series Enter could take, next to a refused line
+    assert.equal(paste(page, tenth), true);
+    assert.equal(links.value, `${ninth}\n${video}`);
+    assert.equal(status.textContent, `Series ${tenth} queued: it downloads whole, with the usual pauses.`);
+    links.value = typed; // waiting already
+    assert.equal(paste(page, ninth), true);
+    assert.equal(status.textContent, `Series ${ninth} queued: it downloads whole, with the usual pauses.`);
+    assert.equal(module.queuedJobs().length, 10);
+    // a paste taken over a selection: that text goes, the caret stays where it was (not at the
+    // end); the box keeps its other lines
+    const [first, second] = ["7699393770256782391", "7699393770256782392"];
+    links.value = `${first}\n${video}\n${second}`;
+    selectLine(page, 2);
+    assert.equal(paste(page, "7699393770256782393"), true);
+    assert.equal(links.value, `${first}\n\n${second}`);
+    assert.deepEqual([links.selectionStart, links.selectionEnd], [first.length + 1, first.length + 1]);
+    assert.equal(status.textContent, `Series 7699393770256782393 queued: it downloads whole, with the usual pauses. · ${kept}`);
+    // a link refused lands on a line of its own — never glued onto the line the caret is on, nor
+    // into it —, named by the box's own line number; Windows line breaks land as plain ones
+    links.value = first; // the caret at the end of the line, no line break after it
+    assert.equal(paste(page, video), true); // the page puts it in place itself
+    assert.equal(links.value, `${first}\n${video}`);
+    assert.match(String(status.textContent), /^line 2: 'https:\/\/www\.tiktok\.com\/@someone\/video\/7699400000000000005' is a single video, not a series/);
+    assert.deepEqual([links.selectionStart, links.selectionEnd], [links.value.length, links.value.length]);
+    links.value = `${first}\n${second}`;
+    links.selectionStart = links.selectionEnd = 4; // inside the first line
+    assert.equal(paste(page, `${video}\r\n${second}\r\n`), true); // after the caret's line
+    assert.equal(links.value, `${first}\n${video}\n${second}\n\n${second}`);
+    assert.match(String(status.textContent), /^line 2: 'https:\/\/www\.tiktok\.com\/@someone\/video\/7699400000000000005' is a single video/);
+    // other text lands as any paste does, at the caret — named by the box's line all the same
+    links.value = `${first}\n${second}`;
+    assert.equal(paste(page, " # not a link"), false);
+    assert.equal(links.value, `${first}\n${second} # not a link`);
+    assert.equal(paste(page, "\nnot a link"), false);
+    assert.match(String(status.textContent), /^line 3: Not a TikTok short-drama or video URL: 'not a link'/);
+    assert.equal(module.queuedJobs().length, 11);
   } finally {
     page.restore();
   }
@@ -2011,20 +2086,23 @@ test("the page: no paste and no Enter queues anything while a cooldown is in for
     assert.equal(press(page), true);
     assert.equal(links.value, "");
     assert.deepEqual(module.queuedJobs().map(jobSummary), [["batch", `Series ${SERIES_ID}`, [SERIES_ID], false, true]]);
-    // two pastes during a cooldown both land; once it is over, another paste downloads what it
-    // brings and leaves those two in the box — never lost —, for Enter
+    // two links pasted one after the other during a cooldown — copied from the address bar: no line
+    // break around them — both land, each on a line of its own, never glued into one (where the
+    // second would hide in the first's query and never be downloaded); once it is over, another
+    // paste downloads what it brings and leaves those two in the box — never lost —, for Enter
     const [first, second, later] = ["7699393770256782311", "7699393770256782322", "7699393770256782333"];
+    const [firstLink, secondLink] = [first, second].map((id) => `https://www.tiktok.com/shortdrama/episode/${id}/1?is_from_webapp=1&sender_device=pc`);
     page.local.set("cooldown", { ...cooldown, until: Date.now() / 1000 + 1800 });
     page.storageChanged("cooldown");
     await page.turn();
-    assert.equal(paste(page, `${first}\n`), false);
-    assert.equal(paste(page, `${second}\n`), false);
-    assert.equal(links.value, `${first}\n${second}\n`);
+    assert.equal(paste(page, firstLink), false); // an empty box: it lands as any paste does
+    assert.equal(paste(page, secondLink), true); // put on a line of its own by the page
+    assert.equal(links.value, `${firstLink}\n${secondLink}`);
     page.local.delete("cooldown");
     page.storageChanged("cooldown");
     await page.turn();
     assert.equal(paste(page, later), true);
-    assert.equal(links.value, `${first}\n${second}\n`);
+    assert.equal(links.value, `${firstLink}\n${secondLink}`);
     assert.deepEqual(module.queuedJobs().map(jobSummary).at(-1), ["batch", `Series ${later}`, [later], false, false]);
     assert.equal(element("input-status").textContent, `Series ${later} queued: it downloads whole, with the usual pauses. · What the box held before stays there: press Enter to download it.`);
     assert.equal(press(page), true);
