@@ -1335,6 +1335,9 @@ test("the app tab is never discarded while a job runs or waits, discardable agai
  * the parts `querySelector` hands out (one per selector, kept) and the listeners added, by event
  * type, for the test to fire.
  */
+/** @type {FakeElement | null} the element the page focused last (`document.activeElement`) */
+let focusedElement = null;
+
 class FakeElement {
   /** @param {string} tag */
   constructor(tag) {
@@ -1346,7 +1349,7 @@ class FakeElement {
     this.checked = false;
     /** its `value` (a text field's, a select's) */
     this.current = "";
-    /** a text field's selection: the caret at the end of its value whenever that is set, as in Chrome */
+    /** a text field's selection: the caret at the end of its value whenever that changes, as in Chrome */
     this.selectionStart = 0;
     this.selectionEnd = 0;
     this.lang = "";
@@ -1377,24 +1380,46 @@ class FakeElement {
   get value() {
     return this.current;
   }
-  /** @param {string} value */
+  /**
+   * As Chrome sets a text field's value: its line breaks read as `\n`, the caret moved to the end
+   * only when the value changes.
+   * @param {string} value
+   */
   set value(value) {
-    this.current = value;
-    this.selectionStart = this.selectionEnd = String(value).length;
+    const text = String(value).replace(/\r\n?/g, "\n");
+    if (text !== this.current) this.selectionStart = this.selectionEnd = text.length;
+    this.current = text;
+  }
+  /** The element focused, as `document.activeElement` names it (the page's editing commands act there). */
+  focus() {
+    focusedElement = this;
   }
   /**
-   * A text field's `setRangeText`, as the HTML standard and Chrome do it: `start`..`end` replaced
-   * by `replacement`, then the selection — `start`: collapsed before the replacement, `end`: after
-   * it, `select`: around it, `preserve`: kept where it was relative to the text around it.
+   * A text field's `setSelectionRange`, as Chrome does it: `start` after `end` taken as `end`, both
+   * held to the value's length.
+   * @param {number} start
+   * @param {number} end
+   */
+  setSelectionRange(start, end) {
+    const length = this.current.length;
+    this.selectionEnd = Math.min(end, length);
+    this.selectionStart = Math.min(start, this.selectionEnd);
+  }
+  /**
+   * A text field's `setRangeText`, as the HTML standard and Chrome do it: `start` after `end` an
+   * IndexSizeError, then `start`..`end` (held to the value's length) replaced by `replacement`, its
+   * line breaks read as `\n`, then the selection — `start`: collapsed before the replacement, `end`:
+   * after it, `select`: around it, `preserve`: kept where it was relative to the text around it.
    * @param {string} replacement
    * @param {number} start
    * @param {number} end
    * @param {"select" | "start" | "end" | "preserve"} [mode]
    */
   setRangeText(replacement, start, end, mode = "preserve") {
+    if (start > end) throw new RangeError("IndexSizeError: start is after end");
+    replacement = replacement.replace(/\r\n?/g, "\n");
     const length = this.current.length;
     const [from, to] = [Math.min(start, length), Math.min(end, length)];
-    if (from > to) throw new RangeError("IndexSizeError: start is after end");
     const [oldStart, oldEnd] = [this.selectionStart, this.selectionEnd];
     this.current = this.current.slice(0, from) + replacement + this.current.slice(to);
     const newEnd = from + replacement.length;
@@ -1605,6 +1630,11 @@ async function fakePage(options = {}) {
     // a job the page starts itself gets past its header rule (`downloader.applyRefererRule`)
     declarativeNetRequest: { updateSessionRules: async () => undefined },
   };
+  focusedElement = null;
+  /** Chrome's editing commands as the page used them (`document.execCommand`), and whether Chrome takes them. */
+  /** @type {{command: string, value: string | null}[]} */
+  const edits = [];
+  const editor = { on: true, edits };
   const document = {
     documentElement: new FakeElement("html"),
     body: new FakeElement("body"),
@@ -1613,6 +1643,30 @@ async function fakePage(options = {}) {
     querySelectorAll: () => [],
     /** @param {string} tag */
     createElement: (tag) => new FakeElement(tag),
+    get activeElement() {
+      return focusedElement;
+    },
+    /**
+     * Chrome's editing commands on the focused text field, the ones the page uses: `insertText`
+     * puts the text in place of the selection, the caret after it; `delete` removes the selection
+     * (with none, the character before the caret) — each an edit Ctrl+Z takes back, which the
+     * test reads from `editor.edits`. While `editor.on` is false, Chrome is taken to refuse them:
+     * false, no change.
+     * @param {string} command
+     * @param {boolean} [_showUi]
+     * @param {string} [value]
+     * @returns {boolean}
+     */
+    execCommand: (command, _showUi, value) => {
+      const box = focusedElement;
+      if (!editor.on || box === null || !["insertText", "delete"].includes(command)) return false;
+      const { selectionStart: start, selectionEnd: end } = box;
+      if (command === "insertText") box.setRangeText(String(value ?? ""), start, end, "end");
+      else if (start < end) box.setRangeText("", start, end, "start");
+      else if (start > 0) box.setRangeText("", start - 1, start, "start");
+      editor.edits.push({ command, value: command === "insertText" ? String(value ?? "") : null });
+      return true;
+    },
   };
   const navigatorBefore = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const setIntervalBefore = globalThis.setInterval;
@@ -1677,6 +1731,7 @@ async function fakePage(options = {}) {
     catalog,
     turn,
     restore,
+    editor,
     local,
     downloads,
     replaced,
@@ -1721,9 +1776,7 @@ async function fakePage(options = {}) {
  * @param {string} text
  */
 function insertAtSelection(box, text) {
-  const start = box.selectionStart;
-  box.value = box.value.slice(0, start) + text + box.value.slice(box.selectionEnd);
-  box.selectionStart = box.selectionEnd = start + text.length;
+  box.setRangeText(text, box.selectionStart, box.selectionEnd, "end"); // its line breaks read as `\n`, as Chrome stores them
 }
 
 /**
@@ -2037,11 +2090,30 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(links.value, `${first}\n\n${second}`);
     assert.deepEqual([links.selectionStart, links.selectionEnd], [first.length + 1, first.length + 1]);
     assert.equal(status.textContent, `Series 7699393770256782393 queued: it downloads whole, with the usual pauses. · ${kept}`);
+    assert.deepEqual(page.editor.edits.at(-1), { command: "delete", value: null }); // Chrome's own edit: Ctrl+Z takes it back
+    // a paste taken over part of a line — a selection run past a line's end, say — leaves the box
+    // as it was: it was a download, not an edit (half a line removed could leave an id that names
+    // another series)
+    const overshoot = `${video}\n2222222222222222222`;
+    links.value = overshoot;
+    links.selectionStart = 0;
+    links.selectionEnd = video.length + 3;
+    const edited = page.editor.edits.length;
+    assert.equal(paste(page, "7699393770256782394"), true);
+    assert.equal(links.value, overshoot);
+    assert.equal(page.editor.edits.length, edited);
+    assert.equal(status.textContent, "Series 7699393770256782394 queued: it downloads whole, with the usual pauses."); // no note: Enter would refuse the box
+    // the note is decided once the paste is queued: the box naming the series the paste queues
+    // gets none (Enter would only say it is waiting already)
+    links.value = "7699393770256782303";
+    assert.equal(paste(page, "https://www.tiktok.com/shortdrama/episode/7699393770256782303/2"), true);
+    assert.equal(status.textContent, "Series 7699393770256782303 queued: it downloads whole, with the usual pauses.");
     // a link refused lands on a line of its own — never glued onto the line the caret is on, nor
     // into it —, named by the box's own line number; Windows line breaks land as plain ones
     links.value = first; // the caret at the end of the line, no line break after it
     assert.equal(paste(page, video), true); // the page puts it in place itself
     assert.equal(links.value, `${first}\n${video}`);
+    assert.deepEqual(page.editor.edits.at(-1), { command: "insertText", value: `\n${video}` }); // an edit Ctrl+Z takes back
     assert.match(String(status.textContent), /^line 2: 'https:\/\/www\.tiktok\.com\/@someone\/video\/7699400000000000005' is a single video, not a series/);
     assert.deepEqual([links.selectionStart, links.selectionEnd], [links.value.length, links.value.length]);
     links.value = `${first}\n${second}`;
@@ -2049,13 +2121,29 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(paste(page, `${video}\r\n${second}\r\n`), true); // after the caret's line
     assert.equal(links.value, `${first}\n${video}\n${second}\n\n${second}`);
     assert.match(String(status.textContent), /^line 2: 'https:\/\/www\.tiktok\.com\/@someone\/video\/7699400000000000005' is a single video/);
-    // other text lands as any paste does, at the caret — named by the box's line all the same
+    // anything the parser reads as a line — a short link, other words — lands on a line of its
+    // own too; only blank lines and comments land as any paste does, at the caret
+    links.value = first;
+    assert.equal(paste(page, "https://vm.tiktok.com/ZMabc123/"), true);
+    assert.equal(links.value, `${first}\nhttps://vm.tiktok.com/ZMabc123/`);
+    assert.match(String(status.textContent), /^line 2: Short links/);
+    links.value = `${first}\n${second}`;
+    links.selectionStart = links.selectionEnd = 2; // inside the first line
+    assert.equal(paste(page, "not a link"), true);
+    assert.equal(links.value, `${first}\nnot a link\n${second}`);
+    assert.match(String(status.textContent), /^line 2: Not a TikTok short-drama or video URL: 'not a link'/);
     links.value = `${first}\n${second}`;
     assert.equal(paste(page, " # not a link"), false);
     assert.equal(links.value, `${first}\n${second} # not a link`);
-    assert.equal(paste(page, "\nnot a link"), false);
+    assert.equal(paste(page, "\nnot a link"), false); // a line break first: the browser's own paste lands it the same way
     assert.match(String(status.textContent), /^line 3: Not a TikTok short-drama or video URL: 'not a link'/);
-    assert.equal(module.queuedJobs().length, 11);
+    // where Chrome refuses its editing command, the page puts the text in place all the same
+    page.editor.on = false;
+    links.value = first;
+    assert.equal(paste(page, video), true);
+    assert.equal(links.value, `${first}\n${video}`);
+    page.editor.on = true;
+    assert.equal(module.queuedJobs().length, 13);
   } finally {
     page.restore();
   }
@@ -2098,6 +2186,20 @@ test("the page: no paste and no Enter queues anything while a cooldown is in for
     assert.equal(paste(page, firstLink), false); // an empty box: it lands as any paste does
     assert.equal(paste(page, secondLink), true); // put on a line of its own by the page
     assert.equal(links.value, `${firstLink}\n${secondLink}`);
+    // with text selected, a refused paste takes its place as any paste does: the right link over a
+    // wrong line; an id over the id inside a kept link, which corrects that link
+    const wrongLine = "https://www.tiktok.com/@someone/video/7699400000000000009";
+    const kept = links.value;
+    links.value = `${kept}\n${wrongLine}`;
+    selectLine(page, 3);
+    const laterLink = `https://www.tiktok.com/shortdrama/episode/${later}/1`;
+    assert.equal(paste(page, laterLink), false);
+    assert.equal(links.value, `${kept}\n${laterLink}`);
+    links.selectionStart = links.value.indexOf(later);
+    links.selectionEnd = links.selectionStart + later.length;
+    assert.equal(paste(page, "7699393770256782344"), false);
+    assert.equal(links.value, `${kept}\nhttps://www.tiktok.com/shortdrama/episode/7699393770256782344/1`);
+    links.value = kept;
     page.local.delete("cooldown");
     page.storageChanged("cooldown");
     await page.turn();
@@ -2145,6 +2247,11 @@ test("the page: no paste and no Enter queues anything while a cooldown is in for
     assert.equal(element("links").value, `${SERIES_ID}\n`);
     assert.equal(paste(readonly, "not a link at all"), false);
     assert.equal(element("links").value, `${SERIES_ID}\nnot a link at all`);
+    // not even a link's own line: the paste lands as any paste does, glued at the caret
+    const link = `https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/2`;
+    assert.equal(paste(readonly, link), false);
+    assert.equal(element("links").value, `${SERIES_ID}\nnot a link at all${link}`);
+    assert.deepEqual(readonly.editor.edits, []);
     assert.deepEqual(module.queuedJobs(), []);
     assert.equal(element("input-status").textContent, "");
     assert.equal(element("duplicate-banner").hidden, false);
@@ -4869,7 +4976,7 @@ test("the page: a card's episode count is its status fraction's — TikTok's cou
     // every reason a run records an episode locked, not only a paid one: unlocking helps only those
     assert.equal(
       meta?.title,
-      "Locked episodes (45): the downloads of this drama skipped them without asking TikTok for them — paid ones this account has not unlocked, ones TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), ones protected by DRM or with no play address. Unlocking in TikTok helps only the paid ones; See episodes shows the reason TikTok's list gives for each. DramaFetch never unlocks or decrypts anything.",
+      "Locked episodes (45): the downloads of this drama skipped them without asking TikTok for them — paid ones this account has not unlocked, ones TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), ones protected by DRM or with no play address. Unlocking in TikTok helps only the paid ones; See episodes shows each one's reason. DramaFetch never unlocks or decrypts anything.",
     );
     const paper = partOf(/** @type {FakeElement} */ (cardOf(page, PAPER)), "favorite-meta");
     assert.equal(paper?.textContent, "30 episodes · 40m");
@@ -4906,7 +5013,11 @@ test("the page: a card's episode count is its status fraction's — TikTok's cou
     const one = partOf(/** @type {FakeElement} */ (cardOf(spanish, SNOW_A)), "favorite-meta");
     assert.equal(one?.textContent, "60 episodios · 1 bloqueado · 1 h 19 min");
     assert.equal(one?.getAttribute("data-locked"), "1");
-    assert.match(String(one?.title), /^Episodios bloqueados \(1\): /);
+    // its tooltip in the singular too: one episode, skipped, its reason
+    assert.equal(
+      one?.title,
+      "Episodio bloqueado: las descargas de este drama lo omitieron sin pedírselo a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortado (reproduce … s de … s: una ventana de un episodio no desbloqueado, o un defecto de TikTok), protegido con DRM o sin dirección de reproducción—. Desbloquear en TikTok solo sirve si es de pago; Ver episodios muestra su motivo. DramaFetch nunca desbloquea ni descifra nada.",
+    );
   } finally {
     spanish.restore();
   }
@@ -4914,7 +5025,12 @@ test("the page: a card's episode count is its status fraction's — TikTok's cou
   const english = await fakePage({ storage: { ...storage, [`series:${SNOW_A}`]: lockedState(SNOW_A, [1], [2]) } });
   try {
     await settled(english);
-    assert.equal(partOf(/** @type {FakeElement} */ (cardOf(english, SNOW_A)), "favorite-meta")?.textContent, "60 episodes · 1 locked · 1h 19m");
+    const one = partOf(/** @type {FakeElement} */ (cardOf(english, SNOW_A)), "favorite-meta");
+    assert.equal(one?.textContent, "60 episodes · 1 locked · 1h 19m");
+    assert.equal(
+      one?.title,
+      "Locked episode: the downloads of this drama skipped it without asking TikTok for it — a paid one this account has not unlocked, one TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), or one protected by DRM or with no play address. Unlocking in TikTok helps only a paid one; See episodes shows its reason. DramaFetch never unlocks or decrypts anything.",
+    );
   } finally {
     english.restore();
   }

@@ -37,11 +37,13 @@ export class UnsupportedUrlError extends Error {
 }
 
 // The patterns of urls.py, written lower-case and matched against `caseless(text)` — that is
-// re.IGNORECASE as Python applies it (`\u017f`, `\u0131`, `\u0130` and the Kelvin sign included). Python's `.`
-// is `[^\n]` (JavaScript's also stops at \r, U+2028, U+2029) and its `$` also matches before a
-// final newline: `(?=\n?$)`.
+// re.IGNORECASE as Python applies it (`\u017f`, `\u0131`, `\u0130` and the Kelvin sign included). Python's `\S`
+// is `[^${PY_SPACE}]` (JavaScript's own `\S` differs on U+001C-U+001F, U+0085 and U+FEFF) and its `$`
+// also matches before a final newline: `(?=\n?$)`.
 const HOST = String.raw`https?://(?:www\.|m\.)?tiktok\.com`;
-const TAIL = String.raw`/?(?:[?#][^\n]*)?(?=\n?$)`;
+// a query or a fragment runs to the end of the line and holds no whitespace: two links on one line
+// are refused, never read as the first one with the second hidden in its query
+const TAIL = String.raw`/?(?:[?#][^${PY_SPACE}]*)?(?=\n?$)`;
 const SERIES_EPISODE_RE = new RegExp(
   String.raw`^${HOST}/shortdrama/episode/(?<id>[0-9]{15,22})(?:/(?<n>[0-9]{1,4}))?${TAIL}`,
   "u",

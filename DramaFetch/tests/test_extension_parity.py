@@ -1425,6 +1425,12 @@ INPUTS = (
     f"\ufeffhttps://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1",
     f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1\nfoo",
     f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1 trailing words",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?is_from_webapp=1&sender_device=pc "
+    "https://www.tiktok.com/shortdrama/episode/7699393770256782322/1",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1\t{SERIES_ID}",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1#x\u00a0y",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1\x1cb",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1\ufeffb",
     "a'b",
     'a"b',
     "a'\"b",

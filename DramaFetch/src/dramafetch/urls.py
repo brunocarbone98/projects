@@ -15,7 +15,9 @@ from dramafetch.errors import UnsupportedUrlError
 from dramafetch.models import TIKTOK_BASE_URL, SeriesRef, VideoRef
 
 _HOST = r"https?://(?:www\.|m\.)?tiktok\.com"
-_TAIL = r"/?(?:[?#].*)?$"
+# A query or a fragment runs to the end of the line and holds no whitespace: two links on one
+# line are refused, never read as the first one with the second hidden in its query.
+_TAIL = r"/?(?:[?#]\S*)?$"
 # Ids and episode numbers are ASCII digits, [0-9] — never \d, which also takes full-width (IME) or
 # Arabic-Indic digits: such text would pass for an id TikTok cannot have and cost a request.
 SERIES_EPISODE_RE = re.compile(

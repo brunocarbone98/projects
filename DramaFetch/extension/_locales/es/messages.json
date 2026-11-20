@@ -929,13 +929,17 @@
     "description": "The same, for one locked episode."
   },
   "libraryLockedTitle": {
-    "message": "Episodios bloqueados ($count$): las descargas de este drama los omitieron sin pedírselos a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortados (reproduce … s de … s: una ventana de un episodio no desbloqueado, o un defecto de TikTok), protegidos con DRM o sin dirección de reproducción—. Desbloquear en TikTok solo sirve para los de pago; Ver episodios muestra el motivo que da la lista de TikTok para cada uno. DramaFetch nunca desbloquea ni descifra nada.",
+    "message": "Episodios bloqueados ($count$): las descargas de este drama los omitieron sin pedírselos a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortados (reproduce … s de … s: una ventana de un episodio no desbloqueado, o un defecto de TikTok), protegidos con DRM o sin dirección de reproducción—. Desbloquear en TikTok solo sirve para los de pago; Ver episodios muestra el motivo de cada uno. DramaFetch nunca desbloquea ni descifra nada.",
     "description": "Tooltip of a library card's episode line when it counts locked episodes: every reason a run records an episode skipped-locked.",
     "placeholders": {
       "count": {
         "content": "$1"
       }
     }
+  },
+  "libraryLockedTitleOne": {
+    "message": "Episodio bloqueado: las descargas de este drama lo omitieron sin pedírselo a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortado (reproduce … s de … s: una ventana de un episodio no desbloqueado, o un defecto de TikTok), protegido con DRM o sin dirección de reproducción—. Desbloquear en TikTok solo sirve si es de pago; Ver episodios muestra su motivo. DramaFetch nunca desbloquea ni descifra nada.",
+    "description": "The same tooltip for one locked episode."
   },
   "libraryShown": {
     "message": "Mostrando $shown$ de $count$",

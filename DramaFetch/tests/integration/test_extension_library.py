@@ -481,14 +481,16 @@ def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: 
             )
             assert main_meta.get_attribute("data-locked") == "1"
             tooltip = main_meta.get_attribute("title") or ""
-            # every reason a run records an episode locked, not only a paid one
+            # every reason a run records an episode locked, not only a paid one — in the singular
+            # for its one episode
             assert tooltip.startswith(
-                "Locked episodes (1): the downloads of this drama skipped them without asking"
-                " TikTok for them — paid ones this account has not unlocked, ones TikTok lists as"
-                " playing short"
+                "Locked episode: the downloads of this drama skipped it without asking TikTok for"
+                " it — a paid one this account has not unlocked, one TikTok lists as playing short"
             )
-            assert "ones protected by DRM or with no play address" in tooltip
-            assert "Unlocking in TikTok helps only the paid ones" in tooltip
+            assert "or one protected by DRM or with no play address" in tooltip
+            assert "Unlocking in TikTok helps only a paid one; See episodes shows its reason." in (
+                tooltip
+            )
             assert tooltip.endswith("DramaFetch never unlocks or decrypts anything.")
             assert _border(_card(page, SECOND_SERIES_ID)) == plain  # the ticks cleared with the job
             # each drama, as it was done, got its notification, which Chrome showed

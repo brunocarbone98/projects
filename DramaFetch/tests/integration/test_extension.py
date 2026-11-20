@@ -387,6 +387,19 @@ def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: P
         assert len(server.media_requests) == media
         assert series["line"] == "complete: 3 of 5 (3 already on disk) — 2 locked (2, 5)"
 
+        # See episodes shows what the records know: TikTok's list calls E2 free, but a download
+        # found it encrypted — locked there, unticked, with that verdict, and not counted available
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
+        ext.see_episodes(SERIES_ID)
+        row = ext.page.locator("#episode-table tbody tr[data-number='2']")
+        box = row.locator("input[type=checkbox]")
+        assert box.get_attribute("data-locked") == "1" and not box.is_checked()
+        assert (row.locator(".hints").text_content() or "").startswith(
+            "protected by DRM (found by an earlier run): DramaFetch does not decrypt it"
+        )
+        meta = ext.page.locator("#series-meta").text_content() or ""
+        assert meta.startswith("5 episodes listed, 3 available"), meta
+
 
 def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
     tmp_path: Path,
@@ -436,6 +449,16 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
             lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}",
             10,
             "the second paste is not on a line of its own",
+        )
+        # the page put it there as an edit of Chrome's own: Ctrl+Z takes it back, Ctrl+Shift+Z
+        # brings it again
+        page.keyboard.press("ControlOrMeta+Z")
+        ext.wait_for(lambda: page.input_value("#links") == MAIN_LINK, 10, "Ctrl+Z did not undo")
+        page.keyboard.press("ControlOrMeta+Shift+Z")
+        ext.wait_for(
+            lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}",
+            10,
+            "Ctrl+Shift+Z did not redo",
         )
         status = page.locator("#input-status")
         assert (status.text_content() or "").startswith("TikTok refused a request at ")

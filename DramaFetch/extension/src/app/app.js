@@ -49,7 +49,7 @@ import {
   twinIds,
   unchangedSince,
 } from "../lib/library.js";
-import { TIKTOK_BASE_URL } from "../lib/messages.js";
+import { DRM_REMEMBERED_MESSAGE, TIKTOK_BASE_URL } from "../lib/messages.js";
 import { fileBaseName } from "../lib/naming.js";
 import {
   PAGE_DELAY_S,
@@ -62,7 +62,7 @@ import {
   sleepSeconds,
 } from "../lib/pacing.js";
 import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib/report.js";
-import { doneEntries, readState } from "../lib/state.js";
+import { doneEntries, drmProtected, readState } from "../lib/state.js";
 import { parseSeriesList, seriesPageUrl } from "../lib/urls.js";
 import { PageAlerts, dramaAlert, episodeLabel, stoppedAlert } from "./alerts.js";
 import { BOOKMARK_MESSAGES, BookmarkCooldown, BookmarkError, countAfterRemoval, removeFromBookmark } from "./bookmark.js";
@@ -2772,7 +2772,7 @@ function libraryCard(entry, status, twin) {
   ]);
   if (twin) badges.append(el("span", { className: "badge twin", text: t("libraryTwin"), attrs: { "data-twin": "1" } }));
   // the locked episodes the records hold, explained where the card counts them
-  const locked = progress.locked > 0 ? { title: t("libraryLockedTitle", [progress.locked]), attrs: { "data-locked": String(progress.locked) } } : {};
+  const locked = progress.locked > 0 ? { title: progress.locked === 1 ? t("libraryLockedTitleOne") : t("libraryLockedTitle", [progress.locked]), attrs: { "data-locked": String(progress.locked) } } : {};
   const body = el("div", { className: "drama-body" }, [
     el("h3", { className: "favorite-title", text: title }),
     el("p", { className: "favorite-meta", text: favoriteMeta(item, progress), ...locked }),
@@ -3497,7 +3497,11 @@ async function renderSeries(series, view) {
   await view.refresh(); // what Chrome's download history says is still on disk
   const state = readState(await readSeriesState(series.seriesId), series.seriesId);
   const onDisk = new Set(state !== null ? doneEntries(state, (entry) => view.exists(entry)).map(([number]) => number) : []);
-  const available = series.episodes.filter((episode) => !isLocked(episode)).length;
+  // an episode an earlier download found encrypted (DRM): TikTok's list may call it free, but the
+  // engine skips it again without a request — shown as the locked one it is, with that verdict
+  /** @param {Episode} episode */
+  const drmFound = (episode) => state !== null && drmProtected(state, episode.number);
+  const available = series.episodes.filter((episode) => !isLocked(episode) && !drmFound(episode)).length;
   $("series-meta").textContent = t("seriesMeta", [series.episodes.length, available, onDisk.size]);
   const warnings = $("series-warnings");
   warnings.textContent = "";
@@ -3507,10 +3511,11 @@ async function renderSeries(series, view) {
   const episodes = [...series.episodes].sort((a, b) => a.number - b.number);
   covers.show(episodes); // this list's thumbnails, once their rows come into view
   for (const episode of episodes) {
+    const drm = drmFound(episode);
     const box = /** @type {HTMLInputElement} */ (
-      el("input", { attrs: { type: "checkbox", "data-number": String(episode.number), "data-locked": isLocked(episode) ? "1" : "0" } })
+      el("input", { attrs: { type: "checkbox", "data-number": String(episode.number), "data-locked": isLocked(episode) || drm ? "1" : "0" } })
     );
-    box.checked = !isLocked(episode) && !onDisk.has(episode.number);
+    box.checked = !isLocked(episode) && !drm && !onDisk.has(episode.number);
     box.addEventListener("change", updateSelection);
     const cover = el("td", { className: "cover-cell" });
     const thumbnail = covers.urlOf(episode.itemId); // fetched already: no request
@@ -3520,6 +3525,7 @@ async function renderSeries(series, view) {
     if (isLocked(episode) && episode.lockHints.length > 0) {
       access.append(el("span", { className: "hints", text: episode.lockHints.map(shownText).join("; ") }));
     }
+    if (drm && !isLocked(episode)) access.append(el("span", { className: "hints", text: shownText(DRM_REMEMBERED_MESSAGE) }));
     body.append(
       el("tr", { attrs: { "data-number": String(episode.number), "data-access": episode.access, "data-item-id": episode.itemId } }, [
         el("td", {}, [box]),
@@ -3754,13 +3760,14 @@ function enterTakes(rest) {
 }
 
 /**
- * Where a paste the page does not take lands in the box. Text that names a series or a video — a
- * link, an id — lands on lines of its own, never glued onto, nor into, a line the box holds: in
- * place of the selection, or, with none, after the caret's line, with a line break before it when
- * the text before does not end one and after it when the text after does not start one — so links
- * pasted one after the other while nothing may start (the cooldown) stay one per line, each taken
- * by Enter later. Other text lands as any paste does: in place of the selection (`own` false).
- * `offset` is how many of the box's lines come before the pasted text's first line.
+ * Where a paste the page does not take lands in the box. With text selected, in its place, as any
+ * paste: the user chose what it replaces (a wrong line, an id inside a link). With none, text that
+ * names anything — a series, a video, a short link, other words: a line the parser reads — lands
+ * on lines of its own after the caret's line, a line break put before it when that line does not
+ * end with one: never glued onto, nor into, a line the box holds, so links pasted one after the
+ * other while nothing may start (the cooldown) stay one per line, each taken by Enter later. Blank
+ * lines and comments land as any paste does. `own`: the page puts it in place itself; `offset`: the
+ * box's lines before the pasted text's first line.
  * @param {string} value the box's text
  * @param {number} start its selection's start (the caret)
  * @param {number} end its selection's end
@@ -3769,43 +3776,72 @@ function enterTakes(rest) {
  */
 function pasteLanding(value, start, end, pasted) {
   const breaks = (/** @type {string} */ text) => text.split("\n").length - 1;
-  const named = parseSeriesList(pasted);
-  if (named.refs.length === 0 && !named.errors.some((error) => error.kind === "video")) {
+  if (start !== end || parseSeriesList(pasted).lines === 0) {
     return { from: start, to: end, text: pasted, own: false, offset: breaks(value.slice(0, start)) };
   }
   const lineEnd = value.indexOf("\n", end);
-  const [from, to] = start !== end ? [start, end] : lineEnd === -1 ? [value.length, value.length] : [lineEnd, lineEnd];
-  const before = value.slice(0, from);
-  const after = value.slice(to);
+  const at = lineEnd === -1 ? value.length : lineEnd;
+  const before = value.slice(0, at);
   const lead = before !== "" && !before.endsWith("\n") && !pasted.startsWith("\n") ? "\n" : "";
-  const trail = after !== "" && !after.startsWith("\n") && !pasted.endsWith("\n") ? "\n" : "";
-  return { from, to, text: `${lead}${pasted}${trail}`, own: true, offset: breaks(before) + (lead === "" ? 0 : 1) };
+  return { from: at, to: at, text: `${lead}${pasted}`, own: at !== start || lead !== "", offset: breaks(before) + (lead === "" ? 0 : 1) };
+}
+
+/**
+ * Whether `start`..`end` selects whole lines of `value` — from a line's start to a line's end, its
+ * line break included or not —, as a user selects the lines a paste is to replace. A selection
+ * inside a line, or across part of one, is not.
+ * @param {string} value
+ * @param {number} start
+ * @param {number} end
+ * @returns {boolean}
+ */
+function selectsWholeLines(value, start, end) {
+  return start < end && (start === 0 || value[start - 1] === "\n") && (end === value.length || value[end] === "\n" || value[end - 1] === "\n");
+}
+
+/**
+ * Put `text` in place of `from`..`to` in the box, the caret after it, as typing does — through
+ * Chrome's own editing command, so that Ctrl+Z takes it back like any edit; `setRangeText` (no
+ * undo) only where that command does nothing.
+ * @param {HTMLTextAreaElement} box
+ * @param {string} text "" removes the range
+ * @param {number} from
+ * @param {number} to
+ */
+function editBox(box, text, from, to) {
+  box.focus();
+  box.setSelectionRange(from, to);
+  const edited = text === "" ? from < to && document.execCommand("delete") : document.execCommand("insertText", false, text);
+  if (!edited) box.setRangeText(text, from, to, "end");
 }
 
 /**
  * A paste into the box: what was pasted — the clipboard's text, never the rest of the box — is
- * downloaded at once ({@link downloadFromBox}). Taken, it never lands in the box, and the text it
- * would replace (a selection) goes, as with any paste, the caret left where it was; whatever else
- * the box held — a refused paste's lines, typed ids — stays there, never lost, and the status line
- * says so when Enter would download something of it ({@link enterTakes}). Refused, it lands there
- * for the user to correct (then Enter), the reason on the status line — a link or an id on lines of
- * its own ({@link pasteLanding}); in a read-only tab, as any paste does.
+ * downloaded at once ({@link downloadFromBox}). Taken, it never lands in the box; whole lines it
+ * was pasted over go, as with any paste, and any other selection is left as it was (the paste was
+ * a download, not an edit: half a line removed could leave an id that names another series);
+ * whatever else the box held — a refused paste's lines, typed ids — stays there, never lost, and
+ * the status line says so when Enter would download something of it ({@link enterTakes}).
+ * Refused, it lands there for the user to correct (then Enter), the reason on the status line
+ * ({@link pasteLanding}); in a read-only tab, as any paste does. Every change the page makes to the
+ * box is an edit Ctrl+Z takes back ({@link editBox}).
  * @param {ClipboardEvent} event
  */
 function onLinksPaste(event) {
   const pasted = (event.clipboardData?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n");
   const box = textarea("links");
   const { value, selectionStart: start, selectionEnd: end } = box;
+  const replaced = selectsWholeLines(value, start, end);
   const landing = pasteLanding(value, start, end, pasted);
-  if (downloadFromBox(pasted, { rest: value.slice(0, start) + value.slice(end), offset: landing.offset })) {
+  if (downloadFromBox(pasted, { rest: replaced ? value.slice(0, start) + value.slice(end) : value, offset: landing.offset })) {
     event.preventDefault(); // taken: it never lands in the box
-    box.setRangeText("", start, end, "start");
-    if (box.value.trim() === "") box.value = "";
+    if (replaced) editBox(box, "", start, end);
+    if (box.value.trim() === "" && box.value !== "") box.value = "";
     return;
   }
-  if (!app.owner || !landing.own || (landing.from === start && landing.to === end && landing.text === pasted)) return; // it lands as any paste does
+  if (!app.owner || !landing.own) return; // it lands as any paste does
   event.preventDefault();
-  box.setRangeText(landing.text, landing.from, landing.to, "end");
+  editBox(box, landing.text, landing.from, landing.to);
 }
 
 /**

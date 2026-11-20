@@ -1075,7 +1075,11 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         warnings = _texts(ext, "#series-warnings li")
         assert "1 episodio parece bloqueado" in warnings
         hints = _texts(ext, "#episode-table .hints")
-        assert hints and all("sin dirección de reproducción" in hint for hint in hints)
+        # E2's remembered DRM verdict (TikTok's list calls it free) and E5's lock hints, in Spanish
+        drm_hint, lock_hint = hints
+        assert drm_hint.startswith("protegido con DRM (lo detectó una ejecución anterior): ")
+        assert f"marca “{include_locked}”" in drm_hint
+        assert "sin dirección de reproducción" in lock_hint
         seen += warnings + hints + _texts(ext, "#series-meta") + _texts(ext, "#pacing-line")
 
         # a 429 from the video server: the stop, the rest stopped, the next series not started,

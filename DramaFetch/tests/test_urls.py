@@ -114,6 +114,26 @@ def test_only_ascii_digits_make_an_id(text):
         parse_input(text)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # two links on one line, as copied from a chat or two spreadsheet cells: the second must
+        # never hide in the first's query and be dropped without a word
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?is_from_webapp=1"
+        "&sender_device=pc https://www.tiktok.com/shortdrama/episode/7699393770256782322/1",
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1\t{SERIES_ID}",
+        f"https://www.tiktok.com/shortdrama/{SERIES_ID}#top watch later",
+        "https://www.tiktok.com/@user/video/7699400000000000001?lang=en\u00a0more",
+    ],
+)
+def test_whitespace_inside_a_query_refuses_the_line(text):
+    """A query or a fragment runs to the end of the line and holds no whitespace: the line is
+    refused with its text, so the user splits it, instead of reading the first link only."""
+    with pytest.raises(UnsupportedUrlError, match="Not a TikTok short-drama or video URL"):
+        parse_input(text)
+    assert parse_input(text.split()[0]) is not None  # each link on its own line is read
+
+
 def test_short_link_message_tells_the_user_what_to_paste():
     with pytest.raises(UnsupportedUrlError, match="Short links"):
         parse_input("https://vm.tiktok.com/ZMabc123/")

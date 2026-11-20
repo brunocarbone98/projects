@@ -929,13 +929,17 @@
     "description": "The same, for one locked episode."
   },
   "libraryLockedTitle": {
-    "message": "Locked episodes ($count$): the downloads of this drama skipped them without asking TikTok for them — paid ones this account has not unlocked, ones TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), ones protected by DRM or with no play address. Unlocking in TikTok helps only the paid ones; See episodes shows the reason TikTok's list gives for each. DramaFetch never unlocks or decrypts anything.",
+    "message": "Locked episodes ($count$): the downloads of this drama skipped them without asking TikTok for them — paid ones this account has not unlocked, ones TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), ones protected by DRM or with no play address. Unlocking in TikTok helps only the paid ones; See episodes shows each one's reason. DramaFetch never unlocks or decrypts anything.",
     "description": "Tooltip of a library card's episode line when it counts locked episodes: every reason a run records an episode skipped-locked.",
     "placeholders": {
       "count": {
         "content": "$1"
       }
     }
+  },
+  "libraryLockedTitleOne": {
+    "message": "Locked episode: the downloads of this drama skipped it without asking TikTok for it — a paid one this account has not unlocked, one TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), or one protected by DRM or with no play address. Unlocking in TikTok helps only a paid one; See episodes shows its reason. DramaFetch never unlocks or decrypts anything.",
+    "description": "The same tooltip for one locked episode."
   },
   "libraryShown": {
     "message": "Showing $shown$ of $count$",
