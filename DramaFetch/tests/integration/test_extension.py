@@ -496,17 +496,16 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
             "the second paste is not on a line of its own",
         )
         # what the owner types right after it is an edit of its own: one Ctrl+Z takes back the
-        # note, never the link the page put there with it; the page's own edit is one of Chrome's
-        # too: the next Ctrl+Z takes it back, Ctrl+Shift+Z brings it again
-        page.keyboard.type(" # to watch")
-        ext.wait_for(
-            lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK} # to watch", 10
-        )
+        # typing, never the link the page put there with it; the page's own edit is one of
+        # Chrome's too: the next Ctrl+Z takes it back, Ctrl+Shift+Z brings it again. One key:
+        # the cooldown's countdown, rewritten every second, would split longer typing in two.
+        page.keyboard.type("x")
+        ext.wait_for(lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}x", 10)
         page.keyboard.press("ControlOrMeta+Z")
         ext.wait_for(
             lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}",
             10,
-            "Ctrl+Z took back more than the typing",
+            "Ctrl+Z did not take back the typing alone",
         )
         page.keyboard.press("ControlOrMeta+Z")
         ext.wait_for(lambda: page.input_value("#links") == MAIN_LINK, 10, "Ctrl+Z did not undo")
@@ -718,7 +717,8 @@ def test_k_a_selection_lists_the_series_again_for_the_session_logged_in_now(
     """**Download all available** never takes the list shown — someone else, or nobody, may be
     logged in by now: listed with the session (episode 3 unlocked), logged out, the selection lists
     the series again after the rest between jobs, and that list decides — episode 3 is skipped
-    without a request; nothing of the earlier session's list is used."""
+    without a request; nothing of the earlier session's list is used. A paste of the drama on
+    screen then draws its own fresh list too, never the earlier one."""
     settings = {"restMinS": 0.5, "restMaxS": 6}
     with (
         FakeTikTok() as server,
@@ -739,6 +739,17 @@ def test_k_a_selection_lists_the_series_again_for_the_session_logged_in_now(
         assert len(server.series_page_requests) == pages + 1  # listed again, without the session
         assert not server.item_list_requests[-1].logged_in
         assert len(_job_rests(entry)) == 1  # the rest came first: the list follows right after it
+        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "locked"
+
+        # a paste of the drama on screen (a batch; Look again, so that it is listed) draws the list
+        # it listed right before its downloads, never the earlier one shown
+        ext.add_session_cookie(SESSION_VALUE)
+        ext.see_episodes(THIRD_SERIES_ID)
+        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "unlocked"
+        ext.context.clear_cookies()  # logged out again
+        pasted = ext.paste_and_wait(THIRD_LINK, recheck=True)
+        assert _rows(pasted["series"][0])[3]["status"] == "skipped-locked"
+        assert not server.item_list_requests[-1].logged_in
         assert table.locator("tr[data-number='3']").get_attribute("data-access") == "locked"
 
 

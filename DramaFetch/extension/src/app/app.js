@@ -1466,7 +1466,7 @@ async function runJob(job) {
       }
     }
     entry["refreshes"] = engine.downloader.refreshes;
-    await redrawListed(job, fresh, engine.view);
+    await redrawListed(job, fresh, runs, engine.view);
   } catch (error) {
     if (error instanceof StopRequested) {
       entry["error"] = stop = error.message; // stored in English, like every engine text
@@ -1514,22 +1514,26 @@ async function runJob(job) {
 /**
  * After a download job that ran its course — done, or stopped by a refusal its runs report (a 429,
  * a captcha, three failures) —, the episode list (**See episodes**) drawn again: a selection job's
- * fresh list of its series (listed again for this job: the list the page then acts on), else the
- * list on screen when it is a series the job downloaded — its "on disk" badges, its counts and the
- * DRM verdicts the job recorded, which **Download all available** then leaves out. A job stopped
+ * fresh list of its series (listed again for this job: the list the page then acts on), else, when
+ * the list on screen is a series the job downloaded, the batch's own fresh list of it (listed right
+ * before its downloads: what TikTok lists now, for the session logged in now), or the list on
+ * screen when the batch did not list it (found complete) — its "on disk" badges, its counts and
+ * the DRM verdicts the job recorded, which **Download all available** then leaves out. A job stopped
  * by hand (**Stop**) or ended by an error is not: the list stays as the user left it, ticks
  * included, and the stop is not held up by Chrome's download history (its file checks can wait
  * seconds); the next listing of the drama, or the next job that ends on it, draws it again. A
  * failure here never fails the job.
  * @param {Job} job
  * @param {Series | null} fresh
+ * @param {SeriesRun[] | null} runs
  * @param {DownloadsView} view
  */
-async function redrawListed(job, fresh, view) {
+async function redrawListed(job, fresh, runs, view) {
   if (job.kind !== "batch" && job.kind !== "selection") return;
   const listed = app.loaded;
   const onScreen = listed !== null && job.refs.some((ref) => ref.seriesId === listed.series.seriesId) ? listed.series : null;
-  const series = fresh ?? onScreen;
+  const listedAgain = onScreen === null ? null : ((runs ?? []).find((run) => run.series?.seriesId === onScreen.seriesId)?.series ?? null);
+  const series = fresh ?? listedAgain ?? onScreen;
   if (series === null) return;
   try {
     await renderSeries(series, view);
