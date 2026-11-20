@@ -74,6 +74,37 @@ declare namespace chrome {
     const onClicked: ChromeEvent<(info: OnClickData, tab?: tabs.Tab) => void>;
   }
 
+  // ------------------------------------------------------------------------ notifications
+  /**
+   * The alert when a drama finishes (DramaFetch 1.7.0, the owner's request of 2026-11-19): made by
+   * the DramaFetch tab (`src/app/alerts.js`), clicked in the worker. Plain text, an icon of the
+   * extension's own, at most one button (**Retry**).
+   */
+  namespace notifications {
+    interface NotificationButton {
+      title: string;
+    }
+    interface NotificationOptions {
+      type: "basic";
+      /** An extension resource's full URL (`chrome.runtime.getURL`): a relative one is read from the page's folder. */
+      iconUrl: string;
+      title: string;
+      message: string;
+      contextMessage?: string;
+      /** -2 … 2; 0 the default */
+      priority?: number;
+      requireInteraction?: boolean;
+      silent?: boolean;
+      buttons?: NotificationButton[];
+    }
+    function create(notificationId: string, options: NotificationOptions): Promise<string>;
+    function clear(notificationId: string): Promise<boolean>;
+    /** The notification's body was clicked. */
+    const onClicked: ChromeEvent<(notificationId: string) => void>;
+    /** One of its buttons was clicked (0: the first). */
+    const onButtonClicked: ChromeEvent<(notificationId: string, buttonIndex: number) => void>;
+  }
+
   // --------------------------------------------------------------------------------- i18n
   namespace i18n {
     function getMessage(messageName: string, substitutions?: string | string[]): string;

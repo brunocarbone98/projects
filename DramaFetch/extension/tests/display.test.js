@@ -1007,3 +1007,14 @@ test("the page's display language: Chrome's UI language first, else the language
     Reflect.deleteProperty(globalThis, "chrome");
   }
 });
+
+test("a report line's details on their own — the words a drama's alert names its locked episodes with — read in Spanish as in the line; anything else stays as it is", () => {
+  assert.equal(es("2 locked (61, 62)"), "2 bloqueados (61, 62)");
+  assert.equal(es("1 locked (5)"), "1 bloqueado (5)");
+  assert.equal(es("1 paid episode your account unlocked (3), 2 locked (4-6)"), "1 episodio de pago que tu cuenta desbloqueó (3), 2 bloqueados (4-6)");
+  assertSpanish("2 locked (61, 62)");
+  // the same words inside the report line, as the tab shows it
+  assert.ok(es("complete: 60 of 62 (60 downloaded) — 2 locked (61, 62)").endsWith(" — 2 bloqueados (61, 62)"));
+  assert.equal(en("2 locked (61, 62)"), "2 locked (61, 62)");
+  for (const text of ["2 locked things", "3 lockers (1)", "2 locked (61, 62) and more"]) assert.equal(es(text), text);
+});

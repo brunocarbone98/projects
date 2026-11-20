@@ -836,6 +836,9 @@ const RULES = [
   ],
   // the report line (report.reportLine) and the stops (pacing.afterResult)
   [/^(?:complete, nothing to do|complete|incomplete): /, (m, inner) => reportLineEs(String(m.input), inner)],
+  // a report line's details on their own (`2 locked (61, 62)`: a drama's alert names its locked
+  // episodes in the words of its report line, app/alerts.js)
+  [/^\d+ (?:paid|locked|failed|not downloaded)\b/, (m) => detailsEs(String(m.input))],
   [
     new RegExp(`^episode (-?\\d+) (${STATUS_ALTERNATIVES})(?:: (.*))?$`, "s"),
     (m, inner) => `episodio ${m[1]} (${inner(String(m[2]))})${m[3] === undefined ? "" : `: ${inner(m[3])}`}`,

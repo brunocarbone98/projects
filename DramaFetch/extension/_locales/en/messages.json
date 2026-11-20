@@ -1297,6 +1297,14 @@
     "message": "A JSON file in Downloads/DramaFetch/reports: for each episode that did not download, its status, message, probable cause, the requests made (hosts, HTTP statuses, sizes) and the list entry TikTok served to your session — never your cookies.",
     "description": "Hint under the report setting."
   },
+  "settingAlerts": {
+    "message": "Alert me when a drama finishes",
+    "description": "Setting label (a checkbox): a notification from Chrome as each drama a download job finishes."
+  },
+  "settingAlertsHint": {
+    "message": "A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.",
+    "description": "Hint under the alert setting."
+  },
   "settingsHint": {
     "message": "File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.",
     "description": "Hint of the settings card."
@@ -1334,6 +1342,140 @@
         "content": "$1"
       }
     }
+  },
+  "alertCompleteTitle": {
+    "message": "✓ $name$ — downloaded",
+    "description": "Notification title: every episode of the drama the session may play is on disk (its report says complete).",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNothingPlayableTitle": {
+    "message": "$name$ — nothing your account may play",
+    "description": "Notification title instead of alertCompleteTitle when the drama's report says complete but the session may play none of its episodes (every one locked): nothing was saved, so no ✓ and no “downloaded”; alertNoneOnDisk is its message.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertAllOnDisk": {
+    "message": "All $count$ episodes are on disk$locked$.",
+    "description": "Notification message of a complete drama. $locked$ is empty, or “ — ” and its locked episodes in the words of its report line (“ — 2 locked (61, 62)”).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "locked": {
+        "content": "$2"
+      }
+    }
+  },
+  "alertOneOnDisk": {
+    "message": "1 episode is on disk$locked$.",
+    "description": "The same, when the session may play one episode of the drama — others may be locked, so never “its only episode” ($locked$ as in alertAllOnDisk).",
+    "placeholders": {
+      "locked": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNoneOnDisk": {
+    "message": "Your account may play none of its episodes$locked$.",
+    "description": "The same, for a complete drama whose every episode is locked ($locked$ as in alertAllOnDisk: never empty here).",
+    "placeholders": {
+      "locked": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertRetryTitle": {
+    "message": "⚠ $name$ — $count$ episodes to retry",
+    "description": "Notification title: episodes of the drama did not download (failed, or left by a stop); its Retry button queues them again.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      }
+    }
+  },
+  "alertRetryTitleOne": {
+    "message": "⚠ $name$ — 1 episode to retry",
+    "description": "The same, for one episode.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertRetryMessage": {
+    "message": "$episodes$ did not download.",
+    "description": "Notification message: the episodes (E03, E07, E12) — at most ten, then alertMore.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertRetryMessageOne": {
+    "message": "$episode$ did not download.",
+    "description": "The same, for one episode (E03).",
+    "placeholders": {
+      "episode": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertMore": {
+    "message": "$episodes$ and $count$ more",
+    "description": "The first ten episodes named, and how many more did not download.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      }
+    }
+  },
+  "alertRetryButton": {
+    "message": "Retry",
+    "description": "The notification's button: what the tab's Retry button does for that drama."
+  },
+  "alertIncompleteTitle": {
+    "message": "$name$ — not complete",
+    "description": "Notification title: the drama has nothing to retry but is not complete (a gap in TikTok's list, an episode TikTok did not list, a list it refused); its report line is the message.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertStoppedTitle": {
+    "message": "DramaFetch stopped: $reason$",
+    "description": "Notification title at the end of a download job that stopped with dramas never started; the reason as the tab shows it.",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNotStarted": {
+    "message": "$count$ dramas were not started — download them again later",
+    "description": "Notification message under alertStoppedTitle.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNotStartedOne": {
+    "message": "1 drama was not started — download it again later",
+    "description": "The same, for one drama."
   },
   "historySeriesOmitted": {
     "message": "Series of this run not kept here: $count$.",

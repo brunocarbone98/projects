@@ -245,8 +245,11 @@
         <input type="number" id="setting-rest-max" min="0" max="86400" step="1">
         <label for="setting-report" data-i18n="settingReport">Save a report of the episodes that did not download</label>
         <input type="checkbox" id="setting-report">
+        <label for="setting-alerts" data-i18n="settingAlerts">Alert me when a drama finishes</label>
+        <input type="checkbox" id="setting-alerts">
       </div>
       <p class="hint" data-i18n="settingReportHint">A JSON file in Downloads/DramaFetch/reports: for each episode that did not download, its status, message, probable cause, the requests made (hosts, HTTP statuses, sizes) and the list entry TikTok served to your session — never your cookies.</p>
+      <p class="hint" data-i18n="settingAlertsHint">A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.</p>
       <p class="hint" data-i18n="settingsHint">File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.</p>
       <div class="buttons">
         <button type="submit" id="settings-save" data-i18n="saveSettings">Save settings</button>

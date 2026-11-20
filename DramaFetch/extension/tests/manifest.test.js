@@ -25,6 +25,7 @@ const PERMISSIONS = [
   "webRequest",
   "declarativeNetRequestWithHostAccess",
   "contextMenus", // the right-click "Download this drama" (README: the permissions table)
+  "notifications", // the alert when a drama finishes, the owner's request of 2026-11-19 (README: the permissions table)
 ];
 const HOSTS = [
   "https://www.tiktok.com/*",

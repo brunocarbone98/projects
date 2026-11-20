@@ -44,7 +44,7 @@ import {
 import { STORAGE_REFUSED_PREFIX, StopRequested, StorageRefusedError, downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
 import { BOOKMARK_MESSAGES } from "../src/app/bookmark.js";
 import { FAVORITES_RATE_LIMIT_MESSAGE } from "../src/app/favorites.js";
-import { historyEntry as storedHistoryEntry } from "../src/app/storage.js";
+import { cooldownStore as pageCooldownStore, historyEntry as storedHistoryEntry } from "../src/app/storage.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
 
 const TINY = readFileSync(new URL("../../tests/fixtures/tiny.mp4", import.meta.url));
@@ -1447,12 +1447,14 @@ let pages = 0;
  * page is the test harness' copy (`dramafetch_test` in its manifest) with those test settings —
  * a job then runs without Chrome's 10 s between two file checks. With `options.session`,
  * `chrome.storage.session` holds those keys from the start (the browser session's memory: the
- * library's covers, say) and keeps what the page writes; without it, it holds nothing.
- * @param {{storage?: Record<string, unknown>, lockTaken?: boolean, search?: string, testSettings?: Record<string, unknown>, session?: Record<string, unknown>}} [options]
+ * library's covers, say) and keeps what the page writes; without it, it holds nothing. With
+ * `options.language` `es`, Chrome's UI is Spanish: the Spanish messages, `getUILanguage()` `es-419`.
+ * @param {{storage?: Record<string, unknown>, lockTaken?: boolean, search?: string, testSettings?: Record<string, unknown>, session?: Record<string, unknown>, language?: "en" | "es"}} [options]
  */
 async function fakePage(options = {}) {
+  const language = options.language ?? "en";
   /** @type {Record<string, CatalogEntry>} */
-  const catalog = JSON.parse(readFileSync(new URL("../_locales/en/messages.json", import.meta.url), "utf8"));
+  const catalog = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
   /** @type {Record<string, unknown>} */
   const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
   if (options.testSettings !== undefined) manifest["dramafetch_test"] = true;
@@ -1511,7 +1513,7 @@ async function fakePage(options = {}) {
       },
     },
     i18n: {
-      getUILanguage: () => "en-US",
+      getUILanguage: () => (language === "es" ? "es-419" : "en-US"),
       /** @param {string} key @param {string[]} [substitutions] */
       getMessage: (key, substitutions = []) => {
         const entry = catalog[key];
@@ -6203,5 +6205,605 @@ test("the page: an update that leaves the library as it was puts back everything
     assert.equal(empty.local.get("favoritesLibrary"), undefined);
   } finally {
     empty.restore();
+  }
+});
+
+// ------------------------------------------------ the alert when a drama finishes (DramaFetch 1.7.0)
+
+/** The worker, as the page sees it when it hands a notification's **Retry** over. */
+const WORKER = { id: "dramafetch-test-id", url: `${EXTENSION_ROOT}src/app/background.js` };
+/** The notification's icon: the extension's own file, its address from the extension's root. */
+const ALERT_ICON_URL = `${EXTENSION_ROOT}icons/icon128.png`;
+/** @param {string} seriesId @returns {import("../src/lib/urls.js").SeriesRef} */
+const refOf = (seriesId) => ({ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId });
+/**
+ * The test copy's settings for jobs run through the page's own queue: no wait for Chrome's file
+ * checks, and the rest between jobs and the list-page pause cut to milliseconds (test mode only).
+ */
+const QUICK = { existenceRateLimitS: 0, existenceDelayMs: 0, restMinS: 0.001, restMaxS: 0.002, pageDelayS: 0.001 };
+
+/**
+ * A fake `chrome.notifications` on the page's fake chrome: `shown` holds what Chrome shows (by id,
+ * with its options), `created` every id the page asked for, in order, `cleared` every id it took
+ * away; `getAll()` answers as Chrome does. With `refuse`, `create` throws, rejects or never answers.
+ * @param {{refuse?: "throw" | "reject" | "hang"}} [options]
+ */
+function fakeNotifications(options = {}) {
+  /** @type {Map<string, Record<string, unknown>>} */
+  const shown = new Map();
+  /** @type {string[]} */
+  const created = [];
+  /** @type {string[]} */
+  const cleared = [];
+  const api = {
+    /** @param {string} id @param {Record<string, unknown>} notification */
+    create: (id, notification) => {
+      created.push(id);
+      if (options.refuse === "throw") throw new TypeError("Error in invocation of notifications.create");
+      if (options.refuse === "reject") return Promise.reject(new Error("Unable to download all specified images."));
+      if (options.refuse === "hang") return new Promise(() => undefined);
+      shown.set(id, JSON.parse(JSON.stringify(notification)));
+      return Promise.resolve(id);
+    },
+    /** @param {string} id */
+    clear: async (id) => {
+      cleared.push(id);
+      return shown.delete(id);
+    },
+    getAll: async () => Object.fromEntries([...shown.keys()].map((id) => [id, true])),
+    onClicked: { addListener: () => undefined },
+    onButtonClicked: { addListener: () => undefined },
+  };
+  Object.assign(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis.chrome)), { notifications: api });
+  return { api, shown, created, cleared };
+}
+
+/**
+ * The page's engine of `job` over a scripted TikTok: every series listed with `episodes` episodes
+ * (`locked[seriesId]` the numbers its session may not play; the series named `Drama <its last four
+ * digits>`), every download `done` unless `statuses` gives `<series id>:<number>` another status (a
+ * 429's message the media server's) — with the fake engine's clock, sleep, cooldown, view and state
+ * (`states`, which a test may seed). The page's own hooks, pacing state and `persist` see real runs
+ * of `runBatch` and `runSelectionJob`; nothing is asked of anything.
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ * @param {import("../src/app/app.js").Job} job
+ * `onDownload` is told of every episode the run asks for, before its result.
+ * @param {{episodes?: number, locked?: Record<string, number[]>, statuses?: Record<string, string>, onDownload?: (ep: import("../src/lib/catalog.js").Episode) => void}} [options]
+ */
+function scriptedEngine(page, job, options = {}) {
+  /** @type {import("../src/app/app.js").JobRecord} */
+  const jobRecord = { pauses: [], inputs: [], taking: true };
+  const engine = page.module.buildEngine(job, jobRecord);
+  const fake = fakeEngine();
+  const statuses = options.statuses ?? {};
+  const downloader = {
+    refreshes: 0,
+    existingResult: () => null,
+    /** @param {import("../src/lib/catalog.js").Episode} ep */
+    needsNetwork: (ep) => ep.access !== "locked",
+    /** @param {import("../src/lib/catalog.js").Episode} ep */
+    async download(ep) {
+      options.onDownload?.(ep);
+      if (ep.access === "locked") return { episode: ep, status: "skipped-locked", path: null, message: "looks locked: no play address" };
+      const status = statuses[`${ep.seriesId}:${ep.number}`] ?? "done";
+      if (status === "done") return { episode: ep, status, path: `/dl/${ep.seriesId}/E${ep.number}.mp4`, message: `saved E${ep.number}.mp4 (0.1 MiB) + cover embedded`, downloadId: ep.number };
+      return { episode: ep, status, path: null, message: status === "failed-rate-limited" ? MEDIA_RATE_LIMIT_MESSAGE : `${status} ${ep.number}` };
+    },
+  };
+  Object.assign(engine, {
+    sleep: fake.engine.sleep,
+    clock: fake.engine.clock,
+    wallClock: fake.engine.wallClock,
+    rng: fake.engine.rng,
+    cooldownStore: fake.engine.cooldownStore,
+    discover: async (/** @type {import("../src/lib/urls.js").SeriesRef} */ ref) =>
+      series(
+        Array.from({ length: options.episodes ?? 3 }, (_, index) => episode(index + 1, { seriesId: ref.seriesId, locked: options.locked?.[ref.seriesId]?.includes(index + 1) })),
+        `Drama ${ref.seriesId.slice(-4)}`,
+        ref.seriesId,
+      ),
+    downloader,
+    view: fake.engine.view,
+    readState: fake.engine.readState,
+    writeState: fake.engine.writeState,
+  });
+  return { engine, jobRecord, states: fake.states };
+}
+
+/**
+ * The per-series records of finished runs as the history keeps them — what the tab's **Retry**
+ * reads (`retryTargets`).
+ * @param {readonly import("../src/app/engine.js").SeriesRun[]} runs
+ */
+const recordsOf = (runs) =>
+  runs.map((run) => ({ series_id: run.ref.seriesId, name: run.report.name, rows: run.results.map((result) => ({ number: result.episode.number, status: result.status, message: result.message })) }));
+
+test("the alert: as each drama of a batch is done — its rows and records stored — the complete one says ✓ with its episodes on disk and its locked one in the report line's words; the one with failures says ⚠, names them and has ONE button, Retry; the ids are this page's, the job's and the drama's", async () => {
+  const page = await fakePage();
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    const job = { ...BATCH_JOB, id: 7, refs: [refOf(SERIES_ID), refOf(OTHER_ID)] };
+    /** @type {string[]} the drama's records as each alert was asked for */
+    const storedAtAlert = [];
+    const { engine, states } = scriptedEngine(page, job, { episodes: 12, locked: { [SERIES_ID]: [12] }, statuses: { [`${OTHER_ID}:3`]: "failed", [`${OTHER_ID}:7`]: "failed", [`${OTHER_ID}:12`]: "failed" } });
+    const create = notes.api.create;
+    notes.api.create = (id, notification) => {
+      storedAtAlert.push(JSON.stringify(states.get(id.split(":").at(-2) ?? "")));
+      return create(id, notification);
+    };
+    const runs = await runBatch(engine, job.refs);
+    assert.deepEqual(runs.map((run) => run.report.complete), [true, false]);
+    const page7 = `dramafetch-alert:${module.alerts.page}:7`;
+    assert.deepEqual(notes.created, [`${page7}:${SERIES_ID}:complete`, `${page7}:${OTHER_ID}:retry`]);
+    assert.deepEqual(notes.shown.get(`${page7}:${SERIES_ID}:complete`), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "✓ Drama 2354 — downloaded",
+      message: "All 11 episodes are on disk — 1 locked (12).",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+    assert.deepEqual(notes.shown.get(`${page7}:${OTHER_ID}:retry`), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 3 episodes to retry",
+      message: "E03, E07, E12 did not download.",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    // made after the drama's every row was stored — its complete mark too
+    const [first, second] = storedAtAlert.map((stored) => JSON.parse(stored));
+    assert.equal(Object.keys(first.episodes).length, 12);
+    assert.equal(first.complete_episodes, 11);
+    assert.equal(Object.keys(second.episodes).length, 12);
+    assert.deepEqual(Object.values(second.episodes).filter((entry) => entry.status === "failed").map((entry) => entry.number), [3, 7, 12]);
+    // its Retry stands for what the tab's Retry takes for that drama
+    assert.deepEqual(module.alerts.retryOf(`${page7}:${OTHER_ID}:retry`), module.retryTargets(recordsOf(runs))[0]);
+    assert.equal(module.alerts.retryOf(`${page7}:${SERIES_ID}:complete`), null);
+    // the batch ended without a stop: no more alerts
+    module.alertJobEnd({ ...job, contacted: true }, null, runs, {}, []);
+    assert.equal(notes.created.length, 2);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the alert's Retry, handed over by the worker: the page that made it queues exactly the selection job the tab's Retry queues for that drama and takes the alert away — once; a cooldown in force: nothing queued, the alert kept, the tab named for the worker to bring forward; an alert of another page, or a sender that is no page of the extension: no answer", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const job = { ...BATCH_JOB, id: 3, refs: [refOf(OTHER_ID)] };
+    const { engine } = scriptedEngine(page, job, { episodes: 12, statuses: { [`${OTHER_ID}:3`]: "failed", [`${OTHER_ID}:7`]: "failed-unavailable", [`${OTHER_ID}:12`]: "failed" } });
+    const runs = await runBatch(engine, job.refs);
+    const [id] = notes.created;
+    assert.ok(id !== undefined);
+    const [target] = module.retryTargets(recordsOf(runs));
+    assert.ok(target !== undefined);
+    const [expected] = module.retryJobs([target]);
+    // not from a TikTok page (the content script) nor another extension
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, { id: "dramafetch-test-id", url: "https://www.tiktok.com/@invented_viewer", tab: /** @type {chrome.tabs.Tab} */ ({ id: 42, index: 0, windowId: 1, active: true }) }), []);
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, "another-extension"), []);
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: `dramafetch-alert:another-page:3:${OTHER_ID}:retry` }, WORKER), []);
+    assert.deepEqual(notes.cleared, []);
+    page.hold(); // the job's tabs.getCurrent never answers: it runs, and makes no request
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await page.turn();
+    assert.equal(element("progress-current").textContent, expected?.label);
+    assert.equal(expected?.label, `Retry 3 of Drama 2399`);
+    assert.deepEqual(expected?.numbers, [3, 7, 12]);
+    assert.deepEqual(queuedLabels(page), []); // one job, running
+    assert.deepEqual(notes.cleared, [id]);
+    assert.deepEqual(await notes.api.getAll(), {});
+    assert.equal(module.alerts.retryOf(id), null);
+    // a second press: this page holds it no more (the worker then only brings the tab forward)
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, WORKER), []);
+    await page.turn();
+    assert.deepEqual(queuedLabels(page), []);
+    // the tab's own Retry over the same run's records queues the very same job
+    module.renderFailed(recordsOf(runs));
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.deepEqual(queuedLabels(page), [expected?.label]);
+  } finally {
+    page.restore();
+  }
+  // a cooldown in force: the gate of the tab's Retry button
+  const now = Date.now() / 1000;
+  const cooled = await fakePage({ storage: { cooldown: { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now } } });
+  try {
+    const { element, module } = cooled;
+    const notes = fakeNotifications();
+    const job = { ...BATCH_JOB, id: 4, refs: [refOf(OTHER_ID)] };
+    const { engine } = scriptedEngine(cooled, job, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    await runBatch(engine, job.refs);
+    const [id] = notes.created;
+    assert.ok(id !== undefined);
+    assert.equal(element("cooldown-banner").hidden, false);
+    assert.deepEqual(cooled.message({ type: "dramafetch:retry", notificationId: id }, WORKER), [{ ok: true, queued: false, tabId: 1 }]);
+    await cooled.turn();
+    assert.equal(element("app-status").dataset["state"], "idle");
+    assert.deepEqual(queuedLabels(cooled), []);
+    assert.deepEqual(notes.cleared, []); // not taken away: nothing was queued (the tab's own Retry once the wait is over)
+    assert.notEqual(module.alerts.retryOf(id), null);
+  } finally {
+    cooled.restore();
+  }
+});
+
+test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopped in — its stopped episodes retryable, the stop's reason the context —, and at the job's end ONE more: DramaFetch stopped, how many dramas were never started — those of the jobs the stop took out of the queue counted too; Stop in the middle of a batch counts the dramas after the one it ran; a listing or a removal that stops says so only for the download jobs it took out of the queue", async () => {
+  const page = await fakePage();
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    const THIRD_ID = "7699393770256782388";
+    const job = { ...BATCH_JOB, id: 5, refs: [refOf(SERIES_ID), refOf(OTHER_ID), refOf(THIRD_ID)] };
+    const { engine, jobRecord } = scriptedEngine(page, job, { statuses: { [`${OTHER_ID}:2`]: "failed-rate-limited" } });
+    const runs = await runBatch(engine, job.refs);
+    assert.deepEqual(runs.map((run) => run.errorKind), [null, null, "not-started"]);
+    const stopping = /** @type {import("../src/app/engine.js").SeriesRun} */ (runs.find((run) => run.stop));
+    const stop = stopping.report.stopped || stopping.error || "stopped";
+    assert.equal(stop, "episode 2 failed-rate-limited");
+    const page5 = `dramafetch-alert:${module.alerts.page}:5`;
+    assert.deepEqual(notes.created, [`${page5}:${SERIES_ID}:complete`, `${page5}:${OTHER_ID}:retry`]); // nothing for the drama never started
+    assert.deepEqual(notes.shown.get(`${page5}:${OTHER_ID}:retry`), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 2 episodes to retry",
+      message: "E02, E03 did not download.",
+      contextMessage: "episode 2 failed-rate-limited",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.deepEqual(module.alerts.retryOf(`${page5}:${OTHER_ID}:retry`)?.numbers, [2, 3]);
+    // the job's end: one more, and a batch the stop took out of the queue counts its dramas too
+    assert.equal(job.contacted, true); // it made requests (the page's own `persist` noted them)
+    const waiting = { kind: /** @type {const} */ ("batch"), refs: [refOf("7699393770256782366"), refOf(THIRD_ID)] };
+    module.alertJobEnd(job, stop, runs, jobRecord, [waiting, { kind: "load", refs: [refOf("7699393770256782377")] }]);
+    assert.deepEqual(notes.created.at(-1), `${page5}:stopped`);
+    assert.deepEqual(notes.shown.get(`${page5}:stopped`), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "DramaFetch stopped: episode 2 failed-rate-limited",
+      message: "2 dramas were not started — download them again later",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+    // Stop pressed while the second drama of three runs (as its episode 2 downloads): the batch
+    // throws — no runs, no rows kept for that drama, so no alert of its own —; the hooks counted the
+    // dramas it began, and the third never was
+    notes.created.length = 0;
+    const stopJob = { ...BATCH_JOB, id: 6, refs: job.refs };
+    const pressed = scriptedEngine(page, stopJob, {
+      onDownload: (ep) => {
+        if (ep.seriesId === OTHER_ID && ep.number === 2) page.element("stop-button").fire("click");
+      },
+    });
+    await assert.rejects(runBatch(pressed.engine, stopJob.refs), StopRequested);
+    assert.equal(pressed.jobRecord.begun, 2);
+    module.alertJobEnd(stopJob, "stopped by you", null, pressed.jobRecord, []);
+    const page6 = `dramafetch-alert:${module.alerts.page}:6`;
+    assert.deepEqual(notes.created, [`${page6}:${SERIES_ID}:complete`, `${page6}:stopped`]);
+    assert.equal(notes.shown.get(`${page6}:stopped`)?.["title"], "DramaFetch stopped: stopped by you");
+    assert.equal(notes.shown.get(`${page6}:stopped`)?.["message"], "1 drama was not started — download it again later");
+    // nothing when no drama was left unstarted, when the job asked TikTok for nothing (refused at
+    // its gate), or for a job that downloads nothing (a listing, a removal) when its stop cancelled
+    // no download: its own series are no downloads
+    notes.created.length = 0;
+    module.alertJobEnd({ ...job, id: 8 }, "stopped by you", null, { begun: 3 }, []);
+    module.alertJobEnd({ ...job, id: 9, contacted: false }, "cooldown until 12:30", null, {}, [waiting]);
+    const listingLoad = { kind: /** @type {const} */ ("load"), refs: [refOf("7699393770256782377")] };
+    for (const kind of /** @type {const} */ (["load", "favorites", "unbookmark"])) module.alertJobEnd({ id: 10, kind, refs: [refOf(SERIES_ID)], contacted: true }, FAVORITES_RATE_LIMIT_MESSAGE, null, {}, [listingLoad]);
+    assert.deepEqual(notes.created, []);
+    // ... but the download jobs a listing's or a removal's stop took out of the queue are said, as
+    // a batch's would be (an alert's Retry may wait behind one): their dramas only
+    for (const [id, kind] of /** @type {const} */ ([[11, "load"], [12, "favorites"], [13, "unbookmark"]])) {
+      module.alertJobEnd({ id, kind, refs: [refOf(SERIES_ID)], contacted: true }, FAVORITES_RATE_LIMIT_MESSAGE, null, {}, [waiting, listingLoad]);
+    }
+    assert.deepEqual(notes.created, [11, 12, 13].map((id) => `dramafetch-alert:${module.alerts.page}:${id}:stopped`));
+    assert.deepEqual(notes.shown.get(`dramafetch-alert:${module.alerts.page}:12:stopped`), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: `DramaFetch stopped: ${FAVORITES_RATE_LIMIT_MESSAGE}`,
+      message: "2 dramas were not started — download them again later",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+  } finally {
+    page.restore();
+  }
+});
+
+test("the alert of a batch Stop ended before a drama's downloads began — in the rest before it, the long break, or while its list was read —: that drama counts among those never started, as every one after it does; the drama done before keeps its own alert", async () => {
+  const THIRD_ID = "7699393770256782388";
+  for (const when of /** @type {const} */ (["series-rest", "long-rest", "listing"])) {
+    for (const count of [2, 3]) {
+      const page = await fakePage();
+      try {
+        const { module } = page;
+        const notes = fakeNotifications();
+        const job = { ...BATCH_JOB, id: 12, refs: [refOf(SERIES_ID), refOf(OTHER_ID), refOf(THIRD_ID)].slice(0, count) };
+        const { engine, jobRecord } = scriptedEngine(page, job);
+        // the long break due right after the first drama's three downloads (one every 100 of a run)
+        if (when === "long-rest") engine.pacingState.runAttempts = 97;
+        /** Stop pressed: the page's own button, then the pause or the listing it caught ends so */
+        const press = () => {
+          page.element("stop-button").fire("click");
+          return new StopRequested();
+        };
+        if (when === "listing") {
+          const list = engine.discover;
+          engine.discover = async (ref) => {
+            if (ref.seriesId === OTHER_ID) throw press();
+            return list(ref);
+          };
+        } else {
+          const sleep = engine.sleep;
+          engine.sleep = async (seconds) => {
+            if (jobRecord.pauses.at(-1)?.kind === when) throw press();
+            return sleep(seconds);
+          };
+        }
+        await assert.rejects(runBatch(engine, job.refs), StopRequested);
+        const label = `${when}, ${count} dramas`;
+        if (when !== "listing") assert.equal(jobRecord.pauses.at(-1)?.kind, when, label);
+        assert.equal(job.contacted, true, label); // the first drama downloaded
+        assert.equal(jobRecord.begun, 1, label); // the second drama's downloads never began
+        module.alertJobEnd(job, "stopped by you", null, jobRecord, []);
+        const id = `dramafetch-alert:${module.alerts.page}:12`;
+        assert.deepEqual(notes.created, [`${id}:${SERIES_ID}:complete`, `${id}:stopped`], label);
+        assert.equal(notes.shown.get(`${id}:stopped`)?.["title"], "DramaFetch stopped: stopped by you", label);
+        assert.equal(
+          notes.shown.get(`${id}:stopped`)?.["message"],
+          count === 2 ? "1 drama was not started — download it again later" : "2 dramas were not started — download them again later",
+          label,
+        );
+      } finally {
+        page.restore();
+      }
+    }
+  }
+});
+
+test("the alert setting: Alert me when a drama finishes, on by default, saved with the settings; off, no notification at all — not for a drama, not for a stopped batch", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module, local } = page;
+    assert.equal(element("setting-alerts").checked, true);
+    element("setting-alerts").checked = false;
+    element("settings-form").fire("submit");
+    for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+    assert.equal(/** @type {Record<string, unknown>} */ (local.get("settings"))["alerts"], false);
+    const notes = fakeNotifications();
+    const job = { ...BATCH_JOB, id: 2, refs: [refOf(SERIES_ID), refOf(OTHER_ID), refOf("7699393770256782388")] };
+    const { engine, jobRecord } = scriptedEngine(page, job, { statuses: { [`${OTHER_ID}:2`]: "failed-rate-limited" } });
+    const runs = await runBatch(engine, job.refs);
+    module.alertJobEnd(job, "episode 2 failed-rate-limited", runs, jobRecord, []);
+    assert.deepEqual(notes.created, []);
+  } finally {
+    page.restore();
+  }
+  const off = await fakePage({ storage: { settings: { alerts: false } } });
+  try {
+    assert.equal(off.element("setting-alerts").checked, false);
+  } finally {
+    off.restore();
+  }
+});
+
+test("the alert: nothing for a drama skipped as complete (no request), nothing of their own for a listing, a listing of the favorites or a removal from the Bookmark, nothing for a batch refused at its gate; a listing TikTok stops with a 429 while a batch and an alert's Retry wait behind it says once how many dramas that left unstarted; each job run to its end through the page's own queue", async () => {
+  // a drama found complete less than 24 hours ago, every file still there: skipped, no request
+  let page = await fakePage();
+  try {
+    const notes = fakeNotifications();
+    const job = { ...BATCH_JOB, id: 1, refs: [refOf(SERIES_ID)] };
+    const { engine, states } = scriptedEngine(page, job);
+    const state = newState(SERIES_ID, "Drama 2354");
+    for (const number of [1, 2, 3]) record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: "saved", downloadId: number }, { exists: () => true, now: 1_800_000_000 });
+    markComplete(state, 1_800_000_000 - 60, 3);
+    states.set(SERIES_ID, JSON.parse(JSON.stringify(state)));
+    const [run] = await runBatch(engine, job.refs);
+    assert.equal(run?.report.skippedComplete, true);
+    assert.equal(run?.contacted, false);
+    assert.deepEqual(notes.created, []);
+  } finally {
+    page.restore();
+  }
+  // a listing (Load list, also the popup's Download this series): run to its end
+  page = await fakePage({ testSettings: QUICK });
+  try {
+    const notes = fakeNotifications();
+    page.message({ type: "dramafetch:load", input: SERIES_ID });
+    for (let turn = 0; turn < 500 && (page.local.get("history") === undefined || page.element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.equal(/** @type {Record<string, unknown>[]} */ (page.local.get("history"))[0]?.["kind"], "load");
+    assert.deepEqual(notes.created, []);
+  } finally {
+    page.restore();
+  }
+  // the favorites listed (the popup's Open my library), then a listing TikTok stops with a 429 while
+  // a batch and an alert's Retry wait behind it: both are cancelled, the listing gets no alert of its
+  // own, and ONE says how many dramas its stop left unstarted — the retry's among them
+  page = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, catalog, module } = page;
+    const notes = fakeNotifications();
+    // a ⚠ alert this page holds: a drama of an earlier batch whose episode 2 did not download
+    const THIRD_ID = "7699393770256782388";
+    const earlier = { ...BATCH_JOB, id: 90, refs: [refOf(THIRD_ID)] };
+    await runBatch(scriptedEngine(page, earlier, { statuses: { [`${THIRD_ID}:2`]: "failed" } }).engine, earlier.refs);
+    const [retryAlert] = notes.created;
+    assert.equal(retryAlert, `dramafetch-alert:${module.alerts.page}:90:${THIRD_ID}:retry`);
+    const tab = favoritesTab();
+    tab.remember(1_794_351_500);
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB, card: null, menu: false, script: true });
+    for (let turn = 0; turn < 500 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.equal(history()[0]?.["kind"], "favorites");
+    assert.equal(history()[0]?.["favorites"], 5);
+    assert.deepEqual(notes.created, [retryAlert]); // a listing that ends well: nothing
+    const refused = favoritesTab({ pages: { "0": FAVORITES_CAPTURE, "1794351568": { __dramafetch_status: 429, __dramafetch_text: '{"statusCode": 429}' } } });
+    refused.remember(1_794_351_600);
+    page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB, card: null, menu: false, script: true });
+    element("links").value = `${SERIES_ID}\n${OTHER_ID}`;
+    element("download-all-button").fire("click"); // waits behind the listing
+    // the alert's Retry, pressed meanwhile: queued behind them, the alert taken away
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: retryAlert }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    assert.deepEqual(notes.cleared, [retryAlert]);
+    for (let turn = 0; turn < 1000 && (history().length < 4 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const notStarted = `not started: batch stopped in ${catalog["jobFavorites"]?.message} (${FAVORITES_RATE_LIMIT_MESSAGE})`;
+    assert.deepEqual(history().slice(0, 3).map((entry) => [entry["kind"], entry["error"]]), [
+      ["favorites", FAVORITES_RATE_LIMIT_MESSAGE],
+      ["selection", notStarted],
+      ["batch", notStarted],
+    ]);
+    assert.equal(history()[1]?.["label"], "Retry 1 of Drama 2388");
+    const stopped = `dramafetch-alert:${module.alerts.page}:2:stopped`;
+    assert.deepEqual(notes.created, [retryAlert, stopped]);
+    assert.equal(notes.shown.get(stopped)?.["title"], `DramaFetch stopped: ${FAVORITES_RATE_LIMIT_MESSAGE}`);
+    assert.equal(notes.shown.get(stopped)?.["message"], "3 dramas were not started — download them again later");
+    assert.equal(notes.shown.get(stopped)?.["buttons"], undefined);
+  } finally {
+    await clearCooldown(pageCooldownStore());
+    page.restore();
+  }
+  // a removal from the Bookmark (confirmed on its card): pressed, checked, counted — and nothing said
+  page = await fakePage({
+    storage: {
+      favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946, complete: false }),
+      [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
+    },
+    testSettings: { ...QUICK, bookmarkPollS: 0.001, bookmarkWaitS: 0.5 },
+  });
+  try {
+    const { element } = page;
+    const notes = fakeNotifications();
+    const { site } = bookmarkChrome({ firstPage: { ...FAVORITES_CAPTURE, total: "945", dramaList: /** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(1) } });
+    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
+    await settled(page);
+    element("bookmark-confirm").fire("click");
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    for (let turn = 0; turn < 2000 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.equal(history()[0]?.["kind"], "unbookmark");
+    assert.deepEqual(/** @type {Record<string, unknown>} */ (history()[0]?.["bookmark"])["outcome"], "removed");
+    assert.equal(site.clicks, 1);
+    assert.deepEqual(notes.created, []);
+  } finally {
+    page.restore();
+  }
+  // a batch refused at its gate (a cooldown in force) with another waiting behind it: no request, nothing said
+  const now = Date.now() / 1000;
+  page = await fakePage({ storage: { cooldown: { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now } }, testSettings: QUICK });
+  try {
+    const { element } = page;
+    const notes = fakeNotifications();
+    element("links").value = `${SERIES_ID}\n${OTHER_ID}`;
+    element("download-all-button").fire("click");
+    element("download-all-button").fire("click"); // the second waits behind the first
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    for (let turn = 0; turn < 500 && (history().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.ok(String(history()[0]?.["error"]).startsWith("TikTok refused a request at ")); // the job refused at its gate
+    assert.ok(String(history()[1]?.["error"]).startsWith("not started: batch stopped in 2 series (TikTok refused a request at ")); // the one behind it
+    assert.deepEqual(notes.created, []);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the alert of a batch run through the page's own queue to its end: the drama whose list could not be read says it is not complete — the error the tab shows —, the batch stopped there, and ONE more says how many dramas were never started", async () => {
+  const page = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    element("links").value = `${SERIES_ID}\n${OTHER_ID}\n7699393770256782388`;
+    element("download-all-button").fire("click"); // the discovery can open no tab here: no request at all
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    for (let turn = 0; turn < 500 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const [entry] = history();
+    assert.equal(entry?.["stopped"], "the episode list could not be fetched");
+    const job = `dramafetch-alert:${module.alerts.page}:1`;
+    assert.deepEqual(notes.created, [`${job}:${SERIES_ID}:incomplete`, `${job}:stopped`]);
+    assert.deepEqual(notes.shown.get(`${job}:${SERIES_ID}:incomplete`)?.["title"], `${SERIES_ID} — not complete`);
+    assert.match(String(notes.shown.get(`${job}:${SERIES_ID}:incomplete`)?.["message"]), /^could not list the series: /);
+    assert.equal(notes.shown.get(`${job}:${SERIES_ID}:incomplete`)?.["buttons"], undefined);
+    assert.deepEqual(notes.shown.get(`${job}:stopped`)?.["title"], "DramaFetch stopped: the episode list could not be fetched");
+    assert.deepEqual(notes.shown.get(`${job}:stopped`)?.["message"], "2 dramas were not started — download them again later");
+    // a selection job — the tab's Retry here — has its drama's alert at its end too; one drama, no
+    // other job waiting: nothing more
+    notes.created.length = 0;
+    module.renderFailed([seriesRecord(OTHER_ID, "Two", [[1, "done"], [2, "failed"]])]);
+    element("retry-button").fire("click");
+    for (let turn = 0; turn < 500 && (history().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.equal(history()[0]?.["kind"], "selection");
+    assert.deepEqual(notes.created, [`dramafetch-alert:${module.alerts.page}:2:${OTHER_ID}:incomplete`]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the alert in Spanish under a Spanish Chrome: the titles, the messages, the button and the engine's words as the tab shows them", async () => {
+  const page = await fakePage({ language: "es" });
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    const job = { ...BATCH_JOB, id: 2, refs: [refOf(SERIES_ID), refOf(OTHER_ID), refOf("7699393770256782388")] };
+    const { engine, jobRecord } = scriptedEngine(page, job, { episodes: 4, locked: { [SERIES_ID]: [4] }, statuses: { [`${OTHER_ID}:2`]: "failed-rate-limited" } });
+    const runs = await runBatch(engine, job.refs);
+    module.alertJobEnd(job, "episode 2 failed-rate-limited", runs, jobRecord, []);
+    const texts = [...notes.shown.values()].map((shown) => [shown["title"], shown["message"], shown["contextMessage"], shown["buttons"]]);
+    assert.deepEqual(texts, [
+      ["✓ Drama 2354 — descargado", "Los 3 episodios están en el disco — 1 bloqueado (4).", undefined, undefined],
+      ["⚠ Drama 2399 — 3 episodios por reintentar", "E02, E03, E04 no se descargaron.", "episodio 2 (limitado por TikTok)", [{ title: "Reintentar" }]],
+      ["DramaFetch se detuvo: episodio 2 (limitado por TikTok)", "1 drama no se inició: descárgalo de nuevo más tarde", undefined, undefined],
+    ]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("a notification Chrome refuses — a throw, a rejected promise, an answer that never comes, no API at all (a copy without the permission) — never breaks or slows a job: the batch ends as it would, its history and failed block the same", async () => {
+  const warn = console.warn;
+  console.warn = () => undefined; // the page notes each refusal; not this test's output
+  try {
+    /** @type {unknown[]} */
+    const entries = [];
+    for (const refuse of /** @type {const} */ (["throw", "reject", "hang", "missing", "none"])) {
+      const page = await fakePage({ testSettings: QUICK });
+      try {
+        const { element, module } = page;
+        const notes = refuse === "missing" ? null : fakeNotifications(refuse === "none" ? {} : { refuse });
+        // a whole job through the queue: it ends, as it would
+        element("links").value = `${SERIES_ID}\n${OTHER_ID}`;
+        element("download-all-button").fire("click");
+        const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+        for (let turn = 0; turn < 500 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+        assert.equal(element("app-status").dataset["state"], "idle", refuse);
+        const [entry] = history();
+        assert.ok(entry !== undefined, refuse);
+        entries.push({ ...entry, id: null, started_at: null, finished_at: null });
+        if (notes !== null) assert.equal(notes.created.length, 2, refuse); // asked for all the same: the drama, the stop
+        // the hooks themselves, over a drama with a failure: nothing thrown out of them, and the
+        // retry of an alert Chrome refused is not kept
+        const job = { ...BATCH_JOB, id: 9, refs: [refOf(OTHER_ID)] };
+        const { engine } = scriptedEngine(page, job, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+        const runs = await runBatch(engine, job.refs);
+        await page.turn();
+        assert.equal(runs.length, 1, refuse);
+        const kept = module.alerts.retryOf(`dramafetch-alert:${module.alerts.page}:9:${OTHER_ID}:retry`);
+        assert.deepEqual(kept, refuse === "hang" || refuse === "none" ? module.retryTargets(recordsOf(runs))[0] : null, refuse);
+      } finally {
+        page.restore();
+      }
+    }
+    for (const entry of entries.slice(1)) assert.deepEqual(entry, entries[0]);
+  } finally {
+    console.warn = warn;
   }
 });

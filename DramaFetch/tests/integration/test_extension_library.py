@@ -13,7 +13,11 @@ against the fake TikTok server, whose favorites are the server's own list
   TikTok**;
 - (b) two dramas ticked — each card framed in the accent while ticked — and **Download selected
   dramas** download exactly as **Download all** of their ids does in another profile (the same
-  files, names, embedded covers and rows), and the cards end **On disk**;
+  files, names, embedded covers and rows), and the cards end **On disk**; each drama, as it is done,
+  gets its notification (1.7.0) — `✓ <drama> — downloaded`, its episodes on disk, its locked one in
+  the report line's words —, shown by Chrome (`chrome.notifications.getAll()` lists it), none for
+  the listing before; a click on one's body, dispatched to the service worker's own listener,
+  brings the DramaFetch tab to the front — no job, no reload, no request — and takes it away;
 - (c) **Remove from Favorites** on an on-disk drama presses the drama page's own Bookmark once (one
   `collect` request, the page's own `action`), the fake's list loses it, the card says so, the count
   is the fake's new total (one first-page request of the profile tab), the background tab is closed
@@ -22,9 +26,13 @@ against the fake TikTok server, whose favorites are the server's own list
   still in the library and on the fake, never a second click;
 - (e) a `collect` answered HTTP 429 (`collect_rate_limit`): a stop with the 30-minute cooldown;
 - (f) **Retry** after **Download selected dramas**: an episode whose first transfer the fake cuts
-  short (`truncate_once`) is shown apart with its **Retry** button, the card says **Partly**; the
-  retry — one selection job over that episode — saves it, byte for byte the file a clean
-  **Download all** saves, and the card ends **On disk**.
+  short (`truncate_once`) is shown apart with its **Retry** button, the card says **Partly**, and
+  the drama's notification says `⚠ <drama> — 1 episode to retry` / `E02 did not download.` with a
+  **Retry** button; that button, clicked as Chrome hands it to the service worker (its own
+  `onButtonClicked` listener, `chrome.notifications.onButtonClicked.dispatch` in the worker), goes
+  to the page, which queues one selection job over that episode — the tab's own **Retry** — and
+  takes the notification away: the episode saved byte for byte as a clean **Download all** saves
+  it, the card ends **On disk** and the drama's notification says it is downloaded.
 
 No cookie value is set, printed or asserted on; nothing reaches TikTok.
 """
@@ -52,12 +60,13 @@ from .fake_tiktok import (
     SECOND_SERIES_ID,
     SECOND_SERIES_NAME,
     SERIES_ID,
+    SERIES_NAME,
     SERIES_PATH_RE,
     FakeTikTok,
 )
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Locator, Page
+    from playwright.sync_api import Locator, Page, Worker
 
 pytestmark = [
     pytest.mark.integration,
@@ -81,6 +90,59 @@ ACCENT_JS = (
     "() => { const probe = document.createElement('div'); probe.style.color = 'var(--accent)';"
     " document.body.append(probe); const color = getComputedStyle(probe).color; probe.remove();"
     " return color; }"
+)
+#: In the DramaFetch tab, recorded on their way to Chrome: every notification the page asks for —
+#: its id and options, and whether `chrome.notifications.getAll()` listed it once Chrome made it
+#: (headless Chromium drops a notification from that list about 9 s later — 8.6 s measured in the
+#: sandbox's Chromium —, as a desktop's toast leaves the screen) — and every one the page takes
+#: away. Nothing else changes.
+RECORD_ALERTS_JS = """() => {
+  if (globalThis.__alerts !== undefined) return;
+  globalThis.__alerts = [];
+  globalThis.__cleared = [];
+  const api = chrome.notifications;
+  const create = api.create.bind(api);
+  const clear = api.clear.bind(api);
+  api.create = (id, options) => {
+    const seen = { id, options: JSON.parse(JSON.stringify(options)), listed: null };
+    globalThis.__alerts.push(seen);
+    const made = create(id, options);
+    made.then(
+      async () => { seen.listed = Object.hasOwn(await api.getAll(), id); },
+      (error) => { seen.listed = String(error); },
+    );
+    return made;
+  };
+  api.clear = (id) => {
+    globalThis.__cleared.push(id);
+    return clear(id);
+  };
+}"""
+ALERTS_JS = "() => globalThis.__alerts ?? []"
+CLEARED_JS = "() => globalThis.__cleared ?? []"
+#: In the extension's service worker, recorded on their way to Chrome: the notifications the worker
+#: takes away. Nothing else changes.
+RECORD_WORKER_CLEARS_JS = """() => {
+  if (globalThis.__cleared !== undefined) return;
+  globalThis.__cleared = [];
+  const api = chrome.notifications;
+  const clear = api.clear.bind(api);
+  api.clear = (id) => {
+    globalThis.__cleared.push(id);
+    return clear(id);
+  };
+}"""
+#: A click on a notification's body, or on its first button (**Retry**), as Chrome hands it to the
+#: service worker: the worker's own listeners (`background.js`) run on it.
+BODY_CLICK_JS = "(id) => chrome.notifications.onClicked.dispatch(id)"
+RETRY_CLICK_JS = "(id) => chrome.notifications.onButtonClicked.dispatch(id, 0)"
+#: A message from the DramaFetch tab that starts the service worker when Chrome stopped it (idle);
+#: the worker answers nothing to it, and no other page hears it.
+WAKE_JS = "() => chrome.runtime.sendMessage({ type: 'dramafetch:wake' }).catch(() => null)"
+#: The address of the tab in front, as the extension sees it.
+ACTIVE_TAB_JS = (
+    "async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))"
+    ".map((tab) => tab.url)"
 )
 
 
@@ -126,6 +188,43 @@ def _open_library(ext: ExtensionHarness, popup: Page) -> None:
     ext.wait_for(
         lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "the library was not listed"
     )
+
+
+def _alerts(ext: ExtensionHarness, count: int) -> list[dict[str, Any]]:
+    """The notifications the DramaFetch tab asked Chrome for (`RECORD_ALERTS_JS`), once there are
+    `count` and Chrome answered each."""
+
+    def answered() -> bool:
+        alerts: list[dict[str, Any]] = ext.page.evaluate(ALERTS_JS)
+        return len(alerts) >= count and all(alert["listed"] is not None for alert in alerts)
+
+    ext.wait_for(answered, 10, f"fewer than {count} notifications")
+    alerts: list[dict[str, Any]] = ext.page.evaluate(ALERTS_JS)
+    return alerts
+
+
+def _worker(ext: ExtensionHarness) -> Worker:
+    """The extension's service worker, running: the DramaFetch tab wakes it first (Chrome stops an
+    idle worker), then it is the one Playwright sees at the worker's address."""
+    address = f"chrome-extension://{ext.extension_id}/src/app/background.js"
+    ext.page.evaluate(WAKE_JS)
+    ext.wait_for(
+        lambda: any(worker.url == address for worker in ext.context.service_workers),
+        10,
+        "the extension's service worker is not running",
+    )
+    return [worker for worker in ext.context.service_workers if worker.url == address][-1]
+
+
+def _in_worker(ext: ExtensionHarness, script: str, arg: Any = None) -> Any:
+    """`script(arg)` evaluated in the extension's service worker; a worker Chrome stopped between
+    the wake-up and the call is woken and asked again, once."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    try:
+        return _worker(ext).evaluate(script, arg)
+    except PlaywrightError:
+        return _worker(ext).evaluate(script, arg)
 
 
 def _card(page: Page, series_id: str) -> Locator:
@@ -324,12 +423,17 @@ def test_b_download_selected_dramas_downloads_exactly_as_download_all_does(tmp_p
     """(b) The main series and the second one ticked in the library — each framed in the accent
     while ticked, as the approved sketch draws it —, **Download selected dramas**: ONE batch job,
     the same files (names and bytes: the covers embedded), the same rows and the same label as
-    **Download all** of their ids in another profile; the cards end **On disk**."""
+    **Download all** of their ids in another profile; the cards end **On disk**; each drama's
+    notification says it is downloaded — none for the listing before —, and a click on one's body,
+    as Chrome hands it to the service worker, brings the DramaFetch tab to the front (no job, no
+    reload, no request) and takes that notification away."""
     with FakeTikTok() as server:
         with ExtensionHarness(tmp_path / "library", server.base_url, test_settings=SETTINGS) as ext:
-            _profile, popup, _tab = _profile_and_popup(ext, server.base_url)
+            ext.page.evaluate(RECORD_ALERTS_JS)
+            profile, popup, _tab = _profile_and_popup(ext, server.base_url)
             _open_library(ext, popup)
             page = ext.page
+            assert page.evaluate(ALERTS_JS) == []  # a listing: no notification
             accent = page.evaluate(ACCENT_JS)
             plain = _border(_card(page, LIGHTHOUSE_ID))
             assert plain != accent
@@ -357,6 +461,45 @@ def test_b_download_selected_dramas_downloads_exactly_as_download_all_does(tmp_p
                 "On disk · 3/3"
             )
             assert _border(_card(page, SECOND_SERIES_ID)) == plain  # the ticks cleared with the job
+            # each drama, as it was done, got its notification, which Chrome showed
+            alerts = _alerts(ext, 2)
+            assert [alert["id"].split(":")[-2:] for alert in alerts] == [
+                [SERIES_ID, "complete"],
+                [SECOND_SERIES_ID, "complete"],
+            ]
+            assert [(a["options"]["title"], a["options"]["message"]) for a in alerts] == [
+                (f"✓ {SERIES_NAME} — downloaded", "All 4 episodes are on disk — 1 locked (5)."),
+                (f"✓ {SECOND_SERIES_NAME} — downloaded", "All 3 episodes are on disk."),
+            ]
+            icon = f"chrome-extension://{ext.extension_id}/icons/icon128.png"
+            for alert in alerts:
+                assert alert["listed"] is True  # chrome.notifications.getAll() listed it
+                assert alert["options"]["iconUrl"] == icon
+                assert "buttons" not in alert["options"]
+                assert "contextMessage" not in alert["options"]
+                assert "http" not in json.dumps(alert["options"]).replace(icon, "")
+            # a click on the first one's body, the profile's tab in front: the worker brings the
+            # DramaFetch tab forward as it is and takes the notification away; nothing else
+            profile.bring_to_front()
+            assert page.evaluate(ACTIVE_TAB_JS) == [f"{server.base_url}{PROFILE_PATH}"]
+
+            def requests() -> int:
+                """The fake's requests but the library's covers (the page may go on with those
+                once a job ends, click or no click)."""
+                return sum(1 for r in server.requests if not COVER_PATH_RE.match(r.path))
+
+            before, jobs, tabs = requests(), ext.finished_jobs(), len(ext.tab_urls())
+            _in_worker(ext, RECORD_WORKER_CLEARS_JS)
+            _in_worker(ext, BODY_CLICK_JS, alerts[0]["id"])
+            ext.wait_for(
+                lambda: page.evaluate(ACTIVE_TAB_JS) == [ext.app_url],
+                10,
+                "the DramaFetch tab did not come to the front",
+            )
+            assert _in_worker(ext, "() => globalThis.__cleared") == [alerts[0]["id"]]
+            assert len(page.evaluate(ALERTS_JS)) == 2  # the same page: not reloaded
+            assert (ext.finished_jobs(), ext.idle(), len(ext.tab_urls())) == (jobs, True, tabs)
+            assert requests() == before  # nothing asked of the fake TikTok
         with ExtensionHarness(tmp_path / "box", server.base_url, test_settings=SETTINGS) as box:
             box_entry = box.download_all(f"{SERIES_ID}\n{SECOND_SERIES_ID}", timeout_s=120)
             box_files = _saved(box)
@@ -506,9 +649,13 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
     """(f) The second drama ticked and **Download selected dramas**, the fake cutting the first
     transfer of its episode 2 short (`truncate_once`): episodes 1 and 3 saved, episode 2 shown apart
     — **Did not download (1)** with its **Retry** button, in the history too — and the card
-    **Partly · 2/3**. **Retry** is one selection job over that episode alone, requested once more:
-    saved whole with its cover embedded — byte for byte what a clean **Download all** saves in
-    another profile —, the block gone, the card **On disk · 3/3**."""
+    **Partly · 2/3** — and its notification `⚠ … — 1 episode to retry` / `E02 did not download.`
+    with ONE button, **Retry**. That button, clicked as Chrome hands the click to the service
+    worker (its own `onButtonClicked` listener), is handed to the DramaFetch tab, which queues one
+    selection job over that episode alone — the tab's own **Retry** — and takes the notification
+    away: the episode requested once more, saved whole with its cover embedded — byte for byte what
+    a clean **Download all** saves in another profile —, the block gone, the card **On disk · 3/3**
+    and the drama's notification `✓ … — downloaded`."""
     second = (SECOND_SERIES_ID, 2)
 
     def media_requests(server: FakeTikTok) -> int:
@@ -524,6 +671,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         FakeTikTok(truncate_once=frozenset({second})) as server,
         ExtensionHarness(tmp_path / "library", server.base_url, test_settings=SETTINGS) as ext,
     ):
+        ext.page.evaluate(RECORD_ALERTS_JS)
         _profile, popup, _tab = _profile_and_popup(ext, server.base_url)
         _open_library(ext, popup)
         page = ext.page
@@ -557,8 +705,24 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
             lambda: card.get_attribute("data-status") == "partly", 10, "the card is not partly"
         )
         assert card.locator(".favorite-status").inner_text() == "Partly · 2/3"
+        (alert,) = _alerts(ext, 1)
+        assert alert["id"].endswith(f":{SECOND_SERIES_ID}:retry")
+        assert alert["listed"] is True
+        options = alert["options"]
+        assert (options["title"], options["message"], options["buttons"]) == (
+            f"⚠ {SECOND_SERIES_NAME} — 1 episode to retry",
+            "E02 did not download.",
+            [{"title": "Retry"}],
+        )
+        assert "contextMessage" not in options  # the job did not stop
 
-        entry = ext._run("#retry-button", 90)
+        # the notification's Retry, clicked: the worker hands it to the pages, and the page that
+        # made it queues the retry — the tab's own Retry for that drama — and takes it away
+        jobs = ext.finished_jobs()
+        _in_worker(ext, RETRY_CLICK_JS, alert["id"])
+        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 90, "the retry did not end")
+        assert page.evaluate(CLEARED_JS) == [alert["id"]]
+        entry = ext.history()[0]
         assert entry["kind"] == "selection"
         assert entry["label"] == f"Retry 1 of {SECOND_SERIES_NAME}"
         ((series_id, rows),) = _rows(entry)
@@ -573,6 +737,12 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
             "not on disk after the retry",
         )
         assert card.locator(".favorite-status").inner_text() == "On disk · 3/3"
+        _first, done = _alerts(ext, 2)  # the retry's own drama, now whole
+        assert done["id"].endswith(f":{SECOND_SERIES_ID}:complete")
+        assert (done["options"]["title"], done["options"]["message"]) == (
+            f"✓ {SECOND_SERIES_NAME} — downloaded",
+            "All 3 episodes are on disk.",
+        )
         retried = _saved(ext)
     with (
         FakeTikTok() as clean,

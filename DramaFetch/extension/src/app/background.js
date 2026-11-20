@@ -22,11 +22,20 @@
  * asked for it ({@link keepFavoritesTemplate}) — and forgotten when the tab closes. That URL is the
  * template the DramaFetch tab reads the list with (`favorites.js`): its first page replayed
  * unchanged; that handle is the library's profile when the list becomes the library.
+ *
+ * And it answers the clicks on the notifications the DramaFetch tab shows when a drama finishes
+ * (DramaFetch 1.7.0, `alerts.js`): a click on one brings the DramaFetch tab to the front
+ * ({@link openApp}, no hand-over) and takes the notification away; its **Retry** button is handed
+ * to the page that made it (`dramafetch:retry`), which queues the retry as the tab's own **Retry**
+ * does — when no running page holds it (the tab was closed or reloaded since), the button only
+ * opens or focuses the DramaFetch tab, whose **Past runs** keep their own **Retry**. The worker
+ * itself never makes a request.
  */
 
 import { cardOf, favoritesQuery, isFavoritesFirstPageUrl } from "../lib/favorites.js";
 import { profileHandleOf } from "../lib/library.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
+import { isAlertId } from "./alerts.js";
 import { closeLeftoverDiscoveryTab, observedUrlPatterns } from "./discovery.js";
 import { t } from "./i18n.js";
 import { MENU_CARD, loadOfClick, menuItems } from "./menus.js";
@@ -191,6 +200,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }),
   );
   return true; // the answer comes asynchronously
+});
+
+/**
+ * Take a notification away; Chrome's refusal is ignored (it may be gone already).
+ * @param {string} notificationId
+ * @returns {Promise<void>}
+ */
+async function clearAlert(notificationId) {
+  await chrome.notifications.clear(notificationId).catch(() => undefined);
+}
+
+/**
+ * A notification's **Retry**: handed to the DramaFetch pages (`dramafetch:retry`). The page that
+ * made it queues the retry — the tab's own **Retry** for that drama — and takes the notification
+ * away; when its gate refuses (a cooldown in force), that page comes to the front, where the
+ * banner says until when. When no running page holds it (the tab was closed or reloaded since),
+ * the button only opens or focuses the DramaFetch tab: nothing is queued, the worker asks TikTok
+ * for nothing, and **Past runs** keeps its own **Retry**.
+ * @param {string} notificationId
+ * @returns {Promise<void>}
+ */
+async function retryFromAlert(notificationId) {
+  const answer = await chrome.runtime.sendMessage({ type: "dramafetch:retry", notificationId }).catch(() => undefined);
+  if (isRecord(answer) && answer["ok"] === true) {
+    if (answer["queued"] === true) return;
+    const tabId = answer["tabId"];
+    const tab = typeof tabId === "number" ? await chrome.tabs.update(tabId, { active: true }) : undefined;
+    if (tab !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+    return;
+  }
+  await clearAlert(notificationId);
+  await openApp(null);
+}
+
+// a copy of the extension without the `notifications` permission has no API: nothing to answer
+chrome.notifications?.onClicked.addListener((notificationId) => {
+  if (!isAlertId(notificationId)) return;
+  void clearAlert(notificationId);
+  void openApp(null).catch(() => undefined); // the DramaFetch tab to the front, nothing handed over
+});
+chrome.notifications?.onButtonClicked.addListener((notificationId, buttonIndex) => {
+  if (!isAlertId(notificationId) || buttonIndex !== 0) return;
+  void retryFromAlert(notificationId).catch(() => undefined);
 });
 
 /**

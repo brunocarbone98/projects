@@ -491,3 +491,14 @@ test("the library's covers: signed addresses kept in the browser session's memor
   await assert.rejects(writeLibrary(record), new RegExp("FILE_ERROR_NO_SPACE"));
   switches.refuseWrites = false;
 });
+
+test("the alert switch: on by default, a stored non-boolean falls back to it, and it must be a boolean to save", () => {
+  assert.equal(DEFAULT_SETTINGS.alerts, true);
+  assert.equal(normalizeSettings({ alerts: false }, false).alerts, false);
+  assert.equal(normalizeSettings({ alerts: "no" }, false).alerts, true); // not a boolean: dropped, the default stays
+  assert.equal(normalizeSettings({ alerts: false, report: false }, false).report, false); // each switch its own
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, alerts: false }, false), null);
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, alerts: /** @type {never} */ ("x") }, false), "the alert switch must be on or off");
+  // checked before the pacing: a bad switch is named even when the pauses are bad too
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, alerts: /** @type {never} */ (1), delayMinS: 0 }, false), "the alert switch must be on or off");
+});

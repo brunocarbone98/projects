@@ -63,6 +63,7 @@ import {
 import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib/report.js";
 import { doneEntries, readState } from "../lib/state.js";
 import { parseSeriesList, seriesPageUrl } from "../lib/urls.js";
+import { PageAlerts, dramaAlert, episodeLabel, stoppedAlert } from "./alerts.js";
 import { BOOKMARK_MESSAGES, BookmarkCooldown, BookmarkError, countAfterRemoval, removeFromBookmark } from "./bookmark.js";
 import { DiscoveryError, closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
 import { CoverLane, CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
@@ -201,6 +202,10 @@ const ENGINE_LOCK = "dramafetch-engine";
  *   in the runs' order, each taken when its series was done ({@link releaseSeries})
  * @property {boolean} taking whether the next series' is still taken: false once one could not be
  *   (that run and the later ones stay whole, and the report reads them at the job's end)
+ * @property {number} [begun] how many series of a batch it began — the last one whose list came
+ *   (`onStart`) or that was done (`onSeriesDone`) —: those after them were never started when
+ *   **Stop** ended it ({@link alertJobEnd}), the one Stop caught in the rest before it or while its
+ *   list was read among them
  *
  * @typedef {object} JobOutcome How a job ended, as its history entry records it ({@link reportJobEnd}).
  * @property {string} startedAt
@@ -295,6 +300,12 @@ function shownText(text) {
 const keeper = new TabKeeper();
 
 /**
+ * The notifications this page made when a drama finished, and the retry behind each **Retry**
+ * button (DramaFetch 1.7.0, {@link alertDrama}). (Exported for the unit tests.)
+ */
+export const alerts = new PageAlerts();
+
+/**
  * The history's retry buttons as rendered last: `updateButtons` applies the download buttons' rule
  * to them (no engine in this tab, a cooldown in force) and lifts it when the cooldown ends.
  * @type {Set<HTMLButtonElement>}
@@ -365,15 +376,6 @@ function duration(seconds) {
   if (seconds === null || seconds <= 0) return "–";
   const whole = Math.round(seconds);
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
-}
-
-/**
- * `E01`: an episode number as the progress rows and the history show it.
- * @param {number} number
- * @returns {string}
- */
-function episodeLabel(number) {
-  return `E${String(number).padStart(2, "0")}`;
 }
 
 // ------------------------------------------------------------------- effective options
@@ -529,6 +531,8 @@ export function buildEngine(job, jobRecord) {
   if (test.activateAfterS !== undefined) discoveryOptions.activateAfterS = test.activateAfterS;
   if (test.detailGraceS !== undefined) discoveryOptions.detailGraceS = test.detailGraceS;
   if (test.pageDelayS !== undefined) discoveryOptions.pageDelayS = test.pageDelayS;
+  /** the place of the batch's series that runs now (`onSeriesStart`): begun once its list came */
+  let current = 0;
   /** A listing contacts TikTok from its first request to its last: noted at both ends. */
   const discover = async (/** @type {SeriesRef} */ ref) => {
     await noteContact(job);
@@ -594,6 +598,7 @@ export function buildEngine(job, jobRecord) {
       renderPause();
     },
     onStart: (start) => {
+      jobRecord.begun = current; // its list came (or it was skipped as complete): begun
       clearPause();
       libraryRunning(start.ref.seriesId);
       $("progress-current").textContent = t("progressSeries", start.name);
@@ -611,15 +616,18 @@ export function buildEngine(job, jobRecord) {
       if (result.episode.seriesId === library.running) void refreshLibraryStatuses([result.episode.seriesId]);
     },
     onSeriesStart: (index, total, ref) => {
+      current = index; // not begun yet: the rest before it, the cooldown and its listing come first
       $("progress-current").textContent = t("progressBatch", [index, total, ref.seriesId]);
       libraryRunning(ref.seriesId);
     },
-    onSeriesDone: (_index, _total, run) => {
+    onSeriesDone: (index, _total, run) => {
+      jobRecord.begun = index; // done, whatever came of it: never counted as not started
       clearPause();
       renderReportLine(run);
       releaseSeries(run, downloader, jobRecord);
       trimResultRows();
       libraryFinished(run.ref.seriesId);
+      alertDrama(job, run); // its rows and records are stored: the drama's notification, now
     },
   };
 }
@@ -969,6 +977,15 @@ function failedEpisodesText(targets, named) {
 }
 
 /**
+ * The gate of every download button, the retries' too: this tab holds the engine, no cooldown is
+ * in force and no write was refused.
+ * @returns {boolean}
+ */
+function retryAllowed() {
+  return app.owner && app.cooldown === null && app.unsaved === null;
+}
+
+/**
  * Queue the retry of `targets` and spend `source`, the button that asked for it, until the next
  * job ends (the progress card and the history are rendered again then, their buttons new). The
  * gate of every download button holds: never from a read-only tab, never during a cooldown.
@@ -976,10 +993,87 @@ function failedEpisodesText(targets, named) {
  * @param {HTMLButtonElement} source
  */
 function startRetry(targets, source) {
-  if (!app.owner || app.cooldown !== null || app.unsaved !== null || spentRetries.has(source)) return;
+  if (!retryAllowed() || spentRetries.has(source)) return;
   source.disabled = true;
   spentRetries.add(source);
   for (const job of retryJobs(targets)) enqueue(job);
+}
+
+/**
+ * The **Retry** button of a notification this page made, handed over by the worker
+ * (`dramafetch:retry`): what the tab's **Retry** does for that drama — {@link retryJobs} →
+ * {@link enqueue}, behind the same gate, so the job then takes the cooldown gate, the rest between
+ * jobs and a fresh list like any other —, and the notification is taken away. Refused by the gate
+ * (a cooldown in force, a refused write), nothing is queued and the notification stays: the worker
+ * brings this tab to the front, where the banner or the status line says why. Null when this page
+ * holds no such retry — the worker then only opens or focuses the DramaFetch tab.
+ * @param {string} notificationId
+ * @returns {{ok: true, queued: boolean, tabId: number | null} | null}
+ */
+function retryFromAlert(notificationId) {
+  const target = alerts.retryOf(notificationId);
+  if (target === null) return null;
+  if (!retryAllowed()) return { ok: true, queued: false, tabId: app.tabId ?? null };
+  for (const job of retryJobs([target])) enqueue(job);
+  alerts.clear(notificationId);
+  return { ok: true, queued: true, tabId: app.tabId ?? null };
+}
+
+/**
+ * A drama of a download job is done — its rows and records stored —: its notification, while the
+ * **Alert me when a drama finishes** setting is on (`alerts.dramaAlert`: complete, episodes to
+ * retry — the tab's own {@link retryTargets} for that drama behind its **Retry** —, or not
+ * complete; none for a drama skipped as complete, refused before any request or never started).
+ * Never throws (the engine calls it between two series), never waits.
+ * @param {Job} job
+ * @param {SeriesRun} run
+ */
+function alertDrama(job, run) {
+  if (!app.settings.alerts) return;
+  try {
+    const target = retryTargets([runToHistory(run)])[0] ?? null;
+    const texts = dramaAlert(run, target, shownText);
+    if (texts === null) return;
+    alerts.show(alerts.idOf(job.id, `${run.ref.seriesId}:${texts.kind}`), texts, texts.kind === "retry" ? target : null);
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+/**
+ * A job ended stopped — a refusal, a cooldown, three failures in a row, **Stop**, a write refused,
+ * an error — after it made a request: when dramas were never started — a download job's own, and
+ * those of the download jobs its stop took out of the queue, whatever job stopped (a listing or a
+ * removal from the Bookmark too: an alert's **Retry** may wait behind one) —, ONE more notification
+ * says so (`alerts.stoppedAlert`: the reason as the tab shows it, how many). Nothing for a job that
+ * asked TikTok for nothing (refused at its gate). Never throws, never waits. (Exported for the unit
+ * tests.)
+ * @param {Pick<Job, "id" | "kind" | "refs" | "contacted">} job
+ * @param {string | null} stop why it stopped, or null
+ * @param {readonly SeriesRun[] | null} runs the runs it produced; null when it ended before them
+ *   (**Stop** in a batch: the series after the ones it began were never started)
+ * @param {Pick<JobRecord, "begun">} jobRecord
+ * @param {readonly Pick<Job, "kind" | "refs">[]} cancelled the jobs its stop took out of the queue
+ */
+export function alertJobEnd(job, stop, runs, jobRecord, cancelled) {
+  if (stop === null || job.contacted !== true || !app.settings.alerts) return;
+  try {
+    /** @type {Set<string>} the series never started */
+    const never = new Set();
+    // the job's own dramas only when it downloads (a listing's or a removal's series are no downloads)
+    if (runs !== null && (job.kind === "batch" || job.kind === "selection")) {
+      // not started after the stop, or refused at its own gate: no request, no row
+      for (const run of runs) if (!run.contacted && run.results.length === 0) never.add(run.ref.seriesId);
+    } else if (job.kind === "batch") {
+      for (const ref of job.refs.slice(jobRecord.begun ?? 0)) never.add(ref.seriesId);
+    }
+    for (const waiting of cancelled) {
+      if (waiting.kind === "batch" || waiting.kind === "selection") for (const ref of waiting.refs) never.add(ref.seriesId);
+    }
+    if (never.size > 0) alerts.show(alerts.idOf(job.id, "stopped"), stoppedAlert(stop, never.size, shownText));
+  } catch (error) {
+    console.warn(error);
+  }
 }
 
 /**
@@ -1232,6 +1326,7 @@ async function pump() {
 /**
  * Every queued job ends without a request: `not started: …` in the history.
  * @param {string} reason
+ * @returns {Promise<Job[]>} the jobs it took out of the queue
  */
 async function cancelQueue(reason) {
   const cancelled = app.queue.splice(0);
@@ -1249,6 +1344,7 @@ async function cancelQueue(reason) {
       series: [],
     });
   }
+  return cancelled;
 }
 
 /**
@@ -1330,6 +1426,7 @@ async function runJob(job) {
       renderReportLine(run);
       renderBatchTable([run]);
       entry["series"] = [runToHistory(run)];
+      alertDrama(job, run); // its rows are stored: the drama's notification, now
       if (run.stop) {
         stopping = run;
         stop = run.report.stopped || run.error || "stopped";
@@ -1358,8 +1455,11 @@ async function runJob(job) {
     }
     entry["stopped"] = stop;
     entry["finished_at"] = new Date().toISOString();
-    if (stopping !== null) await cancelQueue(notStartedMessage(stopping));
-    else if (stop !== null) await cancelQueue(`not started: batch stopped in ${job.label} (${stop})`);
+    /** @type {Job[]} */
+    let cancelled = [];
+    if (stopping !== null) cancelled = await cancelQueue(notStartedMessage(stopping));
+    else if (stop !== null) cancelled = await cancelQueue(`not started: batch stopped in ${job.label} (${stop})`);
+    alertJobEnd(job, stop, runs, jobRecord, cancelled); // the dramas a stop left unstarted, said once
     await appendHistory(entry);
     $("progress-activity").textContent = "";
     renderFailed(Array.isArray(entry["series"]) ? entry["series"] : []); // what did not download, apart, with its retry
@@ -3680,6 +3780,7 @@ function fillSettings() {
   input("setting-rest-min").value = String(settings.restMinS);
   input("setting-rest-max").value = String(settings.restMaxS);
   input("setting-report").checked = settings.report;
+  input("setting-alerts").checked = settings.alerts;
   const pacing = effectivePacing();
   $("pacing-line").textContent = `${shownText(describePacing(pacing))}; ${shownText(describeBatchPacing(pacing))}`;
 }
@@ -3699,6 +3800,7 @@ async function onSaveSettings(event) {
     restMinS: Number(input("setting-rest-min").value),
     restMaxS: Number(input("setting-rest-max").value),
     report: input("setting-report").checked,
+    alerts: input("setting-alerts").checked,
   };
   try {
     await saveSettings(settings);
@@ -3941,6 +4043,10 @@ async function main() {
         showLibrarySection();
         sendResponse({ ok: true, tabId: app.tabId ?? null });
       }
+      // a notification's Retry, handed over by the worker: queued by the page that made it, else
+      // no answer (the worker then only opens or focuses the DramaFetch tab)
+      const retry = record["type"] === "dramafetch:retry" && typeof record["notificationId"] === "string" ? retryFromAlert(record["notificationId"]) : null;
+      if (retry !== null) sendResponse(retry);
     }
   });
   setInterval(() => {
