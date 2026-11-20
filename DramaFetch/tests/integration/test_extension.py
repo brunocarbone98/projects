@@ -526,6 +526,17 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
             10,
             "Ctrl+Shift+Z did not redo",
         )
+        # the box shows 4 rows: a link the page lands below them is scrolled into view, as
+        # Chrome's own paste is — never a paste that seems to do nothing
+        for n in range(3, 7):
+            link = f"https://www.tiktok.com/shortdrama/episode/76993937702567823{n:02d}/1"
+            ext.paste(link)
+            ext.wait_for(lambda link=link: page.input_value("#links").endswith(f"\n{link}"), 10)
+        assert page.evaluate(
+            "() => { const box = document.getElementById('links');"
+            " return box.scrollHeight > box.clientHeight"
+            " && box.scrollTop + box.clientHeight >= box.scrollHeight - 1; }"
+        ), "the last link pasted is out of the box's view"
         status = page.locator("#input-status")
         assert (status.text_content() or "").startswith("TikTok refused a request at ")
         assert "error" in (status.get_attribute("class") or "")

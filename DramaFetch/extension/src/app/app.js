@@ -3856,7 +3856,8 @@ function selectsWholeLines(value, start, end) {
  * Chrome's own editing command, so that Ctrl+Z takes it back like any edit; `setRangeText` (no
  * undo) only where that command does nothing. The caret is set again afterwards: that closes
  * Chrome's typing step, so what the user types next is an edit of its own — one Ctrl+Z takes it
- * back and never the page's edit with it.
+ * back and never the page's edit with it —, and the box focused again, which scrolls it to the
+ * caret.
  * @param {HTMLTextAreaElement} box
  * @param {string} text "" removes the range
  * @param {number} from
@@ -3869,6 +3870,10 @@ function editBox(box, text, from, to) {
   if (!edited) box.setRangeText(text, from, to, "end");
   const caret = box.selectionEnd;
   box.setSelectionRange(caret, caret);
+  // and the caret in view: an editing command the page runs does not scroll the box to it (a link
+  // landed below its rows looked dropped); focusing the box again does, as Chrome's own paste
+  box.blur();
+  box.focus();
 }
 
 /**

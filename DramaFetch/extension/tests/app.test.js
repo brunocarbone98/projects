@@ -1394,6 +1394,10 @@ class FakeElement {
   focus() {
     focusedElement = this;
   }
+  /** No element focused any more, when this one was; its selection is kept, as Chrome keeps a text field's. */
+  blur() {
+    if (focusedElement === this) focusedElement = null;
+  }
   /**
    * A text field's `setSelectionRange`, as Chrome does it: `start` after `end` taken as `end`, both
    * held to the value's length.
