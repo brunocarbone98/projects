@@ -65,6 +65,19 @@ test("two links on one line are refused, never read as the first with the second
   assert.equal(parseInput(`https://www.tiktok.com/shortdrama/${ID}?a=1﻿b`).kind, "series");
   // each link on its own line is read
   assert.equal(parseSeriesList(`https://www.tiktok.com/shortdrama/episode/${ID}/1?is_from_webapp=1&sender_device=pc\n${second}`).refs.length, 2);
+  // with no whitespace between them — two pastes into Notepad, a CSV row, a zero-width space —, a
+  // TikTok address inside the query refuses the line too
+  for (const line of [
+    `https://www.tiktok.com/shortdrama/episode/${ID}/1?is_from_webapp=1&sender_device=pc${second}`,
+    `https://www.tiktok.com/shortdrama/episode/${ID}/1?a=1,https://www.tiktok.com/@user/video/7699400000000000001`,
+    `https://www.tiktok.com/shortdrama/${ID}#top\u200bwww.tiktok.com/shortdrama/7699393770256782322`,
+    `https://www.tiktok.com/@user/video/7699400000000000001?lang=enHTTPS://WWW.TIKTO\u212a.COM/x`,
+  ]) {
+    assert.throws(() => parseInput(line), /^UnsupportedUrlError: Not a TikTok short-drama or video URL/, line);
+  }
+  // the host's name alone, or an encoded address, is a query like any other
+  assert.equal(parseInput(`https://www.tiktok.com/shortdrama/episode/${ID}/1?ref=tiktok.com`).kind, "series");
+  assert.equal(parseInput(`https://www.tiktok.com/shortdrama/episode/${ID}/1?u=https%3A%2F%2Fwww.tiktok.com%2Fx`).kind, "series");
 });
 
 test("page URLs and the tab check, test base included", () => {

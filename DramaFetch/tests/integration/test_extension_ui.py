@@ -402,7 +402,8 @@ def test_the_app_tab_is_never_discarded_while_a_job_runs_or_waits(tmp_path: Path
     Meanwhile a paste into a box that holds text loses none of it (1.7.0): a refused paste lands,
     the right link pasted over its wrong line — Chrome's own selection — is taken (here a series
     already waiting: nothing queued twice), that line gone, the rest kept and said; Enter later
-    downloads what the box kept, and Enter in the emptied box changes nothing."""
+    downloads what the box kept — Ctrl+Z gives it back, Ctrl+Shift+Z empties it again —, and
+    Enter in the emptied box changes nothing."""
     settings = {"delayMinS": 1, "delayMaxS": 1}  # a pause between episodes to look during
     with (
         FakeTikTok() as server,
@@ -449,6 +450,14 @@ def test_the_app_tab_is_never_discarded_while_a_job_runs_or_waits(tmp_path: Path
         assert status.text_content() == queued
         page.keyboard.press("Enter")  # an empty box: nothing — no new line, the line unchanged
         assert page.input_value("#links") == "" and status.text_content() == queued
+        # Enter emptied the box with an edit of Chrome's own: Ctrl+Z gives the text back, exactly
+        # (nothing queued by it), and Ctrl+Shift+Z empties it again
+        page.keyboard.press("ControlOrMeta+Z")
+        ext.wait_for(
+            lambda: page.input_value("#links") == f"{THIRD_LINK}\n", 10, "Ctrl+Z did not undo"
+        )
+        page.keyboard.press("ControlOrMeta+Shift+Z")
+        ext.wait_for(lambda: page.input_value("#links") == "", 10, "Ctrl+Shift+Z did not redo")
         ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 30, "no pause")
         assert _auto_discardable(ext) is False
         page.click("#stop-button")
@@ -1077,8 +1086,13 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         hints = _texts(ext, "#episode-table .hints")
         # E2's remembered DRM verdict (TikTok's list calls it free) and E5's lock hints, in Spanish
         drm_hint, lock_hint = hints
-        assert drm_hint.startswith("protegido con DRM (lo detectó una ejecución anterior): ")
-        assert f"marca “{include_locked}”" in drm_hint
+        # what tries it again THERE: tick it and Download selected — never the box's checkbox
+        selected = page.locator("#download-selected-button").inner_text()
+        assert drm_hint == (
+            "protegido con DRM (lo detectó una ejecución anterior): DramaFetch no lo descifra; "
+            f"para intentarlo de nuevo, márcalo y pulsa “{selected}”"
+        )
+        assert include_locked not in drm_hint
         assert "sin dirección de reproducción" in lock_hint
         seen += warnings + hints + _texts(ext, "#series-meta") + _texts(ext, "#pacing-line")
 

@@ -49,7 +49,7 @@ import {
   twinIds,
   unchangedSince,
 } from "../lib/library.js";
-import { DRM_REMEMBERED_MESSAGE, TIKTOK_BASE_URL } from "../lib/messages.js";
+import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import { fileBaseName } from "../lib/naming.js";
 import {
   PAGE_DELAY_S,
@@ -247,6 +247,13 @@ const app = {
   testSettings: {},
   /** @type {{series: Series, resolvedAt: number} | null} */
   loaded: null,
+  /**
+   * The episodes of the list on screen that an earlier download found encrypted (a remembered DRM
+   * verdict), as {@link renderSeries} drew them: shown locked, and left out of what **Download all
+   * available** takes ({@link availableNumbers}).
+   * @type {{seriesId: string, numbers: Set<number>}}
+   */
+  listedDrm: { seriesId: "", numbers: new Set() },
   /** @type {FavoritesShown | null} the favorites the panel shows (**Your favorite dramas**) */
   favorites: null,
   /** @type {RetryTarget[] | null} the last finished job's episodes that did not download (the progress card's retry button) */
@@ -943,10 +950,11 @@ export function retryTargets(seriesRecords) {
 
 /**
  * The jobs a retry queues: one selection job per series, in the order of the series, over exactly
- * that series' episodes that did not download — what **See episodes** and **Download selected**
- * over those numbers does ({@link runSelectionJob}: the cooldown gate, the rest between jobs, a
- * fresh resolve, then the downloads; an episode meanwhile on disk is skipped), the locked ones
- * not asked for.
+ * that series' episodes that did not download — the job **Download selected** queues in **See
+ * episodes** over those numbers ({@link runSelectionJob}: the cooldown gate, the rest between
+ * jobs, a fresh resolve, then the downloads; an episode meanwhile on disk is skipped), but with
+ * `includeLocked` false: a locked one is not asked for, nor one an earlier download found
+ * encrypted, where **Download selected** asks for such a row ticked.
  * @param {readonly RetryTarget[]} targets
  * @returns {Omit<Job, "id">[]}
  */
@@ -3499,8 +3507,13 @@ async function renderSeries(series, view) {
   const onDisk = new Set(state !== null ? doneEntries(state, (entry) => view.exists(entry)).map(([number]) => number) : []);
   // an episode an earlier download found encrypted (DRM): TikTok's list may call it free, but the
   // engine skips it again without a request — shown as the locked one it is, with that verdict
+  // and what tries it again here (tick it, Download selected: a locked row ticked is asked for)
+  const drmNumbers = new Set(
+    series.episodes.filter((episode) => state !== null && drmProtected(state, episode.number)).map((episode) => episode.number),
+  );
+  app.listedDrm = { seriesId: series.seriesId, numbers: drmNumbers };
   /** @param {Episode} episode */
-  const drmFound = (episode) => state !== null && drmProtected(state, episode.number);
+  const drmFound = (episode) => drmNumbers.has(episode.number);
   const available = series.episodes.filter((episode) => !isLocked(episode) && !drmFound(episode)).length;
   $("series-meta").textContent = t("seriesMeta", [series.episodes.length, available, onDisk.size]);
   const warnings = $("series-warnings");
@@ -3525,7 +3538,7 @@ async function renderSeries(series, view) {
     if (isLocked(episode) && episode.lockHints.length > 0) {
       access.append(el("span", { className: "hints", text: episode.lockHints.map(shownText).join("; ") }));
     }
-    if (drm && !isLocked(episode)) access.append(el("span", { className: "hints", text: shownText(DRM_REMEMBERED_MESSAGE) }));
+    if (drm && !isLocked(episode)) access.append(el("span", { className: "hints", text: t("seriesDrmHint", [t("downloadSelectedButton")]) }));
     body.append(
       el("tr", { attrs: { "data-number": String(episode.number), "data-access": episode.access, "data-item-id": episode.itemId } }, [
         el("td", {}, [box]),
@@ -3614,9 +3627,7 @@ function updateSelection() {
 
 function updateButtons() {
   const blocked = !app.owner || app.cooldown !== null || app.unsaved !== null;
-  const loaded = app.loaded !== null;
-  const available = loaded ? app.loaded?.series.episodes.some((episode) => !isLocked(episode)) : false;
-  button("download-available-button").disabled = blocked || !available;
+  button("download-available-button").disabled = blocked || availableNumbers().length === 0;
   button("download-selected-button").disabled = blocked || !episodeBoxes().some((box) => box.checked);
   // the retry buttons: the same rule, and a clicked one stays disabled until the next job ends
   const retry = button("retry-button");
@@ -3636,6 +3647,17 @@ function updateButtons() {
 }
 
 /**
+ * The box's text as the parser reads it: a byte-order mark at the start of any line dropped — a
+ * paste can bring one (copied from a file that starts with it), and once it lands below other
+ * lines it is no longer the text's first character, the one place `parseSeriesList` drops it.
+ * @param {string} text
+ * @returns {string}
+ */
+function boxText(text) {
+  return text.replace(/^\uFEFF/gm, "");
+}
+
+/**
  * `text` — the box's, or what was pasted into it — as series refs (the box's rules,
  * `lib/urls.parseSeriesList`: duplicates dropped with a note), or null with the reason on the
  * status line: a line the parser refuses (nothing may start while one is), or no series at all.
@@ -3646,7 +3668,7 @@ function updateButtons() {
  * @returns {{refs: SeriesRef[], notes: string[]} | null}
  */
 function parsedLinks(text, offset = 0) {
-  const parsed = parseSeriesList(text);
+  const parsed = parseSeriesList(boxText(text));
   const status = $("input-status");
   if (parsed.errors.length > 0) {
     /** @param {SeriesListLine} error */
@@ -3715,7 +3737,8 @@ function queuedText(result) {
  * twice) —: Enter's box is emptied then, a paste never lands in it; refused — a line the parser
  * refuses, no series, the gate — the text stays in the box, with the reason on the status line.
  * `where.rest`: what the box keeps besides a paste taken (null for Enter, which takes the whole
- * box) — said (`linksKept`) only when Enter would download something of it ({@link enterTakes});
+ * box, and for a paste over part of a line, whose line Enter should not take next) — said
+ * (`linksKept`) only when Enter would download something of it ({@link enterTakes});
  * `where.offset`: the box's lines before the pasted text's first line ({@link parsedLinks}).
  * @param {string} text
  * @param {{rest?: string | null, offset?: number}} [where]
@@ -3748,13 +3771,13 @@ function downloadFromBox(text, where = {}) {
  * Whether Enter would download something of `rest`, what the box keeps besides a paste taken: no
  * line the parser refuses (Enter would then queue nothing at all) and a series not being
  * downloaded already (asked once the paste is queued: one the paste just queued counts as such).
- * Null — Enter's own run, which takes the whole box — never.
+ * Null — Enter's own run, which takes the whole box, or a paste over part of a line — never.
  * @param {string | null} rest
  * @returns {boolean}
  */
 function enterTakes(rest) {
   if (rest === null) return false;
-  const kept = parseSeriesList(rest);
+  const kept = parseSeriesList(boxText(rest));
   const pending = pendingDownloads();
   return kept.errors.length === 0 && kept.refs.some((ref) => !pending.has(ref.seriesId));
 }
@@ -3802,7 +3825,9 @@ function selectsWholeLines(value, start, end) {
 /**
  * Put `text` in place of `from`..`to` in the box, the caret after it, as typing does — through
  * Chrome's own editing command, so that Ctrl+Z takes it back like any edit; `setRangeText` (no
- * undo) only where that command does nothing.
+ * undo) only where that command does nothing. The caret is set again afterwards: that closes
+ * Chrome's typing step, so what the user types next is an edit of its own — one Ctrl+Z takes it
+ * back and never the page's edit with it.
  * @param {HTMLTextAreaElement} box
  * @param {string} text "" removes the range
  * @param {number} from
@@ -3813,6 +3838,8 @@ function editBox(box, text, from, to) {
   box.setSelectionRange(from, to);
   const edited = text === "" ? from < to && document.execCommand("delete") : document.execCommand("insertText", false, text);
   if (!edited) box.setRangeText(text, from, to, "end");
+  const caret = box.selectionEnd;
+  box.setSelectionRange(caret, caret);
 }
 
 /**
@@ -3832,11 +3859,15 @@ function onLinksPaste(event) {
   const box = textarea("links");
   const { value, selectionStart: start, selectionEnd: end } = box;
   const replaced = selectsWholeLines(value, start, end);
+  const rest = replaced ? value.slice(0, start) + value.slice(end) : value;
   const landing = pasteLanding(value, start, end, pasted);
-  if (downloadFromBox(pasted, { rest: replaced ? value.slice(0, start) + value.slice(end) : value, offset: landing.offset })) {
+  // pasted over part of a line, the box stays as it was, but that line is not what Enter should
+  // download next: no note about what the box holds
+  const kept = start === end || replaced ? rest : null;
+  if (downloadFromBox(pasted, { rest: kept, offset: landing.offset })) {
     event.preventDefault(); // taken: it never lands in the box
-    if (replaced) editBox(box, "", start, end);
-    if (box.value.trim() === "" && box.value !== "") box.value = "";
+    if (rest.trim() === "" && value !== "") editBox(box, "", 0, value.length); // only blanks left: emptied, one Ctrl+Z
+    else if (replaced) editBox(box, "", start, end);
     return;
   }
   if (!app.owner || !landing.own) return; // it lands as any paste does
@@ -3856,7 +3887,7 @@ function onLinksKeydown(event) {
   event.preventDefault();
   const box = textarea("links");
   if (box.value.trim() === "") return; // nothing to download: no new line, nothing said
-  if (downloadFromBox(box.value)) box.value = "";
+  if (downloadFromBox(box.value)) editBox(box, "", 0, box.value.length); // emptied: Ctrl+Z brings it back
 }
 
 /**
@@ -3969,12 +4000,22 @@ function startSelection(numbers, includeLocked) {
   });
 }
 
+/**
+ * The episodes **Download all available** takes from the list on screen — exactly the ones its
+ * `… available` counts ({@link renderSeries}): TikTok lists them free or unlocked, and no earlier
+ * download found them encrypted (a remembered DRM verdict, which the engine would skip again
+ * without a request). None: the button is disabled, and no job lists the series for nothing.
+ * @returns {number[]}
+ */
+function availableNumbers() {
+  if (app.loaded === null) return [];
+  const series = app.loaded.series;
+  const drm = app.listedDrm.seriesId === series.seriesId ? app.listedDrm.numbers : new Set();
+  return series.episodes.filter((episode) => !isLocked(episode) && !drm.has(episode.number)).map((episode) => episode.number);
+}
+
 function onDownloadAvailable() {
-  if (app.loaded === null) return;
-  startSelection(
-    app.loaded.series.episodes.filter((episode) => !isLocked(episode)).map((episode) => episode.number),
-    false,
-  );
+  startSelection(availableNumbers(), false);
 }
 
 function onDownloadSelected() {

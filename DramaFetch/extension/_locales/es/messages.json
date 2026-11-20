@@ -413,6 +413,15 @@
       }
     }
   },
+  "seriesDrmHint": {
+    "message": "protegido con DRM (lo detectó una ejecución anterior): DramaFetch no lo descifra; para intentarlo de nuevo, márcalo y pulsa “$button$”",
+    "description": "See episodes: the hint of an episode an earlier download found encrypted (shown locked).",
+    "placeholders": {
+      "button": {
+        "content": "$1"
+      }
+    }
+  },
   "badgeFree": {
     "message": "gratis",
     "description": "Access badge."

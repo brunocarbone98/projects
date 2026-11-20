@@ -413,6 +413,15 @@
       }
     }
   },
+  "seriesDrmHint": {
+    "message": "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; tick it and press “$button$” to try again",
+    "description": "See episodes: the hint of an episode an earlier download found encrypted (shown locked).",
+    "placeholders": {
+      "button": {
+        "content": "$1"
+      }
+    }
+  },
   "badgeFree": {
     "message": "free",
     "description": "Access badge."

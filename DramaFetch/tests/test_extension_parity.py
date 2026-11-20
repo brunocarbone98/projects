@@ -1431,6 +1431,13 @@ INPUTS = (
     f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1#x\u00a0y",
     f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1\x1cb",
     f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1\ufeffb",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?is_from_webapp=1&sender_device=pc"
+    "https://www.tiktok.com/shortdrama/episode/7699393770256782322/1",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1,https://www.tiktok.com/@u/video/7699400000000000001",
+    f"https://www.tiktok.com/shortdrama/{SERIES_ID}#top\u200bwww.tiktok.com/shortdrama/7699393770256782322",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1HTTPS://WWW.TIKTO\u212a.COM/x",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?ref=tiktok.com",
+    f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?u=https%3A%2F%2Fwww.tiktok.com%2Fx",
     "a'b",
     'a"b',
     "a'\"b",

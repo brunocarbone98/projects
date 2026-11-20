@@ -134,6 +134,55 @@ def test_whitespace_inside_a_query_refuses_the_line(text):
     assert parse_input(text.split()[0]) is not None  # each link on its own line is read
 
 
+@pytest.mark.parametrize(
+    ("text", "first"),
+    [
+        # two links with no whitespace between them — two pastes into Notepad, a CSV row, a
+        # zero-width space —: the second hides in the first's query unless a TikTok address there
+        # refuses the line
+        (
+            f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?is_from_webapp=1"
+            "&sender_device=pchttps://www.tiktok.com/shortdrama/episode/7699393770256782322/1",
+            f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?is_from_webapp=1",
+        ),
+        (
+            f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1,"
+            "https://www.tiktok.com/@user/video/7699400000000000001",
+            f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?a=1",
+        ),
+        (
+            f"https://www.tiktok.com/shortdrama/{SERIES_ID}#top\u200b"
+            "www.tiktok.com/shortdrama/7699393770256782322",
+            f"https://www.tiktok.com/shortdrama/{SERIES_ID}#top",
+        ),
+        (
+            "https://www.tiktok.com/@user/video/7699400000000000001?lang=en"
+            "HTTPS://WWW.TIKTOK.COM/shortdrama/7699393770256782322",
+            "https://www.tiktok.com/@user/video/7699400000000000001?lang=en",
+        ),
+    ],
+)
+def test_another_tiktok_address_inside_a_query_refuses_the_line(text, first):
+    """A query or a fragment holds no other TikTok address: two links glued together are refused
+    with their text, never read as the first one with the second dropped without a word."""
+    with pytest.raises(UnsupportedUrlError, match="Not a TikTok short-drama or video URL"):
+        parse_input(text)
+    assert parse_input(first) is not None  # the first alone is read
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?ref=tiktok.com",
+        f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1?u=https%3A%2F%2Fwww.tiktok.com%2Fx",
+    ],
+)
+def test_a_query_naming_tiktok_without_an_address_is_read(text):
+    """Only an address (`tiktok.com/`) refuses a query: the host's name alone, or an encoded
+    address, is a query like any other."""
+    assert parse_input(text) == SeriesRef(series_id=SERIES_ID, episode_hint=1, source_url=text)
+
+
 def test_short_link_message_tells_the_user_what_to_paste():
     with pytest.raises(UnsupportedUrlError, match="Short links"):
         parse_input("https://vm.tiktok.com/ZMabc123/")

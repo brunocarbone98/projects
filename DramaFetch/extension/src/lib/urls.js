@@ -41,9 +41,10 @@ export class UnsupportedUrlError extends Error {
 // is `[^${PY_SPACE}]` (JavaScript's own `\S` differs on U+001C-U+001F, U+0085 and U+FEFF) and its `$`
 // also matches before a final newline: `(?=\n?$)`.
 const HOST = String.raw`https?://(?:www\.|m\.)?tiktok\.com`;
-// a query or a fragment runs to the end of the line and holds no whitespace: two links on one line
-// are refused, never read as the first one with the second hidden in its query
-const TAIL = String.raw`/?(?:[?#][^${PY_SPACE}]*)?(?=\n?$)`;
+// a query or a fragment runs to the end of the line and holds no whitespace and no other TikTok
+// address: two links on one line — a space between them, a comma, or none at all — are refused,
+// never read as the first one with the second hidden in its query
+const TAIL = String.raw`/?(?:[?#](?:(?!tiktok\.com\/)[^${PY_SPACE}])*)?(?=\n?$)`;
 const SERIES_EPISODE_RE = new RegExp(
   String.raw`^${HOST}/shortdrama/episode/(?<id>[0-9]{15,22})(?:/(?<n>[0-9]{1,4}))?${TAIL}`,
   "u",

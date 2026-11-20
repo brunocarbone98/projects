@@ -2003,6 +2003,8 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     links.value = `${fourth}\n  # the single video taken out`;
     assert.equal(press(page), true);
     assert.equal(links.value, "");
+    assert.deepEqual(page.editor.edits.at(-1), { command: "delete", value: null }); // emptied by Chrome's own edit: Ctrl+Z brings it back
+    assert.deepEqual([links.selectionStart, links.selectionEnd], [0, 0]);
     assert.deepEqual(module.queuedJobs().map(jobSummary).at(-1), ["batch", `Series ${fourth}`, [fourth], false, false]);
     assert.deepEqual(queuedLabels(page), ["2 series", `Series ${fourth}`]);
     // Enter in an empty or blank box — right after a paste or an Enter that queued, say: nothing
@@ -2056,8 +2058,10 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.deepEqual(module.queuedJobs().map(jobSummary).at(-1), ["batch", `Series ${typed}`, [typed], false, false]);
     // what the box held besides the paste but blank goes, and comments alone stay — neither is said
     links.value = " \n ";
+    const blankEdits = page.editor.edits.length;
     assert.equal(paste(page, `${typed}\n${pastedId}`), true); // both waiting already: taken, nothing queued
     assert.equal(links.value, "");
+    assert.deepEqual(page.editor.edits.slice(blankEdits), [{ command: "delete", value: null }]); // one edit, one Ctrl+Z
     assert.equal(status.textContent, `Already being downloaded, or waiting to be — not queued twice: ${typed}, ${pastedId}.`);
     links.value = "# to watch\n";
     assert.equal(paste(page, typed), true);
@@ -2103,6 +2107,21 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(links.value, overshoot);
     assert.equal(page.editor.edits.length, edited);
     assert.equal(status.textContent, "Series 7699393770256782394 queued: it downloads whole, with the usual pauses."); // no note: Enter would refuse the box
+    // pasted over the id inside a link — meant to replace it —: the pasted series is queued, the
+    // box left as it was, and no note invites Enter to download the series pasted over
+    const pastedOver = "https://www.tiktok.com/shortdrama/episode/7699393770256782378/1";
+    links.value = pastedOver;
+    links.selectionStart = pastedOver.indexOf("7699393770256782378");
+    links.selectionEnd = links.selectionStart + 19;
+    assert.equal(paste(page, "7699393770256782379"), true);
+    assert.equal(links.value, pastedOver);
+    assert.equal(status.textContent, "Series 7699393770256782379 queued: it downloads whole, with the usual pauses.");
+    // a byte-order mark a paste brought (copied from a file that starts with one) is no part of
+    // the line it landed on, wherever that line is: Enter takes it
+    links.value = "7699393770256782376\n\ufeff7699393770256782375";
+    assert.equal(press(page), true);
+    assert.equal(links.value, "");
+    assert.deepEqual(module.queuedJobs().map(jobSummary).at(-1), ["batch", "2 series", ["7699393770256782376", "7699393770256782375"], false, false]);
     // the note is decided once the paste is queued: the box naming the series the paste queues
     // gets none (Enter would only say it is waiting already)
     links.value = "7699393770256782303";
@@ -2143,7 +2162,90 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(paste(page, video), true);
     assert.equal(links.value, `${first}\n${video}`);
     page.editor.on = true;
-    assert.equal(module.queuedJobs().length, 13);
+    assert.equal(module.queuedJobs().length, 15);
+  } finally {
+    page.restore();
+  }
+});
+
+test("See episodes: an episode a download found encrypted (DRM) shows as locked, with what tries it again there, and Download all available takes exactly the episodes the list counts as available — none: disabled", async () => {
+  /**
+   * See episodes over the five-episode series (E05 paid and locked) whose stored records hold a
+   * DRM verdict for `drm`; returns the page, the list drawn.
+   * @param {number[]} drm
+   * @param {"en" | "es"} [language]
+   */
+  const seeEpisodes = async (drm, language = "en") => {
+    const state = newState(SERIES_ID, "Test Series");
+    for (const number of drm) {
+      const result = { episode: episode(number), status: /** @type {const} */ ("failed-unavailable"), path: null, message: DRM_MESSAGE };
+      record(state, result, { exists: () => true, now: 1_800_000_000 });
+    }
+    const page = await fakePage({ storage: { [`series:${SERIES_ID}`]: state }, language });
+    const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
+    /** @type {import("../src/app/app.js").Job} */
+    const job = { id: 99, kind: "load", label: `List series ${SERIES_ID}`, refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false };
+    const engine = page.module.buildEngine(job, { pauses: [], inputs: [], taking: true });
+    engine.sleep = async () => undefined;
+    engine.discover = async () => series([episode(1), episode(2), episode(3), episode(4), episode(5, { locked: true })]);
+    engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
+      /** @type {unknown} */ ({ exists: () => false, refresh: async () => undefined, completedAt: () => null, remember() {} })
+    );
+    assert.equal(await page.module.runLoad(job, engine, {}), null);
+    return page;
+  };
+  /**
+   * Each row of the list drawn: [number, data-locked, ticked, its hints].
+   * @param {Awaited<ReturnType<typeof fakePage>>} page
+   */
+  const rows = (page) =>
+    page
+      .element("episode-table")
+      .querySelector("tbody")
+      ?.children.map((row) => [
+        row.getAttribute("data-number"),
+        row.children[0]?.children[0]?.getAttribute("data-locked"),
+        row.children[0]?.children[0]?.checked,
+        (row.children[6]?.children ?? []).filter((child) => child.className === "hints").map((child) => child.textContent),
+      ]);
+  const hint = "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; tick it and press “Download selected” to try again";
+  let page = await seeEpisodes([2]);
+  try {
+    assert.equal(page.element("series-meta").textContent, "5 episodes listed, 3 available (free or unlocked by your account), 0 already on disk.");
+    assert.deepEqual(rows(page), [
+      ["1", "0", true, []],
+      ["2", "1", false, [hint]], // never the box's checkbox: See episodes' own buttons do not read it
+      ["3", "0", true, []],
+      ["4", "0", true, []],
+      ["5", "1", false, ["no play address"]],
+    ]);
+    assert.equal(page.element("download-available-button").disabled, false);
+    page.hold(); // the job's tabs.getCurrent never answers: it runs, and makes no request
+    page.element("download-available-button").fire("click");
+    await page.turn();
+    // the three the list counts as available, never the episode the engine would skip again
+    assert.deepEqual(
+      page.module.queuedJobs().map((job) => [job.kind, job.numbers, job.includeLocked]),
+      [["selection", [1, 3, 4], false]],
+    );
+  } finally {
+    page.restore();
+  }
+  page = await seeEpisodes([1, 2, 3, 4]);
+  try {
+    assert.equal(page.element("series-meta").textContent, "5 episodes listed, 0 available (free or unlocked by your account), 0 already on disk.");
+    assert.equal(page.element("download-available-button").disabled, true); // no job lists the series for nothing
+    page.element("download-available-button").fire("click");
+    await page.turn();
+    assert.deepEqual(page.module.queuedJobs(), []);
+  } finally {
+    page.restore();
+  }
+  page = await seeEpisodes([2], "es");
+  try {
+    assert.deepEqual(rows(page)?.[1]?.[3], [
+      "protegido con DRM (lo detectó una ejecución anterior): DramaFetch no lo descifra; para intentarlo de nuevo, márcalo y pulsa “Descargar selección”",
+    ]);
   } finally {
     page.restore();
   }
