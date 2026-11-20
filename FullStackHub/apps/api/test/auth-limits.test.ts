@@ -255,8 +255,9 @@ describe("content security policy", () => {
         ?.slice(1);
 
     expect(directive("script-src")).toEqual(["'self'", docsBootScriptHash, SCALAR_SCRIPT_URL]);
-    // No directive trusts the whole CDN, only that one file.
-    expect(policy).not.toMatch(/https:\/\/cdn\.jsdelivr\.net(?:\/?)(?:[\s;]|$)/);
+    // Nothing else on the CDN, in any directive: not its origin, not a folder of it.
+    const cdnSources = policy.split(/[\s;]+/).filter((source) => source.includes("jsdelivr"));
+    expect(cdnSources).toEqual([SCALAR_SCRIPT_URL]);
     expect(policy).not.toContain("unsafe-eval");
     expect(policy).not.toContain("upgrade-insecure-requests");
   });

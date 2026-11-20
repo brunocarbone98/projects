@@ -7,12 +7,7 @@ import {
 } from "@shipping-hub/shared";
 import type { User } from "@prisma/client";
 import { randomUUID } from "node:crypto";
-import {
-  hashPassword,
-  needsRehash,
-  spendPasswordCheck,
-  verifyPassword,
-} from "../auth/passwords.js";
+import { checkLoginPassword, hashPassword } from "../auth/passwords.js";
 import {
   generateRefreshToken,
   hashRefreshToken,
@@ -74,21 +69,10 @@ export async function register(input: {
 
 export async function login(input: { email: string; password: string }): Promise<AuthResponseDto> {
   const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
-  if (!user) {
-    // The same scrypt work as a wrong password for an existing account, so the response time does
-    // not tell whether the email is registered.
-    await spendPasswordCheck(input.password);
-    throw invalidCredentials();
-  }
-  if (!(await verifyPassword(input.password, user.passwordHash))) throw invalidCredentials();
-  if (needsRehash(user.passwordHash)) {
-    // A hash below today's cost is replaced while the password is at hand. Only the hash that was
-    // just verified is replaced: if another request changed it in between, that one stays.
-    await prisma.user.updateMany({
-      where: { id: user.id, passwordHash: user.passwordHash },
-      data: { passwordHash: await hashPassword(input.password) },
-    });
-  }
+  // One scrypt check whether or not the email has an account, so the response time does not tell
+  // which emails are registered.
+  const matches = await checkLoginPassword(input.password, user?.passwordHash ?? null);
+  if (!user || !matches) throw invalidCredentials();
   return { user: toUserDto(user), tokens: await issueTokens(user) };
 }
 

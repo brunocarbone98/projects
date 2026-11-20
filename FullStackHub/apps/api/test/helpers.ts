@@ -11,10 +11,12 @@ import { buildApp } from "../src/app.js";
 import { hashPassword } from "../src/auth/passwords.js";
 import { prisma } from "../src/prisma.js";
 
-/** A hash as the first release stored it: Node's default scrypt cost, `scrypt$<saltHex>$<keyHex>`. */
-export function firstReleaseHash(password: string): string {
+/** A hash as the next release writes it: a PHC string at N=2^15, r=8, p=3 (32 MiB). */
+export function nextReleaseHash(password: string): string {
   const salt = randomBytes(16);
-  return `scrypt$${salt.toString("hex")}$${scryptSync(password, salt, 64).toString("hex")}`;
+  const key = scryptSync(password, salt, 64, { N: 2 ** 15, r: 8, p: 3, maxmem: 64 * 1024 * 1024 });
+  const base64 = (bytes: Buffer) => bytes.toString("base64").replace(/=+$/, "");
+  return `$scrypt$ln=15,r=8,p=3$${base64(salt)}$${base64(key)}`;
 }
 
 // High rate limits so ordinary tests never trip them; the rate-limit tests build their own app.

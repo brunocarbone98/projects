@@ -1,13 +1,13 @@
 // Password hashing with Node's built-in scrypt (no native dependency).
 //
-// Stored format: a PHC string, `$scrypt$ln=<log2 N>,r=<r>,p=<p>$<salt>$<key>` (salt and key in
-// base64 without padding), so the cost travels with each hash and can be raised again later. The
-// first release stored `scrypt$<saltHex>$<keyHex>` at Node's default cost (N=2^14, r=8, p=1): such a
-// hash is still verified, and `needsRehash` tells the login to replace it.
+// Written today: `scrypt$<saltHex>$<keyHex>` at Node's default cost (N=2^14, r=8, p=1), the format
+// every release so far writes and reads, so rolling this release back locks nobody out.
 //
-// The new format starts with `$`, never with `scrypt$`: the first release's parser refuses it. A
-// `scrypt$<N>$<r>$<p>$…` string would not be refused: that parser would read "8" as an empty key and
-// accept any password, so a rollback to the first release would open every account re-hashed since.
+// Also read: a PHC string, `$scrypt$ln=<log2 N>,r=<r>,p=<p>$<salt>$<key>` (salt and key in base64
+// without padding), the format the next release writes at a higher cost. Reading it first means that
+// release can be rolled back to this one without locking out the accounts it re-hashed. It is not
+// written yet: the release before this one refuses it (and would read a `scrypt$<N>$<r>$<p>$…`
+// string as an empty key that matches any password, the reason the cost is not stored that way).
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 /** The cost of a scrypt hash: N (CPU and memory), r (block size) and p (parallelization). */
@@ -17,25 +17,18 @@ export interface ScryptCost {
   readonly p: number;
 }
 
-/**
- * The cost of every new hash: one of the settings OWASP's Password Storage Cheat Sheet lists as
- * equivalent to N=2^17, r=8, p=1, at a quarter of its memory: 32 MiB per hash, not 128 MiB. Node
- * hashes on its libuv thread pool (4 threads by default), so the logins hashing at one moment hold
- * about 128 MiB at most, where N=2^17 would hold 512 MiB in a container that also runs the web and
- * the two Python services. About 0.2 s per hash on a current server CPU (0.04 s at the first cost).
- */
-export const SCRYPT_COST: ScryptCost = Object.freeze({ N: 2 ** 15, r: 8, p: 3 });
-
-/** The cost of the first release's hashes (`scrypt$<saltHex>$<keyHex>`): Node's defaults. */
-const FIRST_RELEASE_COST: ScryptCost = Object.freeze({ N: 2 ** 14, r: 8, p: 1 });
+/** The cost of the hashes this release writes (`scrypt$<saltHex>$<keyHex>`): Node's defaults. */
+export const STORED_COST: ScryptCost = Object.freeze({ N: 2 ** 14, r: 8, p: 1 });
 
 const SALT_LENGTH = 16;
 const KEY_LENGTH = 64;
-/** No stored cost may make one check hold more memory than this (128 · N · r bytes). */
+/** No stored cost may make one check hold more memory than this (128 · N · r bytes)… */
 const MAX_SCRYPT_MEMORY = 256 * 1024 * 1024;
+/** …or do more work than this (N · r · p): 32 times `STORED_COST`, about 1.3 s on a server CPU. */
+const MAX_SCRYPT_WORK = 2 ** 22;
 
-const FIRST_RELEASE_HASH = /^scrypt\$([0-9a-f]{32})\$([0-9a-f]{128})$/;
-const PHC_HASH =
+const FIRST_FORMAT = /^scrypt\$([0-9a-f]{32})\$([0-9a-f]{128})$/;
+const PHC_FORMAT =
   /^\$scrypt\$ln=(\d{1,2}),r=(\d{1,2}),p=(\d{1,2})\$([A-Za-z0-9+/]{22})\$([A-Za-z0-9+/]{86})$/;
 
 interface StoredHash {
@@ -55,20 +48,18 @@ function derive(password: string, salt: Buffer, cost: ScryptCost): Promise<Buffe
   });
 }
 
-const base64 = (bytes: Buffer): string => bytes.toString("base64").replace(/=+$/, "");
-
-/** Reads a stored hash; `null` for anything this module did not write (never throws). */
+/** Reads a stored hash; `null` for anything in neither format, or beyond the caps (never throws). */
 function parse(stored: string): StoredHash | null {
-  const first = FIRST_RELEASE_HASH.exec(stored);
+  const first = FIRST_FORMAT.exec(stored);
   if (first) {
     const [, saltHex = "", keyHex = ""] = first;
     return {
-      cost: FIRST_RELEASE_COST,
+      cost: STORED_COST,
       salt: Buffer.from(saltHex, "hex"),
       key: Buffer.from(keyHex, "hex"),
     };
   }
-  const phc = PHC_HASH.exec(stored);
+  const phc = PHC_FORMAT.exec(stored);
   if (!phc) return null;
   const [, ln = "", r = "", p = "", salt = "", key = ""] = phc;
   const cost: ScryptCost = { N: 2 ** Number(ln), r: Number(r), p: Number(p) };
@@ -79,38 +70,42 @@ function parse(stored: string): StoredHash | null {
     cost.r <= 16 &&
     cost.p >= 1 &&
     cost.p <= 16 &&
-    128 * cost.N * cost.r <= MAX_SCRYPT_MEMORY;
+    128 * cost.N * cost.r <= MAX_SCRYPT_MEMORY &&
+    cost.N * cost.r * cost.p <= MAX_SCRYPT_WORK &&
+    // OpenSSL's own rule, which Node enforces by throwing: N < 2^(16 · r) (only r = 1 meets it here).
+    cost.N < 2 ** (16 * cost.r);
   if (!sane) return null;
   return { cost, salt: Buffer.from(salt, "base64"), key: Buffer.from(key, "base64") };
 }
 
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(SALT_LENGTH);
-  const key = await derive(password, salt, SCRYPT_COST);
-  const { N, r, p } = SCRYPT_COST;
-  return `$scrypt$ln=${Math.log2(N)},r=${r},p=${p}$${base64(salt)}$${base64(key)}`;
+  const key = await derive(password, salt, STORED_COST);
+  return `scrypt$${salt.toString("hex")}$${key.toString("hex")}`;
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   const hash = parse(stored);
   if (!hash) return false;
-  const key = await derive(password, hash.salt, hash.cost);
-  return timingSafeEqual(key, hash.key);
-}
-
-/** Whether a stored hash is below today's cost: the login replaces it once the password is known. */
-export function needsRehash(stored: string): boolean {
-  const cost = parse(stored)?.cost;
-  return cost?.N !== SCRYPT_COST.N || cost.r !== SCRYPT_COST.r || cost.p !== SCRYPT_COST.p;
+  return timingSafeEqual(await derive(password, hash.salt, hash.cost), hash.key);
 }
 
 const NO_ACCOUNT_SALT = randomBytes(SALT_LENGTH);
 
 /**
- * Does the scrypt work of checking a password against an account at today's cost, for a login whose
- * email has no account: the response then takes as long as a wrong password for an existing account,
- * so its time does not tell whether the email is registered.
+ * A login's password check, with the same scrypt work whether or not the email has an account: no
+ * stored hash (`null`), or one this module cannot read, costs one derivation at `STORED_COST`, as a
+ * wrong password for an account does, so the response time does not tell which emails are
+ * registered.
  */
-export async function spendPasswordCheck(password: string): Promise<void> {
-  await derive(password, NO_ACCOUNT_SALT, SCRYPT_COST);
+export async function checkLoginPassword(
+  password: string,
+  stored: string | null,
+): Promise<boolean> {
+  const hash = stored === null ? null : parse(stored);
+  if (!hash) {
+    await derive(password, NO_ACCOUNT_SALT, STORED_COST);
+    return false;
+  }
+  return timingSafeEqual(await derive(password, hash.salt, hash.cost), hash.key);
 }
