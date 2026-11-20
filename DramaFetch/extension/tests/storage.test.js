@@ -23,13 +23,16 @@ import {
   historyEntry,
   normalizeSettings,
   readFavoritesTemplate,
+  LIBRARY_SORT_KEY,
   readLibrary,
   readLibraryCovers,
+  readLibrarySort,
   rememberFavoritesTemplate,
   settingsProblem,
   trimHistory,
   writeLibrary,
   writeLibraryCovers,
+  writeLibrarySort,
 } from "../src/app/storage.js";
 import { libraryRecord } from "../src/lib/library.js";
 
@@ -501,4 +504,30 @@ test("the alert switch: on by default, a stored non-boolean falls back to it, an
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, alerts: /** @type {never} */ ("x") }, false), "the alert switch must be on or off");
   // checked before the pacing: a bad switch is named even when the pauses are bad too
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, alerts: /** @type {never} */ (1), delayMinS: 0 }, false), "the alert switch must be on or off");
+});
+
+test("the library's sort order: kept in chrome.storage.local under its own key and read back checked; best effort — a refused write or read never throws (the list's own order then)", async () => {
+  const { stored, switches } = fakeLocal();
+  assert.equal(LIBRARY_SORT_KEY, "librarySort");
+  assert.equal(await readLibrarySort(), "recent"); // nothing kept yet: the list's own
+  assert.equal(await writeLibrarySort("title"), true);
+  assert.deepEqual(stored, { librarySort: "title" }); // its own small key: nothing else written
+  assert.equal(await readLibrarySort(), "title");
+  assert.equal(await writeLibrarySort("episodes"), true);
+  assert.equal(await readLibrarySort(), "episodes");
+  // anything else stored there is no sort order
+  stored["librarySort"] = "by colour";
+  assert.equal(await readLibrarySort(), "recent");
+  stored["librarySort"] = { sort: "title" };
+  assert.equal(await readLibrarySort(), "recent");
+  // a refused write: false, nothing thrown, what was kept stays; a refused read: the list's own order
+  stored["librarySort"] = "title";
+  switches.refuseWrites = true;
+  assert.equal(await writeLibrarySort("episodes"), false);
+  assert.equal(stored["librarySort"], "title");
+  switches.refuseWrites = false;
+  switches.refuseReads = true;
+  assert.equal(await readLibrarySort(), "recent");
+  switches.refuseReads = false;
+  assert.equal(await readLibrarySort(), "title");
 });

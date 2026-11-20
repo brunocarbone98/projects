@@ -136,12 +136,13 @@ def test_the_extension_s_own_requests_carry_the_referer_and_no_origin(tmp_path: 
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         base = server.base_url
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         assert ext.session_rules() == []
         before = _probe_origin(ext, server)
         assert before.origin == f"chrome-extension://{ext.extension_id}"
         assert before.referer is None
 
-        ext.load(MAIN_LINK)  # the rule goes in before the job's first request
+        ext.see_episodes(SERIES_ID)  # the rule goes in before the job's first request
         (rule,) = ext.session_rules()
         assert rule["action"]["requestHeaders"] == [
             {"header": "Referer", "operation": "set", "value": f"{base}/"},
@@ -153,7 +154,7 @@ def test_the_extension_s_own_requests_carry_the_referer_and_no_origin(tmp_path: 
         assert after.origin is None and after.referer == f"{base}/"
 
         _each_thumbnail(ext, _shown(ext))  # the list's five thumbnails, row by row
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         assert series["line"] == "complete: 4 of 5 (4 downloaded) — 1 locked (5)"
         # no CORS on the fake CDN: the extension reached it through its host permissions
@@ -181,6 +182,7 @@ def test_the_tiktok_tab_s_own_requests_are_untouched_by_the_rule(tmp_path: Path)
     fetches from inside that page — carry the same headers with the rule in force as without it:
     a page in a normal tab before any job (no rule), the discovery's tab, a normal tab again."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         series_page = f"{server.base_url}/shortdrama/episode/{SERIES_ID}/1"
 
         def visit() -> list[RequestRecord]:
@@ -203,7 +205,7 @@ def test_the_tiktok_tab_s_own_requests_are_untouched_by_the_rule(tmp_path: Path)
         assert ext.session_rules() == []
         without = visit()
         start = len(server.requests)
-        ext.load(MAIN_LINK)
+        ext.see_episodes(SERIES_ID)
         assert ext.session_rules() != []
         discovery = _page_api_requests(server, start)
         with_rule = visit()
@@ -223,15 +225,17 @@ def test_the_tiktok_tab_s_own_requests_are_untouched_by_the_rule(tmp_path: Path)
 
 def test_a_redirect_on_a_covered_host_is_followed_hop_by_hop(tmp_path: Path) -> None:
     """`/cdn/…` and `/cover/…` answer a 302 to `/hop/1/…` on the same (covered) origin: every
-    episode and its cover come through, the thumbnails of **Load list** too; both requests of each
-    are the extension's own — `Referer` set, no `Origin` — and nothing leaves the covered host."""
+    episode and its cover come through, the thumbnails of **See episodes** too; both requests of
+    each are the extension's own — `Referer` set, no `Origin` — and nothing leaves the covered
+    host."""
     with (
         FakeTikTok(media_hops=1, cover_hops=1) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        ext.load(MAIN_LINK)
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
+        ext.see_episodes(SERIES_ID)
         _each_thumbnail(ext, _shown(ext))  # each thumbnail behind its hop, shown
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = {row["number"]: row for row in series["rows"]}
         assert [rows[n]["status"] for n in range(1, 6)] == ["done"] * 4 + ["skipped-locked"]
@@ -265,7 +269,7 @@ def test_five_redirects_are_followed_and_a_sixth_is_refused(tmp_path: Path) -> N
         FakeTikTok(media_hops=5, cover_hops=6) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = {row["number"]: row for row in series["rows"]}
         for number in range(1, 5):
@@ -291,13 +295,14 @@ def test_a_chain_that_leaves_the_covered_hosts_is_refused(tmp_path: Path) -> Non
         FakeTikTok(media_hops=1, cover_hops=1, hops_then_elsewhere=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        ext.load(MAIN_LINK)
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
+        ext.see_episodes(SERIES_ID)
 
         def refused(item: str) -> bool:  # its thumbnail's hop was requested, nothing beyond it
             return any(r.path == f"/hop/1/cover/{item}.jpg" for r in server.hop_requests)
 
         _each_thumbnail(ext, refused)
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = {row["number"]: row for row in series["rows"]}
         assert [rows[n]["status"] for n in range(1, 6)] == ["failed-unavailable"] * 3 + [
@@ -350,7 +355,7 @@ def test_the_session_reaches_the_extension_s_own_requests_whatever_the_cookie_se
         assert third_party.control_cookie is not blocked  # the profile's setting holds
 
         ext.add_session_cookie(SESSION_VALUE, same_site=same_site)
-        entry = ext.download_all(THIRD_SERIES_ID)
+        entry = ext.paste_and_wait(THIRD_SERIES_ID)
         (series,) = entry["series"]
         assert series["name"] == THIRD_SERIES_NAME
         assert series["line"] == (

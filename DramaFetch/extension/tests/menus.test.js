@@ -3,7 +3,7 @@
 // with its own title ("Download this drama" on a link to a series, on any page; "Download this
 // page's drama" on a series page; "Download this favorite drama" on a card of the profile's
 // favorites, on www.tiktok.com only), where Chrome shows them, what a click asks the DramaFetch tab
-// to list, and the worker that puts the items in place at install and at Chrome's start, answers a
+// to download (1.7.0: the batch job a paste of it queues), and the worker that puts the items in place at install and at Chrome's start, answers a
 // click the way it answers the popup's "Download this series" — the card item by asking the tab's
 // frame for the right-clicked card, telling "no card" from "no script" —, hears only the
 // extension's own pages and worker, and observes the favorites list's requests of the user's TikTok
@@ -104,7 +104,7 @@ test("the link item shows on links under /shortdrama/ on TikTok's hosts, the pag
     assert.equal(shownBy(SHORT_DRAMA_LINK_PATTERNS, url), true, `link: ${url}`);
     assert.equal(shownBy(SERIES_PAGE_PATTERNS, url), true, `page: ${url}`);
   }
-  // a link under /shortdrama/ that names no series shows the link item: the tab says why it lists
+  // a link under /shortdrama/ that names no series shows the link item: the tab says why it downloads
   // nothing; no page item on such an address, a list of dramas
   for (const url of ["https://www.tiktok.com/shortdrama/foryou", "https://www.tiktok.com/shortdrama"]) {
     assert.equal(shownBy(SHORT_DRAMA_LINK_PATTERNS, url), true, `link: ${url}`);
@@ -190,7 +190,7 @@ test("a click asks for the series of the link, or of the right-clicked page; any
   assert.equal(loadOfClick({ menuItemId: MENU_LINK, linkUrl: `http://127.0.0.1:8123/shortdrama/episode/${SERIES}/2` }, "http://127.0.0.1:8123"), SERIES);
 });
 
-test("the worker puts the items in place at install and at Chrome's start — one install at a time, again after a refused one —; a click has the series listed like the popup; the popup's Open DramaFetch leaves the open tab as it is", async () => {
+test("the worker puts the items in place at install and at Chrome's start — one install at a time, again after a refused one —; a click has the series downloaded like the popup's; the popup's Open DramaFetch leaves the open tab as it is", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   /** @type {{ installed?: () => void, startup?: () => void, clicked?: (info: chrome.contextMenus.OnClickData) => void, message?: (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => boolean }} */
@@ -322,7 +322,7 @@ test("the worker puts the items in place at install and at Chrome's start — on
     assert.deepEqual(calls, placed);
     calls.length = 0;
 
-    // no DramaFetch page running, no tab: one opens with the series to list
+    // no DramaFetch page running, no tab: one opens with the series to download
     // (`app.html?load=<series id>`)
     const load = { type: "dramafetch:load", input: SERIES };
     clicked({ menuItemId: MENU_LINK, linkUrl: `https://www.tiktok.com/shortdrama/episode/${SERIES}/8`, pageUrl: "https://www.tiktok.com/shortdrama/foryou" });
@@ -339,7 +339,7 @@ test("the worker puts the items in place at install and at Chrome's start — on
     assert.deepEqual(calls, [["sendMessage", load], ["update", 7, { active: true }], ["focus", 3, { focused: true }]]);
     calls.length = 0;
 
-    // an address that names no series: handed over as it is, the tab says why it lists nothing
+    // an address that names no series: handed over as it is, the tab says why it downloads nothing
     clicked({ menuItemId: MENU_LINK, linkUrl: "https://www.tiktok.com/shortdrama/foryou" });
     await settle();
     assert.deepEqual(calls[0], ["sendMessage", { type: "dramafetch:load", input: "https://www.tiktok.com/shortdrama/foryou" }]);
@@ -585,7 +585,7 @@ test("the worker: the card item asks the right-clicked tab's frame for the card 
     calls.length = 0;
     // a right-click on no card — the script answered, with null or with something that is no card —:
     // no card, `script` true; no script in the tab at all (loaded before this version: the message
-    // is rejected): no card, `script` false — the DramaFetch tab lists nothing either way and says why
+    // is rejected): no card, `script` false — the DramaFetch tab queues nothing either way and says why
     for (const [answer, script] of /** @type {[unknown, boolean][]} */ ([
       [null, true],
       [{ title: 5, index: 1 }, true],

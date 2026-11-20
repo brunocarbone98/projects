@@ -4,8 +4,8 @@
  * as DramaFetch for Chrome reads it. Pure: no `chrome.*`, no DOM (`src/app/favorites.js` fetches the
  * pages from inside the user's TikTok tab, `src/content/cards.js` reads a right-clicked card,
  * `src/app/app.js` shows the panel). An extension-only feature: the Python tool has no favorites
- * list, and nothing here decides anything about a download — a favorite becomes a series id in the
- * box, which downloads exactly like a pasted link.
+ * list, and nothing here decides anything about a download — a favorite becomes a series id the
+ * DramaFetch tab hands to its engine, which downloads it exactly like a pasted link.
  *
  * Facts from the owner's captures (Chrome DevTools, 2026-11-15; the sandbox cannot reach TikTok):
  * - the list is on the user's profile, `https://www.tiktok.com/@<uniqueId>` → **Favorites** →
@@ -36,7 +36,6 @@
 import { isDict } from "./catalog.js";
 import { DONE, SKIPPED_EXISTS, SKIPPED_LOCKED, TIKTOK_BASE_URL, pyStrip } from "./messages.js";
 import { completeSince, doneEntries, lockedNumbers, readState } from "./state.js";
-import { parseSeriesList } from "./urls.js";
 
 /** The records' statuses of an episode on disk or locked: under a complete mark, only these raise a drama's episode count ({@link knownEpisodes}). */
 const ACCOUNTED_STATUSES = new Set([DONE, SKIPPED_EXISTS, SKIPPED_LOCKED]);
@@ -120,7 +119,7 @@ export class FavoritesPayloadError extends Error {
 
 /**
  * `text` on one line: NFC, every run of whitespace, line breaks and control characters one space,
- * trimmed — how a title is compared and how it goes into the box.
+ * trimmed — how a title is compared and shown.
  * @param {string} text
  * @returns {string}
  */
@@ -447,34 +446,6 @@ export function coversShift(items, card, perPage) {
 export function titleMatches(title, filter) {
   const wanted = cleanTitle(filter).toLowerCase();
   return wanted === "" || cleanTitle(title ?? "").toLowerCase().includes(wanted);
-}
-
-/**
- * The box with `items` added below what it holds: for each series it does not name yet, a `#
- * <title>` comment line (the title on one line) above the series id on a line of its own — the
- * box's own rules (`lib/urls.parseSeriesList`) skip the comment and read the id. A series the box
- * names already, or one `items` names twice, is added once at most.
- * @param {string} box the box's text
- * @param {readonly FavoriteItem[]} items
- * @returns {{text: string, added: FavoriteItem[]}}
- */
-export function boxWithFavorites(box, items) {
-  const named = new Set(parseSeriesList(box).refs.map((ref) => ref.seriesId));
-  /** @type {string[]} */
-  const lines = [];
-  /** @type {FavoriteItem[]} */
-  const added = [];
-  for (const item of items) {
-    if (named.has(item.seriesId)) continue;
-    named.add(item.seriesId);
-    const title = item.title === null ? "" : cleanTitle(item.title);
-    if (title) lines.push(`# ${title}`);
-    lines.push(item.seriesId);
-    added.push(item);
-  }
-  if (lines.length === 0) return { text: box, added };
-  const block = lines.join("\n");
-  return { text: box.trim() ? `${box.trimEnd()}\n${block}` : block, added };
 }
 
 /**

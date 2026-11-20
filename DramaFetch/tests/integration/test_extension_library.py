@@ -12,13 +12,17 @@ against the fake TikTok server, whose favorites are the server's own list
   with nothing changed costs ONE `drama_list` request, and so does the page's own **Update from
   TikTok**;
 - (b) two dramas ticked — each card framed in the accent while ticked — and **Download selected
-  dramas** download exactly as **Download all** of their ids does in another profile (the same
-  files, names, embedded covers and rows), and the cards end **On disk**; each drama, as it is done,
+  dramas** download exactly as a paste of their ids does in another profile (the same files,
+  names, embedded covers and rows), and the cards end **On disk** — the one with a locked episode
+  saying so (1.7.0: `5 episodes · 1 locked`, from DramaFetch's own records, its tooltip saying
+  why; before the run, TikTok's count alone) —; each drama, as it is done,
   gets its notification (1.7.0) — `✓ <drama> — downloaded`, its episodes on disk, its locked one in
   the report line's words —, shown by Chrome (`chrome.notifications.getAll()` lists it), none for
   the listing before; a click on one's body, dispatched to the service worker's own listener,
   brings the DramaFetch tab to the front — no job, no reload, no request — and takes it away;
-- (c) **Remove from Favorites** on an on-disk drama presses the drama page's own Bookmark once (one
+- (c) a card's own **Download** (1.7.0) downloads that drama — the batch job **Download selected
+  dramas** queues for it alone —; then **Remove from Favorites** on it, on disk, presses the drama
+  page's own Bookmark once (one
   `collect` request, the page's own `action`), the fake's list loses it, the card says so, the count
   is the fake's new total (one first-page request of the profile tab), the background tab is closed
   and nothing else is asked — no cover while the job runs;
@@ -31,7 +35,7 @@ against the fake TikTok server, whose favorites are the server's own list
   **Retry** button; that button, clicked as Chrome hands it to the service worker (its own
   `onButtonClicked` listener, `chrome.notifications.onButtonClicked.dispatch` in the worker), goes
   to the page, which queues one selection job over that episode — the tab's own **Retry** — and
-  takes the notification away: the episode saved byte for byte as a clean **Download all** saves
+  takes the notification away: the episode saved byte for byte as a clean paste of its id saves
   it, the card ends **On disk** and the drama's notification says it is downloaded.
 
 No cookie value is set, printed or asserted on; nothing reaches TikTok.
@@ -419,11 +423,13 @@ def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_o
         assert not server.item_list_requests and not server.media_requests
 
 
-def test_b_download_selected_dramas_downloads_exactly_as_download_all_does(tmp_path: Path) -> None:
+def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: Path) -> None:
     """(b) The main series and the second one ticked in the library — each framed in the accent
     while ticked, as the approved sketch draws it —, **Download selected dramas**: ONE batch job,
     the same files (names and bytes: the covers embedded), the same rows and the same label as
-    **Download all** of their ids in another profile; the cards end **On disk**; each drama's
+    a paste of their ids in another profile; the cards end **On disk** — the main series' card,
+    whose fifth episode is locked, `5 episodes · 1 locked` (DramaFetch's own records: before the
+    run, TikTok's count alone) —; each drama's
     notification says it is downloaded — none for the listing before —, and a click on one's body,
     as Chrome hands it to the service worker, brings the DramaFetch tab to the front (no job, no
     reload, no request) and takes that notification away."""
@@ -442,6 +448,9 @@ def test_b_download_selected_dramas_downloads_exactly_as_download_all_does(tmp_p
                 assert _border(_card(page, series_id)) == accent  # ticked: framed in the accent
             assert _border(_card(page, LIGHTHOUSE_ID)) == plain  # not ticked: as it was
             assert page.locator("#favorites-selection").inner_text() == "2 selected · 8 episodes"
+            main_meta = _card(page, SERIES_ID).locator(".favorite-meta")
+            assert main_meta.inner_text() == "5 episodes · 1m"  # never run: TikTok's count alone
+            assert main_meta.get_attribute("data-locked") is None
             jobs = ext.finished_jobs()
             page.click("#library-download")
             ext.wait_for(
@@ -460,6 +469,27 @@ def test_b_download_selected_dramas_downloads_exactly_as_download_all_does(tmp_p
             assert _card(page, SECOND_SERIES_ID).locator(".favorite-status").inner_text() == (
                 "On disk · 3/3"
             )
+            # the main series' card: the locked episode its run listed and skipped, counted, with
+            # why on hover — and its fraction of the same five
+            assert _card(page, SERIES_ID).locator(".favorite-status").inner_text() == (
+                "On disk · 4/5"
+            )
+            ext.wait_for(
+                lambda: main_meta.inner_text() == "5 episodes · 1 locked · 1m",
+                10,
+                "the locked episode is not counted on the card",
+            )
+            assert main_meta.get_attribute("data-locked") == "1"
+            tooltip = main_meta.get_attribute("title") or ""
+            # every reason a run records an episode locked, not only a paid one
+            assert tooltip.startswith(
+                "Locked episodes (1): the downloads of this drama skipped them without asking"
+                " TikTok for them — paid ones this account has not unlocked, ones TikTok lists as"
+                " playing short"
+            )
+            assert "ones protected by DRM or with no play address" in tooltip
+            assert "Unlocking in TikTok helps only the paid ones" in tooltip
+            assert tooltip.endswith("DramaFetch never unlocks or decrypts anything.")
             assert _border(_card(page, SECOND_SERIES_ID)) == plain  # the ticks cleared with the job
             # each drama, as it was done, got its notification, which Chrome showed
             alerts = _alerts(ext, 2)
@@ -501,7 +531,7 @@ def test_b_download_selected_dramas_downloads_exactly_as_download_all_does(tmp_p
             assert (ext.finished_jobs(), ext.idle(), len(ext.tab_urls())) == (jobs, True, tabs)
             assert requests() == before  # nothing asked of the fake TikTok
         with ExtensionHarness(tmp_path / "box", server.base_url, test_settings=SETTINGS) as box:
-            box_entry = box.download_all(f"{SERIES_ID}\n{SECOND_SERIES_ID}", timeout_s=120)
+            box_entry = box.paste_and_wait(f"{SERIES_ID}\n{SECOND_SERIES_ID}", timeout_s=120)
             box_files = _saved(box)
     assert (library_entry["kind"], library_entry["label"]) == ("batch", "2 series")
     assert (box_entry["kind"], box_entry["label"]) == ("batch", "2 series")
@@ -517,7 +547,9 @@ def test_b_download_selected_dramas_downloads_exactly_as_download_all_does(tmp_p
 def test_c_remove_from_favorites_presses_the_bookmark_once_and_the_count_follows(
     tmp_path: Path,
 ) -> None:
-    """(c) **Remove from Favorites** on a drama downloaded whole: the confirmation shows what the
+    """(c) A card's own **Download** downloads that drama — ONE batch job, `Series <id>`, what
+    **Download selected dramas** queues for it alone (1.7.0) —; then **Remove from Favorites** on
+    it, downloaded whole: the confirmation shows what the
     records say; confirmed, the drama's page opens in a background tab, its own Bookmark is pressed
     once (one `collect` request with the page's own `action`), the reload shows it off, the tab is
     closed; the fake's list loses it, the card says **Removed from your Favorites**, the count is
@@ -528,7 +560,9 @@ def test_c_remove_from_favorites_presses_the_bookmark_once_and_the_count_follows
     ):
         _profile, popup, _tab = _profile_and_popup(ext, server.base_url)
         _open_library(ext, popup)
-        ext.download_all(SECOND_SERIES_ID)
+        entry = ext.download_card(SECOND_SERIES_ID)
+        assert (entry["kind"], entry["label"]) == ("batch", f"Series {SECOND_SERIES_ID}")
+        assert entry["series"][0]["line"] == "complete: 3 of 3 (3 downloaded)"
         page = ext.page
         card = _card(page, SECOND_SERIES_ID)
         ext.wait_for(lambda: card.get_attribute("data-status") == "on-disk", 10, "not on disk")
@@ -654,7 +688,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
     worker (its own `onButtonClicked` listener), is handed to the DramaFetch tab, which queues one
     selection job over that episode alone — the tab's own **Retry** — and takes the notification
     away: the episode requested once more, saved whole with its cover embedded — byte for byte what
-    a clean **Download all** saves in another profile —, the block gone, the card **On disk · 3/3**
+    a clean paste of its id saves in another profile —, the block gone, the card **On disk · 3/3**
     and the drama's notification `✓ … — downloaded`."""
     second = (SECOND_SERIES_ID, 2)
 
@@ -748,7 +782,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         FakeTikTok() as clean,
         ExtensionHarness(tmp_path / "clean", clean.base_url, test_settings=SETTINGS) as box,
     ):
-        box.download_all(SECOND_SERIES_ID, timeout_s=120)
+        box.paste_and_wait(SECOND_SERIES_ID, timeout_s=120)
         whole = _saved(box)
     episodes = sorted(path for path in retried if path.endswith(".mp4"))
     assert [Path(path).name for path in episodes] == [

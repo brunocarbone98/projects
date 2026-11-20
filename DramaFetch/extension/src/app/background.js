@@ -3,11 +3,12 @@
  * The service worker: opens the DramaFetch tab — or re-focuses the one already open (one per
  * browser) — when the popup asks or a right-click item is clicked (`menus.js`: **Download this
  * drama**, **Download this page's drama**, **Download this favorite drama**), and hands it a series
- * to list, or the favorites of a TikTok tab to show. It holds no long-running work: the engine runs
- * in the DramaFetch tab while that tab is open. When that tab goes away in the middle of a listing
- * — closed, navigated elsewhere or discarded, so its own clean-up never runs — the worker closes
- * the muted TikTok tab the listing had open (`discovery.DISCOVERY_TAB_KEY`). It answers only the
- * extension's own pages (`senders.isOwnSender`: never a content script).
+ * to download (DramaFetch 1.7.0: the job a paste of it queues), or the favorites of a TikTok tab to
+ * show — with the right-clicked card whose drama to download. It holds no long-running work: the
+ * engine runs in the DramaFetch tab while that tab is open. When that tab goes away in the middle of
+ * a listing — closed, navigated elsewhere or discarded, so its own clean-up never runs — the worker
+ * closes the muted TikTok tab the listing had open (`discovery.DISCOVERY_TAB_KEY`). It answers only
+ * the extension's own pages (`senders.isOwnSender`: never a content script).
  *
  * It also OBSERVES — URLs and status codes only, never a body, never blocking, never changing
  * anything — the `drama_list` requests the user's own TikTok tabs make when their profile's
@@ -49,8 +50,9 @@ const APP_PATH = "src/app/app.html";
  * @typedef {import("../lib/favorites.js").FavoritesHandover} FavoritesHandover
  *
  * @typedef {{load: string} | {favorites: FavoritesHandover} | {library: true}} Handover What the
- *   DramaFetch tab is handed: a series to list (an address or an id, as the box reads it), the
- *   favorites of a TikTok tab to show — with the right-clicked card to list, when there is one —,
+ *   DramaFetch tab is handed: a series to download (an address or an id, as the box reads it), the
+ *   favorites of a TikTok tab to show — with the right-clicked card whose drama to download, when
+ *   there is one —,
  *   or the library to show as it is kept (the popup's **Open my library** away from a TikTok
  *   profile: no job, no request).
  */
@@ -131,8 +133,8 @@ function isTabId(value) {
 }
 
 /**
- * Open the DramaFetch tab, or bring the open one to the front; with a hand-over, have it list that
- * series (`dramafetch:load`), show that TikTok tab's favorites (`dramafetch:favorites`) or show the
+ * Open the DramaFetch tab, or bring the open one to the front; with a hand-over, have it download
+ * that series (`dramafetch:load`), show that TikTok tab's favorites (`dramafetch:favorites`) or show the
  * library as it is kept (`dramafetch:library`: no job, no request). The engine's tab (one per
  * browser) takes it and answers with its tab, which comes to the front. When no page answers — no
  * DramaFetch tab is open, or the open one's page is not running (Chrome restored it after a restart
@@ -308,7 +310,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   const answer = async () => {
     if (info.menuItemId === MENU_CARD) {
       // a drama of the profile's favorites: its card, from the tab's frame — without one (no card
-      // right-clicked, no script to ask) the DramaFetch tab lists nothing and says why
+      // right-clicked, no script to ask) the DramaFetch tab queues nothing and says why
       const tabId = tab?.id;
       if (!isTabId(tabId)) return;
       const { card, script } = await rightClickedCard(tabId, info.frameId ?? 0);

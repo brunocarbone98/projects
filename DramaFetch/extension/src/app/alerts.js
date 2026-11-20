@@ -2,8 +2,9 @@
 /**
  * The alerts of DramaFetch 1.7.0 — the owner's request of 2026-11-19: “an alert that tells me a
  * drama has been downloaded completely, or that one or more episodes need a retry”. One Chrome
- * notification (a Windows toast) per drama a download job finishes — **Download all**, **Download
- * selected dramas**, **Download selected**, **Download all available**, **Retry** —, made by the
+ * notification (a Windows toast) per drama a download job finishes — a paste, a card's
+ * **Download**, **Download selected dramas**, a hand-over, **Download selected**, **Download all
+ * available**, **Retry** —, made by the
  * DramaFetch tab that ran the job (`app.js`, once the drama's rows and records are stored) and
  * clicked in the worker (`background.js`):
  *

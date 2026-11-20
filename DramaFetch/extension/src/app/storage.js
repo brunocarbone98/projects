@@ -23,14 +23,15 @@
  * in `chrome.storage.local` as {@link LIBRARY_KEY} — a cache, best effort: the dramas' ids, titles,
  * episodes and lengths, TikTok's count, when and from which profile the list was read and the
  * dramas DramaFetch removed since (`lib/library.libraryRecord`); no cover URL, no address, nothing
- * signed. A refused write of it never stops anything.
+ * signed. A refused write of it never stops anything. Its sort order, the one picked last, is kept
+ * apart ({@link LIBRARY_SORT_KEY}, DramaFetch 1.7.0), best effort the same way.
  *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
  */
 
 import { storageAreaStore } from "../lib/cooldown.js";
 import { isFavoritesFirstPageUrl } from "../lib/favorites.js";
-import { libraryOf, storedHandle } from "../lib/library.js";
+import { librarySortOf, libraryOf, storedHandle } from "../lib/library.js";
 import { DEFAULT_NAME_FORMAT, QUALITY_MODES, THUMBNAIL_MODES } from "../lib/messages.js";
 import { nameFormatProblem } from "../lib/naming.js";
 import { PACES, PACING_DEFAULTS, PacingState, pacingOptions, pacingProblem } from "../lib/pacing.js";
@@ -43,6 +44,8 @@ export const PACING_KEY = "pacing";
 export const SERIES_KEY_PREFIX = "series:";
 /** The library kept across sessions (`lib/library.StoredLibrary`): nothing signed in it. */
 export const LIBRARY_KEY = "favoritesLibrary";
+/** The library's sort order the user picked last (`lib/library.LibrarySort`): a preference. */
+export const LIBRARY_SORT_KEY = "librarySort";
 /**
  * The `chrome.storage.session` key of the library's covers: series id → the cover URL the last
  * listing gave (signed: in the browser session's memory only, never on disk).
@@ -470,6 +473,36 @@ export async function readLibrary() {
  */
 export async function writeLibrary(library) {
   await chrome.storage.local.set({ [LIBRARY_KEY]: library });
+}
+
+/**
+ * The library's sort order the user picked last (`lib/library.librarySortOf`: the list's own,
+ * `recent`, when none is kept or what is kept is no sort order). Never throws: a read the storage
+ * refuses is the list's own order.
+ * @returns {Promise<import("../lib/library.js").LibrarySort>}
+ */
+export async function readLibrarySort() {
+  try {
+    return librarySortOf((await chrome.storage.local.get(LIBRARY_SORT_KEY))[LIBRARY_SORT_KEY]);
+  } catch {
+    return librarySortOf(undefined);
+  }
+}
+
+/**
+ * Keep the library's sort order for the next sessions — best effort, as the library itself: a
+ * write `chrome.storage.local` refuses is ignored (the page's menu keeps the order for its life),
+ * never a stop and never the page's refused write. Returns whether it was kept.
+ * @param {import("../lib/library.js").LibrarySort} sort
+ * @returns {Promise<boolean>}
+ */
+export async function writeLibrarySort(sort) {
+  try {
+    await chrome.storage.local.set({ [LIBRARY_SORT_KEY]: librarySortOf(sort) });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

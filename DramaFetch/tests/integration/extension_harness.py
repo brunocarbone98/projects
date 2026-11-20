@@ -16,8 +16,15 @@ that page sees the extension's service worker activated and saves the test setti
 TikTok's base URL, pauses near 0) through the page's test-mode panel. `page.wait_for_function`
 with a string predicate is blocked by the extension page's CSP, so the harness polls from Python.
 
-Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
-`#download-available-button`, `#download-selected-button`, `#include-locked`, `#recheck`,
+A series starts downloading the way the owner starts it (DramaFetch 1.7.0, the owner's decision of
+2026-11-20): a REAL paste into the box (`paste`: the text on the browser's clipboard, then Ctrl+V —
+Chromium fires the box's own trusted `paste` event with the clipboard's `text/plain`; no button),
+or a library card's **Download** (`download_card`); a series' episodes are listed with its library
+card's **See episodes** (`see_episodes`, over a library `keep_library` put in place as a listing of
+the favorites would have kept it).
+
+Element ids it relies on: `#links`, `#download-available-button`, `#download-selected-button`,
+`#include-locked`, `#recheck`, `#input-status`,
 `#app-status` (`data-state` idle|running, `data-finished` = finished jobs), `#test-settings`,
 `#test-settings-save`, `#test-settings-status`, `#cooldown-banner`, `#episode-table` (one
 `tr[data-number]` per listed episode with `data-access` free|unlocked|locked, its checkbox, the
@@ -28,9 +35,10 @@ Element ids it relies on: `#links`, `#load-button`, `#download-all-button`,
 `#retry-button`, `#report-button`,
 `#failed-report`, `#setting-report`, `#settings-save`, `#history-list`, the library
 (`#favorites-card`, `#favorites-count`, `#favorites-filter`, `#favorites-select-all`,
-`#favorites-add-button`, `#favorites-status`, `#favorites-grid` with one `article[data-series-id]`
-per drama — its `.favorite-title`, `.favorite-meta`, `.favorite-status[data-status]`, its tick and
-its `[data-action]` buttons —, `#library-chip-<filter>`, `#library-total`, `#library-download`,
+`#favorites-status`, `#favorites-grid` with one `article[data-series-id]` per drama — its
+`.favorite-title`, `.favorite-meta`, `.favorite-status[data-status]`, its tick and its
+`[data-action]` buttons: `download`, `browse` (**See episodes**), `remove`, `open` —,
+`#library-chip-<filter>`, `#library-total`, `#library-download`,
 `#library-refresh`, and the confirmation `#bookmark-dialog` with `#bookmark-confirm`) and the
 popup's `#popup-favorites` / `#popup-favorites-hint` / `#popup-library`. Storage keys it reads:
 `history` (most recent run first), `cooldown`, `series:<id>`, `pacing`, `favoritesLibrary`, and in
@@ -46,6 +54,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal
@@ -143,7 +152,7 @@ def unpacked_extension_id(directory: Path) -> str:
 
 
 class ExtensionHarness:
-    """`with ExtensionHarness(tmp_path, server.base_url) as ext: ext.download_all(...)`."""
+    """`with ExtensionHarness(tmp_path, server.base_url) as ext: ext.paste_and_wait(...)`."""
 
     def __init__(
         self,
@@ -394,19 +403,36 @@ class ExtensionHarness:
         )
         return rules
 
-    def _run(self, click: str, timeout_s: float) -> dict[str, Any]:
+    def _after(self, start: Callable[[], None], what: str, timeout_s: float) -> dict[str, Any]:
+        """`start()` — a click, a paste —, then wait until the job it queued has ended and nothing
+        runs; that job's history entry."""
         before = self.finished_jobs()
-        self.page.click(click)
+        start()
         self.wait_for(
             lambda: self.finished_jobs() > before and self.idle(),
             timeout_s,
-            f"the job of {click} did not finish",
+            f"the job of {what} did not finish",
         )
         history = self.history()
         assert history, "the finished job left no history entry"
         return history[0]
 
-    def download_all(
+    def _run(self, click: str, timeout_s: float) -> dict[str, Any]:
+        return self._after(lambda: self.page.click(click), click, timeout_s)
+
+    def paste(self, text: str) -> None:
+        """A real paste of `text` into the box, as the owner pastes: the text on the browser's
+        clipboard (written from the app page, `navigator.clipboard.writeText`), the box focused,
+        Ctrl+V (Cmd+V on macOS) — Chromium fires the box's own `paste` event, trusted, with the
+        clipboard's `text/plain`. What the page makes of it is the page's: a download queued at
+        once (the box emptied), or — a line it refuses, a cooldown, a refused write — the text
+        left in the box with the reason on the status line. Does not wait for anything."""
+        page = self.page
+        page.evaluate("(text) => navigator.clipboard.writeText(text)", text)
+        page.focus("#links")
+        page.keyboard.press("ControlOrMeta+V")
+
+    def paste_and_wait(
         self,
         links: str,
         *,
@@ -414,19 +440,66 @@ class ExtensionHarness:
         recheck: bool = False,
         timeout_s: float = JOB_TIMEOUT_S,
     ) -> dict[str, Any]:
-        """Paste `links`, press **Download all**, wait for the job; its history entry."""
+        """The box's checkboxes ticked first when asked (they count for that paste, then clear),
+        then `links` pasted (`paste`): the download of every series they name — ONE batch job,
+        what **Download all** made until 1.7.0, no button pressed —, waited for; its history
+        entry."""
         page = self.page
-        page.fill("#links", links)
         if include_locked:
             page.check("#include-locked")
         if recheck:
             page.check("#recheck")
-        return self._run("#download-all-button", timeout_s)
+        return self._after(lambda: self.paste(links), "a paste", timeout_s)
 
-    def load(self, link: str, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
-        """Paste one link and press **Load list**; the history entry of the listing."""
-        self.page.fill("#links", link)
-        return self._run("#load-button", timeout_s)
+    def keep_library(self, *dramas: tuple[str, str, int]) -> None:
+        """Put `dramas` — `(series id, title, episode count)` — in the library as a listing of the
+        user's TikTok favorites would have kept it (`favoritesLibrary` in `chrome.storage.local`:
+        ids, titles and counts only — no cover, no address, nothing signed), then reload the app
+        page, which shows it at its start with no request: each drama's card with its **See
+        episodes** (`see_episodes`) and **Download** (`download_card`)."""
+        now = time.time()
+        library = {
+            "v": 1,
+            "listedAt": now,
+            "total": len(dramas),
+            "countedAt": None,
+            "fullReadAt": None,
+            "unconfirmed": False,
+            "complete": True,
+            "short": False,
+            "ended": None,
+            "profile": None,
+            "items": [
+                {"seriesId": series_id, "title": title, "episodes": episodes, "durationS": None}
+                for series_id, title, episodes in dramas
+            ],
+            "removed": [],
+        }
+        page = self.page
+        page.evaluate("(library) => chrome.storage.local.set({favoritesLibrary: library})", library)
+        page.reload()
+        cards = page.locator("#favorites-grid article[data-series-id]")
+        self.wait_for(
+            lambda: self.idle() and cards.count() == len(dramas),
+            20,
+            "the reloaded tab did not show the library",
+        )
+
+    def card_button(self, series_id: str, action: str) -> str:
+        """The selector of a library card's button: `download`, `browse` (**See episodes**),
+        `remove`, `open`."""
+        return f"#favorites-grid article[data-series-id='{series_id}'] [data-action='{action}']"
+
+    def see_episodes(self, series_id: str, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
+        """**See episodes** on the drama's library card (`keep_library` puts it there): its episode
+        list with the covers, as **Load list** showed it until 1.7.0; the listing job's history
+        entry."""
+        return self._run(self.card_button(series_id, "browse"), timeout_s)
+
+    def download_card(self, series_id: str, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
+        """**Download** on the drama's library card: the whole drama, the job **Download selected
+        dramas** queues for it alone; its history entry."""
+        return self._run(self.card_button(series_id, "download"), timeout_s)
 
     def download_available(self, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
         """**Download all available** of the loaded series; its history entry."""

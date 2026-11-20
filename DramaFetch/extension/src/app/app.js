@@ -1,10 +1,12 @@
 // @ts-check
 /**
- * The DramaFetch tab: the text box (one link or id per line, the CLI's `--from-file` rules), the
- * episode list of one series (**Load list**), the user's TikTok library (DramaFetch 1.6.0: their
- * Bookmark — **Favorites** → **Drama** — as cards, kept across sessions, its count TikTok's, with
- * filters, a search, ticks, **Download selected**, **Add selected to the box** and **Remove from
- * Favorites**), the jobs — one at a time, FIFO, the web job manager's rules — and their progress
+ * The DramaFetch tab: the text box (one link or id per line, the CLI's `--from-file` rules) — a
+ * paste into it, or Enter, queues the download of the series it names at once (DramaFetch 1.7.0,
+ * the owner's decision of 2026-11-20) —, the episode list of one series (**See episodes** on a
+ * drama of the library), the user's TikTok library (DramaFetch 1.6.0: their Bookmark — **Favorites**
+ * → **Drama** — as cards, kept across sessions, its count TikTok's, with filters, a search, a sort
+ * kept across sessions, ticks, a **Download** button per drama, **Download selected dramas** and
+ * **Remove from Favorites**), the jobs — one at a time, FIFO, the web job manager's rules — and their progress
  * (the episodes a job did not download shown apart from the ones that completed, with the button
  * that queues them again), the cooldown banner, the settings, the history of the last 20 runs —
  * each past run's failures retryable the same way —, and (only in the test harness' copy) the test
@@ -18,7 +20,6 @@ import { buildReport, digestEntry, hasFailures, reportFilename, reportJson, repo
 import { displayText, statusLabel } from "../lib/display.js";
 import {
   FAVORITES_MAX_PAGES,
-  boxWithFavorites,
   cleanTitle,
   coversCard,
   coversShift,
@@ -32,7 +33,6 @@ import {
 } from "../lib/favorites.js";
 import {
   LIBRARY_PIECE,
-  LIBRARY_SORTS,
   ageOf,
   chipCounts,
   countsFresh,
@@ -40,6 +40,7 @@ import {
   distinctItems,
   inFilter,
   libraryRecord,
+  librarySortOf,
   libraryStatus,
   progressOf,
   removalFacts,
@@ -95,6 +96,7 @@ import {
   readHistory,
   readLibrary,
   readLibraryCovers,
+  readLibrarySort,
   readSeriesState,
   readSeriesStates,
   savePacing,
@@ -103,6 +105,7 @@ import {
   storedCooldownUntil,
   writeLibrary,
   writeLibraryCovers,
+  writeLibrarySort,
   writeSeriesState,
 } from "./storage.js";
 import { TabKeeper } from "./tabkeeper.js";
@@ -134,18 +137,21 @@ const ENGINE_LOCK = "dramafetch-engine";
  *
  * @typedef {object} Job
  * @property {number} id
- * @property {"load" | "batch" | "selection" | "favorites" | "unbookmark"} kind `favorites`: **List
- *   favorites** (the library's refresh); `unbookmark`: **Remove from Favorites**
+ * @property {"load" | "batch" | "selection" | "favorites" | "unbookmark"} kind `load`: **See
+ *   episodes** (a listing), or a right-clicked favorites card resolved to its drama, whose download
+ *   it queues ({@link runLoad}); `batch`: a download of whole series — a paste, Enter, a card's
+ *   **Download**, **Download selected dramas**, a hand-over; `favorites`: **List favorites** (the
+ *   library's refresh); `unbookmark`: **Remove from Favorites**
  * @property {string} label
- * @property {SeriesRef[]} refs a `load` job from a favorites card has none until the card is resolved
+ * @property {SeriesRef[]} refs a `load` job from a favorites card has none: the card is resolved by the job
  * @property {Series | null} series
  * @property {number[]} numbers
  * @property {boolean} includeLocked
  * @property {boolean} recheck
  * @property {boolean} [contacted] whether the job made a request to TikTok (set while it runs)
  * @property {number} [favoritesTab] the user's TikTok tab whose favorites a `favorites` job lists, or
- *   whose right-clicked card a `load` job resolves first
- * @property {Card | null} [card] the right-clicked favorites card a `load` job lists the drama of
+ *   whose right-clicked card a `load` job resolves
+ * @property {Card | null} [card] the right-clicked favorites card a `load` job queues the download of
  * @property {{seriesId: string, title: string | null, episodes: number | null}} [bookmark] the drama
  *   an `unbookmark` job removes from the Bookmark (`episodes`: the count its confirmation showed —
  *   the job's gate reads the library's own count when it runs, {@link runUnbookmark})
@@ -936,8 +942,8 @@ export function retryTargets(seriesRecords) {
 
 /**
  * The jobs a retry queues: one selection job per series, in the order of the series, over exactly
- * that series' episodes that did not download — what pasting the link and **Download selected**
- * with those numbers does ({@link runSelectionJob}: the cooldown gate, the rest between jobs, a
+ * that series' episodes that did not download — what **See episodes** and **Download selected**
+ * over those numbers does ({@link runSelectionJob}: the cooldown gate, the rest between jobs, a
  * fresh resolve, then the downloads; an episode meanwhile on disk is skipped), the locked ones
  * not asked for.
  * @param {readonly RetryTarget[]} targets
@@ -1274,20 +1280,36 @@ function renderAppStatus() {
 }
 
 /**
- * Queue a job — in the engine's tab only: a read-only tab could never run it.
+ * Queue a job — in the engine's tab only: a read-only tab could never run it. At the end of the
+ * queue (FIFO), or — `next` — at its head: the download a right-clicked card's job resolved, which
+ * takes that job's place in the line ({@link downloadCard}). Returns whether it was queued.
  * @param {Omit<Job, "id">} job
+ * @param {{next?: boolean}} [where]
+ * @returns {boolean}
  */
-function enqueue(job) {
-  if (!app.owner) return;
+function enqueue(job, where = {}) {
+  if (!app.owner) return false;
   if (app.unsaved !== null) {
     // the page cannot store anything any more: a job would only be refused, after clearing the
     // last one's results (the popup's "Download this series" and the retry buttons come here too)
     void showStorageRefused();
-    return;
+    return false;
   }
-  app.queue.push({ ...job, id: app.nextJobId++ });
+  const queued = { ...job, id: app.nextJobId++ };
+  if (where.next === true) app.queue.unshift(queued);
+  else app.queue.push(queued);
   renderAppStatus();
   void pump();
+  return true;
+}
+
+/**
+ * The job running and the jobs waiting, in order, as they were queued — what the unit tests read of
+ * the queue. (Exported for the unit tests, which cannot see it otherwise.)
+ * @returns {Job[]}
+ */
+export function queuedJobs() {
+  return [...(app.running === null ? [] : [app.running]), ...app.queue].map((job) => ({ ...job, refs: [...job.refs] }));
 }
 
 async function pump() {
@@ -1482,19 +1504,20 @@ async function runJob(job) {
 }
 
 /**
- * **Load list**: list one series (no download) and show its episodes — a job like any other: the
- * rest between jobs first (no long break: a listing alone is no download attempt), the cooldown
- * asked again after it. A right-click on a drama of the user's TikTok favorites (`job.card`) is a
- * listing too, in ONE job (so no rest more): the card is resolved to its series first — from the
- * favorites the panel shows, with no request ({@link cardStart}), or else from the tab's favorites
- * list read from its top until it reaches the card ({@link fetchFavorites}, paced;
- * `lib/favorites.coversCard`: a page past the card's position when its drama is not where the card
- * sits) —, never by a guess between dramas of the same title (`lib/favorites.resolveCard`: those
- * are shown in the panel for the user to pick, nothing listed; `lib/favorites.coversShift` names
- * the limit),
- * the series joins the box like any series handed over, and the listing goes on as for **Load
- * list**. Returns why the job stopped (a cooldown met meanwhile, a refusal or a login wall met while
- * reading the list or before it), or null. (Exported for the unit tests, which cannot run a job.)
+ * A listing job — **See episodes** on a drama of the library: list one series (no download) and
+ * show its episodes, a job like any other: the rest between jobs first (no long break: a listing
+ * alone is no download attempt), the cooldown asked again after it. A right-click on a drama of the
+ * user's TikTok favorites (`job.card`, **Download this favorite drama**) is this job too: the card
+ * is resolved to its series — from the favorites the library shows, with no request
+ * ({@link cardStart}), or else from the tab's favorites list read from its top until it reaches the
+ * card ({@link fetchFavorites}, paced; `lib/favorites.coversCard`: a page past the card's position
+ * when its drama is not where the card sits) —, never by a guess between dramas of the same title
+ * (`lib/favorites.resolveCard`: those are shown in the library for the user to pick, nothing
+ * queued; `lib/favorites.coversShift` names the limit) —, and once it is ONE drama, its download
+ * is queued right after this job ({@link downloadCard}): this job lists no series — the download
+ * lists it right before its own downloads, ONE listing in all. Returns why the job stopped (a
+ * cooldown met meanwhile, a refusal or a login wall met while reading the list or before it), or
+ * null. (Exported for the unit tests, which cannot run a job.)
  * @param {Job} job
  * @param {Engine} engine
  * @param {Record<string, unknown>} entry
@@ -1506,8 +1529,9 @@ export async function runLoad(job, engine, entry) {
   if (job.card) {
     start = await cardStart(job, entry); // before the rest: without what the card needs, no request at all
     if ("done" in start) return start.done; // said why, no request; a login wall seen there is the job's stop
+    if ("item" in start) return downloadCard(start.item, entry); // resolved with no request: no rest, nothing asked
   }
-  setStatus($("input-status"), t("loading"));
+  setStatus($("input-status"), t(start === null ? "loading" : "favoritesListing"));
   await restBetweenJobs(engine, { lastContactAt: app.lastContactAt, batchJob: false });
   const refused = await checkCooldown(engine);
   if (refused !== null) {
@@ -1521,42 +1545,30 @@ export async function runLoad(job, engine, entry) {
     entry["error"] = app.unsaved;
     return app.unsaved;
   }
-  if (start !== null) {
-    /** @type {FavoriteItem | null} */
-    let item = "item" in start ? start.item : null;
-    if ("template" in start) {
-      const card = /** @type {Card} */ (job.card);
-      const tabId = /** @type {number} */ (job.favoritesTab);
-      let read;
-      try {
-        read = await fetchFavorites(job, engine, tabId, start.template, card);
-      } catch (error) {
-        if (error instanceof StopRequested) throw error;
-        return favoritesFailed(error, entry);
-      }
-      const { listing } = read;
-      const resolved = resolveCard(listing.items, card);
-      // TikTok stopped sending the list before it could tell the card's drama: no guess
-      if (cutShort(listing) && stoppedShortOfCard(listing.items, card, listing.perPage, resolved)) {
-        return cardCutShort(card, listing.items.length, entry);
-      }
-      if (resolved.kind === "missing") return cardNotFound(card, entry);
-      if (resolved.kind === "shared") {
-        // the list consulted, in the library — unless the library is larger and holds those dramas;
-        // a library of another TikTok profile stays as it was, and offers nothing to pick from
-        if (!read.shown && takesLibraryPlace(listing, card) && !(await showFavoritesListing(tabId, listing, start.template.profile))) return cardSharedElsewhere(card, entry);
-        return cardShared(card, entry);
-      }
-      item = resolved.item;
+  if (start !== null && "template" in start) {
+    const card = /** @type {Card} */ (job.card);
+    const tabId = /** @type {number} */ (job.favoritesTab);
+    let read;
+    try {
+      read = await fetchFavorites(job, engine, tabId, start.template, card);
+    } catch (error) {
+      if (error instanceof StopRequested) throw error;
+      return favoritesFailed(error, entry);
     }
-    const found = /** @type {FavoriteItem} */ (item);
-    joinBox([found]);
-    if (app.queue.some((queued) => queued.kind === "load" && queued.refs[0]?.seriesId === found.seriesId)) {
-      setStatus($("input-status"), t("loadAlreadyQueued"), "error"); // a waiting Load list lists it: not twice
-      return null;
+    const { listing } = read;
+    const resolved = resolveCard(listing.items, card);
+    // TikTok stopped sending the list before it could tell the card's drama: no guess
+    if (cutShort(listing) && stoppedShortOfCard(listing.items, card, listing.perPage, resolved)) {
+      return cardCutShort(card, listing.items.length, entry);
     }
-    job.refs = [{ kind: "series", seriesId: found.seriesId, episodeHint: null, sourceUrl: found.seriesId }];
-    setStatus($("input-status"), t("loading"));
+    if (resolved.kind === "missing") return cardNotFound(card, entry);
+    if (resolved.kind === "shared") {
+      // the list consulted, in the library — unless the library is larger and holds those dramas;
+      // a library of another TikTok profile stays as it was, and offers nothing to pick from
+      if (!read.shown && takesLibraryPlace(listing, card) && !(await showFavoritesListing(tabId, listing, start.template.profile))) return cardSharedElsewhere(card, entry);
+      return cardShared(card, entry);
+    }
+    return downloadCard(resolved.item, entry); // its drama: downloaded next, listed right before its downloads
   }
   const ref = /** @type {SeriesRef} */ (job.refs[0]);
   let series;
@@ -1579,13 +1591,42 @@ export async function runLoad(job, engine, entry) {
   return null;
 }
 
+/**
+ * A right-clicked favorites card resolved to ONE drama (from the library's list with no request, or
+ * from the list read up to the card): that drama is downloaded — the `batch` job a paste of its id
+ * queues ({@link queueDownload}; no checkbox for a hand-over: `includeLocked` and `recheck` false),
+ * queued right after the card's job, at the head of the queue (it takes that job's place in the
+ * line), with no request of the card's job: the download lists the series right before its own
+ * downloads. A drama already being downloaded, or waiting to be, is not queued twice
+ * (`alreadyDownloading`, kept in the card job's history entry). The box is left alone. Returns the
+ * job's stop: none.
+ * @param {FavoriteItem} item
+ * @param {Record<string, unknown>} entry
+ * @returns {null}
+ */
+function downloadCard(item, entry) {
+  const ref = { kind: /** @type {const} */ ("series"), seriesId: item.seriesId, episodeHint: null, sourceUrl: item.seriesId };
+  const name = `“${item.title ?? item.seriesId}”`;
+  const result = queueDownload([ref], { includeLocked: false, recheck: false }, { next: true });
+  if (result === null) return null; // a write refused meanwhile: the page said why, nothing queued
+  if (result.queued.length === 0) {
+    const text = t("alreadyDownloading", [name]);
+    setStatus($("input-status"), text, "error");
+    entry["error"] = text;
+    return null;
+  }
+  setStatus($("input-status"), t("cardQueued", [name]), "ok");
+  return null;
+}
+
 // ------------------------------------------------------------ the user's TikTok favorites
 
 /**
  * The series ticked in the library, by series id: never cleared by another tab's listing (a card
  * built for a ticked id shows ticked), pruned only by a COMPLETE listing that becomes the library —
  * the ids it does not hold are dropped ({@link endFavorites}) —, emptied by **Clear selection**,
- * and cleared by **Download selected** of the dramas it queues, those only ({@link onLibraryDownload}).
+ * and cleared by **Download selected** of the dramas it queues, those only ({@link onLibraryDownload});
+ * a card's own **Download** leaves them alone ({@link onLibraryDownloadOne}).
  */
 const favoritesSelected = new Set();
 
@@ -1635,9 +1676,10 @@ const library = {
 };
 
 /**
- * The grid's cards as drawn last, by series id: the drama, its card, its tick and the buttons that
- * would start a job (disabled when no job may start: `updateButtons`).
- * @type {Map<string, {item: FavoriteItem, article: HTMLElement, box: HTMLInputElement | null, cover: HTMLElement, actions: HTMLButtonElement[]}>}
+ * The grid's cards as drawn last, by series id: the drama, its card, its tick, the buttons that
+ * would start a job (disabled when no job may start: `updateButtons`) and its **Download** (also
+ * disabled while the drama is queued or downloading).
+ * @type {Map<string, {item: FavoriteItem, article: HTMLElement, box: HTMLInputElement | null, cover: HTMLElement, actions: HTMLButtonElement[], download: HTMLButtonElement | null}>}
  */
 const libraryCards = new Map();
 
@@ -1927,8 +1969,8 @@ function stoppedShortOfCard(items, card, perPage, resolved) {
  * Several of the user's favorites bear the right-clicked card's title: none is picked — its
  * position cannot tell them apart. The library shows them — its search box set to that title, every
  * status shown, the section scrolled into view —, each with its episodes and length, and the page
- * asks the user to tick the one they right-clicked and press **Add selected to the box**; the job
- * lists nothing, and its history entry keeps the text.
+ * asks the user to press **Download** on the one they right-clicked; the job queues nothing, and
+ * its history entry keeps the text.
  * @param {Card} card
  * @param {Record<string, unknown>} entry
  * @returns {null}
@@ -1950,7 +1992,7 @@ function cardShared(card, entry) {
  * another TikTok profile's ({@link showFavoritesListing} left it untouched: one account's list never
  * enters another's library): none is picked — DramaFetch never guesses —, the library stays exactly
  * as it was, and the page says to open the one wanted on TikTok and use the toolbar button →
- * **Download this series** (`favoritesSharedElsewhere`, an error); the job lists nothing, and its
+ * **Download this series** (`favoritesSharedElsewhere`, an error); the job queues nothing, and its
  * history entry keeps the text.
  * @param {Card} card
  * @param {Record<string, unknown>} entry
@@ -1987,7 +2029,7 @@ function takesLibraryPlace(listing, card) {
 
 /**
  * A right-clicked card names a drama the favorites list does not hold (any more): the page says so
- * and the job ends — nothing listed.
+ * and the job ends — nothing queued.
  * @param {Card} card
  * @param {Record<string, unknown>} entry
  * @returns {null}
@@ -2001,7 +2043,7 @@ function cardNotFound(card, entry) {
 
 /**
  * A right-clicked card lies further down the favorites than TikTok sent (`favorites.cutShort`): the
- * page says so and how to list that drama anyway, and the job ends — nothing listed.
+ * page says so and how to download that drama anyway, and the job ends — nothing queued.
  * @param {Card} card
  * @param {number} count the dramas TikTok sent
  * @param {Record<string, unknown>} entry
@@ -2586,11 +2628,15 @@ async function refreshLibraryStatuses(seriesIds) {
   renderLibrary();
 }
 
-/** @returns {LibraryEntry[]} the library's dramas with what the records say and whether DramaFetch removed them */
+/**
+ * @returns {LibraryEntry[]} the library's dramas with what the records say (before the records were
+ * read: what a drama never run has — TikTok's count, nothing saved, nothing locked) and whether
+ * DramaFetch removed them
+ */
 function libraryEntries() {
   return libraryItems().map((item) => ({
     item,
-    progress: library.progress.get(item.seriesId) ?? { status: /** @type {const} */ ("none"), saved: 0, total: item.episodes },
+    progress: library.progress.get(item.seriesId) ?? progressOf(undefined, item.seriesId, item.episodes),
     removed: library.removed.has(item.seriesId),
   }));
 }
@@ -2611,10 +2657,23 @@ function queuedSeries() {
   return queued;
 }
 
+/**
+ * The series being downloaded or waiting to be: those a waiting `batch` or `selection` job will
+ * download, those of the running one it has not finished — the one it downloads now included. A
+ * paste, Enter, a hand-over and a right-clicked card never queue one of them twice, and a card's
+ * **Download** is disabled for them (its card says **Queued** or **Downloading**).
+ * @returns {Set<string>}
+ */
+function pendingDownloads() {
+  const pending = queuedSeries();
+  const running = app.running;
+  if (running !== null && (running.kind === "batch" || running.kind === "selection") && library.running !== null) pending.add(library.running);
+  return pending;
+}
+
 /** @returns {LibrarySort} the sort order chosen (the list's own when none) */
 function librarySort() {
-  const value = select("library-sort").value;
-  return /** @type {readonly string[]} */ (LIBRARY_SORTS).includes(value) ? /** @type {LibrarySort} */ (value) : "recent";
+  return librarySortOf(select("library-sort").value);
 }
 
 /**
@@ -2675,8 +2734,13 @@ function renderLibrary() {
 
 /**
  * One drama's card: its cover (or a plain placeholder with the title), its tick (none once it left
- * the Bookmark), its title, episodes and length, its status from the records and the jobs, the
- * twins' badge, a thin progress bar while it is partly saved or downloading, and its actions.
+ * the Bookmark), its title, episodes (the number its status fraction counts against), the locked
+ * ones the records hold and its length, its status from the records and the jobs, the twins'
+ * badge, a thin progress bar while it is partly saved or downloading, and its actions —
+ * **Download** (DramaFetch 1.7.0: that drama alone, {@link onLibraryDownloadOne}; disabled while it
+ * is queued or downloading), **Remove from Favorites** on a drama on disk, **See episodes** (its
+ * episode list, to pick from: the one way left to list a series, so on every card) and **Open on
+ * TikTok**; a drama DramaFetch removed from the Bookmark has none.
  * @param {LibraryEntry} entry
  * @param {LibraryStatus} status
  * @param {boolean} twin another different drama of the library bears its title
@@ -2706,9 +2770,11 @@ function libraryCard(entry, status, twin) {
     el("span", { className: `badge favorite-status ${status}`, text: libraryStatusText(status, progress), attrs: { "data-status": status } }),
   ]);
   if (twin) badges.append(el("span", { className: "badge twin", text: t("libraryTwin"), attrs: { "data-twin": "1" } }));
+  // the locked episodes the records hold, explained where the card counts them
+  const locked = progress.locked > 0 ? { title: t("libraryLockedTitle", [progress.locked]), attrs: { "data-locked": String(progress.locked) } } : {};
   const body = el("div", { className: "drama-body" }, [
     el("h3", { className: "favorite-title", text: title }),
-    el("p", { className: "favorite-meta", text: favoriteMeta(item) }),
+    el("p", { className: "favorite-meta", text: favoriteMeta(item, progress), ...locked }),
     badges,
   ]);
   if (status === "partly" || status === "running") {
@@ -2717,6 +2783,8 @@ function libraryCard(entry, status, twin) {
   }
   /** @type {HTMLButtonElement[]} */
   const actions = [];
+  /** @type {HTMLButtonElement | null} */
+  let download = null;
   const row = el("div", { className: "drama-actions" });
   /**
    * @param {string} action
@@ -2734,15 +2802,17 @@ function libraryCard(entry, status, twin) {
   if (status === "removed") {
     row.append(el("span", { className: "meta", text: t("libraryRemovedNote") }));
   } else {
+    download = action("download", t("libraryDownloadOne"), "primary", () => onLibraryDownloadOne(item));
     if (status === "on-disk") actions.push(action("remove", t("libraryRemove"), "danger-outline", () => void openRemoval(item)));
-    else actions.push(action("browse", t("libraryBrowse"), "link", () => listSeries({ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId })));
+    actions.push(action("browse", t("libraryBrowse"), "link", () => listSeries({ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId })));
     action("open", t("libraryOpen"), "link", () => void openOnTikTok(seriesId));
   }
   body.append(row);
   const blocked = !app.owner || app.cooldown !== null || app.unsaved !== null;
   for (const made of actions) made.disabled = blocked;
+  if (download !== null) download.disabled = blocked || status === "queued" || status === "running";
   const article = el("article", { className: `drama-card ${status}`, attrs: { "data-series-id": seriesId, "data-status": status } }, [cover, body]);
-  libraryCards.set(seriesId, { item, article, box, cover, actions });
+  libraryCards.set(seriesId, { item, article, box, cover, actions, download });
   return article;
 }
 
@@ -2765,20 +2835,28 @@ function libraryStatusText(status, progress) {
 }
 
 /**
- * `60 episodes · 1h 19m`, as far as the list says.
+ * `60 episodes · 45 locked · 1h 19m`: how many episodes the drama has — the number its status
+ * fraction counts against (`lib/library.progressOf`'s total: TikTok's count, raised to what
+ * DramaFetch's records hold when a run listed more), so the card never disagrees with itself —,
+ * the locked ones the records hold (the episodes a run skipped without a request,
+ * `skipped-locked`: paid and not unlocked, listed as playing short, protected by DRM or with no
+ * play address — `libraryLockedTitle` names them all —; none for a drama DramaFetch never ran:
+ * nothing is asked of TikTok to learn it), and its length as TikTok's list gives it; `–` when
+ * nothing is known.
  * @param {FavoriteItem} item
+ * @param {Progress} progress
  * @returns {string}
  */
-function favoriteMeta(item) {
-  const parts = durationParts(item.durationS);
-  const length =
-    parts === null
-      ? null
-      : parts.hours > 0
-        ? t("favoritesLengthHours", [parts.hours, parts.minutes])
-        : t("favoritesLengthMinutes", [parts.minutes]);
-  if (item.episodes === null) return length ?? "–";
-  return length === null ? t("favoritesEpisodes", [item.episodes]) : t("favoritesEpisodesLength", [item.episodes, length]);
+function favoriteMeta(item, progress) {
+  /** @type {string[]} */
+  const parts = [];
+  if (progress.total !== null) parts.push(t("favoritesEpisodes", [progress.total]));
+  if (progress.locked > 0) parts.push(progress.locked === 1 ? t("libraryLockedOne") : t("libraryLocked", [progress.locked]));
+  const length = durationParts(item.durationS);
+  if (length !== null) {
+    parts.push(length.hours > 0 ? t("favoritesLengthHours", [length.hours, length.minutes]) : t("favoritesLengthMinutes", [length.minutes]));
+  }
+  return parts.length > 0 ? parts.join(" · ") : "–";
 }
 
 /** The count line: what is listed, while it loads and once it is done (the dramas DramaFetch removed left out). */
@@ -2907,22 +2985,33 @@ function onFavoritesSelectShown() {
 }
 
 /**
+ * The ticked dramas the library holds, still in the Bookmark, with what the records say of them,
+ * in the order the library shows them (its sort; the list's own by default).
+ * @returns {LibraryEntry[]}
+ */
+function selectedEntries() {
+  const entries = libraryEntries().filter((entry) => !entry.removed && favoritesSelected.has(entry.item.seriesId));
+  return sortedItems(entries, librarySort());
+}
+
+/**
  * The ticked dramas the library holds, still in the Bookmark, in the order the library shows them
  * (its sort; the list's own by default).
  * @returns {FavoriteItem[]}
  */
 function selectedItems() {
-  const entries = libraryEntries().filter((entry) => !entry.removed && favoritesSelected.has(entry.item.seriesId));
-  return sortedItems(entries, librarySort()).map((entry) => entry.item);
+  return selectedEntries().map((entry) => entry.item);
 }
 
-/** The selection bar: `K selected · E episodes`, and the buttons that need a tick. */
+/**
+ * The selection bar: `K selected · E episodes` — E the sum of the episode counts their cards show
+ * (`lib/library.selectionEpisodes`) —, and the buttons that need a tick.
+ */
 function updateFavoritesSelection() {
-  const items = selectedItems();
-  const episodes = selectionEpisodes(items, new Set(items.map((item) => item.seriesId)));
-  $("favorites-selection").textContent = t("librarySelection", [items.length, episodes]);
-  button("favorites-add-button").disabled = items.length === 0;
-  button("library-clear").disabled = items.length === 0;
+  const entries = selectedEntries();
+  const episodes = selectionEpisodes(entries, new Set(entries.map((entry) => entry.item.seriesId)));
+  $("favorites-selection").textContent = t("librarySelection", [entries.length, episodes]);
+  button("library-clear").disabled = entries.length === 0;
   updateButtons();
 }
 
@@ -2934,23 +3023,26 @@ function onLibraryClear() {
 }
 
 /**
- * **Add selected to the box**: every ticked drama the box does not name yet joins it — a `#
- * <title>` comment line above its series id — and the page says how many, and that **Download
- * all** downloads them. Nothing is downloaded from the library itself, nothing asked of TikTok.
+ * The job **Download selected dramas** queues for `items` — and a card's own **Download** for its
+ * one drama ({@link onLibraryDownloadOne}): ONE `batch` job over exactly their series ids, in that
+ * order — what a paste of those ids into the box queues with both checkboxes unticked (the same
+ * refs, label, `includeLocked` false, `recheck` false) —, through `enqueue`, so the job gate, the
+ * cooldown and a refused write behave as for a paste. Returns the refs queued: none for no items,
+ * or when the page queues nothing (a read-only tab, a write refused: said).
+ * @param {readonly FavoriteItem[]} items
+ * @returns {SeriesRef[]}
  */
-function onFavoritesAdd() {
-  const items = selectedItems();
-  if (items.length === 0) return;
-  const added = joinBox(items);
-  if (added > 0) setStatus($("favorites-status"), t("favoritesAdded", [added]), "ok");
-  else setStatus($("favorites-status"), t("favoritesNoneAdded"));
+function queueDramas(items) {
+  const parsed = parseSeriesList(items.map((item) => item.seriesId).join("\n"));
+  if (parsed.refs.length === 0) return [];
+  const label = parsed.refs.length === 1 ? t("jobSeries", /** @type {SeriesRef} */ (parsed.refs[0]).seriesId) : t("jobBatch", [parsed.refs.length]);
+  const queued = enqueue({ kind: "batch", label, refs: parsed.refs, series: null, numbers: [], includeLocked: false, recheck: false });
+  return queued ? parsed.refs : [];
 }
 
 /**
- * **Download selected**: ONE `batch` job over exactly the ticked dramas' series ids, in the order
- * the library shows them — what **Download all** does with those ids in the box (the same refs,
- * label, `includeLocked` false, `recheck` false), through `enqueue`, so the job gate, the cooldown
- * and a refused write behave as for **Download all**. The box is not touched; the queued dramas'
+ * **Download selected dramas**: ONE `batch` job over exactly the ticked dramas' series ids, in the
+ * order the library shows them ({@link queueDramas}). The box is not touched; the queued dramas'
  * ticks are cleared and their cards say **Queued** — theirs only: pressed while a listing refills
  * the library (**Update from TikTok**, the popup's **Open my library**), it queues the ticked
  * dramas read so far, what the selection bar counts, and a tick on one the listing has not read
@@ -2960,18 +3052,30 @@ function onFavoritesAdd() {
 function onLibraryDownload() {
   const items = selectedItems();
   if (items.length === 0 || !app.owner) return;
-  if (app.unsaved !== null) {
-    void showStorageRefused(); // as Download all: nothing queued
+  const queued = queueDramas(items);
+  if (queued.length === 0) return; // refused (a write the storage refused: said), nothing to untick
+  for (const ref of queued) favoritesSelected.delete(ref.seriesId); // the queued ones only: a tick a listing has not read back yet stays
+  input("favorites-select-all").checked = false;
+  setStatus($("favorites-status"), t("libraryQueuedJob", [queued.length]), "ok");
+  renderLibrary();
+}
+
+/**
+ * A card's **Download** (DramaFetch 1.7.0, the owner's decision of 2026-11-20): that one drama
+ * downloaded — exactly the job one tick and **Download selected dramas** queue for it
+ * ({@link queueDramas}) —, the ticks left alone. Never for a drama already queued or downloading
+ * (its button is disabled then; `alreadyDownloading` all the same), nor while no job may start
+ * (the same gate as the cards' other job buttons, through `enqueue`).
+ * @param {FavoriteItem} item
+ */
+function onLibraryDownloadOne(item) {
+  if (!app.owner) return;
+  const name = `“${item.title ?? item.seriesId}”`;
+  if (pendingDownloads().has(item.seriesId)) {
+    setStatus($("favorites-status"), t("alreadyDownloading", [name]), "error");
     return;
   }
-  const parsed = parseSeriesList(items.map((item) => item.seriesId).join("\n"));
-  if (parsed.refs.length === 0) return;
-  const label = parsed.refs.length === 1 ? t("jobSeries", /** @type {SeriesRef} */ (parsed.refs[0]).seriesId) : t("jobBatch", [parsed.refs.length]);
-  enqueue({ kind: "batch", label, refs: parsed.refs, series: null, numbers: [], includeLocked: false, recheck: false });
-  for (const ref of parsed.refs) favoritesSelected.delete(ref.seriesId); // the queued ones only: a tick a listing has not read back yet stays
-  input("favorites-select-all").checked = false;
-  setStatus($("favorites-status"), t("libraryQueuedJob", [parsed.refs.length]), "ok");
-  renderLibrary();
+  if (queueDramas([item]).length > 0) setStatus($("favorites-status"), t("libraryQueuedDrama", [name]), "ok");
 }
 
 /**
@@ -2986,19 +3090,6 @@ async function openOnTikTok(seriesId) {
   } catch {
     // no tab could be opened: nothing else happens
   }
-}
-
-/**
- * `items` join the box below what it holds — a `# <title>` comment line above each series id the
- * box does not name yet (`lib/favorites.boxWithFavorites`); how many joined.
- * @param {readonly FavoriteItem[]} items
- * @returns {number}
- */
-function joinBox(items) {
-  const box = textarea("links");
-  const { text, added } = boxWithFavorites(box.value, items);
-  box.value = text;
-  return added.length;
 }
 
 /** The library section in view (the popup's **Open my library**, a card's shared title). */
@@ -3083,7 +3174,7 @@ async function openRemoval(item) {
   const facts = removalFacts(raw, item.seriesId, item.episodes);
   const title = item.title ?? item.seriesId;
   $("bookmark-dialog-name").textContent = title;
-  $("bookmark-dialog-meta").textContent = favoriteMeta(item);
+  $("bookmark-dialog-meta").textContent = favoriteMeta(item, progressOf(raw, item.seriesId, item.episodes)); // as its card counts it
   const loaded = libraryCovers.urlOf(item.seriesId);
   $("bookmark-dialog-cover").replaceChildren(loaded !== null ? el("img", { className: "drama-img", attrs: { src: loaded, alt: "" } }) : el("span", { className: "drama-placeholder" }));
   /** @type {HTMLElement[]} */
@@ -3516,8 +3607,6 @@ function updateSelection() {
 
 function updateButtons() {
   const blocked = !app.owner || app.cooldown !== null || app.unsaved !== null;
-  button("load-button").disabled = blocked;
-  button("download-all-button").disabled = blocked;
   const loaded = app.loaded !== null;
   const available = loaded ? app.loaded?.series.episodes.some((episode) => !isLocked(episode)) : false;
   button("download-available-button").disabled = blocked || !available;
@@ -3528,19 +3617,26 @@ function updateButtons() {
   for (const historyButton of historyRetryButtons) historyButton.disabled = blocked || spentRetries.has(historyButton);
   button("report-button").disabled = app.lastReport === null; // a save, no request: the cooldown does not matter
   // the library: Download selected and Update from TikTok queue jobs; Remove from Favorites and See
-  // episodes too — the same rule (Open on TikTok is a normal tab: never disabled)
+  // episodes too — the same rule (Open on TikTok is a normal tab: never disabled) —, and a card's
+  // Download, also while its drama is queued or downloading
   button("library-download").disabled = blocked || selectedItems().length === 0;
   button("library-refresh").disabled = blocked || library.source === null;
-  for (const card of libraryCards.values()) for (const action of card.actions) action.disabled = blocked;
+  const pending = pendingDownloads();
+  for (const [seriesId, card] of libraryCards) {
+    for (const action of card.actions) action.disabled = blocked;
+    if (card.download !== null) card.download.disabled = blocked || pending.has(seriesId);
+  }
 }
 
 /**
- * The text box as series refs, or null with the reason shown (nothing may start while a line is
- * refused).
+ * `text` — the box's, or what was pasted into it — as series refs (the box's rules,
+ * `lib/urls.parseSeriesList`: duplicates dropped with a note), or null with the reason on the
+ * status line: a line the parser refuses (nothing may start while one is), or no series at all.
+ * @param {string} text
  * @returns {{refs: SeriesRef[], notes: string[]} | null}
  */
-function parsedLinks() {
-  const parsed = parseSeriesList(textarea("links").value);
+function parsedLinks(text) {
+  const parsed = parseSeriesList(text);
   const status = $("input-status");
   if (parsed.errors.length > 0) {
     setStatus(status, parsed.errors.map((error) => shownText(error.message)).join(" · "), "error");
@@ -3550,14 +3646,128 @@ function parsedLinks() {
     setStatus(status, t("noLinks"), "error");
     return null;
   }
-  setStatus(status, parsed.notes.map(shownText).join(" · "));
   return { refs: parsed.refs, notes: parsed.notes };
 }
 
 /**
- * Whether a **Load list** job for `seriesId` is running or waiting: a second click, or the popup's
- * "Download this series" for a series already being listed, must not queue the same listing twice
- * (two discoveries of one series, one after the other, for nothing).
+ * Queue the download of whole series — what a paste, Enter, a hand-over and a right-clicked card
+ * queue (and **Download all** queued until 1.7.0): ONE `batch` job — `parseSeriesList`'s refs,
+ * label `jobSeries` / `jobBatch`, through `enqueue`, so the job gate, the cooldown, a refused write,
+ * the rest between jobs, each series listed right before its own downloads and the alerts behave
+ * as for any batch — over the series not being downloaded already ({@link pendingDownloads}: those
+ * are named, never queued twice). Null when the page refused to queue (a read-only tab, a write
+ * refused: said); else what was queued and what was left out.
+ * @param {readonly SeriesRef[]} refs
+ * @param {{includeLocked: boolean, recheck: boolean}} options
+ * @param {{next?: boolean}} [where] at the queue's head (a right-clicked card's drama)
+ * @returns {{queued: SeriesRef[], already: SeriesRef[]} | null}
+ */
+function queueDownload(refs, options, where = {}) {
+  const pending = pendingDownloads();
+  const queued = refs.filter((ref) => !pending.has(ref.seriesId));
+  const already = refs.filter((ref) => pending.has(ref.seriesId));
+  if (queued.length > 0) {
+    const label = queued.length === 1 ? t("jobSeries", /** @type {SeriesRef} */ (queued[0]).seriesId) : t("jobBatch", [queued.length]);
+    const job = { kind: /** @type {const} */ ("batch"), label, refs: queued, series: null, numbers: [], includeLocked: options.includeLocked, recheck: options.recheck };
+    if (!enqueue(job, where)) return null;
+  }
+  return { queued, already };
+}
+
+/**
+ * What the status line says of a download queued ({@link queueDownload}): what was queued
+ * (`queuedOne`: one series, by its id; `libraryQueuedJob`: several, one after the other) and what
+ * was not, being downloaded already (`alreadyDownloading`, by their ids).
+ * @param {{queued: readonly SeriesRef[], already: readonly SeriesRef[]}} result
+ * @returns {string}
+ */
+function queuedText(result) {
+  /** @type {string[]} */
+  const parts = [];
+  const [first] = result.queued;
+  if (result.queued.length === 1 && first !== undefined) parts.push(t("queuedOne", first.seriesId));
+  else if (result.queued.length > 1) parts.push(t("libraryQueuedJob", [result.queued.length]));
+  if (result.already.length > 0) parts.push(t("alreadyDownloading", result.already.map((ref) => ref.seriesId).join(", ")));
+  return parts.join(" · ");
+}
+
+/**
+ * The box's own download (DramaFetch 1.7.0, the owner's decision of 2026-11-20, in place of **Load
+ * list** and **Download all**): `text` — what was pasted, or the whole box on Enter — queued as
+ * **Download all** queued the box: ONE `batch` job ({@link queueDownload}), `includeLocked` and
+ * `recheck` from the two checkboxes for this run, which are then cleared. The gate of the download
+ * buttons first, as **Download all**'s was (disabled otherwise): this tab holds the engine — a
+ * read-only tab does nothing at all, its banner says why —, no cooldown is in force (the status
+ * line names its end), no write was refused (the storage advice). Returns whether the text was
+ * taken — queued, or every series of it found being downloaded already (named, nothing queued
+ * twice) —: Enter's box is emptied then, a paste never lands in it; refused — a line the parser
+ * refuses, no series, the gate — the text stays in the box, with the reason on the status line.
+ * `kept`: the box holds lines besides a paste taken, which stay there — said (`linksKept`), for
+ * Enter.
+ * @param {string} text
+ * @param {boolean} [kept]
+ * @returns {boolean}
+ */
+function downloadFromBox(text, kept = false) {
+  if (!app.owner) return false;
+  const parsed = parsedLinks(text);
+  if (parsed === null) return false;
+  if (app.unsaved !== null) {
+    void showStorageRefused();
+    return false;
+  }
+  if (app.cooldown !== null) {
+    setStatus($("input-status"), shownText(cooldownMessage(app.cooldown, { now: now() })), "error");
+    return false;
+  }
+  const result = queueDownload(parsed.refs, { includeLocked: input("include-locked").checked, recheck: input("recheck").checked });
+  if (result === null) return false;
+  if (result.queued.length > 0) {
+    input("include-locked").checked = false; // per run, as Download all had them
+    input("recheck").checked = false;
+  }
+  const said = [queuedText(result), ...parsed.notes.map(shownText), ...(kept ? [t("linksKept")] : [])].join(" · ");
+  setStatus($("input-status"), said, result.queued.length > 0 ? "ok" : "error");
+  return true;
+}
+
+/**
+ * A paste into the box: what was pasted — the clipboard's text, never the rest of the box — is
+ * downloaded at once ({@link downloadFromBox}). Taken, it never lands in the box, and the text it
+ * would replace (a selection) goes, as with any paste; whatever else the box held — a refused
+ * paste's lines, typed ids — stays there, never lost, and the status line says so when it holds a
+ * line to download (Enter takes the whole box). Refused, it lands there as any paste does, for the
+ * user to correct (then Enter), the reason on the status line.
+ * @param {ClipboardEvent} event
+ */
+function onLinksPaste(event) {
+  const pasted = event.clipboardData?.getData("text/plain") ?? "";
+  const box = textarea("links");
+  const rest = box.value.slice(0, box.selectionStart) + box.value.slice(box.selectionEnd);
+  if (!downloadFromBox(pasted, parseSeriesList(rest).lines > 0)) return; // refused: the paste lands in the box
+  event.preventDefault();
+  box.value = rest.trim() === "" ? "" : rest;
+}
+
+/**
+ * Enter in the box (typed ids): the whole box downloaded as a paste is ({@link downloadFromBox}),
+ * and emptied once taken; in a blank box nothing at all — the status line (a paste's `queued`,
+ * say) left as it is. Shift+Enter makes a new line, and so does Enter while an input method
+ * composes a character — and in a read-only tab, which downloads nothing.
+ * @param {KeyboardEvent} event
+ */
+function onLinksKeydown(event) {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || !app.owner) return;
+  event.preventDefault();
+  const box = textarea("links");
+  if (box.value.trim() === "") return; // nothing to download: no new line, nothing said
+  if (downloadFromBox(box.value)) box.value = "";
+}
+
+/**
+ * Whether a listing of `seriesId` (**See episodes**) is running or waiting: a second click must
+ * not queue the same listing twice (two discoveries of one series, one after the other, for
+ * nothing).
  * @param {string} seriesId
  * @returns {boolean}
  */
@@ -3568,8 +3778,8 @@ function loadPending(seriesId) {
 }
 
 /**
- * Queue the listing of one series — **Load list**, or a series handed from outside
- * ({@link loadFromOutside}): one listing per series at a time.
+ * Queue the listing of one series — **See episodes** on a drama of the library: its episodes with
+ * their covers, to download all available or pick from; one listing per series at a time.
  * @param {SeriesRef} ref
  */
 function listSeries(ref) {
@@ -3608,14 +3818,15 @@ function cardPending(tabId, card) {
  * The favorites of a TikTok tab handed over (the popup's **Open my library** on that profile —
  * 1.5.0's **Choose from your favorites** —, **Update from TikTok**, the right-click **Download this
  * favorite drama** on a profile page), taken by the engine's tab only,
- * like a series ({@link loadFromOutside}): a right-click on a card lists that card's drama — one
- * **Load list** job that resolves the card first —; a right-click that names no card queues
- * nothing at all (no job, no request) and says why — the tab's content script answered that the
- * right-click was on no drama (`favoritesNoCard`), or no content script answered, the tab being
- * older than DramaFetch's load or update (`favoritesNoScript`) —; the popup's hand-over (**Open my
- * library**, **Update from TikTok**) brings the library into view and updates it from the tab's
- * favorites (**List favorites**: the smart refresh). The tab still answers, so the worker brings it
- * to the front to say it. Nothing is queued twice.
+ * like a series ({@link downloadFromOutside}): a right-click on a card downloads that card's drama
+ * — one job resolves the card first and queues the drama's download right after it
+ * ({@link runLoad}) —; a right-click that names no card queues nothing at all (no job, no request)
+ * and says why — the tab's content script answered that the right-click was on no drama
+ * (`favoritesNoCard`), or no content script answered, the tab being older than DramaFetch's load
+ * or update (`favoritesNoScript`) —; the popup's hand-over (**Open my library**, **Update from
+ * TikTok**) brings the library into view and updates it from the tab's favorites (**List
+ * favorites**: the smart refresh). The tab still answers, so the worker brings it to the front to
+ * say it. Nothing is queued twice (the same card's job waiting or running: `alreadyDownloading`).
  * @param {FavoritesHandover} handover
  * @returns {boolean} whether this tab took it (the engine's tab)
  */
@@ -3624,12 +3835,12 @@ function favoritesFromOutside(handover) {
   const status = $("input-status");
   const { tabId, card } = handover;
   if (card !== null) {
-    if (cardPending(tabId, card)) setStatus(status, t("loadAlreadyQueued"), "error");
+    if (cardPending(tabId, card)) setStatus(status, t("alreadyDownloading", [`“${card.title}”`]), "error");
     else enqueue({ kind: "load", label: t("jobCard", card.title), refs: [], series: null, numbers: [], includeLocked: false, recheck: false, favoritesTab: tabId, card });
     return true;
   }
   if (handover.menu) {
-    // a right-click that named no drama: nothing to list — never the whole list in its place
+    // a right-click that named no drama: nothing to download — never the whole list in its place
     if (handover.script) setStatus(status, t("favoritesNoCard"), "error");
     else setStatus(status, t("favoritesNoScript"), "error");
     return true;
@@ -3642,30 +3853,6 @@ function favoritesFromOutside(handover) {
   setStatus(status, t("favoritesChoose"));
   enqueue({ kind: "favorites", label: t("jobFavorites"), refs: [], series: null, numbers: [], includeLocked: false, recheck: false, favoritesTab: tabId, card: null });
   return true;
-}
-
-/** **Load list**: the one series in the box. */
-function onLoad() {
-  const parsed = parsedLinks();
-  if (parsed === null) return;
-  if (parsed.refs.length !== 1) {
-    setStatus($("input-status"), t("loadOneOnly"), "error");
-    return;
-  }
-  listSeries(/** @type {SeriesRef} */ (parsed.refs[0]));
-}
-
-function onDownloadAll() {
-  const parsed = parsedLinks();
-  if (parsed === null) return;
-  const includeLocked = input("include-locked").checked;
-  const recheck = input("recheck").checked;
-  input("include-locked").checked = false; // per run
-  input("recheck").checked = false;
-  const label =
-    parsed.refs.length === 1 ? t("jobSeries", /** @type {SeriesRef} */ (parsed.refs[0]).seriesId) : t("jobBatch", [parsed.refs.length]);
-  enqueue({ kind: "batch", label, refs: parsed.refs, series: null, numbers: [], includeLocked, recheck });
-  if (parsed.notes.length > 0) setStatus($("input-status"), parsed.notes.map(shownText).join(" · "));
 }
 
 /**
@@ -3896,15 +4083,19 @@ async function setupTestMode() {
 
 /**
  * A series handed from outside — the popup's **Download this series**, the right-click **Download
- * this drama** — listed in the engine's tab only: the request reaches every DramaFetch page, and
- * the engine's takes it. The link joins the box rather than replacing it, so a batch typed there
- * for **Download all** stays: on a line of its own, unless the box names that series already. A
- * link that names no series (or more than one) leaves the box as it is, and the tab says why it
- * lists nothing.
+ * this drama** and **Download this page's drama** — downloaded in the engine's tab only (DramaFetch
+ * 1.7.0: they put a drama in DramaFetch "like pasting it"): the request reaches every DramaFetch
+ * page, and the engine's takes it. It queues the job a paste of it queues ({@link queueDownload}:
+ * ONE `batch` job — no checkbox for a hand-over: `includeLocked` and `recheck` false —, never for a
+ * series already being downloaded), so its one listing is the job's own, right before the
+ * downloads, and the job gate refuses it during a cooldown as before. The box is left alone: it
+ * holds what the user pastes or types, and empties once that is queued — a series queued already
+ * has no place there; the status line says what was queued. An address that names no series
+ * queues nothing and the tab says why (without the parser's `line 1: `).
  * @param {string} link
  * @returns {boolean} whether this tab took it (the engine's tab)
  */
-function loadFromOutside(link) {
+function downloadFromOutside(link) {
   if (!app.owner) return false;
   const parsed = parseSeriesList(link);
   const status = $("input-status");
@@ -3913,17 +4104,12 @@ function loadFromOutside(link) {
     setStatus(status, parsed.errors.map((error) => shownText(error.message.replace(/^line 1: /, ""))).join(" · "), "error");
     return true;
   }
-  if (parsed.refs.length !== 1) {
-    setStatus(status, t(parsed.refs.length === 0 ? "noLinks" : "loadOneOnly"), "error");
+  if (parsed.refs.length === 0) {
+    setStatus(status, t("noLinks"), "error");
     return true;
   }
-  const ref = /** @type {SeriesRef} */ (parsed.refs[0]);
-  const box = textarea("links");
-  if (!parseSeriesList(box.value).refs.some((listed) => listed.seriesId === ref.seriesId)) {
-    box.value = box.value.trim() ? `${box.value.trimEnd()}\n${link}` : link;
-  }
-  setStatus(status, parsed.notes.map(shownText).join(" · "));
-  listSeries(ref);
+  const result = queueDownload(parsed.refs, { includeLocked: false, recheck: false });
+  if (result !== null) setStatus(status, queuedText(result), result.queued.length > 0 ? "ok" : "error");
   return true;
 }
 
@@ -3976,9 +4162,11 @@ async function main() {
   app.lastContactAt = stored.lastContactAt;
   fillSettings();
   await setupTestMode();
+  select("library-sort").value = await readLibrarySort(); // the sort picked last, before the library is drawn
 
-  button("load-button").addEventListener("click", onLoad);
-  button("download-all-button").addEventListener("click", onDownloadAll);
+  // the box: a paste downloads what was pasted, Enter the whole box (Shift+Enter: a new line)
+  textarea("links").addEventListener("paste", (event) => onLinksPaste(/** @type {ClipboardEvent} */ (event)));
+  textarea("links").addEventListener("keydown", (event) => onLinksKeydown(/** @type {KeyboardEvent} */ (event)));
   button("download-available-button").addEventListener("click", onDownloadAvailable);
   button("download-selected-button").addEventListener("click", onDownloadSelected);
   button("stop-button").addEventListener("click", onStop);
@@ -3993,11 +4181,13 @@ async function main() {
   // the library
   input("favorites-filter").addEventListener("input", applyFavoritesFilter);
   input("favorites-select-all").addEventListener("change", onFavoritesSelectShown);
-  button("favorites-add-button").addEventListener("click", onFavoritesAdd);
   for (const filter of /** @type {LibraryFilter[]} */ (["all", "none", "partly", "on-disk"])) {
     button(`library-chip-${filter}`).addEventListener("click", () => setLibraryFilter(filter));
   }
-  select("library-sort").addEventListener("change", applyFavoritesFilter);
+  select("library-sort").addEventListener("change", () => {
+    applyFavoritesFilter();
+    void writeLibrarySort(librarySort()); // the next sessions start with it (a preference: a refused write changes nothing)
+  });
   button("library-more").addEventListener("click", () => {
     library.shown += LIBRARY_PIECE;
     renderLibrary();
@@ -4032,7 +4222,7 @@ async function main() {
       // the engine's tab takes it and answers with its tab, which the worker brings to the front;
       // a read-only tab stays silent (as does a tab that is not running: the worker then reloads
       // one with the series in its address)
-      if (record["type"] === "dramafetch:load" && typeof record["input"] === "string" && loadFromOutside(record["input"])) {
+      if (record["type"] === "dramafetch:load" && typeof record["input"] === "string" && downloadFromOutside(record["input"])) {
         sendResponse({ ok: true, tabId: app.tabId ?? null });
       }
       // the favorites of a TikTok tab (the popup, the right-click on a profile): the same hand-over
@@ -4066,7 +4256,7 @@ async function main() {
   const toLibrary = new URLSearchParams(location.search).get("library") === "1"; // the popup's Open my library no running page took
   if (load || favorites !== null || toLibrary) {
     history.replaceState(null, "", location.pathname);
-    if (load) loadFromOutside(load);
+    if (load) downloadFromOutside(load);
     if (favorites !== null) favoritesFromOutside(favorites);
     if (toLibrary) showLibrarySection();
   }

@@ -4,7 +4,7 @@
 // `drama_list` answer — the anonymized capture of 2026-11-15, tests/fixtures/drama_list_page.json,
 // with two DIFFERENT dramas of the same title, as in the owner's list —, the resolver that turns a
 // right-clicked card into its drama (never a guess between dramas of the same title) and how far a
-// card's listing reads, the lines a favorite adds to the box, the checks of what a TikTok tab's
+// card's listing reads, the checks of what a TikTok tab's
 // content script answers, the hand-over's address and the status DramaFetch's own records give a
 // favorite. No browser, no network.
 import assert from "node:assert/strict";
@@ -19,7 +19,6 @@ import {
   FavoritesPayloadError,
   MAX_CARD_TITLE_LENGTH,
   NOT_A_LIST_MESSAGE,
-  boxWithFavorites,
   cardOf,
   cleanTitle,
   coverUrlOf,
@@ -39,7 +38,6 @@ import {
   titleMatches,
 } from "../src/lib/favorites.js";
 import { completeSince, markComplete, newState, record } from "../src/lib/state.js";
-import { parseSeriesList } from "../src/lib/urls.js";
 
 /** @type {Record<string, unknown>} the anonymized capture of one page of the owner's list */
 const CAPTURE = JSON.parse(readFileSync(new URL("../../tests/fixtures/drama_list_page.json", import.meta.url), "utf8"));
@@ -340,33 +338,6 @@ test("a card whose drama is not where the card sits — the grid moved since it 
   assert.equal(coversShift(fresh.slice(0, 24), five, per), false); // 24 dramas: not more than 5 + 19
   assert.equal(coversShift(fresh.slice(0, 25), five, per), true);
   assert.equal(coversShift(fresh.slice(0, 3), five, per), false); // the card's position not even read
-});
-
-test("the box: a `# <title>` line above each series id it does not name yet, the title on one line; nothing twice", () => {
-  const lighthouse = item(LIGHTHOUSE, "The Lighthouse Keeper's Promise");
-  const snowA = item(SNOW_A, "Snowfall in Two Cities");
-  const snowB = item(SNOW_B, "Snowfall in Two Cities");
-  // an empty box
-  const first = boxWithFavorites("", [lighthouse, snowA, snowB]);
-  assert.equal(first.text, `# The Lighthouse Keeper's Promise\n${LIGHTHOUSE}\n# Snowfall in Two Cities\n${SNOW_A}\n# Snowfall in Two Cities\n${SNOW_B}`);
-  assert.deepEqual(first.added, [lighthouse, snowA, snowB]);
-  // the box's own rules read exactly those three series, the comments skipped
-  const read = parseSeriesList(first.text);
-  assert.deepEqual(read.refs.map((ref) => ref.seriesId), [LIGHTHOUSE, SNOW_A, SNOW_B]);
-  assert.deepEqual(read.errors, []);
-  // what the box names already (a link, an id, a line with a comment) is not added again; nor twice from one selection
-  const typed = `https://www.tiktok.com/shortdrama/episode/${SNOW_A}/3\n${LIGHTHOUSE}  # mine\n\n`;
-  const second = boxWithFavorites(typed, [snowA, lighthouse, snowB, snowB]);
-  assert.equal(second.text, `${typed.trimEnd()}\n# Snowfall in Two Cities\n${SNOW_B}`);
-  assert.deepEqual(second.added, [snowB]);
-  const third = boxWithFavorites(second.text, [snowA, snowB, lighthouse]);
-  assert.equal(third.text, second.text);
-  assert.deepEqual(third.added, []);
-  // a title with line breaks and controls stays on one line, so the id line is never swallowed or split
-  const odd = item("7700000000000000009", "Line one\nline two\r\n\u0085# not a comment end\t\u0000");
-  const fourth = boxWithFavorites("", [odd, item("7700000000000000010", null)]);
-  assert.equal(fourth.text, "# Line one line two # not a comment end\n7700000000000000009\n7700000000000000010");
-  assert.deepEqual(parseSeriesList(fourth.text).refs.map((ref) => ref.seriesId), ["7700000000000000009", "7700000000000000010"]);
 });
 
 test("the filter: the title holds the text, letter case and blanks aside", () => {

@@ -6,18 +6,22 @@
  * and keeps the library in `chrome.storage.local`; `src/app/bookmark.js` removes a drama from the
  * Bookmark). An extension-only feature, like the favorites list: the Python tool has none, and
  * nothing here decides anything about a download — the library only puts series ids into the
- * existing engine (a `batch` job, the same as **Download all** of the box).
+ * existing engine (a `batch` job, the same as a paste of their ids into the box).
  *
  * What it decides:
  * - each drama's status from DramaFetch's OWN records ({@link progressOf}: `on-disk`, `partly`,
- *   `none` — `lib/favorites.progressStatus` —, with the episodes saved and the episodes the list
- *   names) and from the jobs: `queued` (in a waiting `batch` / `selection` job), `running` (the
- *   series the running job is downloading), `removed` (removed from the Bookmark by DramaFetch
- *   since the last listing) — {@link libraryStatus};
+ *   `none` — `lib/favorites.progressStatus` —, with the episodes saved, the episodes it has — the
+ *   list's count raised to what the records hold: the number its card shows, its status fraction,
+ *   **Most episodes** and the selection's sum alike, so a card never disagrees with itself — and
+ *   the locked ones the records hold (DramaFetch 1.7.0: no request, nothing unlocked)) and from the
+ *   jobs: `queued` (in a waiting `batch` / `selection` job), `running` (the series the running job
+ *   is downloading), `removed` (removed from the Bookmark by DramaFetch since the last listing) —
+ *   {@link libraryStatus};
  * - the filters' counts ({@link chipCounts}: every drama not removed counted once, under its
  *   STORED status — a queued or running drama under the status its records give), the twins
- *   ({@link twinIds}: different series of the same title), the sort orders ({@link sortedItems})
- *   and the search ({@link titleMatches} of `lib/favorites.js`);
+ *   ({@link twinIds}: different series of the same title), the sort orders ({@link sortedItems};
+ *   the one picked last kept across sessions, read back with {@link librarySortOf}) and the search
+ *   ({@link titleMatches} of `lib/favorites.js`);
  * - the smart refresh's question ({@link unchangedSince}): is TikTok's list still the library's —
  *   TikTok's `total` equal to the library's dramas not removed AND the first page's series ids,
  *   in order, the library's first ones? Then one request was enough — while the library's episode
@@ -47,6 +51,8 @@ export const LIBRARY_PIECE = 60;
 export const LIBRARY_FILTERS = Object.freeze(/** @type {const} */ (["all", "none", "partly", "on-disk"]));
 /** The sort orders: the list's own (newest favorite first), title A–Z, most episodes first. */
 export const LIBRARY_SORTS = Object.freeze(/** @type {const} */ (["recent", "title", "episodes"]));
+/** The sort order of a library nobody sorted yet: the list's own. */
+export const DEFAULT_LIBRARY_SORT = "recent";
 /**
  * What a saved episode's stored message carries when its cover went into the MP4: the note of
  * `src/app/downloader.js` `Downloader.keep` (` + cover embedded`, ` + cover embedded + file`) —
@@ -68,7 +74,12 @@ const ENDED = /** @type {const} */ (["cap", "until", "empty", "cursor"]);
  * @typedef {object} Progress What DramaFetch's own records say of a drama ({@link progressOf}).
  * @property {StoredStatus} status
  * @property {number} saved the episodes saved (a `done` entry, or one a run found on disk)
- * @property {number | null} total the list's episodes, else what the records know, else null
+ * @property {number | null} total how many episodes it has: the list's count raised to the highest
+ *   episode number the records hold, else what the records know, else null — the number its card
+ *   shows and its status fraction counts against
+ * @property {number} locked the episodes the records hold as locked (`skipped-locked`: a run listed
+ *   them as episodes the account may not play — paid ones it has not unlocked, or one whose DRM a
+ *   download found — and skipped them; `lib/state.lockedNumbers`), 0 for a drama never run
  *
  * @typedef {object} LibraryEntry One drama as the grid and the filters see it.
  * @property {FavoriteItem} item
@@ -138,9 +149,10 @@ function recordedTotal(state) {
 /**
  * What DramaFetch's own records say of a drama — read-only, no request: its stored status
  * (`lib/favorites.progressStatus`: `on-disk`, `partly`, or `none` when nothing is saved or the
- * series was never run), the episodes saved, and how many it has (the list's `episodes` raised to
- * the highest episode number the records hold — under a complete mark, one on disk or locked only:
- * `lib/favorites.knownEpisodes` —, else what the records know).
+ * series was never run), the episodes saved, how many it has (the list's `episodes` raised to the
+ * highest episode number the records hold — under a complete mark, one on disk or locked only:
+ * `lib/favorites.knownEpisodes` —, else what the records know) and how many the records hold as
+ * locked (none for a drama never run: nothing is asked of TikTok to learn it).
  * @param {unknown} raw the stored state (`series:<id>`)
  * @param {string} seriesId
  * @param {number | null} episodes the list's episode count
@@ -151,7 +163,8 @@ export function progressOf(raw, seriesId, episodes) {
   const state = readState(raw, seriesId);
   const saved = state === null ? 0 : doneEntries(state, () => true).length;
   const listed = state === null ? (episodes !== null && episodes > 0 ? episodes : null) : knownEpisodes(state, episodes);
-  return { status, saved, total: listed ?? (state === null ? null : recordedTotal(state)) };
+  const locked = state === null ? 0 : lockedNumbers(state).length;
+  return { status, saved, total: listed ?? (state === null ? null : recordedTotal(state)), locked };
 }
 
 /**
@@ -242,14 +255,29 @@ export function twinIds(items) {
   return twins;
 }
 
-/** Titles compared as people read them: letter case and accents aside, numbers by value. */
+/**
+ * Titles compared as people read them: letter case and accents aside (`Á` sorts with `A`), numbers
+ * by value (`Episode 2` before `Episode 10`).
+ */
 const TITLE_ORDER = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 
 /**
+ * A sort order as the library keeps it across sessions (`librarySort` in `chrome.storage.local`)
+ * or as its menu holds it: one of {@link LIBRARY_SORTS}, else — nothing kept yet, or anything else
+ * — the list's own ({@link DEFAULT_LIBRARY_SORT}).
+ * @param {unknown} value
+ * @returns {LibrarySort}
+ */
+export function librarySortOf(value) {
+  return typeof value === "string" && /** @type {readonly string[]} */ (LIBRARY_SORTS).includes(value) ? /** @type {LibrarySort} */ (value) : DEFAULT_LIBRARY_SORT;
+}
+
+/**
  * The library in a sort order, a new array: `recent` the list's own order (newest favorite first),
- * `title` A–Z (letter case and accents aside; a drama without a title last), `episodes` most first
- * (a drama whose count is unknown last); ties keep the list's order.
- * @template {{item: FavoriteItem}} T
+ * `title` A–Z ({@link TITLE_ORDER}: letter case and accents aside, numbers by value; a drama
+ * without a title last), `episodes` most first — the number each card shows, `progress.total` (a
+ * drama whose count is unknown last); ties keep the list's order.
+ * @template {{item: FavoriteItem, progress: Progress}} T
  * @param {readonly T[]} entries in the list's order
  * @param {LibrarySort} sort
  * @returns {T[]}
@@ -265,8 +293,8 @@ export function sortedItems(entries, sort) {
     });
   } else if (sort === "episodes") {
     indexed.sort((a, b) => {
-      const left = a.entry.item.episodes;
-      const right = b.entry.item.episodes;
+      const left = a.entry.progress.total;
+      const right = b.entry.progress.total;
       if (left === null || right === null) return left === right ? a.index - b.index : left === null ? 1 : -1;
       return right - left || a.index - b.index;
     });
@@ -275,15 +303,22 @@ export function sortedItems(entries, sort) {
 }
 
 /**
- * The episodes a selection adds up to: the sum of the selected dramas' `episodes` (a drama whose
- * count is unknown adds none), each drama once.
- * @param {readonly FavoriteItem[]} items
+ * The episodes a selection adds up to: the sum of the selected dramas' episode counts as their
+ * cards show them (`progress.total`: the list's count raised to what the records hold; a drama
+ * whose count is unknown adds none), each drama once.
+ * @param {readonly {item: FavoriteItem, progress: Progress}[]} entries
  * @param {ReadonlySet<string>} selected series ids
  * @returns {number}
  */
-export function selectionEpisodes(items, selected) {
+export function selectionEpisodes(entries, selected) {
+  /** @type {Set<string>} */
+  const counted = new Set();
   let sum = 0;
-  for (const item of distinctItems(items)) if (selected.has(item.seriesId)) sum += item.episodes ?? 0;
+  for (const { item, progress } of entries) {
+    if (!selected.has(item.seriesId) || counted.has(item.seriesId)) continue;
+    counted.add(item.seriesId);
+    sum += progress.total ?? 0;
+  }
   return sum;
 }
 
