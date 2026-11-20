@@ -131,6 +131,12 @@ export const BOOKMARK_MESSAGES = Object.freeze({
   stale:
     "not removed from your Favorites: its episode count was read from TikTok more than 24 hours ago and new " +
     "episodes may have come since — update the library from TikTok first; nothing was asked of TikTok",
+  "no-count":
+    "not removed from your Favorites: TikTok's list gives no episode count for this drama, so only a download " +
+    "that finds it complete can vouch for it — download it again, then remove it; nothing was asked of TikTok",
+  gone:
+    "not removed from your Favorites: it is no longer in your library — TikTok's list read since no longer holds it, " +
+    "or DramaFetch removed it already; nothing was asked of TikTok",
   "bookmark-missing":
     "not removed from your Favorites: DramaFetch found no single Bookmark button to press on the drama's page; " +
     "nothing was pressed — remove it on TikTok yourself",
@@ -143,7 +149,7 @@ export const BOOKMARK_MESSAGES = Object.freeze({
 });
 
 /**
- * @typedef {"not-on-disk" | "stale" | "bookmark-missing" | "tab-gone" | "not-confirmed" | "not-kept" | "unknown"} BookmarkErrorKind
+ * @typedef {"not-on-disk" | "stale" | "no-count" | "gone" | "bookmark-missing" | "tab-gone" | "not-confirmed" | "not-kept" | "unknown"} BookmarkErrorKind
  * @typedef {"saved" | "unsaved" | "missing" | "several" | "clicked"} BookmarkState What the page
  *   answers ({@link bookmarkInPage}): the one button's state, none, more than one, or the one click
  * @typedef {import("./engine.js").Engine} Engine

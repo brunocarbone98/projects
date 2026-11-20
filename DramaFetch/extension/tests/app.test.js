@@ -5295,17 +5295,22 @@ test("the page: the library's episode counts are trusted for 24 hours after its 
   }
 });
 
-test("the page: a removal's gate reads the drama as the library holds it when the job runs, never the count its confirmation showed — confirmed while a library read 25 h ago said On disk · 30/30, queued behind Update from TikTok, which reads 40 episodes: nothing asked (not on disk); the same update reading 30 still removes it —; a whole read that gave no episode count for the drama vouches for nothing (a run that found the series complete within 24 h does); a drama the library no longer holds, or marks removed, is asked nothing", async () => {
+test("the page: a removal's gate reads the drama as the library holds it when the job runs, never the count its confirmation showed — confirmed while a library read 25 h ago said On disk · 30/30, queued behind Update from TikTok, which reads 40 episodes: nothing asked (not on disk); the same update reading 30 still removes it —; a whole read that gave no episode count for the drama (none, or 0) vouches for nothing — no-count: only a run that found the series complete within 24 h does —; a drama the library no longer holds, or marks removed, is asked nothing (gone); each refusal in its own words", async () => {
   const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
   /** @param {string} seriesId @param {string} title @param {number} episodes */
   const entryOf = (seriesId, title, episodes) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 79) });
   /**
-   * TikTok's whole list in two pages: the five dramas, Paper Crowns with `paper` episodes, or left out
-   * @param {number | null} paper
+   * TikTok's whole list in two pages: the five dramas — Paper Crowns with `paper` episodes, listed
+   * without any `numVideos` ("no count"), or left out (null)
+   * @param {number | "no count" | null} paper
    */
   const pagesWith = (paper) => {
     const kept = FIVE.filter(([seriesId]) => paper !== null || seriesId !== PAPER);
-    const entries = kept.map(([seriesId, title, episodes]) => entryOf(seriesId, title, seriesId === PAPER && paper !== null ? paper : episodes));
+    const entries = kept.map(([seriesId, title, episodes]) => {
+      if (seriesId !== PAPER || typeof paper !== "string") return entryOf(seriesId, title, seriesId === PAPER && typeof paper === "number" ? paper : episodes);
+      const { numVideos: _left, ...countless } = entryOf(seriesId, title, episodes);
+      return countless;
+    });
     const total = String(entries.length);
     return {
       "0": { ...FAVORITES_CAPTURE, total, cursor: "1794351568", hasMore: true, dramaList: entries.slice(0, 3) },
@@ -5316,12 +5321,13 @@ test("the page: a removal's gate reads the drama as the library holds it when th
   const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
   const threeDaysAgo = Date.now() / 1000 - 3 * 86_400;
   const NOT_ON_DISK = "“Paper Crowns” was not removed: DramaFetch's records do not show every episode of it on disk. Nothing was asked of TikTok.";
-  const STALE = "“Paper Crowns” was not removed: its episode count was read from TikTok more than 24 hours ago, and new episodes may have come since. Press Update from TikTok first, then remove it. Nothing was asked of TikTok.";
+  const NO_COUNT = "“Paper Crowns” was not removed: TikTok's list gives no episode count for it, so only a download can show it is complete. Download it again (Download selected dramas), then remove it within 24 hours. Nothing was asked of TikTok.";
+  const GONE = "“Paper Crowns” was not removed: it is no longer in your library — TikTok's list, read after you confirmed, no longer holds it, or DramaFetch already removed it. Nothing was asked of TikTok.";
   /**
    * Update from TikTok — the whole list read (its first page could not tell) —, then the removal
    * the user confirmed before it: `episodes` the count its dialog showed
    * @param {Awaited<ReturnType<typeof fakePage>>} page
-   * @param {number | null} paper Paper Crowns' episodes in TikTok's list now, or null: not in it any more
+   * @param {number | "no count" | null} paper Paper Crowns' episodes in TikTok's list now, listed without a count, or null: not in it any more
    * @param {number | null} episodes
    */
   const updateThenRemove = async (page, paper, episodes) => {
@@ -5376,8 +5382,8 @@ test("the page: a removal's gate reads the drama as the library holds it when th
     assert.equal(stop, null);
     assert.equal(site.clicks, 0);
     assert.deepEqual(log, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
-    assert.equal(page.element("favorites-status").textContent, STALE);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES.gone);
+    assert.equal(page.element("favorites-status").textContent, GONE);
     assert.equal(cardOf(page, PAPER), undefined);
   } finally {
     page.restore();
@@ -5395,32 +5401,54 @@ test("the page: a removal's gate reads the drama as the library holds it when th
     assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
     assert.equal(site.clicks, 0);
     assert.deepEqual(log, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES.gone);
+    assert.equal(page.element("favorites-status").textContent, GONE);
+  } finally {
+    page.restore();
+  }
+  // confirmed on the old count, run after an update that lists the drama WITHOUT a count: the whole
+  // read is fresh but vouches for no count — nothing asked (no-count), whatever count the job carries
+  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
+  try {
+    await settled(page);
+    const { site, log, entry, stop } = await updateThenRemove(page, "no count", 30);
+    assert.equal(stop, null);
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES["no-count"]);
+    assert.equal(page.element("favorites-status").textContent, NO_COUNT);
+    const kept = /** @type {{items: {seriesId: string, episodes: number | null}[]}} */ (page.local.get("favoritesLibrary"));
+    assert.equal(kept.items.find((item) => item.seriesId === PAPER)?.episodes, null);
   } finally {
     page.restore();
   }
   // the whole list read two hours ago gave no episode count for the drama: it vouches for none —
   // the records' complete mark of 3 days ago says On disk, and nothing is asked of TikTok
-  /** @type {[string, string, number | null][]} */
-  const countless = FIVE.map(([seriesId, title, episodes]) => [seriesId, title, seriesId === PAPER ? null : episodes]);
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(countless), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
-  try {
-    await settled(page);
-    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "on-disk");
-    const { site, log } = bookmarkChrome();
-    const { job, engine, pauses } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (/** @type {unknown} */ (null)));
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.deepEqual(pauses, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
-    assert.equal(page.element("favorites-status").textContent, STALE);
-  } finally {
-    page.restore();
+  // (a count of 0 is no count either: the card's On disk rests on the complete mark alone, as `knownEpisodes` reads it)
+  for (const none of [null, 0]) {
+    /** @type {[string, string, number | null][]} */
+    const countless = FIVE.map(([seriesId, title, episodes]) => [seriesId, title, seriesId === PAPER ? none : episodes]);
+    page = await fakePage({ storage: { favoritesLibrary: storedLibrary(countless), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
+    try {
+      await settled(page);
+      assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "on-disk", String(none));
+      const { site, log } = bookmarkChrome();
+      const { job, engine, pauses } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (/** @type {unknown} */ (none)));
+      /** @type {Record<string, unknown>} */
+      const entry = {};
+      assert.equal(await page.module.runUnbookmark(job, engine, entry), null, String(none));
+      assert.equal(site.clicks, 0, String(none));
+      assert.deepEqual(log, [], String(none));
+      assert.deepEqual(pauses, [], String(none));
+      assert.equal(entry["error"], BOOKMARK_MESSAGES["no-count"], String(none));
+      assert.equal(page.element("favorites-status").textContent, NO_COUNT, String(none));
+    } finally {
+      page.restore();
+    }
   }
   // ... while a run that found the series complete an hour ago does: removed as usual
+  /** @type {[string, string, number | null][]} */
+  const countless = FIVE.map(([seriesId, title, episodes]) => [seriesId, title, seriesId === PAPER ? null : episodes]);
   page = await fakePage({ storage: { favoritesLibrary: storedLibrary(countless), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: Date.now() / 1000 - 3600 }) } });
   try {
     await settled(page);

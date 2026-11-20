@@ -447,6 +447,16 @@ const EXACT = new Map(
         "episodios nuevos — actualiza antes la biblioteca desde TikTok; no se pidió nada a TikTok",
     ],
     [
+      BOOKMARK_MESSAGES["no-count"],
+      "no se quitó de tu Bookmark: la lista de TikTok no da su número de episodios, así que solo una descarga que lo " +
+        "encuentre completo puede confirmarlo — descárgalo otra vez y luego quítalo; no se pidió nada a TikTok",
+    ],
+    [
+      BOOKMARK_MESSAGES.gone,
+      "no se quitó de tu Bookmark: ya no está en tu biblioteca — la lista de TikTok leída después ya no lo tiene, o " +
+        "DramaFetch ya lo quitó; no se pidió nada a TikTok",
+    ],
+    [
       BOOKMARK_MESSAGES["bookmark-missing"],
       "no se quitó de tu Bookmark: DramaFetch no encontró un único botón Bookmark que pulsar en la página del " +
         "drama; no se pulsó nada — quítalo tú mismo en TikTok",

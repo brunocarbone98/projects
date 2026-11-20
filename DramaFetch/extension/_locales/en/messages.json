@@ -1120,6 +1120,24 @@
       }
     }
   },
+  "bookmarkNoCount": {
+    "message": "“$title$” was not removed: TikTok's list gives no episode count for it, so only a download can show it is complete. Download it again (Download selected dramas), then remove it within 24 hours. Nothing was asked of TikTok.",
+    "description": "Removal refused at the gate: TikTok's favorites list gives no episode count for the drama and no run found it complete in the last 24 hours.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkGone": {
+    "message": "“$title$” was not removed: it is no longer in your library — TikTok's list, read after you confirmed, no longer holds it, or DramaFetch already removed it. Nothing was asked of TikTok.",
+    "description": "Removal refused at the gate: the drama is no longer in the library, or is marked removed already.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
   "bookmarkMissing": {
     "message": "“$title$” was not removed: DramaFetch found no single Bookmark button to press on its page, so nothing was pressed. Remove it yourself: Open on TikTok.",
     "description": "No button (or several).",

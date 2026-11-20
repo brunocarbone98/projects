@@ -1120,6 +1120,24 @@
       }
     }
   },
+  "bookmarkNoCount": {
+    "message": "“$title$” no se quitó: la lista de TikTok no da su número de episodios, así que solo una descarga puede mostrar que está completo. Descárgalo otra vez (Descargar seleccionados) y quítalo en las 24 horas siguientes. No se pidió nada a TikTok.",
+    "description": "Removal refused at the gate: TikTok's favorites list gives no episode count for the drama and no run found it complete in the last 24 hours.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkGone": {
+    "message": "“$title$” no se quitó: ya no está en tu biblioteca — la lista de TikTok, leída después de que confirmaras, ya no lo tiene, o DramaFetch ya lo quitó. No se pidió nada a TikTok.",
+    "description": "Removal refused at the gate: the drama is no longer in the library, or is marked removed already.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
   "bookmarkMissing": {
     "message": "“$title$” no se quitó: DramaFetch no encontró un único botón Bookmark que pulsar en su página, así que no pulsó nada. Quítalo tú mismo: Abrir en TikTok.",
     "description": "No button (or several).",
