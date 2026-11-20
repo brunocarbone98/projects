@@ -447,6 +447,16 @@ const EXACT = new Map(
         "episodios nuevos — actualiza antes la biblioteca desde TikTok; no se pidió nada a TikTok",
     ],
     [
+      BOOKMARK_MESSAGES["no-count"],
+      "no se quitó de tu Bookmark: la lista de TikTok no da su número de episodios, así que solo una descarga que lo " +
+        "encuentre completo puede confirmarlo — descárgalo otra vez y luego quítalo; no se pidió nada a TikTok",
+    ],
+    [
+      BOOKMARK_MESSAGES.gone,
+      "no se quitó de tu Bookmark: ya no está en tu biblioteca — la lista de TikTok leída después ya no lo tiene, o " +
+        "DramaFetch ya lo quitó; no se pidió nada a TikTok",
+    ],
+    [
       BOOKMARK_MESSAGES["bookmark-missing"],
       "no se quitó de tu Bookmark: DramaFetch no encontró un único botón Bookmark que pulsar en la página del " +
         "drama; no se pulsó nada — quítalo tú mismo en TikTok",
@@ -826,6 +836,9 @@ const RULES = [
   ],
   // the report line (report.reportLine) and the stops (pacing.afterResult)
   [/^(?:complete, nothing to do|complete|incomplete): /, (m, inner) => reportLineEs(String(m.input), inner)],
+  // a report line's details on their own (`2 locked (61, 62)`: a drama's alert names its locked
+  // episodes in the words of its report line, app/alerts.js)
+  [/^\d+ (?:paid|locked|failed|not downloaded)\b/, (m) => detailsEs(String(m.input))],
   [
     new RegExp(`^episode (-?\\d+) (${STATUS_ALTERNATIVES})(?:: (.*))?$`, "s"),
     (m, inner) => `episodio ${m[1]} (${inner(String(m[2]))})${m[3] === undefined ? "" : `: ${inner(m[3])}`}`,

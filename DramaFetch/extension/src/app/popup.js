@@ -1,7 +1,8 @@
 // @ts-check
 /**
- * The toolbar popup. On a TikTok short-drama tab: **Download this series** (opens the DramaFetch
- * tab with that series listed) and **Open DramaFetch**; on a TikTok profile page (`/@…`) whose
+ * The toolbar popup. On a TikTok short-drama tab: **Download this series** (the DramaFetch tab
+ * downloads that whole series — DramaFetch 1.7.0: the `batch` job a paste of it queues, listed right
+ * before its downloads) and **Open DramaFetch**; on a TikTok profile page (`/@…`) whose
  * **Favorites** → **Drama** list the background worker saw that tab load: **Open my library · N
  * dramas** (N: TikTok's count the library kept) — that tab handed over as 1.5.0's **Choose from
  * your favorites** did, and the DramaFetch tab updates the library from it (the smart refresh) and
@@ -22,7 +23,7 @@ import { loadTestSettings, readFavoritesTemplate, readLibrary } from "./storage.
 /**
  * Ask the background worker to open (or focus) the DramaFetch tab, then close the popup.
  * @param {{load: string | null} | {favorites: number} | {library: true}} request a series link to
- *   list there, the TikTok tab whose favorites to list, or the library to show
+ *   download there, the TikTok tab whose favorites to list, or the library to show
  */
 async function open(request) {
   try {

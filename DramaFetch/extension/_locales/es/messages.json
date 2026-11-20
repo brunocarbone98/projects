@@ -53,15 +53,15 @@
     "description": "Heading of the input card."
   },
   "linksLabel": {
-    "message": "Un enlace de serie (de cualquier episodio) o un id de serie por línea",
-    "description": "Label of the links box."
+    "message": "Pega un enlace de serie (de cualquier episodio) o un id de serie: se descarga el drama entero, sin pulsar nada más",
+    "description": "Label of the box: a paste downloads the whole series."
   },
   "linksPlaceholder": {
     "message": "https://www.tiktok.com/shortdrama/episode/7699393770256782354/1",
     "description": "Placeholder of the links box."
   },
   "linksHint": {
-    "message": "Cargar lista muestra primero los episodios de una serie. Descargar todo toma cada serie del cuadro, una tras otra, y lista cada una justo antes de sus descargas. Mantén esta pestaña abierta mientras DramaFetch trabaja.",
+    "message": "Varios a la vez: uno por línea, en un solo pegado; se descargan uno tras otro, y cada uno se lista justo antes de sus descargas. Ids escritos a mano: pulsa Intro (Mayús+Intro para una línea nueva). Las dos casillas de arriba valen para el siguiente pegado o Intro, y luego se desmarcan. Para elegir episodios, usa Ver episodios en un drama de tu biblioteca. Mantén esta pestaña abierta mientras DramaFetch trabaja.",
     "description": "Hint under the links box."
   },
   "includeLockedLabel": {
@@ -71,14 +71,6 @@
   "recheckLabel": {
     "message": "Volver a revisar las series completas de las últimas 24 horas",
     "description": "Per-run checkbox: recheck."
-  },
-  "loadButton": {
-    "message": "Cargar lista",
-    "description": "Button: list one series."
-  },
-  "downloadAllButton": {
-    "message": "Descargar todo",
-    "description": "Button: download every series of the box."
   },
   "downloadAvailableButton": {
     "message": "Descargar todo lo disponible",
@@ -299,9 +291,36 @@
     "message": "Pega al menos un enlace o id de serie.",
     "description": "Input error."
   },
-  "loadOneOnly": {
-    "message": "Cargar lista acepta una sola serie; usa Descargar todo para varias.",
-    "description": "Input error."
+  "queuedOne": {
+    "message": "Serie $id$ en cola: se descarga entera, con las pausas de siempre.",
+    "description": "After a paste, Enter or a hand-over queued one series.",
+    "placeholders": {
+      "id": {
+        "content": "$1"
+      }
+    }
+  },
+  "alreadyDownloading": {
+    "message": "Ya se está descargando o espera su turno; no se pone en cola dos veces: $names$.",
+    "description": "A series (or several, by id or title) already in a download job: nothing queued for it.",
+    "placeholders": {
+      "names": {
+        "content": "$1"
+      }
+    }
+  },
+  "linksKept": {
+    "message": "Lo que ya había en el cuadro sigue ahí: pulsa Intro para descargarlo.",
+    "description": "After a paste was taken: the box still holds lines it held before the paste (a refused paste's, typed ids), which Enter downloads."
+  },
+  "cardQueued": {
+    "message": "$name$ encontrado en tus favoritos: se descarga a continuación, con las pausas de siempre.",
+    "description": "A right-clicked favorites card resolved to its drama, whose download was queued.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
   },
   "loadAlreadyQueued": {
     "message": "Esa serie ya se está listando; espera al trabajo en curso.",
@@ -394,6 +413,15 @@
       }
     }
   },
+  "seriesDrmHint": {
+    "message": "protegido con DRM (lo detectó una ejecución anterior): DramaFetch no lo descifra; para intentarlo de nuevo, márcalo y pulsa “$button$”",
+    "description": "See episodes: the hint of an episode an earlier download found encrypted (shown locked).",
+    "placeholders": {
+      "button": {
+        "content": "$1"
+      }
+    }
+  },
   "badgeFree": {
     "message": "gratis",
     "description": "Access badge."
@@ -438,12 +466,8 @@
     "message": "Seleccionar todos los mostrados",
     "description": "Checkbox: tick every drama the filter shows."
   },
-  "favoritesAddButton": {
-    "message": "Añadir al cuadro",
-    "description": "Button: the ticked favorites join the box of series (nothing is downloaded)."
-  },
   "favoritesHint": {
-    "message": "Leer la lista completa tarda 1–2 minutos (unas 50 páginas, con pausa antes de cada una). “En disco” = todos los episodios que tu cuenta puede ver, guardados y verificados. Descargar seleccionados descarga los marcados una serie tras otra, exactamente como Descargar todo.",
+    "message": "Leer la lista completa tarda 1–2 minutos (unas 50 páginas, con pausa antes de cada una). “En disco” = todos los episodios que tu cuenta puede ver, guardados y verificados. Descargar en una tarjeta descarga ese drama; Descargar seleccionados descarga los marcados uno tras otro, exactamente como si pegaras sus enlaces.",
     "description": "Hint under the favorites panel's buttons."
   },
   "favoritesListing": {
@@ -515,7 +539,7 @@
     }
   },
   "favoritesLoaded": {
-    "message": "$count$ dramas favoritos listados: marca los que quieras descargar y pulsa Descargar seleccionados (o Añadir al cuadro).",
+    "message": "$count$ dramas favoritos listados: pulsa Descargar en un drama, o marca varios y pulsa Descargar seleccionados.",
     "description": "Status after the favorites list was read.",
     "placeholders": {
       "count": {
@@ -554,18 +578,6 @@
       }
     }
   },
-  "favoritesEpisodesLength": {
-    "message": "$episodes$ episodios · $length$",
-    "description": "A favorite's episodes and length, e.g. 60 episodes · 1h 19m.",
-    "placeholders": {
-      "episodes": {
-        "content": "$1"
-      },
-      "length": {
-        "content": "$2"
-      }
-    }
-  },
   "favoritesLengthHours": {
     "message": "$hours$ h $minutes$ min",
     "description": "A favorite's length in hours and minutes.",
@@ -587,30 +599,17 @@
       }
     }
   },
-  "favoritesAdded": {
-    "message": "$count$ añadidos al cuadro. Descargar todo los descarga, una serie tras otra.",
-    "description": "Status after Add selected to the box.",
-    "placeholders": {
-      "count": {
-        "content": "$1"
-      }
-    }
-  },
-  "favoritesNoneAdded": {
-    "message": "El cuadro ya nombra todos los dramas marcados: no se añadió nada.",
-    "description": "Status after Add selected to the box when the box named them all already."
-  },
   "favoritesChoose": {
-    "message": "Tus favoritos se listan abajo: marca los dramas que quieras y pulsa Añadir al cuadro.",
+    "message": "Tus favoritos se listan abajo: pulsa Descargar en un drama, o marca varios y pulsa Descargar seleccionados.",
     "description": "Status when a TikTok profile's favorites are handed over: the popup's Open my library there, or Update from TikTok."
   },
   "favoritesNoCard": {
     "message": "Ese clic derecho no fue sobre un drama de tus favoritos: haz clic derecho sobre el título del drama o sobre su portada, o usa el botón de DramaFetch en la barra → Abrir mi biblioteca.",
-    "description": "Status when the right-click on a TikTok profile was on no favorites card (the tab's content script said so): nothing is listed."
+    "description": "Status when the right-click on a TikTok profile was on no favorites card (the tab's content script said so): nothing is queued."
   },
   "favoritesNoScript": {
     "message": "DramaFetch no pudo preguntar a tu pestaña de TikTok sobre qué drama hiciste clic derecho (la pestaña ya estaba abierta antes de que DramaFetch se cargara o se actualizara): pulsa F5 en tu perfil de TikTok, abre Favoritos → Drama y vuelve a hacer clic derecho sobre el drama.",
-    "description": "Status when the right-click on a TikTok profile reached no content script in that tab (a tab loaded before DramaFetch was loaded or updated): nothing is listed."
+    "description": "Status when the right-click on a TikTok profile reached no content script in that tab (a tab loaded before DramaFetch was loaded or updated): nothing is queued."
   },
   "favoritesAlreadyQueued": {
     "message": "Tus favoritos ya se están listando; espera al trabajo en curso.",
@@ -626,7 +625,7 @@
   },
   "favoritesNotFound": {
     "message": "“$title$” no está en tu lista de favoritos; puede haber cambiado: pulsa F5 en la página de TikTok y vuelve a intentarlo.",
-    "description": "A right-clicked card's drama is not in the favorites list: nothing listed.",
+    "description": "A right-clicked card's drama is not in the favorites list: nothing queued.",
     "placeholders": {
       "title": {
         "content": "$1"
@@ -635,7 +634,7 @@
   },
   "favoritesCardCutShort": {
     "message": "“$title$” está más abajo en tus favoritos de lo que TikTok envió (se detuvo tras $count$): abre el drama en TikTok y usa el botón de DramaFetch en la barra → Descargar esta serie.",
-    "description": "A right-clicked card lies beyond the part of the favorites list TikTok sent: nothing listed.",
+    "description": "A right-clicked card lies beyond the part of the favorites list TikTok sent: nothing queued.",
     "placeholders": {
       "title": {
         "content": "$1"
@@ -646,8 +645,8 @@
     }
   },
   "favoritesShared": {
-    "message": "Varios de tus favoritos se llaman “$title$”: se muestran abajo con sus episodios y su duración; marca aquel sobre el que hiciste clic derecho (su tarjeta muestra lo mismo) y pulsa Añadir al cuadro.",
-    "description": "Several different dramas of the favorites list bear a right-clicked card's title: none is picked, the panel shows them (filtered to that title) for the user to tick; nothing listed.",
+    "message": "Varios de tus favoritos se llaman “$title$”: se muestran abajo con sus episodios y su duración; pulsa Descargar en aquel sobre el que hiciste clic derecho (su tarjeta muestra lo mismo).",
+    "description": "Several different dramas of the favorites list bear a right-clicked card's title: none is picked, the library shows them (filtered to that title), each with its Download button, for the user to pick; nothing queued.",
     "placeholders": {
       "title": {
         "content": "$1"
@@ -656,7 +655,7 @@
   },
   "favoritesSharedElsewhere": {
     "message": "Varios dramas de los favoritos de este perfil de TikTok se llaman “$title$”, y DramaFetch nunca adivina cuál quisiste decir: abre en TikTok el que quieras y usa el botón de DramaFetch en la barra → Descargar esta serie.",
-    "description": "A right-clicked card's title is shared by several dramas of a TikTok profile other than the library's: the library is left as it was, none is picked, nothing listed.",
+    "description": "A right-clicked card's title is shared by several dramas of a TikTok profile other than the library's: the library is left as it was, none is picked, nothing queued.",
     "placeholders": {
       "title": {
         "content": "$1"
@@ -912,6 +911,45 @@
       }
     }
   },
+  "libraryQueuedDrama": {
+    "message": "$name$ en cola: se descarga entero, con las pausas de siempre.",
+    "description": "After a card's Download.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryDownloadOne": {
+    "message": "Descargar",
+    "description": "Button on a library card: download that drama."
+  },
+  "libraryLocked": {
+    "message": "$count$ bloqueados",
+    "description": "On a library card, after its episode count: the locked episodes DramaFetch's records hold.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryLockedOne": {
+    "message": "1 bloqueado",
+    "description": "The same, for one locked episode."
+  },
+  "libraryLockedTitle": {
+    "message": "Episodios bloqueados ($count$): las descargas de este drama los omitieron sin pedírselos a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortados (reproduce … s de … s: una ventana de un episodio no desbloqueado, o un defecto de TikTok), protegidos con DRM o sin dirección de reproducción—. Desbloquear en TikTok solo sirve para los de pago; Ver episodios muestra el motivo de cada uno. DramaFetch nunca desbloquea ni descifra nada.",
+    "description": "Tooltip of a library card's episode line when it counts locked episodes: every reason a run records an episode skipped-locked.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "libraryLockedTitleOne": {
+    "message": "Episodio bloqueado: las descargas de este drama lo omitieron sin pedírselo a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortado (reproduce … s de … s: una ventana de un episodio no desbloqueado, o un defecto de TikTok), protegido con DRM o sin dirección de reproducción—. Desbloquear en TikTok solo sirve si es de pago; Ver episodios muestra su motivo. DramaFetch nunca desbloquea ni descifra nada.",
+    "description": "The same tooltip for one locked episode."
+  },
   "libraryShown": {
     "message": "Mostrando $shown$ de $count$",
     "description": "Under the grid.",
@@ -984,7 +1022,7 @@
   },
   "libraryBrowse": {
     "message": "Ver episodios",
-    "description": "Card button: queues Load list of that series."
+    "description": "Card button: lists that drama's episodes with their covers (a listing job), to download all available or pick from."
   },
   "libraryOpen": {
     "message": "Abrir en TikTok",
@@ -1120,6 +1158,24 @@
       }
     }
   },
+  "bookmarkNoCount": {
+    "message": "“$title$” no se quitó: la lista de TikTok no da su número de episodios, así que solo una descarga puede mostrar que está completo. Descárgalo otra vez (Descargar seleccionados) y quítalo en las 24 horas siguientes. No se pidió nada a TikTok.",
+    "description": "Removal refused at the gate: TikTok's favorites list gives no episode count for the drama and no run found it complete in the last 24 hours.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkGone": {
+    "message": "“$title$” no se quitó: ya no está en tu biblioteca — la lista de TikTok, leída después de que confirmaras, ya no lo tiene, o DramaFetch ya lo quitó. No se pidió nada a TikTok.",
+    "description": "Removal refused at the gate: the drama is no longer in the library, or is marked removed already.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
   "bookmarkMissing": {
     "message": "“$title$” no se quitó: DramaFetch no encontró un único botón Bookmark que pulsar en su página, así que no pulsó nada. Quítalo tú mismo: Abrir en TikTok.",
     "description": "No button (or several).",
@@ -1191,8 +1247,8 @@
     "description": "Queue label: the favorites list job."
   },
   "jobCard": {
-    "message": "Listar “$title$” de tus favoritos",
-    "description": "Queue label: a right-click on a favorites card lists that drama.",
+    "message": "Buscar “$title$” en tus favoritos",
+    "description": "Queue label: a right-click on a favorites card finds that drama, whose download is queued right after.",
     "placeholders": {
       "title": {
         "content": "$1"
@@ -1279,6 +1335,14 @@
     "message": "Un archivo JSON en Downloads/DramaFetch/reports: por cada episodio que no se descargó, su estado, mensaje, causa probable, las peticiones hechas (servidores, códigos HTTP, tamaños) y la entrada de la lista que TikTok sirvió a tu sesión; nunca tus cookies.",
     "description": "Hint under the report setting."
   },
+  "settingAlerts": {
+    "message": "Avisarme cuando termine un drama",
+    "description": "Setting label (a checkbox): a notification from Chrome as each drama a download job finishes."
+  },
+  "settingAlertsHint": {
+    "message": "Una notificación de Chrome por cada drama que termina una descarga: descargado, o los episodios por reintentar, con un botón Reintentar. ¿No aparece ninguna? Permite las notificaciones de Chrome en Windows (Configuración → Sistema → Notificaciones) y comprueba que el Asistente de concentración (No molestar) esté desactivado.",
+    "description": "Hint under the alert setting."
+  },
   "settingsHint": {
     "message": "Los nombres de archivo pueden usar {series}, {number}, {n}, {title} y {id}. Las pausas solo pueden alargarse respecto de las predeterminadas (4–9 s entre episodios, 60–120 s cada 10): más rápido nunca es seguro frente a TikTok.",
     "description": "Hint of the settings card."
@@ -1317,6 +1381,140 @@
       }
     }
   },
+  "alertCompleteTitle": {
+    "message": "✓ $name$ — descargado",
+    "description": "Notification title: every episode of the drama the session may play is on disk (its report says complete).",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNothingPlayableTitle": {
+    "message": "$name$ — nada que tu cuenta pueda reproducir",
+    "description": "Notification title instead of alertCompleteTitle when the drama's report says complete but the session may play none of its episodes (every one locked): nothing was saved, so no ✓ and no “downloaded”; alertNoneOnDisk is its message.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertAllOnDisk": {
+    "message": "Los $count$ episodios están en el disco$locked$.",
+    "description": "Notification message of a complete drama. $locked$ is empty, or “ — ” and its locked episodes in the words of its report line (“ — 2 locked (61, 62)”).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "locked": {
+        "content": "$2"
+      }
+    }
+  },
+  "alertOneOnDisk": {
+    "message": "1 episodio está en el disco$locked$.",
+    "description": "The same, when the session may play one episode of the drama — others may be locked, so never “its only episode” ($locked$ as in alertAllOnDisk).",
+    "placeholders": {
+      "locked": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNoneOnDisk": {
+    "message": "Tu cuenta no puede reproducir ninguno de sus episodios$locked$.",
+    "description": "The same, for a complete drama whose every episode is locked ($locked$ as in alertAllOnDisk: never empty here).",
+    "placeholders": {
+      "locked": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertRetryTitle": {
+    "message": "⚠ $name$ — $count$ episodios por reintentar",
+    "description": "Notification title: episodes of the drama did not download (failed, or left by a stop); its Retry button queues them again.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      }
+    }
+  },
+  "alertRetryTitleOne": {
+    "message": "⚠ $name$ — 1 episodio por reintentar",
+    "description": "The same, for one episode.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertRetryMessage": {
+    "message": "$episodes$ no se descargaron.",
+    "description": "Notification message: the episodes (E03, E07, E12) — at most ten, then alertMore.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertRetryMessageOne": {
+    "message": "$episode$ no se descargó.",
+    "description": "The same, for one episode (E03).",
+    "placeholders": {
+      "episode": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertMore": {
+    "message": "$episodes$ y $count$ más",
+    "description": "The first ten episodes named, and how many more did not download.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      }
+    }
+  },
+  "alertRetryButton": {
+    "message": "Reintentar",
+    "description": "The notification's button: what the tab's Retry button does for that drama."
+  },
+  "alertIncompleteTitle": {
+    "message": "$name$ — sin completar",
+    "description": "Notification title: the drama has nothing to retry but is not complete (a gap in TikTok's list, an episode TikTok did not list, a list it refused); its report line is the message.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertStoppedTitle": {
+    "message": "DramaFetch se detuvo: $reason$",
+    "description": "Notification title at the end of a download job that stopped with dramas never started; the reason as the tab shows it.",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNotStarted": {
+    "message": "$count$ dramas no se iniciaron: descárgalos de nuevo más tarde",
+    "description": "Notification message under alertStoppedTitle.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertNotStartedOne": {
+    "message": "1 drama no se inició: descárgalo de nuevo más tarde",
+    "description": "The same, for one drama."
+  },
   "historySeriesOmitted": {
     "message": "Series de esta ejecución no listadas aquí: $count$.",
     "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series, about 120-190 when a stop left most of them not started): how many of its series are not listed (any count: the wording does not depend on it). The ones with an episode to retry are kept first.",
@@ -1340,19 +1538,19 @@
   },
   "popupDownload": {
     "message": "Descargar esta serie",
-    "description": "Popup button."
+    "description": "Popup button: the DramaFetch tab downloads this tab's whole series (the job a paste of it queues)."
   },
   "contextDownload": {
     "message": "Descargar este drama",
-    "description": "Right-click menu item on a link to a TikTok short-drama series: lists it in the DramaFetch tab."
+    "description": "Right-click menu item on a link to a TikTok short-drama series: the DramaFetch tab downloads the whole series (the job a paste of it queues)."
   },
   "contextDownloadPage": {
     "message": "Descargar el drama de esta página",
-    "description": "Right-click menu item on a TikTok short-drama series page (not on a link): lists the page's series in the DramaFetch tab."
+    "description": "Right-click menu item on a TikTok short-drama series page (not on a link): the DramaFetch tab downloads the page's whole series (the job a paste of it queues)."
   },
   "contextDownloadFavorite": {
     "message": "Descargar este drama favorito",
-    "description": "Right-click menu item on a drama card of the user's TikTok profile (Favorites → Drama): lists that drama's series in the DramaFetch tab."
+    "description": "Right-click menu item on a drama card of the user's TikTok profile (Favorites → Drama): the DramaFetch tab finds that drama in the favorites and downloads its whole series."
   },
   "popupOpen": {
     "message": "Abrir DramaFetch",

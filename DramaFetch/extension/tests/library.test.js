@@ -16,6 +16,7 @@ import {
   LIBRARY_PIECE,
   LIBRARY_SORTS,
   LIBRARY_VERSION,
+  DEFAULT_LIBRARY_SORT,
   ageOf,
   chipCounts,
   countsFresh,
@@ -24,6 +25,7 @@ import {
   inFilter,
   libraryOf,
   libraryRecord,
+  librarySortOf,
   libraryStatus,
   profileHandleOf,
   progressOf,
@@ -83,20 +85,20 @@ test("the constants: pieces of 60 cards, the filters and sorts of the sketch, ve
   assert.ok(downloader.includes(`note = "${COVER_EMBEDDED_NOTE} + file";`));
 });
 
-test("a drama's progress from the records: on disk, partly or none, the episodes saved and how many it has", () => {
+test("a drama's progress from the records: on disk, partly or none, the episodes saved, how many it has and how many the records hold locked", () => {
   // nothing stored, or nothing saved: none, 0 of the list's count
-  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, 60), { status: "none", saved: 0, total: 60 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [], { locked: [3] }), LIGHTHOUSE, 60), { status: "none", saved: 0, total: 60 });
+  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, 60), { status: "none", saved: 0, total: 60, locked: 0 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [], { locked: [3] }), LIGHTHOUSE, 60), { status: "none", saved: 0, total: 60, locked: 1 });
   // some saved: partly; all the list names saved (or a complete run's count): on disk
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3]), LIGHTHOUSE, 60), { status: "partly", saved: 3, total: 60 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3), { status: "on-disk", saved: 3, total: 3 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { locked: [3] }), LIGHTHOUSE, 3), { status: "on-disk", saved: 2, total: 3 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3]), LIGHTHOUSE, 60), { status: "partly", saved: 3, total: 60, locked: 0 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3), { status: "on-disk", saved: 3, total: 3, locked: 0 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { locked: [3] }), LIGHTHOUSE, 3), { status: "on-disk", saved: 2, total: 3, locked: 1 });
   // found complete, the list grown since: partly
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 5), { status: "partly", saved: 3, total: 5 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 5), { status: "partly", saved: 3, total: 5, locked: 0 });
   // the list names no count: what the records know — a complete run's count plus the locked ones, else the highest number recorded
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { complete: 2, locked: [3] }), LIGHTHOUSE, null), { status: "on-disk", saved: 2, total: 3 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 4]), LIGHTHOUSE, null), { status: "partly", saved: 2, total: 4 });
-  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, null), { status: "none", saved: 0, total: null });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { complete: 2, locked: [3] }), LIGHTHOUSE, null), { status: "on-disk", saved: 2, total: 3, locked: 1 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 4]), LIGHTHOUSE, null), { status: "partly", saved: 2, total: 4, locked: 0 });
+  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, null), { status: "none", saved: 0, total: null, locked: 0 });
   // another series' state is no record of this one
   assert.equal(progressOf(stored(PAPER, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3).status, "none");
   // a list that shrank: an episode failed by a run that listed 4, then a run found the 3 TikTok lists
@@ -107,14 +109,24 @@ test("a drama's progress from the records: on disk, partly or none, the episodes
   for (const number of [1, 2, 3]) record(shrunk, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: 1_800_000_050 });
   markComplete(shrunk, 1_800_000_100, 3);
   const raw = JSON.parse(JSON.stringify(shrunk));
-  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 3), { status: "on-disk", saved: 3, total: 3 });
+  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 3), { status: "on-disk", saved: 3, total: 3, locked: 0 });
   assert.equal(removalFacts(raw, LIGHTHOUSE, 3).total, 3);
-  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 4), { status: "partly", saved: 3, total: 4 });
+  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 4), { status: "partly", saved: 3, total: 4, locked: 0 });
+  // the locked ones: what the records hold `skipped-locked` (paid episodes a run listed and skipped;
+  // a DRM verdict it remembers), none for a drama never run — nothing is asked of TikTok to learn it
+  const paywalled = stored(LIGHTHOUSE, [1, 2, 3, 4, 5], { locked: Array.from({ length: 45 }, (_, index) => index + 16), complete: 5 });
+  assert.deepEqual(progressOf(paywalled, LIGHTHOUSE, 60), { status: "partly", saved: 5, total: 60, locked: 45 });
+  assert.equal(progressOf(stored(LIGHTHOUSE, [1, 2, 3]), LIGHTHOUSE, 3).locked, 0);
+  assert.equal(progressOf(undefined, LIGHTHOUSE, 60).locked, 0);
+  assert.equal(progressOf(stored(PAPER, [1], { locked: [2, 3] }), LIGHTHOUSE, 3).locked, 0); // another series' records
+  // a run that listed more episodes than TikTok's favorites entry says: the larger number, the one
+  // the card's count, its status fraction, Most episodes and the selection's sum all use
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { locked: [3, 4] }), LIGHTHOUSE, 3), { status: "on-disk", saved: 2, total: 4, locked: 2 });
 });
 
 test("a card's status: removed first, then running, then queued, else what the records say", () => {
-  const onDisk = { status: /** @type {const} */ ("on-disk"), saved: 3, total: 3 };
-  const none = { status: /** @type {const} */ ("none"), saved: 0, total: 3 };
+  const onDisk = { status: /** @type {const} */ ("on-disk"), saved: 3, total: 3, locked: 0 };
+  const none = { status: /** @type {const} */ ("none"), saved: 0, total: 3, locked: 0 };
   const jobs = { queued: false, running: false, removed: false };
   assert.equal(libraryStatus(onDisk, jobs), "on-disk");
   assert.equal(libraryStatus(none, jobs), "none");
@@ -126,7 +138,7 @@ test("a card's status: removed first, then running, then queued, else what the r
 
 test("the filters' counts: every drama not removed once, under its stored status — queued and running ones where their records put them —, the removed apart; the filters show what they count, All the removed too", () => {
   /** @param {string} seriesId @param {"on-disk" | "partly" | "none"} status @param {boolean} [removed] */
-  const entry = (seriesId, status, removed = false) => ({ item: item(seriesId, seriesId), progress: { status, saved: status === "none" ? 0 : 3, total: 60 }, removed });
+  const entry = (seriesId, status, removed = false) => ({ item: item(seriesId, seriesId), progress: { status, saved: status === "none" ? 0 : 3, total: 60, locked: 0 }, removed });
   const entries = [entry(LIGHTHOUSE, "on-disk"), entry(SNOW_A, "none"), entry(SNOW_B, "partly"), entry(PAPER, "none"), entry(MOON, "on-disk", true), entry(LANTERN, "partly")];
   const counts = chipCounts(entries);
   assert.deepEqual(counts, { all: 5, none: 2, partly: 2, onDisk: 1, removed: 1 });
@@ -155,30 +167,65 @@ test("twins: DIFFERENT series of the same title (on one line, NFC) — never one
   assert.deepEqual([...twinIds(items)].sort(), [SNOW_A, SNOW_B, "7712345678901234570", "7712345678901234571"].sort());
 });
 
-test("the sort orders: the list's own, title A–Z (letter case and accents aside, untitled last), most episodes first (unknown last); ties keep the list's order", () => {
+test("the sort orders: the list's own, title A–Z (letter case and accents aside, numbers by value, untitled last), most episodes first by the number each card shows (unknown last); ties keep the list's order", () => {
+  /**
+   * @param {import("../src/lib/favorites.js").FavoriteItem} favorite
+   * @param {number | null} [total] how many episodes its card shows: TikTok's count unless the records raised it
+   */
+  const entry = (favorite, total = favorite.episodes) => ({ item: favorite, progress: { status: /** @type {const} */ ("none"), saved: 0, total, locked: 0 } });
   const entries = [
-    item(LIGHTHOUSE, "the lighthouse keeper's promise", 60),
-    item(SNOW_A, "Snowfall in Two Cities", 44),
-    item(SNOW_B, null, 80),
-    item(PAPER, "Paper Crowns", null),
-    item(MOON, "Éclair Days", 60),
-    item(LANTERN, "Snowfall in Two Cities", 60),
-  ].map((entry) => ({ item: entry }));
-  const ids = (/** @type {import("../src/lib/library.js").LibrarySort} */ sort) => sortedItems(entries, sort).map((entry) => entry.item.seriesId);
+    entry(item(LIGHTHOUSE, "the lighthouse keeper's promise", 60)),
+    entry(item(SNOW_A, "Snowfall in Two Cities", 44)),
+    entry(item(SNOW_B, null, 80)),
+    entry(item(PAPER, "Paper Crowns", null)),
+    entry(item(MOON, "Éclair Days", 60)),
+    entry(item(LANTERN, "Snowfall in Two Cities", 60)),
+  ];
+  const ids = (/** @type {import("../src/lib/library.js").LibrarySort} */ sort, list = entries) => sortedItems(list, sort).map((sorted) => sorted.item.seriesId);
   assert.deepEqual(ids("recent"), [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER, MOON, LANTERN]);
   assert.deepEqual(ids("title"), [MOON, PAPER, SNOW_A, LANTERN, LIGHTHOUSE, SNOW_B]);
   assert.deepEqual(ids("episodes"), [SNOW_B, LIGHTHOUSE, MOON, LANTERN, SNOW_A, PAPER]);
   assert.notEqual(sortedItems(entries, "recent"), entries); // a new array: the list's order kept
+  // Most episodes: the number each card shows — a run that listed more than TikTok's favorites entry
+  // says moves the drama up with it
+  const raised = entries.map((sorted) => (sorted.item.seriesId === SNOW_A ? entry(sorted.item, 90) : sorted));
+  assert.deepEqual(ids("episodes", raised), [SNOW_A, SNOW_B, LIGHTHOUSE, MOON, LANTERN, PAPER]);
+  // the collation (TITLE_ORDER): numbers by value, letter case and accents aside — ties keep the list's order
+  const titled = [
+    entry(item("7712345678901234580", "Episode 10")),
+    entry(item("7712345678901234581", "Ángel de medianoche")),
+    entry(item("7712345678901234582", "episode 2")),
+    entry(item("7712345678901234583", "angel de medianoche")),
+    entry(item("7712345678901234584", "Abril")),
+    entry(item("7712345678901234585", "Zafiro")),
+    entry(item("7712345678901234586", "Árbol")),
+  ];
+  assert.deepEqual(
+    sortedItems(titled, "title").map((sorted) => sorted.item.title),
+    ["Abril", "Ángel de medianoche", "angel de medianoche", "Árbol", "episode 2", "Episode 10", "Zafiro"],
+  );
   // the search the toolbar uses: the title holds the text, letter case and blanks aside
   assert.equal(titleMatches("Snowfall in Two Cities", "  SNOWFALL in "), true);
   assert.equal(titleMatches(null, "x"), false);
 });
 
-test("the selection's episodes: the sum of the ticked dramas' counts, each once; an unknown count adds none", () => {
+test("the sort order kept across sessions, read back checked: one of the three, else the list's own", () => {
+  assert.equal(DEFAULT_LIBRARY_SORT, "recent");
+  for (const sort of LIBRARY_SORTS) assert.equal(librarySortOf(sort), sort);
+  for (const other of [undefined, null, "", "Title", "random", 3, ["title"], { sort: "title" }]) assert.equal(librarySortOf(other), "recent");
+});
+
+test("the selection's episodes: the sum of the ticked dramas' counts as their cards show them, each once; an unknown count adds none", () => {
+  /** @param {import("../src/lib/favorites.js").FavoriteItem} favorite @param {number | null} total */
+  const entry = (favorite, total) => ({ item: favorite, progress: { status: /** @type {const} */ ("partly"), saved: 1, total, locked: 0 } });
   const items = [item(LIGHTHOUSE, "a", 60), item(SNOW_A, "b", 44), item(PAPER, "c", null), item(LIGHTHOUSE, "a", 60)];
-  assert.equal(selectionEpisodes(items, new Set([LIGHTHOUSE, SNOW_A, PAPER])), 104);
-  assert.equal(selectionEpisodes(items, new Set()), 0);
-  assert.deepEqual(distinctItems(items).map((entry) => entry.seriesId), [LIGHTHOUSE, SNOW_A, PAPER]);
+  const entries = items.map((favorite) => entry(favorite, favorite.episodes));
+  assert.equal(selectionEpisodes(entries, new Set([LIGHTHOUSE, SNOW_A, PAPER])), 104);
+  assert.equal(selectionEpisodes(entries, new Set()), 0);
+  // a drama whose records raised its count (a run listed 50, TikTok's entry says 44): the card's 50
+  const raised = [entry(item(LIGHTHOUSE, "a", 60), 60), entry(item(SNOW_A, "b", 44), 50)];
+  assert.equal(selectionEpisodes(raised, new Set([LIGHTHOUSE, SNOW_A])), 110);
+  assert.deepEqual(distinctItems(items).map((distinct) => distinct.seriesId), [LIGHTHOUSE, SNOW_A, PAPER]);
 });
 
 test("the smart refresh's question: TikTok's total equals the dramas not removed AND the first page's ids are the library's first ones, in order", () => {

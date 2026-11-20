@@ -177,18 +177,24 @@ def _watch_errors(ext: ExtensionHarness) -> list[str]:
     return errors
 
 
-def _click_and_wait(ext: ExtensionHarness, selector: str, finished: int) -> None:
-    """Click, then wait until `finished` jobs have ended, nothing runs and nothing waits. (The
-    harness' own `_run` reads the job's history entry: a storage that refuses has none.)"""
-    ext.page.click(selector)
-    ext.wait_for(
-        lambda: (
-            ext.finished_jobs() >= finished
-            and ext.idle()
-            and ext.page.locator("#queue-card").is_hidden()
-        ),
-        message=f"the job of {selector} did not finish",
-    )
+def _paste_and_finish(ext: ExtensionHarness, links: str, finished: int) -> None:
+    """A real paste of `links` into the box (`ExtensionHarness.paste`), then wait until `finished`
+    jobs have ended, nothing runs and nothing waits. (The harness' own `paste_and_wait` reads the
+    job's history entry: a storage that refuses has none.)"""
+    ext.paste(links)
+    _wait_finished(ext, finished)
+
+
+def _paste_refused(ext: ExtensionHarness, links: str) -> None:
+    """A real paste of `links` into a box that must refuse it — a refused write, a cooldown —:
+    nothing queued (no job ends, none waits), the paste left in the box for later."""
+    page = ext.page
+    page.fill("#links", "")
+    finished = ext.finished_jobs()
+    ext.paste(links)
+    ext.wait_for(lambda: page.input_value("#links") == links, 10, "the paste is not in the box")
+    assert ext.finished_jobs() == finished and ext.idle()
+    assert page.locator("#queue-card").is_hidden()
 
 
 def _status_line(ext: ExtensionHarness) -> str:
@@ -196,15 +202,18 @@ def _status_line(ext: ExtensionHarness) -> str:
 
 
 def _queue_two(ext: ExtensionHarness, first: str, second: str) -> None:
-    """**Download all** for `first`, then for `second`, in one go: the second job is queued while
-    the first runs, whatever the first does (no race with a quick refusal)."""
+    """A paste of `first`, then one of `second`, in one go: two download jobs, the second queued
+    while the first runs, whatever the first does (no race with a quick refusal). Each is the box's
+    own `paste` event carrying the text as its clipboard data — a `ClipboardEvent` with a
+    `DataTransfer`, dispatched in the page: the handler a real paste reaches."""
     ext.page.evaluate(
         """([first, second]) => {
           const links = document.getElementById("links");
-          const button = document.getElementById("download-all-button");
           for (const value of [first, second]) {
-            links.value = value;
-            button.click();
+            const data = new DataTransfer();
+            data.setData("text/plain", value);
+            const paste = { clipboardData: data, bubbles: true, cancelable: true };
+            links.dispatchEvent(new ClipboardEvent("paste", paste));
           }
         }""",
         [first, second],
@@ -225,21 +234,22 @@ def _wait_finished(ext: ExtensionHarness, finished: int) -> None:
 
 def _popup_load(ext: ExtensionHarness, expected_status: str | None) -> None:
     """The popup's **Download this series** for the main series, as test_e of test_extension.py
-    sends it; waits until the app page has the link (and, unless None, shows `expected_status`)."""
-    ext.page.fill("#links", "")
+    sends it: the app page takes it (the worker's answer says so) and, unless `expected_status` is
+    None, shows that on its status line — cleared first, so that only the hand-over's own outcome
+    counts. The box is left as it is."""
+    ext.page.evaluate("() => { document.getElementById('input-status').textContent = ''; }")
     popup = ext.context.new_page()
     popup.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
-    popup.evaluate(
+    answer = popup.evaluate(
         "(id) => chrome.runtime.sendMessage({type: 'dramafetch:open', load: id})", SERIES_ID
     )
-    ext.wait_for(
-        lambda: (
-            ext.page.input_value("#links") == SERIES_ID
-            and (expected_status is None or _status_line(ext) == expected_status)
-        ),
-        20,
-        f"the popup's load did not end with {expected_status!r}",
-    )
+    assert answer == {"ok": True}
+    if expected_status is not None:
+        ext.wait_for(
+            lambda: _status_line(ext) == expected_status,
+            20,
+            f"the popup's load did not end with {expected_status!r}",
+        )
     popup.close()
 
 
@@ -302,7 +312,7 @@ def test_a_progress_past_chromes_10_mb_is_stored_and_a_series_still_completes(
         assert filled["quota"] == QUOTA_BYTES < filled["bytes"]
         assert filled["series"] > 400
 
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         assert series["line"] == MAIN_LINE
         assert entry["stopped"] is None and entry["error"] is None
@@ -314,7 +324,7 @@ def test_a_progress_past_chromes_10_mb_is_stored_and_a_series_still_completes(
         assert len(_videos(ext)) == 4
 
         requests = len(server.requests)
-        again = ext.download_all(MAIN_LINK)  # the memory works past the quota: the complete skip
+        again = ext.paste_and_wait(MAIN_LINK)  # the memory works past the quota: the complete skip
         assert again["series"][0]["status"] == "skipped (complete)"
         assert len(server.requests) == requests
         assert errors == []
@@ -354,8 +364,8 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
         assert failed.locator("td.message").text_content() == f"stopped: {reason}"
         assert failed.locator(".badge").text_content() == "stopped"
         assert page.locator("#failed-heading").text_content() == "Did not download (1)"
-        for button in ("#retry-button", "#download-all-button", "#load-button"):
-            assert page.locator(button).is_disabled(), button  # nothing can start a job here now
+        assert page.locator("#retry-button").is_disabled()  # nothing can start a job here now
+        _paste_refused(ext, MAIN_LINK)  # nor can a paste: nothing queued, the advice stays
         assert page.locator(
             "#report-button"
         ).is_enabled()  # a save of the report is no storage write
@@ -381,7 +391,7 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
 
         page.close()  # writes work again in a reloaded page (the wrapper was the old page's)
         ext.reopen_app()
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = {row["number"]: row for row in series["rows"]}
         assert [rows[n]["status"] for n in sorted(rows)] == [
@@ -414,8 +424,7 @@ def _a_429_while_the_disk_is_full(ext: ExtensionHarness, server: FakeTikTok) -> 
     errors = _watch_errors(ext)
     page = ext.page
     assert page.evaluate(FULL_DISK_JS, {"acceptStateWrites": 0, "message": FULL_DISK})
-    page.fill("#links", MAIN_LINK)
-    _click_and_wait(ext, "#download-all-button", 1)
+    _paste_and_finish(ext, MAIN_LINK, 1)
 
     assert _media_counts(server) == [1, 0, 0, 0, 0]
     assert _table_rows(ext, "#failed-table") == [
@@ -433,8 +442,7 @@ def _a_429_while_the_disk_is_full(ext: ExtensionHarness, server: FakeTikTok) -> 
     ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)  # …it holds anyway
     banner = page.locator("#cooldown-text").text_content() or ""
     assert banner.startswith("TikTok refused a request at ") and MEDIA_RATE_LIMIT in banner
-    assert page.locator("#download-all-button").is_disabled()
-    assert page.locator("#load-button").is_disabled()
+    _paste_refused(ext, MAIN_LINK)  # no download can start: nothing queued
     assert page.locator("#retry-button").is_disabled()
     until = re.search(r"waits until (\d\d:\d\d)", banner)
     assert until is not None, banner
@@ -466,7 +474,8 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
         ext.page.close()  # the tab reloaded: its memory is gone, the browser session's is not
         page = ext.reopen_app()
         ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)
-        assert page.locator("#download-all-button").is_disabled()
+        _paste_refused(ext, MAIN_LINK)  # the cooldown: nothing queued, its end on the status line
+        assert _status_line(ext).startswith("TikTok refused a request at ")
         ext.wait_for(lambda: ext.cooldown() is not None, 10)  # stored at the first reading
         stored = ext.cooldown()
         assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
@@ -497,7 +506,8 @@ def test_c2_once_space_is_freed_the_open_tab_stores_the_cooldown_and_keeps_namin
         assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
         stored_advice = _stopped_with_stored_wait(f"{UNSAVED_PREFIX}{FULL_DISK}", until)
         ext.wait_for(lambda: _status_line(ext) == stored_advice, 10)
-        assert page.locator("#download-all-button").is_disabled()  # until the tab is reloaded
+        _paste_refused(ext, MAIN_LINK)  # nothing queued until the tab is reloaded
+        ext.wait_for(lambda: _status_line(ext) == stored_advice, 10)
         assert len(server.requests) == requests
         assert errors == []
 
@@ -514,8 +524,8 @@ def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission
     """A copy WITHOUT `unlimitedStorage` whose store is at Chrome's 10 MB quota — DramaFetch 1.3.0
     after about 490 finished series: Chrome itself refuses the next write. Two jobs are queued:
     the first is refused before its series is even listed, the second never starts, the page says
-    why, the buttons are disabled, the popup's load is refused, and a fresh tab's **Load list** is
-    refused by its own question before the listing: no request reaches TikTok. The same profile
+    why, a paste queues nothing, the popup's load is refused, and a fresh tab's paste is refused by
+    its job's own question before the listing: no request reaches TikTok. The same profile
     reloaded with the shipped permissions has everything it had stored, and the series downloads
     and is recorded past the quota."""
     with FakeTikTok() as server:
@@ -545,14 +555,14 @@ def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission
             report = page.locator("#report-lines li").first.text_content() or ""
             assert report == f"{SERIES_ID}: {UNSAVED_PREFIX}{chrome_reason}"
             assert page.locator("#failed-block").is_hidden()  # nothing was attempted
-            assert page.locator("#download-all-button").is_disabled()
+            _paste_refused(ext, MAIN_LINK)
             _popup_load(ext, line)  # refused at once
             assert ext.finished_jobs() == 1
-            # a fresh tab knows nothing of the refusal: its Load list asks first, and is refused
+            # a fresh tab knows nothing of the refusal: its paste is queued, and the job asks
+            # first — refused before the series is listed
             page.close()
             page = ext.reopen_app()
-            page.fill("#links", MAIN_LINK)
-            _click_and_wait(ext, "#load-button", 1)
+            _paste_and_finish(ext, MAIN_LINK, 1)
             assert _status_line(ext) == line
             assert page.locator("#episode-table tbody tr").count() == 0
             assert server.requests == []  # not one request, in all those jobs
@@ -567,7 +577,7 @@ def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission
                 "async () => (await chrome.storage.local.getKeys()).length"
             )
             assert keys == before[0] and _bytes_in_use(upgraded) >= before[1]
-            entry = upgraded.download_all(MAIN_LINK)
+            entry = upgraded.paste_and_wait(MAIN_LINK)
             assert entry["series"][0]["line"] == MAIN_LINE
             assert _bytes_in_use(upgraded) > QUOTA_BYTES
             state = upgraded.series_state(SERIES_ID)
@@ -584,14 +594,14 @@ def test_e_a_series_whose_memory_is_gone_is_found_on_disk_and_not_downloaded_aga
     `already exists: …`, no video request, no `(1).mp4` — and its memory is written anew, the
     complete mark included."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        first = ext.download_all(MAIN_LINK)
+        first = ext.paste_and_wait(MAIN_LINK)
         assert first["series"][0]["line"] == MAIN_LINE
         assert _media_counts(server) == [1, 1, 1, 1, 0]
         ext.page.evaluate("(key) => chrome.storage.local.remove(key)", f"series:{SERIES_ID}")
         assert ext.series_state(SERIES_ID) is None
 
         pages = len(server.series_page_requests)
-        again = ext.download_all(MAIN_LINK)
+        again = ext.paste_and_wait(MAIN_LINK)
         (series,) = again["series"]
         rows = {row["number"]: row for row in series["rows"]}
         assert [rows[n]["status"] for n in sorted(rows)] == [

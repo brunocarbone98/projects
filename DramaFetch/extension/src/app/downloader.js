@@ -1304,7 +1304,7 @@ export class CoverLane {
 }
 
 /**
- * The cover thumbnails of the episode list (**Load list**), fetched by the extension itself — not
+ * The cover thumbnails of the episode list (**See episodes**), fetched by the extension itself — not
  * by the page's own `<img>` loads, which go out all at once, follow a redirect to any host and know
  * nothing of a cooldown or a running job — and only for the rows someone can see: a row's
  * thumbnail is wanted once its cover cell comes into view ({@link watch}: an IntersectionObserver,

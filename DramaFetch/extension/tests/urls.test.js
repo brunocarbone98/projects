@@ -49,6 +49,37 @@ test("short links, other hosts, other digits and junk are refused with the Pytho
   assert.throws(() => parseInput(`https://example.com/shortdrama/episode/${ID}/1`), UnsupportedUrlError);
 });
 
+test("two links on one line are refused, never read as the first with the second hidden in its query", () => {
+  const second = "https://www.tiktok.com/shortdrama/episode/7699393770256782322/1";
+  for (const line of [
+    `https://www.tiktok.com/shortdrama/episode/${ID}/1?is_from_webapp=1&sender_device=pc ${second}`,
+    `https://www.tiktok.com/shortdrama/episode/${ID}/1?a=1\t${ID}`,
+    `https://www.tiktok.com/shortdrama/${ID}#top watch later`,
+    `https://www.tiktok.com/shortdrama/${ID}?a=1\u0085b`, // Python's whitespace, not JavaScript's
+  ]) {
+    assert.throws(() => parseInput(line), /^UnsupportedUrlError: Not a TikTok short-drama or video URL/, line);
+    const listed = parseSeriesList(line);
+    assert.deepEqual([listed.refs.length, listed.errors.length], [0, 1], line); // named by its line, the box's way
+  }
+  // JavaScript's own whitespace that Python's is not (U+FEFF) stays part of the query, as in Python
+  assert.equal(parseInput(`https://www.tiktok.com/shortdrama/${ID}?a=1﻿b`).kind, "series");
+  // each link on its own line is read
+  assert.equal(parseSeriesList(`https://www.tiktok.com/shortdrama/episode/${ID}/1?is_from_webapp=1&sender_device=pc\n${second}`).refs.length, 2);
+  // with no whitespace between them — two pastes into Notepad, a CSV row, a zero-width space —, a
+  // TikTok address inside the query refuses the line too
+  for (const line of [
+    `https://www.tiktok.com/shortdrama/episode/${ID}/1?is_from_webapp=1&sender_device=pc${second}`,
+    `https://www.tiktok.com/shortdrama/episode/${ID}/1?a=1,https://www.tiktok.com/@user/video/7699400000000000001`,
+    `https://www.tiktok.com/shortdrama/${ID}#top\u200bwww.tiktok.com/shortdrama/7699393770256782322`,
+    `https://www.tiktok.com/@user/video/7699400000000000001?lang=enHTTPS://WWW.TIKTO\u212a.COM/x`,
+  ]) {
+    assert.throws(() => parseInput(line), /^UnsupportedUrlError: Not a TikTok short-drama or video URL/, line);
+  }
+  // the host's name alone, or an encoded address, is a query like any other
+  assert.equal(parseInput(`https://www.tiktok.com/shortdrama/episode/${ID}/1?ref=tiktok.com`).kind, "series");
+  assert.equal(parseInput(`https://www.tiktok.com/shortdrama/episode/${ID}/1?u=https%3A%2F%2Fwww.tiktok.com%2Fx`).kind, "series");
+});
+
 test("page URLs and the tab check, test base included", () => {
   assert.equal(seriesPageUrl(ID), `https://www.tiktok.com/shortdrama/episode/${ID}/1`);
   assert.equal(seriesPageUrl(ID, 0, "http://127.0.0.1:8123//"), `http://127.0.0.1:8123/shortdrama/episode/${ID}/1`);
@@ -59,6 +90,12 @@ test("page URLs and the tab check, test base included", () => {
   assert.equal(isShortDramaUrl("https://www.tiktok.com/foryou"), false);
   assert.equal(seriesRefFromUrl(`http://127.0.0.1:8123/shortdrama/episode/${ID}/4`, "http://127.0.0.1:8123")?.seriesId, ID);
   assert.equal(seriesRefFromUrl(`http://127.0.0.1:8123/shortdrama/episode/${ID}/4`), null);
+  // a tab's or a link's address is one page: its query and fragment are not read — not even one
+  // holding another TikTok address (a referer), which a pasted line could not hold
+  const referred = seriesRefFromUrl(`https://www.tiktok.com/shortdrama/episode/${ID}/2?referer_url=https://www.tiktok.com/foryou#top`);
+  assert.deepEqual([referred?.seriesId, referred?.episodeHint], [ID, 2]);
+  assert.equal(isShortDramaUrl(`https://www.tiktok.com/shortdrama/${ID}?enter_from=https://www.tiktok.com/@a/collection`), true);
+  assert.equal(isShortDramaUrl("https://www.tiktok.com/foryou?next=https://www.tiktok.com/shortdrama/7699393770256782399"), false);
 });
 
 test("the text box follows --from-file: comments, blank lines, BOM, duplicates, refused lines", () => {

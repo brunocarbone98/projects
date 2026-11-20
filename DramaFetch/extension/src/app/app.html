@@ -37,17 +37,13 @@
 
   <section class="card" id="input-card">
     <h2 data-i18n="linksHeading">Series to download</h2>
-    <label for="links" data-i18n="linksLabel">One series link (any episode of it) or series id per line</label>
+    <label for="links" data-i18n="linksLabel">Paste a series link (any episode of it) or a series id: the whole drama downloads at once</label>
     <textarea id="links" rows="4" spellcheck="false" autocomplete="off" data-i18n-placeholder="linksPlaceholder"></textarea>
     <div class="options">
       <label><input type="checkbox" id="include-locked"> <span data-i18n="includeLockedLabel">Also ask for locked episodes (TikTok decides; usually they fail)</span></label>
       <label><input type="checkbox" id="recheck"> <span data-i18n="recheckLabel">Look again at series found complete in the last 24 hours</span></label>
     </div>
-    <div class="buttons">
-      <button type="button" id="load-button" data-i18n="loadButton">Load list</button>
-      <button type="button" id="download-all-button" class="primary" data-i18n="downloadAllButton">Download all</button>
-    </div>
-    <p class="hint" data-i18n="linksHint">Load list shows the episodes of one series first. Download all takes every series of the box, one after the other, each listed right before its own downloads. Keep this tab open while DramaFetch works.</p>
+    <p class="hint" data-i18n="linksHint">Several at once: one per line, in one paste — they download one after the other, each listed right before its own downloads. Typed ids: press Enter (Shift+Enter for a new line). The two boxes above count for the next paste or Enter, then clear. To pick episodes, use See episodes on a drama of your library. Keep this tab open while DramaFetch works.</p>
     <p id="input-status" class="status" role="status"></p>
   </section>
 
@@ -87,7 +83,6 @@
         <span class="selection-note" data-i18n="librarySelectionNote">downloaded one after the other, with the usual pauses</span>
         <span class="spacer"></span>
         <button type="button" id="library-clear" data-i18n="libraryClear">Clear selection</button>
-        <button type="button" id="favorites-add-button" data-i18n="favoritesAddButton">Add selected to the box</button>
         <button type="button" id="library-download" class="primary"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"></path><path d="M7 10l5 5 5-5"></path><path d="M5 20h14"></path></svg><span data-i18n="libraryDownload">Download selected</span></button>
       </div>
       <p id="favorites-status" class="status" role="status"></p>
@@ -96,7 +91,7 @@
         <span id="library-shown" class="meta"></span>
         <button type="button" id="library-more" hidden></button>
       </div>
-      <p class="hint" data-i18n="favoritesHint">Reading the whole list takes 1–2 minutes (about 50 pages, a pause before each). “On disk” = every episode your account may watch, saved and checked. Download selected downloads the ticked dramas one series after the other, exactly as Download all would.</p>
+      <p class="hint" data-i18n="favoritesHint">Reading the whole list takes 1–2 minutes (about 50 pages, a pause before each). “On disk” = every episode your account may watch, saved and checked. Download on a card downloads that drama; Download selected dramas downloads the ticked ones one after the other — exactly as pasting their links would.</p>
     </section>
   </div>
 
@@ -245,8 +240,11 @@
         <input type="number" id="setting-rest-max" min="0" max="86400" step="1">
         <label for="setting-report" data-i18n="settingReport">Save a report of the episodes that did not download</label>
         <input type="checkbox" id="setting-report">
+        <label for="setting-alerts" data-i18n="settingAlerts">Alert me when a drama finishes</label>
+        <input type="checkbox" id="setting-alerts">
       </div>
       <p class="hint" data-i18n="settingReportHint">A JSON file in Downloads/DramaFetch/reports: for each episode that did not download, its status, message, probable cause, the requests made (hosts, HTTP statuses, sizes) and the list entry TikTok served to your session — never your cookies.</p>
+      <p class="hint" data-i18n="settingAlertsHint">A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.</p>
       <p class="hint" data-i18n="settingsHint">File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.</p>
       <div class="buttons">
         <button type="submit" id="settings-save" data-i18n="saveSettings">Save settings</button>

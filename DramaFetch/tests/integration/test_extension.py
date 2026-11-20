@@ -5,8 +5,11 @@ A real headless Chromium loads the extension's TEST copy (`extension_harness.Ext
 TikTok server through the extension's own app page — discovery through the page's own request in
 a background tab, downloads with the Referer rule, verification, DRM, covers, naming, the
 per-series state, pacing, cooldown and stops, batches, the free series with conditions and its
-short header. Every scenario counts the requests the fake server saw. No cookie value is ever
-printed or asserted on, beyond checking that it is stored nowhere.
+short header. A download starts as the owner starts it since DramaFetch 1.7.0: a real paste of
+the links into the box (`ExtensionHarness.paste`, Ctrl+V; no button), and a series' episodes are
+listed with **See episodes** on its library card. Every scenario counts the requests the fake
+server saw. No cookie value is ever printed or asserted on, beyond checking that it is stored
+nowhere.
 """
 
 from __future__ import annotations
@@ -84,7 +87,6 @@ def _report_name_re(series_name: str) -> re.Pattern[str]:
 
 _REPORT_NAME_RE = _report_name_re(SERIES_NAME)
 THIRD = dict(enumerate(THIRD_ITEMS, start=1))
-FOURTH_LINK = f"https://www.tiktok.com/shortdrama/episode/{FOURTH_SERIES_ID}/1"
 FOURTH = dict(enumerate(FOURTH_ITEMS, start=1))
 FOURTH_FOLDER = Path("DramaFetch") / f"{FOURTH_SERIES_NAME} [{FOURTH_SERIES_ID}]"
 #: The extension's `lib/diagnosis.js` cause of a short-served file (the spec's exact texts; the
@@ -125,8 +127,8 @@ def _media_of(server: FakeTikTok, item_id: str) -> list[Any]:
 
 def _downloader_covers(server: FakeTikTok, item_id: str | None = None) -> list[Any]:
     """Cover requests the extension made with its Referer rule: the downloader's — and, once
-    **Load list** shows a series, the list's thumbnails, which the extension fetches itself, one at
-    a time (only test_b lists a series before counting: it waits for them first)."""
+    **See episodes** shows a series, the list's thumbnails, which the extension fetches itself, one
+    at a time (only test_b lists a series before counting: it waits for them first)."""
     return [
         r
         for r in server.cover_requests
@@ -204,12 +206,16 @@ def _streams(lines: list[str], keep: set[int]) -> list[str]:
 
 
 def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path, tools: Tools) -> None:
-    """E01-E04 saved as `DramaFetch/<Name> [<id>]/<Name> - Episode 0N.mp4`, each with the fake
-    CDN's cover embedded as `covr`, 3 s long with audio, decoding frame for frame like the CDN's
-    original bytes; E05 (locked) skipped without a single request; the exact report line; the
-    extension's Referer only on its own media and cover requests, never on the page's."""
+    """A real paste of the series link into the box — no button pressed (DramaFetch 1.7.0) —
+    downloads the whole series: ONE batch job; E01-E04 saved as
+    `DramaFetch/<Name> [<id>]/<Name> - Episode 0N.mp4`, each with the fake CDN's cover embedded as
+    `covr`, 3 s long with audio, decoding frame for frame like the CDN's original bytes; E05
+    (locked) skipped without a single request; the exact report line; the extension's Referer only
+    on its own media and cover requests, never on the page's."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
+        assert (entry["kind"], entry["label"]) == ("batch", f"Series {SERIES_ID}")
+        assert ext.page.input_value("#links") == ""  # the paste taken: the box emptied
         assert entry["error"] is None and entry["stopped"] is None
         (series,) = entry["series"]
         assert series["status"] == "complete"
@@ -261,18 +267,19 @@ def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path, tools
 
 
 def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
-    """A second look (recheck, and Load list + Download all available) finds every episode on disk:
-    skipped, zero media requests; a third run within 24 h is the complete skip — zero requests at
-    all, no tab opened, and the line points at recheck for the locked episode."""
+    """A second look (recheck, and See episodes + Download all available) finds every episode on
+    disk: skipped, zero media requests; a third run within 24 h is the complete skip — zero
+    requests at all, no tab opened, and the line points at recheck for the locked episode."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        first = ext.download_all(MAIN_LINK)
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
+        first = ext.paste_and_wait(MAIN_LINK)
         assert first["error"] is None and first["stopped"] is None  # a failed listing is no skip
         assert _statuses(first["series"][0]) == ["done"] * 4 + ["skipped-locked"]
         media = len(server.media_requests)
         covers = len(_downloader_covers(server))
 
         ext.watch_tabs()  # chrome.tabs.onCreated: Playwright never sees the extension's own tabs
-        again = ext.download_all(MAIN_LINK, recheck=True)
+        again = ext.paste_and_wait(MAIN_LINK, recheck=True)
         assert len(ext.opened_tabs()) == 1  # the recheck lists the series in a tab of its own
         (series,) = again["series"]
         assert _statuses(series) == ["skipped-exists"] * 4 + ["skipped-locked"]
@@ -283,7 +290,7 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
         assert series["line"] == "complete: 4 of 5 (4 already on disk) — 1 locked (5)"
         assert len(server.media_requests) == media and len(_downloader_covers(server)) == covers
 
-        listing = ext.load(MAIN_LINK)
+        listing = ext.see_episodes(SERIES_ID)
         assert listing["series"][0]["episodes"] == 5
         table = ext.page.locator("#episode-table tbody")
         for number in range(1, 6):
@@ -308,7 +315,7 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
 
         requests = len(server.requests)
         tabs = len(ext.opened_tabs())
-        third = ext.download_all(MAIN_LINK)
+        third = ext.paste_and_wait(MAIN_LINK)
         (skipped,) = third["series"]
         assert skipped["status"] == "skipped (complete)"
         assert skipped["line"] == (
@@ -325,7 +332,7 @@ def test_c_paid_series_with_and_without_the_session(tmp_path: Path) -> None:
     account that bought it), episode 3 downloads like a free one and the report names it; episode
     4 stays locked either way, zero requests for it; the cookie is stored nowhere."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        logged_out = ext.download_all(THIRD_LINK)
+        logged_out = ext.paste_and_wait(THIRD_LINK)
         (series,) = logged_out["series"]
         assert series["name"] == THIRD_SERIES_NAME
         assert _statuses(series) == ["done", "done", "skipped-locked", "skipped-locked"]
@@ -334,7 +341,7 @@ def test_c_paid_series_with_and_without_the_session(tmp_path: Path) -> None:
         assert not any(r.logged_in for r in server.requests)
 
         ext.add_session_cookie(SESSION_VALUE)
-        logged_in = ext.download_all(THIRD_LINK, recheck=True)
+        logged_in = ext.paste_and_wait(THIRD_LINK, recheck=True)
         (series,) = logged_in["series"]
         assert _statuses(series) == ["skipped-exists", "skipped-exists", "done", "skipped-locked"]
         assert series["line"] == (
@@ -355,7 +362,7 @@ def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: P
     no fresh list, no cover; the state remembers it, so the next run skips it without a request."""
     drm = frozenset({(SERIES_ID, 2)})
     with FakeTikTok(drm_media=drm) as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        first = ext.download_all(MAIN_LINK)
+        first = ext.paste_and_wait(MAIN_LINK)
         (series,) = first["series"]
         assert _statuses(series) == ["done", "failed-unavailable", "done", "done", "skipped-locked"]
         assert _rows(series)[2]["message"] == DRM_MESSAGE
@@ -367,7 +374,7 @@ def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: P
         assert state is not None and state["episodes"]["2"]["message"] == DRM_MESSAGE
 
         media = len(server.media_requests)
-        second = ext.download_all(MAIN_LINK)
+        second = ext.paste_and_wait(MAIN_LINK)
         (series,) = second["series"]
         assert _statuses(series) == [
             "skipped-exists",
@@ -380,18 +387,79 @@ def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: P
         assert len(server.media_requests) == media
         assert series["line"] == "complete: 3 of 5 (3 already on disk) — 2 locked (2, 5)"
 
+        # See episodes shows what the records know: TikTok's list calls E2 free, but a download
+        # found it encrypted — locked there, unticked, with that verdict and what tries it again
+        # THERE (never the box's checkbox, which See episodes' buttons do not read), and not
+        # counted available
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
+        ext.see_episodes(SERIES_ID)
+        row = ext.page.locator("#episode-table tbody tr[data-number='2']")
+        box = row.locator("input[type=checkbox]")
+        assert box.get_attribute("data-locked") == "1" and not box.is_checked()
+        assert (row.locator(".hints").text_content() or "") == (
+            "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; tick it "
+            "and press “Download selected” to try again"
+        )
+        meta = ext.page.locator("#series-meta").text_content() or ""
+        assert meta.startswith("5 episodes listed, 3 available"), meta
+        # Download all available takes exactly those three, never E2
+        listings = len(server.series_page_requests)
+        third = ext.download_available()
+        (series,) = third["series"]
+        assert third["label"] == f"3 episodes of {SERIES_NAME}"
+        assert sorted(_rows(series)) == [1, 3, 4]
+        assert _statuses(series) == ["skipped-exists"] * 3
+        assert len(server.media_requests) == media
+        assert len(server.series_page_requests) == listings + 1  # its own fresh list, as always
+
+
+def test_d2_a_job_stopped_by_hand_leaves_see_episodes_as_the_owner_left_it(tmp_path: Path) -> None:
+    """See episodes shows the drama; the owner unticks E3 and presses Download selected (E1, E2
+    and E4), then Stop in the pause after E1: the list stays as the owner left it — E3 still
+    unticked, never ticked again by a redraw, so pressing Download selected again takes only what
+    the owner chose — and the stop is not held up by a redraw."""
+    settings = {"delayMinS": 3, "delayMaxS": 3}  # a pause after E1 to press Stop in
+    with (
+        FakeTikTok() as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
+    ):
+        page = ext.page
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
+        ext.see_episodes(SERIES_ID)
+        table = page.locator("#episode-table tbody")
+        table.locator("input[data-number='3']").set_checked(False)
+        ticked = lambda: [  # noqa: E731
+            box.get_attribute("data-number")
+            for box in table.locator("input[type=checkbox]").all()
+            if box.is_checked()
+        ]
+        assert ticked() == ["1", "2", "4"]
+        jobs = ext.finished_jobs()
+        page.click("#download-selected-button")
+        ext.wait_for(lambda: _episode_file(ext, 1).exists(), 60, "E1 was not saved")
+        ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 10, "no pause")
+        page.click("#stop-button")
+        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30, "not stopped")
+        entry = ext.history()[0]
+        assert (entry["kind"], entry["stopped"]) == ("selection", "stopped by you")
+        assert ticked() == ["1", "2", "4"]  # E3 never ticked again
+        assert len(_media_of(server, MAIN_ITEMS[3])) == 0
+
 
 def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
     tmp_path: Path,
 ) -> None:
     """HTTP 429 from the CDN: the stop, the 30-minute cooldown stored, the rest of the series
-    `stopped`, the batch's next series `not started` with no request, and the next action —
-    the popup's "Download this series" — refused by the cooldown with zero requests."""
+    `stopped`, the batch's next series `not started` with no request, and the next actions — a
+    paste into the box (nothing queued: the text stays there, the status line names the
+    cooldown; a second link pasted after it lands on a line of its own, never glued onto the
+    first), the popup's "Download this series" (its job refused at the gate) — refused by the
+    cooldown with zero requests."""
     with (
         FakeTikTok(cdn_rate_limit=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        entry = ext.download_all(f"{MAIN_LINK}\n{SECOND_LINK}")
+        entry = ext.paste_and_wait(f"{MAIN_LINK}\n{SECOND_LINK}")
         main, second = entry["series"]
         rows = _rows(main)
         assert rows[1]["status"] == "failed-rate-limited" and rows[1]["message"] == MEDIA_RATE_LIMIT
@@ -415,10 +483,53 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
 
         page = ext.page
         ext.wait_for(lambda: page.locator("#cooldown-banner").is_visible(), 10)
-        assert page.locator("#download-all-button").is_disabled()
-        assert page.locator("#load-button").is_disabled()
         requests = len(server.requests)
         jobs = ext.finished_jobs()
+        ext.paste(MAIN_LINK)  # refused: no job, the paste lands in the box
+        ext.wait_for(
+            lambda: page.input_value("#links") == MAIN_LINK, 10, "the paste is not in the box"
+        )
+        ext.paste(SECOND_LINK)  # refused too: on a line of its own, never glued onto the first
+        ext.wait_for(
+            lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}",
+            10,
+            "the second paste is not on a line of its own",
+        )
+        # what the owner types right after it is an edit of its own: one Ctrl+Z takes back the
+        # typing, never the link the page put there with it; the page's own edit is one of
+        # Chrome's too: the next Ctrl+Z takes it back, Ctrl+Shift+Z brings it again. One key:
+        # the cooldown's countdown, rewritten every second, would split longer typing in two.
+        page.keyboard.type("x")
+        ext.wait_for(lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}x", 10)
+        page.keyboard.press("ControlOrMeta+Z")
+        ext.wait_for(
+            lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}",
+            10,
+            "Ctrl+Z did not take back the typing alone",
+        )
+        page.keyboard.press("ControlOrMeta+Z")
+        ext.wait_for(lambda: page.input_value("#links") == MAIN_LINK, 10, "Ctrl+Z did not undo")
+        page.keyboard.press("ControlOrMeta+Shift+Z")
+        ext.wait_for(
+            lambda: page.input_value("#links") == f"{MAIN_LINK}\n{SECOND_LINK}",
+            10,
+            "Ctrl+Shift+Z did not redo",
+        )
+        # the box shows 4 rows: a link the page lands below them is scrolled into view, as
+        # Chrome's own paste is — never a paste that seems to do nothing
+        for n in range(3, 7):
+            link = f"https://www.tiktok.com/shortdrama/episode/76993937702567823{n:02d}/1"
+            ext.paste(link)
+            ext.wait_for(lambda link=link: page.input_value("#links").endswith(f"\n{link}"), 10)
+        assert page.evaluate(
+            "() => { const box = document.getElementById('links');"
+            " return box.scrollHeight > box.clientHeight"
+            " && box.scrollTop + box.clientHeight >= box.scrollHeight - 1; }"
+        ), "the last link pasted is out of the box's view"
+        status = page.locator("#input-status")
+        assert (status.text_content() or "").startswith("TikTok refused a request at ")
+        assert "error" in (status.get_attribute("class") or "")
+        assert ext.finished_jobs() == jobs and ext.idle()
         popup = ext.context.new_page()
         popup.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
         popup.evaluate(
@@ -426,7 +537,7 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
         )
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30)
         refused = ext.history()[0]
-        assert refused["kind"] == "load"
+        assert (refused["kind"], refused["label"]) == ("batch", f"Series {SERIES_ID}")
         assert str(refused["error"]).startswith("TikTok refused a request at ")
         assert len(server.requests) == requests
         assert [url for url in ext.tab_urls() if url.endswith("/app.html")] == [ext.app_url]
@@ -436,7 +547,9 @@ def test_f_batch_of_three_series_rests_between_them_and_never_interleaves(tmp_pa
     """Three series, strictly one after the other, each listed right before its own downloads,
     with one announced series rest between two series that contact TikTok."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        entry = ext.download_all("\n".join([MAIN_LINK, f"# a comment\n{SECOND_LINK}", THIRD_LINK]))
+        entry = ext.paste_and_wait(
+            "\n".join([MAIN_LINK, f"# a comment\n{SECOND_LINK}", THIRD_LINK])
+        )
         lines = [series["line"] for series in entry["series"]]
         assert lines == [
             "complete: 4 of 5 (4 downloaded) — 1 locked (5)",
@@ -468,7 +581,7 @@ def test_g_truncated_transfer_fails_without_a_second_mirror(tmp_path: Path) -> N
         FakeTikTok(truncate_media=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = _rows(series)
         for number in (1, 2, 3):
@@ -492,7 +605,7 @@ def test_h_expired_play_urls_cost_one_rediscovery_then_save(tmp_path: Path) -> N
         FakeTikTok(expired_media_first_visit=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         assert _statuses(series) == ["done"] * 4 + ["skipped-locked"]
         assert entry["refreshes"] == 1
@@ -505,7 +618,7 @@ def test_i_captcha_stops_and_starts_the_cooldown(tmp_path: Path) -> None:
     """A verification page instead of the series: the batch stops (`captcha`), the cooldown
     starts (source `discovery`), the next series is not started, and the tab is closed."""
     with FakeTikTok(challenge=True) as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        entry = ext.download_all(f"{MAIN_LINK}\n{SECOND_LINK}")
+        entry = ext.paste_and_wait(f"{MAIN_LINK}\n{SECOND_LINK}")
         main, second = entry["series"]
         assert main["error_kind"] == "captcha"
         assert str(main["error"]).startswith("TikTok is asking for a verification (captcha)")
@@ -531,7 +644,7 @@ def test_i_captcha_after_the_first_page_stops_and_starts_the_cooldown(tmp_path: 
         FakeTikTok(challenge_after_first_page=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        entry = ext.download_all(f"{MAIN_LINK}\n{SECOND_LINK}")
+        entry = ext.paste_and_wait(f"{MAIN_LINK}\n{SECOND_LINK}")
         main, second = entry["series"]
         assert main["error_kind"] == "captcha"
         assert str(main["error"]).startswith("TikTok is asking for a verification (captcha)")
@@ -551,7 +664,7 @@ def test_i_login_redirect_stops_without_a_cooldown(tmp_path: Path) -> None:
         FakeTikTok(require_login=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        entry = ext.download_all(f"{MAIN_LINK}\n{SECOND_LINK}")
+        entry = ext.paste_and_wait(f"{MAIN_LINK}\n{SECOND_LINK}")
         main, second = entry["series"]
         assert main["error_kind"] == "login" and main["error"] == LOGIN_REDIRECT
         assert second["error"] == f"not started: batch stopped in {SERIES_ID} (login required)"
@@ -568,12 +681,14 @@ def _job_rests(entry: dict[str, Any]) -> list[str]:
 def test_j_a_redirect_is_never_followed(tmp_path: Path) -> None:
     """A 302 from the fake CDN to a host the test copy does not cover (`localhost`) is never
     followed: not for a video — refused like a 403, the next URL, `failed-unavailable`, nothing
-    saved — and not for a thumbnail of **Load list** (none shown): no request reaches that host."""
+    saved — and not for a thumbnail of **See episodes** (none shown): no request reaches that
+    host."""
     with (
         FakeTikTok(redirect_media=True, redirect_covers=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        ext.load(MAIN_LINK)
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
+        ext.see_episodes(SERIES_ID)
         for number, item in MAIN_ITEMS.items():  # each row's thumbnail is asked for once in view
             row = ext.page.locator(f"#episode-table tbody tr[data-number='{number}']")
             row.locator("td.cover-cell").scroll_into_view_if_needed()
@@ -584,7 +699,7 @@ def test_j_a_redirect_is_never_followed(tmp_path: Path) -> None:
                 "no thumbnail was asked for",
             )
         ext.wait_for(lambda: len(server.cover_requests) == 5, 20, "no thumbnail was asked for")
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = _rows(series)
         assert _statuses(series) == ["failed-unavailable"] * 3 + ["failed", "skipped-locked"]
@@ -602,14 +717,16 @@ def test_k_a_selection_lists_the_series_again_for_the_session_logged_in_now(
     """**Download all available** never takes the list shown — someone else, or nobody, may be
     logged in by now: listed with the session (episode 3 unlocked), logged out, the selection lists
     the series again after the rest between jobs, and that list decides — episode 3 is skipped
-    without a request; nothing of the earlier session's list is used."""
+    without a request; nothing of the earlier session's list is used. A paste of the drama on
+    screen then draws its own fresh list too, never the earlier one."""
     settings = {"restMinS": 0.5, "restMaxS": 6}
     with (
         FakeTikTok() as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
     ):
+        ext.keep_library((THIRD_SERIES_ID, THIRD_SERIES_NAME, 4))
         ext.add_session_cookie(SESSION_VALUE)
-        ext.load(THIRD_LINK)
+        ext.see_episodes(THIRD_SERIES_ID)
         table = ext.page.locator("#episode-table tbody")
         assert table.locator("tr[data-number='3']").get_attribute("data-access") == "unlocked"
         ext.context.clear_cookies()  # logged out of the fake TikTok
@@ -624,13 +741,24 @@ def test_k_a_selection_lists_the_series_again_for_the_session_logged_in_now(
         assert len(_job_rests(entry)) == 1  # the rest came first: the list follows right after it
         assert table.locator("tr[data-number='3']").get_attribute("data-access") == "locked"
 
+        # a paste of the drama on screen (a batch; Look again, so that it is listed) draws the list
+        # it listed right before its downloads, never the earlier one shown
+        ext.add_session_cookie(SESSION_VALUE)
+        ext.see_episodes(THIRD_SERIES_ID)
+        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "unlocked"
+        ext.context.clear_cookies()  # logged out again
+        pasted = ext.paste_and_wait(THIRD_LINK, recheck=True)
+        assert _rows(pasted["series"][0])[3]["status"] == "skipped-locked"
+        assert not server.item_list_requests[-1].logged_in
+        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "locked"
+
 
 def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
     tmp_path: Path,
 ) -> None:
     """The rest between two jobs that contact TikTok counts from the last contact, whatever ended
-    the job — a **Load list**, a run the user stopped, a run whose tab was closed (the contact is
-    stored as it happens) — so the next job rests before its first request."""
+    the job — a listing (**See episodes**), a run the user stopped, a run whose tab was closed (the
+    contact is stored as it happens) — so the next job rests before its first request."""
     settings = {"delayMinS": 1, "delayMaxS": 1, "restMinS": 0.5, "restMaxS": 6}
     with (
         FakeTikTok() as server,
@@ -642,15 +770,15 @@ def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
             assert isinstance(stored, (int, float))
             return float(stored)
 
+        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))
         started = time.time()
-        ext.load(SECOND_LINK)
+        ext.see_episodes(SECOND_SERIES_ID)
         assert contact() >= started  # a listing contacts TikTok too
-        assert len(_job_rests(ext.download_all(SECOND_LINK))) == 1
+        assert len(_job_rests(ext.paste_and_wait(SECOND_LINK))) == 1
 
         page = ext.page
-        page.fill("#links", MAIN_LINK)
         jobs = ext.finished_jobs()
-        page.click("#download-all-button")
+        ext.paste(MAIN_LINK)
         ext.wait_for(lambda: bool(_media_of(server, MAIN_ITEMS[1])), 30, "no first episode")
         seen = time.time()
         ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 30, "no pause")
@@ -658,17 +786,16 @@ def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30, "not stopped")
         assert ext.history()[0]["stopped"] is not None
         assert contact() >= seen  # the stopped run's end
-        assert len(_job_rests(ext.download_all(THIRD_LINK))) == 1
+        assert len(_job_rests(ext.paste_and_wait(THIRD_LINK))) == 1
 
-        page.fill("#links", MAIN_LINK)
-        page.click("#download-all-button")
+        ext.paste(MAIN_LINK)
         ext.wait_for(lambda: bool(_media_of(server, MAIN_ITEMS[2])), 30, "no second episode")
         seen = time.time()
         ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 30, "no pause")
         page.close()  # mid-run: the job's own clean-up never runs
         ext.reopen_app()
         assert contact() >= seen - 1  # stored when the episode was fetched
-        assert len(_job_rests(ext.download_all(MAIN_LINK))) == 1
+        assert len(_job_rests(ext.paste_and_wait(MAIN_LINK))) == 1
 
 
 def test_m_the_tiktok_tab_is_closed_when_the_app_tab_goes_away_mid_listing(tmp_path: Path) -> None:
@@ -679,6 +806,7 @@ def test_m_the_tiktok_tab_is_closed_when_the_app_tab_goes_away_mid_listing(tmp_p
         FakeTikTok(slow_pagination_s=20) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
+        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         series_page = f"{server.base_url}/shortdrama/episode/"
         watcher = ext.context.new_page()
         watcher.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
@@ -692,8 +820,7 @@ def test_m_the_tiktok_tab_is_closed_when_the_app_tab_goes_away_mid_listing(tmp_p
 
         for how in ("close", "reload"):
             lists = len(server.item_list_requests)
-            ext.page.fill("#links", MAIN_LINK)
-            ext.page.click("#load-button")
+            ext.page.click(ext.card_button(SERIES_ID, "browse"))
             # the page's own list request, the repeated first page, then the slow second page
             ext.wait_for(lambda: len(server.item_list_requests) >= lists + 3, 30, "not listing")  # noqa: B023
             assert len(tiktok_tabs()) == 1
@@ -715,10 +842,10 @@ def test_n_a_file_deleted_right_after_a_run_is_downloaded_again(tmp_path: Path) 
         FakeTikTok() as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=chrome_rate_limit) as ext,
     ):
-        assert ext.download_all(MAIN_LINK)["series"][0]["status"] == "complete"
+        assert ext.paste_and_wait(MAIN_LINK)["series"][0]["status"] == "complete"
         _episode_file(ext, 2).unlink()
         media = len(server.media_requests)
-        (series,) = ext.download_all(MAIN_LINK)["series"]
+        (series,) = ext.paste_and_wait(MAIN_LINK)["series"]
         assert _statuses(series) == [
             "skipped-exists",
             "done",
@@ -738,7 +865,7 @@ def test_o_a_download_id_chrome_hands_out_again_is_not_the_episode(tmp_path: Pat
     profile = tmp_path / "profile"
     with FakeTikTok() as server:
         with ExtensionHarness(tmp_path, server.base_url, profile=profile) as ext:
-            ext.download_all(MAIN_LINK)
+            ext.paste_and_wait(MAIN_LINK)
             state = ext.series_state(SERIES_ID)
             assert state is not None
             ids = sorted(state["episodes"][str(n)]["download_id"] for n in range(1, 5))
@@ -758,7 +885,7 @@ def test_o_a_download_id_chrome_hands_out_again_is_not_the_episode(tmp_path: Pat
             )
             assert sorted(reused) == ids  # the very ids the episodes were saved under
             media = len(server.media_requests)
-            (series,) = ext.download_all(MAIN_LINK)["series"]
+            (series,) = ext.paste_and_wait(MAIN_LINK)["series"]
             assert _statuses(series) == ["done"] * 4 + ["skipped-locked"]
             assert len(server.media_requests) == media + 4
             assert [path.name for path in ext.saved_files() if path.suffix == ".mp4"] == [
@@ -789,7 +916,7 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
         FakeTikTok(truncate_media=True, drm_media=drm) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        first = ext.download_all(MAIN_LINK)
+        first = ext.paste_and_wait(MAIN_LINK)
         (series,) = first["series"]
         assert _statuses(series) == [
             "failed",
@@ -867,7 +994,7 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
 
 
 def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Path) -> None:
-    """The same failing run as test_p (**Download all**: a batch, so the locked episode has a row
+    """The same failing run as test_p (a paste: a batch, so the locked episode has a row
     too), with a session cookie set: at its end exactly one report is saved as
     `DramaFetch/reports/<Series> - did not download <date time>.json` — a JSON document with the
     job, the series, every episode that did not download (the failed ones and the locked one)
@@ -882,7 +1009,7 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         ext.add_session_cookie(SESSION_VALUE)  # so that the privacy check means something
-        entry = ext.download_all(MAIN_LINK)
+        entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         assert _statuses(series) == [
             "failed",
@@ -1002,8 +1129,8 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
 ) -> None:
     """The fourth series (the owner's real payload shape of 2026-11-06, `isLimitedFree`), the CDN
     serving episode 3 as TikTok served the owner's 7 — the whole file by size, a header that plays
-    2 s of the 10 s the list announces. **Load list** shows episodes 1-2 `free` and 3 `locked` with
-    the list's own hint (`plays 2 s of 10 s`: `music.duration` against `video.duration`,
+    2 s of the 10 s the list announces. **See episodes** shows episodes 1-2 `free` and 3 `locked`
+    with the list's own hint (`plays 2 s of 10 s`: `music.duration` against `video.duration`,
     no request made; `IsFreeIntro: false` / `IsPreview` / `PreviewType` lock nothing). **Download
     all available** saves 1-2 and asks nothing for 3. **Download selected** with 3 ticked asks
     for it once: `failed-unavailable` with the short-served message, nothing saved for it, no
@@ -1022,7 +1149,8 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         FakeTikTok(short_header_media=short) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        listing = ext.load(FOURTH_LINK)
+        ext.keep_library((FOURTH_SERIES_ID, FOURTH_SERIES_NAME, 3))
+        listing = ext.see_episodes(FOURTH_SERIES_ID)
         assert listing["series"][0]["episodes"] == 3
         page = ext.page
         table = page.locator("#episode-table tbody")
@@ -1168,7 +1296,7 @@ def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_history_c
         ExtensionHarness(tmp_path, server.base_url, test_settings={"maxResultRows": 5}) as ext,
     ):
         page = ext.page
-        entry = ext.download_all("\n".join([MAIN_LINK, SECOND_LINK, THIRD_LINK]))
+        entry = ext.paste_and_wait("\n".join([MAIN_LINK, SECOND_LINK, THIRD_LINK]))
         main, second, third = entry["series"]
         assert _statuses(main) == ["done", "failed-unavailable", "done", "done", "skipped-locked"]
         assert _statuses(second) == ["done"] * 3
@@ -1231,7 +1359,7 @@ def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_history_c
         assert len(report["summary"]) == 4
 
         # the next job: a clean table, no notice (four rows under their header fit the five)
-        again = ext.download_all(SECOND_LINK, recheck=True)
+        again = ext.paste_and_wait(SECOND_LINK, recheck=True)
         assert _statuses(again["series"][0]) == ["skipped-exists"] * 3
         assert _table_rows(page, "#result-table") == [
             ("1", "skipped-exists"),

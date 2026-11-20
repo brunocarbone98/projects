@@ -37,11 +37,14 @@ export class UnsupportedUrlError extends Error {
 }
 
 // The patterns of urls.py, written lower-case and matched against `caseless(text)` — that is
-// re.IGNORECASE as Python applies it (`\u017f`, `\u0131`, `\u0130` and the Kelvin sign included). Python's `.`
-// is `[^\n]` (JavaScript's also stops at \r, U+2028, U+2029) and its `$` also matches before a
-// final newline: `(?=\n?$)`.
+// re.IGNORECASE as Python applies it (`\u017f`, `\u0131`, `\u0130` and the Kelvin sign included). Python's `\S`
+// is `[^${PY_SPACE}]` (JavaScript's own `\S` differs on U+001C-U+001F, U+0085 and U+FEFF) and its `$`
+// also matches before a final newline: `(?=\n?$)`.
 const HOST = String.raw`https?://(?:www\.|m\.)?tiktok\.com`;
-const TAIL = String.raw`/?(?:[?#][^\n]*)?(?=\n?$)`;
+// a query or a fragment runs to the end of the line and holds no whitespace and no other TikTok
+// address: two links on one line — a space between them, a comma, or none at all — are refused,
+// never read as the first one with the second hidden in its query
+const TAIL = String.raw`/?(?:[?#](?:(?!tiktok\.com\/)[^${PY_SPACE}])*)?(?=\n?$)`;
 const SERIES_EPISODE_RE = new RegExp(
   String.raw`^${HOST}/shortdrama/episode/(?<id>[0-9]{15,22})(?:/(?<n>[0-9]{1,4}))?${TAIL}`,
   "u",
@@ -153,14 +156,17 @@ export function videoPageUrl(itemId, author = null, base = TIKTOK_BASE_URL) {
 
 /**
  * The series a tab shows — a short-drama page URL of TikTok (or, in test mode, of `base`) — or
- * null: a bare id, a video page or any other page is no series tab.
+ * null: a bare id, a video page or any other page is no series tab. The address of ONE page, as
+ * Chrome gives a tab's or a link's: its query and fragment are not read — they name no series,
+ * and may even hold another TikTok address (a referer, say), which the parser refuses in a
+ * pasted line (two links glued together) but which is never a second link here.
  * @param {string} url
  * @param {string} [base]
  * @returns {SeriesRef | null}
  */
 export function seriesRefFromUrl(url, base = TIKTOK_BASE_URL) {
   if (typeof url !== "string") return null;
-  let text = url;
+  let text = url.replace(/[?#][\s\S]*$/, "");
   const root = trimBase(base);
   if (root !== TIKTOK_BASE_URL && text.startsWith(`${root}/`)) {
     text = TIKTOK_BASE_URL + text.slice(root.length);

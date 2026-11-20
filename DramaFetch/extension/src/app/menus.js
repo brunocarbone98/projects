@@ -6,12 +6,14 @@
  * as **Download this favorite drama** on the user's TikTok profile, whose **Favorites** → **Drama**
  * entries are buttons, not links ({@link MENU_CARD}). A click does what the popup's **Download this
  * series** does: the background worker opens (or brings to the front) the DramaFetch tab, which
- * lists the series; nothing is downloaded until a download button is pressed there. Of what Chrome
- * passes with a click (the link's and the page's addresses, any selected text, the tab), DramaFetch
- * reads only the link's address — or, for the page item, the right-clicked page's; for the card
- * item, the tab and the frame, which it asks for the card (`src/content/cards.js`) — and keeps
- * nothing else; the items need the `contextMenus` permission only. Pure: no `chrome.*`, no DOM —
- * `background.js` puts the items in place and answers the clicks.
+ * downloads the whole series — DramaFetch 1.7.0, the owner's decision of 2026-11-20: the `batch`
+ * job a paste of it queues, the series listed right before its downloads (the card item: once its
+ * job has found the card's ONE drama). Of what Chrome passes with a click (the link's and the
+ * page's addresses, any selected text, the tab), DramaFetch reads only the link's address — or, for
+ * the page item, the right-clicked page's; for the card item, the tab and the frame, which it asks
+ * for the card (`src/content/cards.js`) — and keeps nothing else; the items need the `contextMenus`
+ * permission only. Pure: no `chrome.*`, no DOM — `background.js` puts the items in place and
+ * answers the clicks.
  */
 
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
@@ -44,7 +46,7 @@ const TIKTOK_HOSTS = ["www.tiktok.com", "m.tiktok.com", "tiktok.com"];
  * Where the link item shows (Chrome's match patterns; `*` in the scheme is http or https): links
  * under `/shortdrama/` on TikTok's hosts. The series is read with the box's own parser
  * (`urls.seriesRefFromUrl`), so a link there that names no series (a list, a category) reaches the
- * DramaFetch tab as it is, and the tab says why it lists nothing, keeping what its box holds.
+ * DramaFetch tab as it is, and the tab says why it downloads nothing, leaving its box alone.
  */
 export const SHORT_DRAMA_LINK_PATTERNS = Object.freeze(TIKTOK_HOSTS.map((host) => `*://${host}/shortdrama/*`));
 
@@ -53,7 +55,7 @@ export const SHORT_DRAMA_LINK_PATTERNS = Object.freeze(TIKTOK_HOSTS.map((host) =
  * page), `/shortdrama/detail/…`, `/shortdrama/series/…` and `/shortdrama/<series id>` (the id is
  * ASCII digits: one pattern per first digit) — never a list of dramas, whose own address names no
  * series. A page there whose address names no series all the same reaches the tab as it is, and
- * the tab says why it lists nothing.
+ * the tab says why it downloads nothing.
  */
 export const SERIES_PAGE_PATTERNS = Object.freeze(
   TIKTOK_HOSTS.flatMap((host) => [
@@ -89,7 +91,7 @@ export function menuItems(linkTitle, pageTitle, cardTitle) {
 }
 
 /**
- * What a click of the link or the page item asks the DramaFetch tab to list — what the popup hands
+ * What a click of the link or the page item asks the DramaFetch tab to download — what the popup hands
  * it: the series id of the link, or of the right-clicked page (the frame's address, which Chrome
  * matched the page item against — Chrome 116 sends it only from inside a frame —, else the page's);
  * the address as it is when it names no series; null for anything else (the card item, which the
