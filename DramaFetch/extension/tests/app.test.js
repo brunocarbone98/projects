@@ -2122,6 +2122,10 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(press(page), true);
     assert.equal(links.value, "");
     assert.deepEqual(module.queuedJobs().map(jobSummary).at(-1), ["batch", "2 series", ["7699393770256782376", "7699393770256782375"], false, false]);
+    // and what the note after a paste says of such a box is what Enter would do: take it
+    links.value = "7699393770256782371\n\ufeff7699393770256782372";
+    assert.equal(paste(page, "7699393770256782373"), true);
+    assert.equal(status.textContent, `Series 7699393770256782373 queued: it downloads whole, with the usual pauses. · ${kept}`);
     // the note is decided once the paste is queued: the box naming the series the paste queues
     // gets none (Enter would only say it is waiting already)
     links.value = "7699393770256782303";
@@ -2162,7 +2166,7 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
     assert.equal(paste(page, video), true);
     assert.equal(links.value, `${first}\n${video}`);
     page.editor.on = true;
-    assert.equal(module.queuedJobs().length, 15);
+    assert.equal(module.queuedJobs().length, 16);
   } finally {
     page.restore();
   }
@@ -2246,6 +2250,72 @@ test("See episodes: an episode a download found encrypted (DRM) shows as locked,
     assert.deepEqual(rows(page)?.[1]?.[3], [
       "protegido con DRM (lo detectó una ejecución anterior): DramaFetch no lo descifra; para intentarlo de nuevo, márcalo y pulsa “Descargar selección”",
     ]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("See episodes of drama A, then of drama B: until B's list is drawn, the page acts on A's list on screen; then on B's — the list, its counts and what its buttons take change in one step", async () => {
+  const other = "7699393770256782399";
+  /**
+   * @param {string} seriesId
+   * @param {string} name
+   * @param {number[]} drm the episodes a download found encrypted
+   */
+  const records = (seriesId, name, drm) => {
+    const state = newState(seriesId, name);
+    for (const number of drm) {
+      const result = { episode: episode(number, { seriesId }), status: /** @type {const} */ ("failed-unavailable"), path: null, message: DRM_MESSAGE };
+      record(state, result, { exists: () => true, now: 1_800_000_000 });
+    }
+    return state;
+  };
+  const page = await fakePage({ storage: { [`series:${SERIES_ID}`]: records(SERIES_ID, "Series A", [2]), [`series:${other}`]: records(other, "Series B", [1, 2, 3, 4]) } });
+  try {
+    /**
+     * See episodes of `seriesId` (E05 paid and locked), Chrome's download history answering when
+     * `refresh` resolves.
+     * @param {string} seriesId
+     * @param {string} name
+     * @param {() => Promise<void>} refresh
+     */
+    const seeEpisodes = (seriesId, name, refresh) => {
+      const ref = { kind: /** @type {const} */ ("series"), seriesId, episodeHint: null, sourceUrl: seriesId };
+      /** @type {import("../src/app/app.js").Job} */
+      const job = { id: 99, kind: "load", label: `List series ${seriesId}`, refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false };
+      const engine = page.module.buildEngine(job, { pauses: [], inputs: [], taking: true });
+      engine.sleep = async () => undefined;
+      const episodes = [1, 2, 3, 4].map((number) => episode(number, { seriesId })).concat([episode(5, { locked: true, seriesId })]);
+      engine.discover = async () => series(episodes, name, seriesId);
+      engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
+        /** @type {unknown} */ ({ exists: () => false, refresh, completedAt: () => null, remember() {} })
+      );
+      return page.module.runLoad(job, engine, {});
+    };
+    const shown = () => [page.element("series-title").textContent, page.element("series-meta").textContent, page.element("download-available-button").disabled];
+    assert.equal(await seeEpisodes(SERIES_ID, "Series A", async () => undefined), null);
+    const listA = ["Series A", "5 episodes listed, 3 available (free or unlocked by your account), 0 already on disk.", false];
+    assert.deepEqual(shown(), listA);
+    /** @type {() => void} */
+    let answer = () => undefined;
+    const history = new Promise((resolve) => {
+      answer = () => resolve(undefined);
+    });
+    const drawing = seeEpisodes(other, "Series B", () => /** @type {Promise<void>} */ (history));
+    for (let turns = 0; turns < 20; turns += 1) await page.turn();
+    // B listed, its list not drawn yet (Chrome's download history not answered): A's list, counts
+    // and buttons, all of a piece — Download all available takes what A's list counts
+    assert.deepEqual(shown(), listA);
+    page.hold(); // the job's tabs.getCurrent never answers: it runs, and makes no request
+    page.element("download-available-button").fire("click");
+    await page.turn();
+    assert.deepEqual(
+      page.module.queuedJobs().map((job) => [job.kind, job.refs[0]?.seriesId, job.numbers, job.includeLocked]),
+      [["selection", SERIES_ID, [1, 3, 4], false]],
+    );
+    answer();
+    assert.equal(await drawing, null);
+    assert.deepEqual(shown(), ["Series B", "5 episodes listed, 0 available (free or unlocked by your account), 0 already on disk.", true]);
   } finally {
     page.restore();
   }

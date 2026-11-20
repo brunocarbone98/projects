@@ -1420,6 +1420,10 @@ async function runJob(job) {
   let stopping = null;
   /** @type {SeriesRun[] | null} the runs the job produced (none when it threw before producing them) */
   let runs = null;
+  /** whether the job got past its gates (the cooldown, a refused write): what it downloads is recorded as it goes */
+  let worked = false;
+  /** @type {Series | null} a selection job's fresh list of its series, listed for this job */
+  let fresh = null;
   try {
     const cooldown = await checkCooldown(engine); // the gate, before the job's first request
     if (cooldown !== null) {
@@ -1432,6 +1436,7 @@ async function runJob(job) {
       return;
     }
     await applyRefererRule(baseUrl());
+    worked = true;
     if (job.kind === "load") {
       stop = await runLoad(job, engine, entry);
     } else if (job.kind === "favorites") {
@@ -1452,7 +1457,7 @@ async function runJob(job) {
       const run = await runSelectionJob(engine, /** @type {SeriesRef} */ (job.refs[0]), job.numbers, {
         lastContactAt: app.lastContactAt,
       });
-      if (run.series !== null) app.loaded = { series: run.series, resolvedAt: now() };
+      fresh = run.series;
       runs = [run];
       renderReportLine(run);
       renderBatchTable([run]);
@@ -1464,10 +1469,6 @@ async function runJob(job) {
       }
     }
     entry["refreshes"] = engine.downloader.refreshes;
-    const listed = app.loaded;
-    if ((job.kind === "batch" || job.kind === "selection") && listed !== null && job.refs.some((ref) => ref.seriesId === listed.series.seriesId)) {
-      await renderSeries(listed.series, engine.view); // the "on disk" badges now (Chrome's history only)
-    }
   } catch (error) {
     if (error instanceof StopRequested) {
       entry["error"] = stop = error.message; // stored in English, like every engine text
@@ -1509,6 +1510,31 @@ async function runJob(job) {
       (episode) => engine.downloader.traceOf(episode),
       jobRecord.inputs,
     );
+    if (worked) await redrawListed(job, fresh, engine.view);
+  }
+}
+
+/**
+ * After a download job — however it ended: done, stopped by hand or by a refusal, failed —, the
+ * episode list (**See episodes**) drawn again: a selection job's fresh list of its series (listed
+ * again for this job: the list the page then acts on, as before), else the list on screen when it
+ * is a series the job downloaded — its "on disk" badges, its counts and the DRM verdicts the job
+ * recorded, which **Download all available** then leaves out. Every episode's record is stored as
+ * it is made, so a stop loses none of them. Never a failure that masks how the job ended.
+ * @param {Job} job
+ * @param {Series | null} fresh
+ * @param {DownloadsView} view
+ */
+async function redrawListed(job, fresh, view) {
+  if (job.kind !== "batch" && job.kind !== "selection") return;
+  const listed = app.loaded;
+  const onScreen = listed !== null && job.refs.some((ref) => ref.seriesId === listed.series.seriesId) ? listed.series : null;
+  const series = fresh ?? onScreen;
+  if (series === null) return;
+  try {
+    await renderSeries(series, view);
+  } catch {
+    // the list stays as it was drawn; the job's end is said and stored already
   }
 }
 
@@ -1591,7 +1617,6 @@ export async function runLoad(job, engine, entry) {
     entry["series"] = [{ series_id: ref.seriesId, name: null, error: message, episodes: 0 }];
     return null;
   }
-  app.loaded = { series, resolvedAt: now() };
   entry["series"] = [
     { series_id: series.seriesId, name: series.name, error: null, episodes: series.episodes.length, warnings: series.warnings },
   ];
@@ -3495,15 +3520,19 @@ function accessBadge(episode) {
 }
 
 /**
+ * Show `series` in **See episodes** — and make it the list the page acts on (`app.loaded`): what
+ * Chrome's download history and the stored records say is read first; then, in ONE synchronous
+ * step, the list the buttons act on, its DRM verdicts, title, counts and rows change together —
+ * never one series' rows and counts on screen while the buttons act on another.
  * @param {Series} series
  * @param {DownloadsView} view
  */
 async function renderSeries(series, view) {
-  $("series-card").hidden = false;
-  const name = episodeContext(series).seriesName;
-  $("series-title").textContent = name;
   await view.refresh(); // what Chrome's download history says is still on disk
   const state = readState(await readSeriesState(series.seriesId), series.seriesId);
+  app.loaded = { series, resolvedAt: now() };
+  $("series-card").hidden = false;
+  $("series-title").textContent = episodeContext(series).seriesName;
   const onDisk = new Set(state !== null ? doneEntries(state, (entry) => view.exists(entry)).map(([number]) => number) : []);
   // an episode an earlier download found encrypted (DRM): TikTok's list may call it free, but the
   // engine skips it again without a request — shown as the locked one it is, with that verdict
@@ -3848,7 +3877,8 @@ function editBox(box, text, from, to) {
  * was pasted over go, as with any paste, and any other selection is left as it was (the paste was
  * a download, not an edit: half a line removed could leave an id that names another series);
  * whatever else the box held — a refused paste's lines, typed ids — stays there, never lost, and
- * the status line says so when Enter would download something of it ({@link enterTakes}).
+ * the status line says so when Enter would download something of it ({@link enterTakes}) — not
+ * after a paste over part of a line: that line is one the user meant to replace.
  * Refused, it lands there for the user to correct (then Enter), the reason on the status line
  * ({@link pasteLanding}); in a read-only tab, as any paste does. Every change the page makes to the
  * box is an edit Ctrl+Z takes back ({@link editBox}).
