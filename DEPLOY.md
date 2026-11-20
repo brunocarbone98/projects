@@ -140,7 +140,9 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   together (the web is the public entrypoint, the rest stay on `localhost`). It's a
   pragmatic packaging for a portfolio — the code is still four separate apps. If
   any process exits, the container restarts. Every process runs as the image's unprivileged
-  `node` user, never root.
+  `node` user, never root. The build context leaves out every local `.env` and `.env.*` file except
+  the `.env.example` templates (`.dockerignore`), so a local `docker build` never bakes a secret
+  into the image; Railway builds from git, where those files are ignored anyway.
 - **Rate limits per visitor:** the web reaches the API over `localhost` (Railway publishes only
   the web's port), so the web forwards each visitor's address and the API trusts it from loopback only. The address is
   the public one Railway's edge puts in `X-Real-IP` (Railway docs: Networking → Public Networking →
@@ -158,6 +160,18 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   them. To check after a deploy:
   the 11th wrong password in a row for one account answers "Too many attempts", and the right
   password still signs in from another network (a phone on mobile data).
+- **Passwords:** stored as scrypt hashes in a PHC string, `$scrypt$ln=15,r=8,p=3$<salt>$<key>`
+  (N=2^15, r=8, p=3: 32 MiB and about 0.2 s per hash, one of the settings OWASP lists as equivalent
+  to N=2^17, r=8, p=1 at a quarter of its memory). A hash stored before this format
+  (`scrypt$<salt>$<key>`, N=2^14, r=8, p=1) still signs in and is replaced at that account's next
+  successful sign-in, so nothing needs migrating. A login for an email with no account does the
+  same scrypt work as a wrong password, so the response time does not tell whether the email is
+  registered (an account still on an older hash answers faster until its next sign-in).
+  **Rollback:** the release before this format refuses the new hashes (it reads none of them as a
+  match), so an account that signed in on this release cannot sign in on that one until this release
+  is back — the public demo accounts included. Nothing else breaks, and no account opens. To check
+  after a deploy: sign in twice as `ana@example.com` / `Password123!` (the first sign-in re-hashes
+  the password, the second reads the new hash).
 - **Local dev is unchanged:** `docker compose up -d` (Postgres + the Python
   services) and `pnpm dev` (web + api) — see `FullStackHub/README.md`. An `apps/api/.env`
   copied before #74 needs the `JWT_ACCESS_SECRET` line from `.env.example` again: the API refuses

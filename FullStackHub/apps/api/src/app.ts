@@ -2,7 +2,7 @@ import cors from "cors";
 import express, { type Express } from "express";
 import helmet from "helmet";
 import { errorHandler, notFoundHandler } from "./http/error-handler.js";
-import { docsBootScriptHash, docsHtml, openapiDocument } from "./openapi.js";
+import { docsBootScriptHash, docsHtml, openapiDocument, SCALAR_SCRIPT_URL } from "./openapi.js";
 import {
   createAuthRouter,
   DEFAULT_AUTH_LIMITS,
@@ -23,15 +23,17 @@ export interface AppOptions {
   authRateLimits?: Partial<AuthRouterOptions>;
 }
 
-// The docs page loads the Scalar reference from jsDelivr and runs one inline script (allowed by its
-// hash); every other response is JSON under helmet's default policy.
+// The docs page runs one inline script (allowed by its hash) and one pinned file of the Scalar
+// reference from jsDelivr (allowed by its full address; the browser also checks its integrity hash).
+// Nothing else on jsDelivr is allowed: that file loads no other script, style or font from there.
+// Every other response is JSON under helmet's default policy.
 const docsCsp = helmet.contentSecurityPolicy({
   useDefaults: false,
   directives: {
     defaultSrc: ["'self'"],
-    scriptSrc: ["'self'", docsBootScriptHash, "https://cdn.jsdelivr.net"],
-    styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net", "https://fonts.scalar.com"],
-    fontSrc: ["'self'", "data:", "https://cdn.jsdelivr.net", "https://fonts.scalar.com"],
+    scriptSrc: ["'self'", docsBootScriptHash, SCALAR_SCRIPT_URL],
+    styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.scalar.com"],
+    fontSrc: ["'self'", "data:", "https://fonts.scalar.com"],
     imgSrc: ["'self'", "data:", "https:"],
     connectSrc: ["'self'"],
     workerSrc: ["'self'", "blob:"],

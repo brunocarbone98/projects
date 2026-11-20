@@ -13,3 +13,9 @@ FullStackHub/screenshots
 # Claude Code agents, shifts, scripts and hooks are not part of the image
 .claude
 **/.claude
+# Local env files hold secrets (API keys, JWT secret, database URLs): never in the image. Railway
+# builds from git, where they are ignored; a local `docker build` would otherwise copy
+# FullStackHub/apps/api/.env or apps/web/.env.local in. The committed template stays.
+**/.env
+**/.env.*
+!**/.env.example

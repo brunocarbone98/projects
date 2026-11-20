@@ -5,10 +5,17 @@ import type {
   UserRole,
 } from "@shipping-hub/shared";
 import type { Express } from "express";
+import { randomBytes, scryptSync } from "node:crypto";
 import supertest from "supertest";
 import { buildApp } from "../src/app.js";
 import { hashPassword } from "../src/auth/passwords.js";
 import { prisma } from "../src/prisma.js";
+
+/** A hash as the first release stored it: Node's default scrypt cost, `scrypt$<saltHex>$<keyHex>`. */
+export function firstReleaseHash(password: string): string {
+  const salt = randomBytes(16);
+  return `scrypt$${salt.toString("hex")}$${scryptSync(password, salt, 64).toString("hex")}`;
+}
 
 // High rate limits so ordinary tests never trip them; the rate-limit tests build their own app.
 export const app: Express = buildApp({
