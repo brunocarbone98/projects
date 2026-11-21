@@ -210,5 +210,26 @@ describe("password hashes", () => {
     for (const hash of [null, "not a hash", older]) {
       expect(await derivations(hash), String(hash)).toEqual(account);
     }
+
+    // Either call failing fails the check on every path, and the login answers 500. A call left
+    // running unawaited would instead leave its error unhandled, which stops the API.
+    const failure = new Error("scrypt failed");
+    const spy = vi.mocked(scrypt);
+    try {
+      for (const failing of [0, 1]) {
+        for (const hash of [current, null, "not a hash", older]) {
+          let call = 0;
+          spy.mockImplementation((_password, _salt, keyLength, _options, done) => {
+            if (call++ === failing) done(failure, Buffer.alloc(0));
+            else done(null, Buffer.alloc(keyLength));
+          });
+          await expect(checkLoginPassword("wrong-password", hash), String(hash)).rejects.toBe(
+            failure,
+          );
+        }
+      }
+    } finally {
+      spy.mockImplementation(nodeScrypt);
+    }
   });
 });
