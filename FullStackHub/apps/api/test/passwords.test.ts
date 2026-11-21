@@ -81,7 +81,9 @@ describe("password hashes", () => {
     const salt = base64(randomBytes(16));
     const key = base64(randomBytes(64));
     // A salt and a key really derived for the password at the cost Node would compute (it reads r=0
-    // as r=8 and p=0 as p=1), so only the cost rule refuses the value: without it, the password matches.
+    // as r=8 and p=0 as p=1). Without the floor the ln=9 value matches; without `p >= 1` the p=0 one
+    // does. Two rules refuse r=0 (`r >= 1`, and OpenSSL's N < 2^(16 · r) = 1), so neither alone can
+    // be pinned; without both, the check throws, or matches once Node can derive at that cost.
     const realSalt = randomBytes(16);
     const saltAndKey = (cost: { N: number; r: number; p: number }) =>
       `${base64(realSalt)}$${base64(scryptSync("Password123!", realSalt, 64, { ...cost, maxmem: 2 ** 26 }))}`;
@@ -128,13 +130,25 @@ describe("password hashes", () => {
     expect(await checkLoginPassword("Password123!", null)).toBe(false);
     expect(await checkLoginPassword("Password123!", "not a hash")).toBe(false);
 
-    // The scrypt calls one check makes. The same single call on every path (same cost, salt and key
-    // lengths) means the response time does not tell an account from no account; without the extra
-    // derivation, no account (or an unreadable hash) made no call at all.
+    // The scrypt calls one check makes, run by Node's own scrypt. The same single call on every path
+    // (same cost, salt and key lengths), finished before the check answers, means the response time
+    // does not tell an account from no account. Without the extra derivation, no account (or an
+    // unreadable hash) made no call at all; a derivation the check did not wait for answered at once.
+    const { scrypt: nodeScrypt } =
+      await vi.importActual<typeof import("node:crypto")>("node:crypto");
     const derivations = async (hash: string | null) => {
       const spy = vi.mocked(scrypt);
       spy.mockClear();
+      const events: string[] = [];
+      spy.mockImplementationOnce((password, salt, keyLength, options, done) =>
+        nodeScrypt(password, salt, keyLength, options, (error, key) => {
+          events.push("derived");
+          done(error, key);
+        }),
+      );
       await checkLoginPassword("wrong-password", hash);
+      events.push("answered");
+      expect(events).toEqual(["derived", "answered"]);
       return spy.mock.calls.map(([password, salt, keyLength, options]) => ({
         password,
         saltLength: Buffer.byteLength(salt),

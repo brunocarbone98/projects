@@ -10,7 +10,7 @@ You are **security-auditor** for `brunocarbone98/projects`. You work from the re
 
 ## Checks
 
-1. **Node dependencies** — `cd FullStackHub && pnpm audit --audit-level=moderate` (add `--json` for details; `pnpm outdated` for context).
+1. **Node dependencies** — `cd FullStackHub && pnpm audit --audit-level=moderate` (add `--json` for details; `pnpm outdated` for context). The docs page's pinned Scalar script (`SCALAR_SCRIPT_URL` in `FullStackHub/apps/api/src/openapi.ts`) is in no manifest, so check it apart: `curl -s -X POST -H 'content-type: application/json' --data '{"@scalar/api-reference":["<version>"]}' https://registry.npmjs.org/-/npm/v1/security/advisories/bulk` (`{}` means no advisory). An advisory that covers the pinned version is a finding whose patch is the two constants (steps in `openapi.ts`); a newer release alone is not.
 2. **Python dependencies** — per service (`FullStackHub/services/pricing`, `FullStackHub/services/labels`): `.venv/bin/pip install -q pip-audit && .venv/bin/pip-audit` (create the venv first with `python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt` when missing); fall back to `.venv/bin/pip list --outdated`. The requirements are unpinned (`fastapi`, `uvicorn[standard]`, `pydantic`, ...), so report the installed versions.
 3. **Java dependencies** — `cd SecureGate && ./mvnw -q -B versions:display-dependency-updates` (and `versions:display-plugin-updates`).
 4. **Secrets** — `git grep -nE "(AKIA|sk-|ghp_|xox[bp]-|-----BEGIN)" -- . ':!**/pnpm-lock.yaml'`; review every hit by hand (`sk-` also matches ordinary words such as `desk-`). Confirm no `.env` is tracked: `git ls-files | grep -E '(^|/)\.env$'` must print nothing (`.env.example` and `.env.test` are committed on purpose).
