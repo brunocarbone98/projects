@@ -162,14 +162,21 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   the 11th wrong password in a row for one account answers "Too many attempts", and the right
   password still signs in from another network (a phone on mobile data).
 - **Passwords:** scrypt hashes, written as a PHC string, `$scrypt$ln=15,r=8,p=3$<salt>$<key>`
-  (a 16-byte salt and a 64-byte key in base64 without padding): N=2^15, r=8, p=3, so one check holds
-  32 MiB and does 6 times the work of Node's default cost. Accounts still holding the older
-  `scrypt$<salt>$<key>` (Node's default cost, which every release before #103 wrote) keep signing
-  in, and their next successful sign-in stores a new hash at the new cost. Every login does one
-  derivation at the new cost whether or not the email has an account, and an older hash is checked
-  alongside it, so the response time tells neither whether an email is registered nor whether its
-  account still holds an older hash. A login or a registration now spends about 0.2 s on scrypt
-  instead of 0.04 s, and up to four checks run at once (Node's thread pool), about 128 MiB together.
+  (a 16-byte salt and a 64-byte key in base64 without padding): N=2^15, r=8, p=3, so a derivation
+  holds 32 MiB and does 6 times the work of Node's default cost. Accounts still holding the older
+  `scrypt$<salt>$<key>` (Node's default cost, which #103 and every release before it wrote) keep
+  signing in, and their next successful sign-in stores a new hash at the new cost. Every login runs
+  the same two derivations at once, one at the older cost and then one at the new, whatever the
+  email and its stored hash. So the response time tells neither whether an email is registered nor
+  whether its account still holds an older hash, even on a busy server. A login spends about
+  0.28 s of CPU on scrypt and a registration about 0.24 s (0.04 s before). A login answers in about
+  0.25 s while two cores are free. Node's thread pool runs four derivations at once, about 128 MiB
+  of scrypt buffers. The allocator keeps up to about 100 MiB of them afterwards (glibc's per-thread
+  heaps hold the 16 MiB buffers; #103 keeps about 50 MiB the same way). So a burst of logins can
+  take the API about 230 MiB above its idle size. Login limits count only failures, so a visitor
+  who keeps signing in to their own accounts keeps those threads busy, and every other login waits.
+  Measured: about 0.7 s with nine sign-ins in flight and about 2.3 s with thirty (one address can
+  keep up to ten in flight on one account, thirty in all).
   Rolling back to #103 is safe: it reads these hashes (there, the accounts written or re-hashed since
   answer a wrong password more slowly than an unknown email). Never roll back past #103: earlier
   releases refuse PHC strings (no account opens, but those accounts cannot sign in until a release
