@@ -140,9 +140,10 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   together (the web is the public entrypoint, the rest stay on `localhost`). It's a
   pragmatic packaging for a portfolio — the code is still four separate apps. If
   any process exits, the container restarts. Every process runs as the image's unprivileged
-  `node` user, never root. The build context leaves out every local `.env` and `.env.*` file except
-  the `.env.example` templates (`.dockerignore`), so a local `docker build` never bakes a secret
-  into the image; Railway builds from git, where those files are ignored anyway.
+  `node` user, never root. The build context leaves out every `.env` and `.env.*` file
+  (`.dockerignore`), the committed `.env.example` and `.env.test` too (no build step reads them), so
+  a local `docker build` never bakes a secret into the image; Railway builds from git, where the
+  local ones are ignored anyway.
 - **Rate limits per visitor:** the web reaches the API over `localhost` (Railway publishes only
   the web's port), so the web forwards each visitor's address and the API trusts it from loopback only. The address is
   the public one Railway's edge puts in `X-Real-IP` (Railway docs: Networking → Public Networking →
@@ -164,10 +165,13 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   r=8, p=1), the format every release reads: rolling this release back locks nobody out. A login for
   an email with no account does the same scrypt work as a wrong password for an existing one, so
   the response time does not tell whether the email is registered. This release also reads a PHC
-  string, `$scrypt$ln=15,r=8,p=3$<salt>$<key>`: the format the next release writes, at a higher
-  cost, so that release can be rolled back to this one without locking out the accounts it
-  re-hashed. Never roll a release that writes PHC hashes back past this one: earlier releases refuse
-  them (no account opens, but those accounts cannot sign in until a release that reads them is back).
+  string, `$scrypt$ln=15,r=8,p=3$<salt>$<key>` (a 16-byte salt and a 64-byte key in base64 without
+  padding, either alphabet): the format the next release writes, at a higher cost, so that release
+  can be rolled back to this one without locking out the accounts it re-hashed. After such a
+  rollback, those accounts answer a wrong password more slowly than an unknown email (6 times the
+  scrypt work) until the next release is back. Never roll a release that writes PHC hashes back past
+  this one: earlier releases refuse them (no account opens, but those accounts cannot sign in until a
+  release that reads them is back).
 - **Local dev is unchanged:** `docker compose up -d` (Postgres + the Python
   services) and `pnpm dev` (web + api) — see `FullStackHub/README.md`. An `apps/api/.env`
   copied before #74 needs the `JWT_ACCESS_SECRET` line from `.env.example` again: the API refuses

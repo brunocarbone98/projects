@@ -15,7 +15,8 @@ FullStackHub/screenshots
 **/.claude
 # Local env files hold secrets (API keys, JWT secret, database URLs): never in the image. Railway
 # builds from git, where they are ignored; a local `docker build` would otherwise copy
-# FullStackHub/apps/api/.env or apps/web/.env.local in. The committed template stays.
+# FullStackHub/apps/api/.env or apps/web/.env.local in. The committed .env.example and .env.test
+# go too: no build step reads them, and an exception with a wildcard (`!**/.env.example`) would make
+# BuildKit walk every folder excluded above (node_modules, .venv, .git, ...) looking for matches.
 **/.env
 **/.env.*
-!**/.env.example

@@ -70,7 +70,7 @@ export async function register(input: {
 export async function login(input: { email: string; password: string }): Promise<AuthResponseDto> {
   const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
   // One scrypt check whether or not the email has an account, so the response time does not tell
-  // which emails are registered.
+  // which emails are registered (checkLoginPassword names the one exception, after a rollback).
   const matches = await checkLoginPassword(input.password, user?.passwordHash ?? null);
   if (!user || !matches) throw invalidCredentials();
   return { user: toUserDto(user), tokens: await issueTokens(user) };

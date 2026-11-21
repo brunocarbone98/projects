@@ -344,12 +344,13 @@ describe("password checks at login", () => {
       expect(res.body).toEqual(known[0]?.res.body);
     }
 
-    // Without the check, an unknown email was answered after one database read (a few ms) and a
-    // known one after a scrypt derivation as well (about 40 ms).
+    // Without the check, an unknown email was answered after one database read and a known one after
+    // a scrypt derivation as well (about 40 ms): a ratio of about 0.02 to 0.12. With it, about 1. The
+    // wide bounds keep a machine busy with other work from failing the test with the check in place.
     const median = (runs: { ms: number }[]) =>
       runs.map((run) => run.ms).sort((a, b) => a - b)[2] ?? 0;
-    expect(median(unknown) / median(known)).toBeGreaterThan(0.5);
-    expect(median(unknown) / median(known)).toBeLessThan(2);
+    expect(median(unknown) / median(known)).toBeGreaterThan(0.3);
+    expect(median(unknown) / median(known)).toBeLessThan(3);
   });
 
   it("signs in an account the next release re-hashed, and leaves its hash as it is", async () => {

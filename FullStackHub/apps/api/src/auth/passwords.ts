@@ -3,10 +3,12 @@
 // Written today: `scrypt$<saltHex>$<keyHex>` at Node's default cost (N=2^14, r=8, p=1), the format
 // every release so far writes and reads, so rolling this release back locks nobody out.
 //
-// Also read: a PHC string, `$scrypt$ln=<log2 N>,r=<r>,p=<p>$<salt>$<key>` (salt and key in base64
-// without padding), the format the next release writes at a higher cost. Reading it first means that
-// release can be rolled back to this one without locking out the accounts it re-hashed. It is not
-// written yet: the release before this one refuses it (and would read a `scrypt$<N>$<r>$<p>$…`
+// Also read: a PHC string, `$scrypt$ln=<log2 N>,r=<r>,p=<p>$<salt>$<key>`, the format the next
+// release writes at a higher cost: a 16-byte salt and a 64-byte key in base64 without padding, in the
+// standard alphabet (`+` and `/`). The URL-safe alphabet (`-` and `_`, Node's `base64url`) is read
+// too, so a writer that picks it still lands on a release that reads it. Reading PHC first means
+// that release can be rolled back to this one without locking out the accounts it re-hashed. It is
+// not written yet: the release before this one refuses it (and would read a `scrypt$<N>$<r>$<p>$…`
 // string as an empty key that matches any password, the reason the cost is not stored that way).
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
@@ -28,8 +30,9 @@ const MAX_SCRYPT_MEMORY = 256 * 1024 * 1024;
 const MAX_SCRYPT_WORK = 2 ** 22;
 
 const FIRST_FORMAT = /^scrypt\$([0-9a-f]{32})\$([0-9a-f]{128})$/;
+// Node's base64 decoder reads either alphabet; 22 and 86 characters are exactly 16 and 64 bytes.
 const PHC_FORMAT =
-  /^\$scrypt\$ln=(\d{1,2}),r=(\d{1,2}),p=(\d{1,2})\$([A-Za-z0-9+/]{22})\$([A-Za-z0-9+/]{86})$/;
+  /^\$scrypt\$ln=(\d{1,2}),r=(\d{1,2}),p=(\d{1,2})\$([A-Za-z0-9+/_-]{22})\$([A-Za-z0-9+/_-]{86})$/;
 
 interface StoredHash {
   cost: ScryptCost;
@@ -95,8 +98,11 @@ const NO_ACCOUNT_SALT = randomBytes(SALT_LENGTH);
 /**
  * A login's password check, with the same scrypt work whether or not the email has an account: no
  * stored hash (`null`), or one this module cannot read, costs one derivation at `STORED_COST`, as a
- * wrong password for an account does, so the response time does not tell which emails are
- * registered.
+ * wrong password for an account with a hash this release writes does, so the response time does not
+ * tell which emails are registered. The one exception: a PHC hash the next release wrote is checked
+ * at its own, higher cost, so after a rollback from that release the accounts it re-hashed answer a
+ * wrong password more slowly than an unknown email (6 times the work at N=2^15, r=8, p=3) until it
+ * is back.
  */
 export async function checkLoginPassword(
   password: string,
