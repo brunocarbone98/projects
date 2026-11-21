@@ -7,9 +7,10 @@
 // (and would read a `scrypt$<N>$<r>$<p>$…` string as an empty key that matches any password, the
 // reason the cost is not stored that way).
 //
-// Also read: `scrypt$<saltHex>$<keyHex>` at Node's default cost (N=2^14, r=8, p=1), the format every
-// release before #103 wrote, and PHC strings at other costs or in the URL-safe base64 alphabet (`-`
-// and `_`). A sign-in re-hashes any of them at today's cost (`checkLoginPassword`).
+// Also read: the first format, `scrypt$<saltHex>$<keyHex>` at Node's default cost (N=2^14, r=8,
+// p=1), which #103 and every release before it wrote, and PHC strings at other costs or in the
+// URL-safe base64 alphabet (`-` and `_`). A sign-in re-hashes any of them whose cost is not today's
+// (`checkLoginPassword`).
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 /** The cost of a scrypt hash: N (CPU and memory), r (block size) and p (parallelization). */
@@ -118,34 +119,39 @@ export interface LoginPasswordCheck {
 }
 
 /**
- * A login's password check, with the same scrypt work whether or not the email has an account. Every
- * path derives once at `STORED_COST`, and the answer waits for that derivation:
- * - a hash at today's cost is checked with it;
- * - no stored hash (`null`), or one this module cannot read, gets it with a fixed salt;
- * - a hash at another cost (the first format, which every release before #103 wrote) is checked at
- *   its own cost alongside it, a fresh hash of the password that the login stores if it matched.
- * So the response time tells neither which emails are registered nor which accounts still hold an
- * older hash. After a rollback to #103, the accounts this release wrote or re-hashed answer a wrong
- * password more slowly than an unknown email there (6 times the work), until this release is back.
+ * A login's password check, with the same scrypt work whatever the email and its stored hash.
+ * Every path starts the same two derivations at once, in this order, and the answer waits for both:
+ * one at `FIRST_FORMAT_COST`, then one at `STORED_COST` (with 16-byte salts and 64-byte keys).
+ * - A first-format hash is checked with the first, and the second is a fresh hash of the password,
+ *   which the login stores if it matched.
+ * - A hash at today's cost is checked with the second. The first, with a fixed salt, is discarded.
+ * - No stored hash (`null`), or one this module cannot read, gets both with a fixed salt.
+ * Node's thread pool runs jobs in the order they come, so the same jobs in the same order take as
+ * long even when every core and pool thread is busy. So the response time tells neither which
+ * emails are registered nor which accounts still hold the first format. Not covered:
+ * - A PHC string at another cost (no release writes one) is checked at its own cost in place of the
+ *   first derivation.
+ * - After a rollback to #103, the accounts this release wrote or re-hashed answer a wrong password
+ *   more slowly than an unknown email there (6 times the work), until this release is back.
  */
 export async function checkLoginPassword(
   password: string,
   stored: string | null,
 ): Promise<LoginPasswordCheck> {
   const hash = stored === null ? null : parse(stored);
-  if (!hash) {
-    await derive(password, NO_ACCOUNT_SALT, STORED_COST);
-    return { matches: false, rehash: null };
+  if (hash && isStale(hash.cost)) {
+    const salt = randomBytes(SALT_LENGTH);
+    const [key, fresh] = await Promise.all([
+      derive(password, hash.salt, hash.cost),
+      derive(password, salt, STORED_COST),
+    ]);
+    const matches = timingSafeEqual(key, hash.key);
+    return { matches, rehash: matches ? phcString(salt, fresh) : null };
   }
-  if (!isStale(hash.cost)) {
-    const matches = timingSafeEqual(await derive(password, hash.salt, hash.cost), hash.key);
-    return { matches, rehash: null };
-  }
-  const salt = randomBytes(SALT_LENGTH);
-  const [key, fresh] = await Promise.all([
-    derive(password, hash.salt, hash.cost),
-    derive(password, salt, STORED_COST),
+  // The first job only keeps the work equal: a first-format hash's check runs it, first.
+  const [, key] = await Promise.all([
+    derive(password, NO_ACCOUNT_SALT, FIRST_FORMAT_COST),
+    derive(password, hash?.salt ?? NO_ACCOUNT_SALT, STORED_COST),
   ]);
-  const matches = timingSafeEqual(key, hash.key);
-  return { matches, rehash: matches ? phcString(salt, fresh) : null };
+  return { matches: hash !== null && timingSafeEqual(key, hash.key), rehash: null };
 }

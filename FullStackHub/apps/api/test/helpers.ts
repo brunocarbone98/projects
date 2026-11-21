@@ -11,7 +11,7 @@ import { buildApp } from "../src/app.js";
 import { hashPassword } from "../src/auth/passwords.js";
 import { prisma } from "../src/prisma.js";
 
-/** A hash in the first format, as every release before #103 wrote it: Node's default scrypt cost. */
+/** A hash in the first format, as #103 and every release before it wrote it (Node's defaults). */
 export function firstFormatHash(password: string): string {
   const salt = randomBytes(16);
   const key = scryptSync(password, salt, 64, { N: 2 ** 14, r: 8, p: 1 });

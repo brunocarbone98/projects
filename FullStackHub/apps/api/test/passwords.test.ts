@@ -125,7 +125,7 @@ describe("password hashes", () => {
     }
   });
 
-  it("checks a login with one derivation at today's cost on every path, and re-hashes an older hash", async () => {
+  it("checks a login with the same two derivations on every path, and re-hashes an older hash", async () => {
     const current = await hashPassword("Password123!");
     const older = firstFormatHash("Password123!");
     const refused = { matches: false, rehash: null };
@@ -145,13 +145,27 @@ describe("password hashes", () => {
     expect(await verifyPassword("Password123!", rehash)).toBe(true);
     expect(await verifyPassword("wrong-password", rehash)).toBe(false);
     expect(await release103Verify("Password123!", rehash)).toBe(true);
+    // Any other cost is re-hashed too, a higher one included: one term changed at a time.
+    for (const cost of [
+      { N: 2 ** 14, r: 8, p: 3 },
+      { N: 2 ** 15, r: 4, p: 3 },
+      { N: 2 ** 15, r: 8, p: 4 },
+    ]) {
+      const salt = randomBytes(16);
+      const key = scryptSync("Password123!", salt, 64, { ...cost, maxmem: 2 ** 26 });
+      const stored = `$scrypt$ln=${Math.log2(cost.N)},r=${cost.r},p=${cost.p}$${base64(salt)}$${base64(key)}`;
+      const check = await checkLoginPassword("Password123!", stored);
+      expect(check.matches, stored).toBe(true);
+      expect(check.rehash ?? "", stored).toMatch(/^\$scrypt\$ln=15,r=8,p=3\$/);
+    }
 
     // The scrypt calls one check makes, run by Node's own scrypt: all started together, and each
-    // finished before the check answers. One call at today's cost on every path (same salt and key
-    // lengths) means the response time tells neither an account from no account nor an older hash
-    // from a current one. Without the extra derivation, no account (or an unreadable hash) made no
-    // call at all and an older hash only a cheaper one; a derivation the check did not wait for
-    // answered at once, and one started after the older hash's check added that check's time.
+    // finished before the check answers. Every path makes the same calls in the same order, one at
+    // the first format's cost and then one at today's, with the same salt and key lengths. Node's
+    // pool runs jobs in the order they come, so the response time tells neither an account from no
+    // account nor an older hash from a current one, even with every core and pool thread busy.
+    // Without the first call on the other paths, an older hash's check was extra work that showed
+    // whenever the pool or the CPU was busy; with the two calls the other way round, it still did.
     const { scrypt: nodeScrypt } =
       await vi.importActual<typeof import("node:crypto")>("node:crypto");
     const derivations = async (hash: string | null) => {
@@ -184,22 +198,17 @@ describe("password hashes", () => {
       ]);
       return calls;
     };
-    const today = {
+    const call = (cost: { N: number; r: number; p: number }) => ({
       password: "wrong-password",
       saltLength: 16,
       keyLength: 64,
-      options: expect.objectContaining({ N: 2 ** 15, r: 8, p: 3 }),
-    };
+      options: expect.objectContaining(cost),
+    });
     const account = await derivations(current);
-    expect(account).toEqual([today]);
-    expect(await derivations(null)).toEqual(account);
-    expect(await derivations("not a hash")).toEqual(account);
-    // An older hash: checked at its own cost, alongside the derivation at today's cost.
-    const olderCalls = await derivations(older);
-    expect(olderCalls).toEqual([
-      { ...today, options: expect.objectContaining({ N: 2 ** 14, r: 8, p: 1 }) },
-      today,
-    ]);
-    expect(olderCalls[1]).toEqual(account[0]);
+    expect(account).toEqual([call({ N: 2 ** 14, r: 8, p: 1 }), call({ N: 2 ** 15, r: 8, p: 3 })]);
+    // No account, an unreadable hash, and an older hash (checked with the first call) alike.
+    for (const hash of [null, "not a hash", older]) {
+      expect(await derivations(hash), String(hash)).toEqual(account);
+    }
   });
 });

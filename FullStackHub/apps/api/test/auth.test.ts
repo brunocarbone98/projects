@@ -11,7 +11,6 @@ import { hashPassword } from "../src/auth/passwords.js";
 import { generateRefreshToken, hashRefreshToken } from "../src/auth/tokens.js";
 import { env } from "../src/env.js";
 import { prisma } from "../src/prisma.js";
-import { storeRehash } from "../src/services/auth.service.js";
 import { api, DEFAULT_PASSWORD, firstFormatHash, registerCustomer } from "./helpers.js";
 import { verifyPassword as release103Verify } from "./release-103-passwords.js";
 
@@ -328,7 +327,7 @@ describe("password checks at login", () => {
     api().post("/api/v1/auth/login").send({ email, password });
   const storedHash = async (id: string) =>
     (await prisma.user.findUniqueOrThrow({ where: { id } })).passwordHash;
-  /** An account whose password is stored in the first format, as every release before #103 did. */
+  /** An account holding a first-format hash, as #103 and every release before it wrote. */
   const olderAccount = (email: string) =>
     prisma.user.create({
       data: { email, name: "Older Hash", passwordHash: firstFormatHash(DEFAULT_PASSWORD) },
@@ -356,10 +355,10 @@ describe("password checks at login", () => {
       expect(res.body).toEqual(known[0]?.res.body);
     }
 
-    // Each answer waits for one scrypt derivation at today's cost (about 0.2 s). Without it, an
-    // unknown email was answered after one database read (a ratio of about 0.02) and an older hash
-    // after its own, cheaper check (about 0.2). The wide bounds keep a machine busy with other work
-    // from failing the test with the derivation in place.
+    // Each answer waits for the same two scrypt derivations (about 0.25 s; passwords.test.ts pins
+    // them). Without the one at today's cost, an unknown email was answered after one database read
+    // (a ratio of about 0.02) and an older hash after its own, cheaper check (about 0.2). The wide
+    // bounds keep a machine busy with other work from failing the test with the derivations there.
     const median = (runs: { ms: number }[]) =>
       runs.map((run) => run.ms).sort((a, b) => a - b)[2] ?? 0;
     for (const other of [unknown, older]) {
@@ -386,12 +385,17 @@ describe("password checks at login", () => {
   });
 
   it("never overwrites a hash changed in between, and never fails a sign-in on the write", async () => {
-    // The stored hash changed after the sign-in read it: the re-hash is not stored.
+    // The password changes (as a reset by hand would) after the sign-in read the account: the
+    // sign-in succeeds, but its re-hash of the old password is not stored, so the new password
+    // stays the one that works.
     const raced = await olderAccount("raced@example.com");
     const changed = await hashPassword("Another-Password1!");
     await prisma.user.update({ where: { id: raced.id }, data: { passwordHash: changed } });
-    await storeRehash(raced, await hashPassword(DEFAULT_PASSWORD));
+    vi.spyOn(prisma.user, "findUnique").mockResolvedValueOnce(raced);
+    expect((await login("raced@example.com", DEFAULT_PASSWORD)).status).toBe(200);
     expect(await storedHash(raced.id)).toBe(changed);
+    expect((await login("raced@example.com", "Another-Password1!")).status).toBe(200);
+    expect((await login("raced@example.com", DEFAULT_PASSWORD)).status).toBe(401);
 
     // The write fails with an error that repeats the query's values, as a Prisma error can: the
     // sign-in still succeeds, the older hash stays, and the warning names the account but neither
