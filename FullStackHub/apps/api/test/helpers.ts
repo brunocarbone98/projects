@@ -5,10 +5,19 @@ import type {
   UserRole,
 } from "@shipping-hub/shared";
 import type { Express } from "express";
+import { randomBytes, scryptSync } from "node:crypto";
 import supertest from "supertest";
 import { buildApp } from "../src/app.js";
 import { hashPassword } from "../src/auth/passwords.js";
 import { prisma } from "../src/prisma.js";
+
+/** A hash as the next release writes it: a PHC string at N=2^15, r=8, p=3 (32 MiB). */
+export function nextReleaseHash(password: string): string {
+  const salt = randomBytes(16);
+  const key = scryptSync(password, salt, 64, { N: 2 ** 15, r: 8, p: 3, maxmem: 64 * 1024 * 1024 });
+  const base64 = (bytes: Buffer) => bytes.toString("base64").replace(/=+$/, "");
+  return `$scrypt$ln=15,r=8,p=3$${base64(salt)}$${base64(key)}`;
+}
 
 // High rate limits so ordinary tests never trip them; the rate-limit tests build their own app.
 export const app: Express = buildApp({

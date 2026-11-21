@@ -401,6 +401,22 @@ const DOCS_BOOT_SCRIPT = `
 /** The CSP source that allows the docs page's one inline script: its SHA-256. */
 export const docsBootScriptHash = `'sha256-${createHash("sha256").update(DOCS_BOOT_SCRIPT).digest("base64")}'`;
 
+/**
+ * The Scalar API reference the docs page runs: one file of one release, and the CSP allows that
+ * address alone. The browser checks the file against `SCALAR_SCRIPT_INTEGRITY` (Subresource
+ * Integrity) and refuses to run anything else, so neither a new release nor a changed file on the CDN
+ * can run on this origin. To move to another release: in an empty folder,
+ * `npm pack @scalar/api-reference@<version>` and `tar -xzf scalar-api-reference-<version>.tgz`, hash
+ * `package/dist/browser/standalone.js` with
+ * `openssl dgst -sha384 -binary package/dist/browser/standalone.js | openssl base64 -A`, change both
+ * constants and open /api/v1/docs in a browser (a wrong hash leaves the page blank with an integrity
+ * error in the console).
+ */
+export const SCALAR_SCRIPT_URL =
+  "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.77.0/dist/browser/standalone.js";
+export const SCALAR_SCRIPT_INTEGRITY =
+  "sha384-+7ESN8b9Ljg46TCYKedZUlhF/wfZbOt78aV/DtoU3anEElh8Q2eXsyhQ9W5lAZD4";
+
 export const docsHtml = `<!doctype html>
 <html lang="en">
   <head>
@@ -411,6 +427,10 @@ export const docsHtml = `<!doctype html>
   <body>
     <script id="api-reference" type="application/json"></script>
     <script>${DOCS_BOOT_SCRIPT}</script>
-    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+    <script
+      src="${SCALAR_SCRIPT_URL}"
+      integrity="${SCALAR_SCRIPT_INTEGRITY}"
+      crossorigin="anonymous"
+    ></script>
   </body>
 </html>`;

@@ -2,6 +2,7 @@ import type { Express } from "express";
 import supertest from "supertest";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
+import { docsBootScriptHash, SCALAR_SCRIPT_INTEGRITY, SCALAR_SCRIPT_URL } from "../src/openapi.js";
 import { DEFAULT_AUTH_LIMITS, type AuthRouterOptions } from "../src/routes/auth.routes.js";
 import { api, DEFAULT_PASSWORD, registerCustomer } from "./helpers.js";
 
@@ -243,13 +244,34 @@ describe("content security policy", () => {
     expect(res.headers["content-security-policy"]).toContain("default-src 'self'");
   });
 
-  it("lets the docs page run only its own inline script and the Scalar bundle", async () => {
+  it("lets the docs page run only its own inline script and the pinned Scalar file", async () => {
     const res = await api().get("/api/v1/docs");
     const policy = String(res.headers["content-security-policy"]);
-    expect(policy).toMatch(
-      /script-src 'self' 'sha256-[A-Za-z0-9+/]+=*' https:\/\/cdn\.jsdelivr\.net/,
-    );
+    const directive = (name: string) =>
+      policy
+        .split(";")
+        .map((part) => part.trim().split(/\s+/))
+        .find(([directiveName]) => directiveName === name)
+        ?.slice(1);
+
+    expect(directive("script-src")).toEqual(["'self'", docsBootScriptHash, SCALAR_SCRIPT_URL]);
+    // Nothing else on the CDN, in any directive: not its origin, not a folder of it.
+    const cdnSources = policy.split(/[\s;]+/).filter((source) => source.includes("jsdelivr"));
+    expect(cdnSources).toEqual([SCALAR_SCRIPT_URL]);
     expect(policy).not.toContain("unsafe-eval");
     expect(policy).not.toContain("upgrade-insecure-requests");
+  });
+
+  it("loads that file from one release, with its integrity hash", async () => {
+    const res = await api().get("/api/v1/docs");
+    const scripts = [...res.text.matchAll(/<script\b[^>]*\bsrc="([^"]*)"[^>]*>/g)];
+
+    expect(scripts.map(([, src]) => src)).toEqual([SCALAR_SCRIPT_URL]);
+    expect(SCALAR_SCRIPT_URL).toMatch(
+      /^https:\/\/cdn\.jsdelivr\.net\/npm\/@scalar\/api-reference@\d+\.\d+\.\d+\/dist\/browser\/standalone\.js$/,
+    );
+    expect(SCALAR_SCRIPT_INTEGRITY).toMatch(/^sha384-[A-Za-z0-9+/]{64}$/);
+    expect(scripts[0]?.[0]).toContain(`integrity="${SCALAR_SCRIPT_INTEGRITY}"`);
+    expect(scripts[0]?.[0]).toContain('crossorigin="anonymous"');
   });
 });

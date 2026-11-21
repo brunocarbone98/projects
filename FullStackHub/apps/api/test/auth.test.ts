@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateRefreshToken, hashRefreshToken } from "../src/auth/tokens.js";
 import { env } from "../src/env.js";
 import { prisma } from "../src/prisma.js";
-import { api, DEFAULT_PASSWORD, registerCustomer } from "./helpers.js";
+import { api, DEFAULT_PASSWORD, nextReleaseHash, registerCustomer } from "./helpers.js";
 
 const refresh = (refreshToken: string) => api().post("/api/v1/auth/refresh").send({ refreshToken });
 
@@ -317,5 +317,55 @@ describe("access token algorithm", () => {
     const res = await me(unsigned);
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe("INVALID_TOKEN");
+  });
+});
+
+describe("password checks at login", () => {
+  const login = (email: string, password: string) =>
+    api().post("/api/v1/auth/login").send({ email, password });
+  const storedHash = async (id: string) =>
+    (await prisma.user.findUniqueOrThrow({ where: { id } })).passwordHash;
+
+  it("answers an unknown email like a wrong password, after the same scrypt work", async () => {
+    await registerCustomer("known@example.com");
+    const timed = async (email: string) => {
+      const started = performance.now();
+      const res = await login(email, "wrong-password");
+      return { res, ms: performance.now() - started };
+    };
+    const known: Awaited<ReturnType<typeof timed>>[] = [];
+    const unknown: Awaited<ReturnType<typeof timed>>[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      known.push(await timed("known@example.com"));
+      unknown.push(await timed(`nobody-${i}@example.com`));
+    }
+    for (const { res } of [...known, ...unknown]) {
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(known[0]?.res.body);
+    }
+
+    // Without the check, an unknown email was answered after one database read and a known one after
+    // a scrypt derivation as well (about 40 ms): a ratio of about 0.02 to 0.12. With it, about 1. The
+    // wide bounds keep a machine busy with other work from failing the test with the check in place.
+    const median = (runs: { ms: number }[]) =>
+      runs.map((run) => run.ms).sort((a, b) => a - b)[2] ?? 0;
+    expect(median(unknown) / median(known)).toBeGreaterThan(0.3);
+    expect(median(unknown) / median(known)).toBeLessThan(3);
+  });
+
+  it("signs in an account the next release re-hashed, and leaves its hash as it is", async () => {
+    const next = nextReleaseHash(DEFAULT_PASSWORD);
+    const user = await prisma.user.create({
+      data: { email: "next-hash@example.com", name: "Next Hash", passwordHash: next },
+    });
+
+    expect((await login("next-hash@example.com", "wrong-password")).status).toBe(401);
+    expect((await login("Next-Hash@example.com", DEFAULT_PASSWORD)).status).toBe(200);
+    expect(await storedHash(user.id)).toBe(next);
+  });
+
+  it("stores a new account's password in the format every release reads", async () => {
+    const { user } = await registerCustomer("format@example.com");
+    expect(await storedHash(user.id)).toMatch(/^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/);
   });
 });

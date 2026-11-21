@@ -7,7 +7,7 @@ import {
 } from "@shipping-hub/shared";
 import type { User } from "@prisma/client";
 import { randomUUID } from "node:crypto";
-import { hashPassword, verifyPassword } from "../auth/passwords.js";
+import { checkLoginPassword, hashPassword } from "../auth/passwords.js";
 import {
   generateRefreshToken,
   hashRefreshToken,
@@ -69,8 +69,10 @@ export async function register(input: {
 
 export async function login(input: { email: string; password: string }): Promise<AuthResponseDto> {
   const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
-  if (!user) throw invalidCredentials();
-  if (!(await verifyPassword(input.password, user.passwordHash))) throw invalidCredentials();
+  // One scrypt check whether or not the email has an account, so the response time does not tell
+  // which emails are registered (checkLoginPassword names the one exception, after a rollback).
+  const matches = await checkLoginPassword(input.password, user?.passwordHash ?? null);
+  if (!user || !matches) throw invalidCredentials();
   return { user: toUserDto(user), tokens: await issueTokens(user) };
 }
 

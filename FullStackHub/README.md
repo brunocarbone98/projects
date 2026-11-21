@@ -128,7 +128,10 @@ curl http://localhost:4000/api/v1/tracking/PTY-2026-001001-0   # public, no auth
 # or open http://localhost:3000/en/tracking/PTY-2026-001001-0
 ```
 
-API reference: <http://localhost:4000/api/v1/docs>.
+API reference: <http://localhost:4000/api/v1/docs> (local only: in production the API listens
+inside the container). The page runs one pinned file of the Scalar reference from jsDelivr, checked
+by the browser against its SHA-384 (`SCALAR_SCRIPT_URL` and `SCALAR_SCRIPT_INTEGRITY` in
+`apps/api/src/openapi.ts`, with the steps to move to another release).
 
 ## Scripts
 
