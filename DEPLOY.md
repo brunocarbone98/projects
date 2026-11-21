@@ -161,17 +161,19 @@ loop is described in [`OPERATIONS.md`](./OPERATIONS.md) → Incident flow.
   them. To check after a deploy:
   the 11th wrong password in a row for one account answers "Too many attempts", and the right
   password still signs in from another network (a phone on mobile data).
-- **Passwords:** scrypt hashes, written as `scrypt$<salt>$<key>` at Node's default cost (N=2^14,
-  r=8, p=1), the format every release reads: rolling this release back locks nobody out. A login for
-  an email with no account does the same scrypt work as a wrong password for an existing one, so
-  the response time does not tell whether the email is registered. This release also reads a PHC
-  string, `$scrypt$ln=15,r=8,p=3$<salt>$<key>` (a 16-byte salt and a 64-byte key in base64 without
-  padding, either alphabet): the format the next release writes, at a higher cost, so that release
-  can be rolled back to this one without locking out the accounts it re-hashed. After such a
-  rollback, those accounts answer a wrong password more slowly than an unknown email (6 times the
-  scrypt work) until the next release is back. Never roll a release that writes PHC hashes back past
-  this one: earlier releases refuse them (no account opens, but those accounts cannot sign in until a
-  release that reads them is back).
+- **Passwords:** scrypt hashes, written as a PHC string, `$scrypt$ln=15,r=8,p=3$<salt>$<key>`
+  (a 16-byte salt and a 64-byte key in base64 without padding): N=2^15, r=8, p=3, so one check holds
+  32 MiB and does 6 times the work of Node's default cost. Accounts still holding the older
+  `scrypt$<salt>$<key>` (Node's default cost, which every release before #103 wrote) keep signing
+  in, and their next successful sign-in stores a new hash at the new cost. Every login does one
+  derivation at the new cost whether or not the email has an account, and an older hash is checked
+  alongside it, so the response time tells neither whether an email is registered nor whether its
+  account still holds an older hash. A login or a registration now spends about 0.2 s on scrypt
+  instead of 0.04 s, and up to four checks run at once (Node's thread pool), about 128 MiB together.
+  Rolling back to #103 is safe: it reads these hashes (there, the accounts written or re-hashed since
+  answer a wrong password more slowly than an unknown email). Never roll back past #103: earlier
+  releases refuse PHC strings (no account opens, but those accounts cannot sign in until a release
+  that reads them is back).
 - **Local dev is unchanged:** `docker compose up -d` (Postgres + the Python
   services) and `pnpm dev` (web + api) — see `FullStackHub/README.md`. An `apps/api/.env`
   copied before #74 needs the `JWT_ACCESS_SECRET` line from `.env.example` again: the API refuses

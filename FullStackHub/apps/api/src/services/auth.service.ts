@@ -69,11 +69,32 @@ export async function register(input: {
 
 export async function login(input: { email: string; password: string }): Promise<AuthResponseDto> {
   const user = await prisma.user.findUnique({ where: { email: input.email.toLowerCase() } });
-  // One scrypt check whether or not the email has an account, so the response time does not tell
-  // which emails are registered (checkLoginPassword names the one exception, after a rollback).
-  const matches = await checkLoginPassword(input.password, user?.passwordHash ?? null);
-  if (!user || !matches) throw invalidCredentials();
+  // One scrypt derivation at today's cost whether or not the email has an account, so the response
+  // time does not tell which emails are registered (checkLoginPassword names the one exception).
+  const check = await checkLoginPassword(input.password, user?.passwordHash ?? null);
+  if (!user || !check.matches) throw invalidCredentials();
+  if (check.rehash) await storeRehash(user, check.rehash);
   return { user: toUserDto(user), tokens: await issueTokens(user) };
+}
+
+/**
+ * Stores a password hash at today's cost in place of the older one a sign-in just proved, and only
+ * if the stored hash is still that one: a change made in between wins. A failed write never fails
+ * the sign-in; the older hash keeps working, and the next sign-in tries again.
+ */
+export async function storeRehash(user: User, rehash: string): Promise<void> {
+  try {
+    await prisma.user.updateMany({
+      where: { id: user.id, passwordHash: user.passwordHash },
+      data: { passwordHash: rehash },
+    });
+  } catch (error) {
+    // The error's name only: a Prisma error message can repeat the query's values, the hash included.
+    const reason = error instanceof Error ? error.name : "unknown error";
+    console.warn(
+      `[auth] re-hashed password of user ${user.id} not stored (${reason}); it keeps the older hash`,
+    );
+  }
 }
 
 /**

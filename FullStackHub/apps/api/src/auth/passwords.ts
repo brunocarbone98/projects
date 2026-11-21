@@ -1,15 +1,15 @@
 // Password hashing with Node's built-in scrypt (no native dependency).
 //
-// Written today: `scrypt$<saltHex>$<keyHex>` at Node's default cost (N=2^14, r=8, p=1), the format
-// every release so far writes and reads, so rolling this release back locks nobody out.
+// Written today: a PHC string, `$scrypt$ln=15,r=8,p=3$<salt>$<key>`, at N=2^15, r=8, p=3 (32 MiB
+// and 6 times the work of Node's default cost), with a 16-byte salt and a 64-byte key in base64
+// without padding, in the standard alphabet. The release before this one (#103) reads it, so rolling
+// back to that release locks nobody out. Never roll back past it: earlier releases refuse PHC strings
+// (and would read a `scrypt$<N>$<r>$<p>$…` string as an empty key that matches any password, the
+// reason the cost is not stored that way).
 //
-// Also read: a PHC string, `$scrypt$ln=<log2 N>,r=<r>,p=<p>$<salt>$<key>`, the format the next
-// release writes at a higher cost: a 16-byte salt and a 64-byte key in base64 without padding, in the
-// standard alphabet (`+` and `/`). The URL-safe alphabet (`-` and `_`, Node's `base64url`) is read
-// too, so a writer that picks it still lands on a release that reads it. Reading PHC first means
-// that release can be rolled back to this one without locking out the accounts it re-hashed. It is
-// not written yet: the release before this one refuses it (and would read a `scrypt$<N>$<r>$<p>$…`
-// string as an empty key that matches any password, the reason the cost is not stored that way).
+// Also read: `scrypt$<saltHex>$<keyHex>` at Node's default cost (N=2^14, r=8, p=1), the format every
+// release before #103 wrote, and PHC strings at other costs or in the URL-safe base64 alphabet (`-`
+// and `_`). A sign-in re-hashes any of them at today's cost (`checkLoginPassword`).
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 
 /** The cost of a scrypt hash: N (CPU and memory), r (block size) and p (parallelization). */
@@ -19,14 +19,17 @@ export interface ScryptCost {
   readonly p: number;
 }
 
-/** The cost of the hashes this release writes (`scrypt$<saltHex>$<keyHex>`): Node's defaults. */
-export const STORED_COST: ScryptCost = Object.freeze({ N: 2 ** 14, r: 8, p: 1 });
+/** The cost of the hashes this release writes: 128 · N · r = 32 MiB, 6 times the first format's work. */
+export const STORED_COST: ScryptCost = Object.freeze({ N: 2 ** 15, r: 8, p: 3 });
+
+/** The cost of the first format, `scrypt$<saltHex>$<keyHex>`: Node's defaults. */
+export const FIRST_FORMAT_COST: ScryptCost = Object.freeze({ N: 2 ** 14, r: 8, p: 1 });
 
 const SALT_LENGTH = 16;
 const KEY_LENGTH = 64;
 /** No stored cost may make one check hold more memory than this (128 · N · r bytes)… */
 const MAX_SCRYPT_MEMORY = 256 * 1024 * 1024;
-/** …or do more work than this (N · r · p): 32 times `STORED_COST`, about 1.3 s on a server CPU. */
+/** …or do more work than this (N · r · p): 32 times the first format's, about 1.3 s on a server CPU. */
 const MAX_SCRYPT_WORK = 2 ** 22;
 
 const FIRST_FORMAT = /^scrypt\$([0-9a-f]{32})\$([0-9a-f]{128})$/;
@@ -57,7 +60,7 @@ function parse(stored: string): StoredHash | null {
   if (first) {
     const [, saltHex = "", keyHex = ""] = first;
     return {
-      cost: STORED_COST,
+      cost: FIRST_FORMAT_COST,
       salt: Buffer.from(saltHex, "hex"),
       key: Buffer.from(keyHex, "hex"),
     };
@@ -81,10 +84,17 @@ function parse(stored: string): StoredHash | null {
   return { cost, salt: Buffer.from(salt, "base64"), key: Buffer.from(key, "base64") };
 }
 
+const base64 = (bytes: Buffer) => bytes.toString("base64").replace(/=+$/, "");
+
+/** The PHC string of a key derived at today's cost. */
+function phcString(salt: Buffer, key: Buffer): string {
+  const { N, r, p } = STORED_COST;
+  return `$scrypt$ln=${Math.log2(N)},r=${r},p=${p}$${base64(salt)}$${base64(key)}`;
+}
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(SALT_LENGTH);
-  const key = await derive(password, salt, STORED_COST);
-  return `scrypt$${salt.toString("hex")}$${key.toString("hex")}`;
+  return phcString(salt, await derive(password, salt, STORED_COST));
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
@@ -93,25 +103,49 @@ export async function verifyPassword(password: string, stored: string): Promise<
   return timingSafeEqual(await derive(password, hash.salt, hash.cost), hash.key);
 }
 
+/** Whether a stored hash's cost differs from today's, so that a sign-in re-hashes it. */
+function isStale(cost: ScryptCost): boolean {
+  return cost.N !== STORED_COST.N || cost.r !== STORED_COST.r || cost.p !== STORED_COST.p;
+}
+
 const NO_ACCOUNT_SALT = randomBytes(SALT_LENGTH);
 
+export interface LoginPasswordCheck {
+  /** Whether the password matches the stored hash. */
+  readonly matches: boolean;
+  /** When it matched a hash at another cost: the password hashed at today's cost, to store instead. */
+  readonly rehash: string | null;
+}
+
 /**
- * A login's password check, with the same scrypt work whether or not the email has an account: no
- * stored hash (`null`), or one this module cannot read, costs one derivation at `STORED_COST`, as a
- * wrong password for an account with a hash this release writes does, so the response time does not
- * tell which emails are registered. The one exception: a PHC hash the next release wrote is checked
- * at its own, higher cost, so after a rollback from that release the accounts it re-hashed answer a
- * wrong password more slowly than an unknown email (6 times the work at N=2^15, r=8, p=3) until it
- * is back.
+ * A login's password check, with the same scrypt work whether or not the email has an account. Every
+ * path derives once at `STORED_COST`, and the answer waits for that derivation:
+ * - a hash at today's cost is checked with it;
+ * - no stored hash (`null`), or one this module cannot read, gets it with a fixed salt;
+ * - a hash at another cost (the first format, which every release before #103 wrote) is checked at
+ *   its own cost alongside it, a fresh hash of the password that the login stores if it matched.
+ * So the response time tells neither which emails are registered nor which accounts still hold an
+ * older hash. After a rollback to #103, the accounts this release wrote or re-hashed answer a wrong
+ * password more slowly than an unknown email there (6 times the work), until this release is back.
  */
 export async function checkLoginPassword(
   password: string,
   stored: string | null,
-): Promise<boolean> {
+): Promise<LoginPasswordCheck> {
   const hash = stored === null ? null : parse(stored);
   if (!hash) {
     await derive(password, NO_ACCOUNT_SALT, STORED_COST);
-    return false;
+    return { matches: false, rehash: null };
   }
-  return timingSafeEqual(await derive(password, hash.salt, hash.cost), hash.key);
+  if (!isStale(hash.cost)) {
+    const matches = timingSafeEqual(await derive(password, hash.salt, hash.cost), hash.key);
+    return { matches, rehash: null };
+  }
+  const salt = randomBytes(SALT_LENGTH);
+  const [key, fresh] = await Promise.all([
+    derive(password, hash.salt, hash.cost),
+    derive(password, salt, STORED_COST),
+  ]);
+  const matches = timingSafeEqual(key, hash.key);
+  return { matches, rehash: matches ? phcString(salt, fresh) : null };
 }
