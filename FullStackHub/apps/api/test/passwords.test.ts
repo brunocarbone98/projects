@@ -222,9 +222,10 @@ describe("password hashes", () => {
       expect(await derivations(hash), String(hash)).toEqual(account);
     }
 
-    // Either call failing, or both, fails the check on every path, and the login answers 500. A call
-    // left unawaited, or awaited only after the other (whose error then skips that await), would
-    // instead leave its own error unhandled, which stops the API.
+    // Either call failing, or both, fails the check on every path, and the login answers 500. A
+    // failing call fails first, while the other still runs, as an allocation failure at a job's
+    // start would: a call not awaited from the start (left unawaited, or awaited only after the
+    // other, in a `finally` or a chain) would then leave its error unhandled, which stops the API.
     const failure = new Error("scrypt failed");
     const spy = vi.mocked(scrypt);
     try {
@@ -232,8 +233,8 @@ describe("password hashes", () => {
         for (const hash of [current, null, "not a hash", older]) {
           let call = 0;
           spy.mockImplementation((_password, _salt, keyLength, _options, done) => {
-            if (failing.includes(call++)) done(failure, Buffer.alloc(0));
-            else done(null, Buffer.alloc(keyLength));
+            if (failing.includes(call++)) setImmediate(() => done(failure, Buffer.alloc(0)));
+            else setImmediate(() => setImmediate(() => done(null, Buffer.alloc(keyLength))));
           });
           await expect(checkLoginPassword("wrong-password", hash), String(hash)).rejects.toBe(
             failure,
@@ -242,16 +243,19 @@ describe("password hashes", () => {
       }
 
       // Every cost but today's is checked at its own and re-hashed: each term changed either way,
-      // and the memory and the work of today's cost with another N and r. A cost taken for today's
-      // would be checked at today's, and the right password refused for good. A stand-in scrypt (a
-      // SHA-512 of its inputs) makes these cases free.
+      // the memory and the work of today's cost with another N and r, and the most memory a stored
+      // hash may ask for (256 MiB). A cost taken for today's would be checked at today's, and the
+      // right password refused for good. A stand-in scrypt (a SHA-512 of its inputs) makes these
+      // cases free. Node's own checks of each call's options still run, without the work (a key
+      // length of 0): a cost above the memory derive allows fails here as at a sign-in.
       const standIn = (password: unknown, salt: unknown, { N, r, p }: ScryptOptions) =>
         createHash("sha512")
           .update(JSON.stringify([password, salt, N, r, p]))
           .digest();
-      spy.mockImplementation((password, salt, _keyLength, options, done) =>
-        done(null, standIn(password, salt, options)),
-      );
+      spy.mockImplementation((password, salt, _keyLength, options, done) => {
+        scryptSync(password, salt, 0, options);
+        done(null, standIn(password, salt, options));
+      });
       for (const [ln, r, p] of [
         [14, 8, 3],
         [16, 8, 3],
@@ -260,6 +264,7 @@ describe("password hashes", () => {
         [15, 8, 1],
         [15, 8, 4],
         [16, 4, 3],
+        [18, 8, 1],
       ]) {
         const salt = randomBytes(16);
         const key = standIn("Password123!", salt, { N: 2 ** ln, r, p });
