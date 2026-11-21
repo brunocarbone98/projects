@@ -1,4 +1,11 @@
-import { randomBytes, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  scrypt,
+  type ScryptOptions,
+  scryptSync,
+  timingSafeEqual,
+} from "node:crypto";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -145,7 +152,9 @@ describe("password hashes", () => {
     expect(await verifyPassword("Password123!", rehash)).toBe(true);
     expect(await verifyPassword("wrong-password", rehash)).toBe(false);
     expect(await release103Verify("Password123!", rehash)).toBe(true);
-    // Any other cost is re-hashed too, a higher one included: one term changed at a time.
+    // Any other cost is re-hashed too, a higher one included: one term changed at a time. Each
+    // re-hash gets a salt of its own, neither the account's nor one another re-hash has.
+    const salts: string[] = [];
     for (const cost of [
       { N: 2 ** 14, r: 8, p: 3 },
       { N: 2 ** 15, r: 4, p: 3 },
@@ -157,7 +166,9 @@ describe("password hashes", () => {
       const check = await checkLoginPassword("Password123!", stored);
       expect(check.matches, stored).toBe(true);
       expect(check.rehash ?? "", stored).toMatch(/^\$scrypt\$ln=15,r=8,p=3\$/);
+      salts.push(base64(salt), (check.rehash ?? "").split("$")[3]);
     }
+    expect(new Set(salts).size).toBe(salts.length);
 
     // The scrypt calls one check makes, run by Node's own scrypt: all started together, and each
     // finished before the check answers. Every path makes the same calls in the same order, one at
@@ -211,22 +222,52 @@ describe("password hashes", () => {
       expect(await derivations(hash), String(hash)).toEqual(account);
     }
 
-    // Either call failing fails the check on every path, and the login answers 500. A call left
-    // running unawaited would instead leave its error unhandled, which stops the API.
+    // Either call failing, or both, fails the check on every path, and the login answers 500. A call
+    // left unawaited, or awaited only after the other (whose error then skips that await), would
+    // instead leave its own error unhandled, which stops the API.
     const failure = new Error("scrypt failed");
     const spy = vi.mocked(scrypt);
     try {
-      for (const failing of [0, 1]) {
+      for (const failing of [[0], [1], [0, 1]]) {
         for (const hash of [current, null, "not a hash", older]) {
           let call = 0;
           spy.mockImplementation((_password, _salt, keyLength, _options, done) => {
-            if (call++ === failing) done(failure, Buffer.alloc(0));
+            if (failing.includes(call++)) done(failure, Buffer.alloc(0));
             else done(null, Buffer.alloc(keyLength));
           });
           await expect(checkLoginPassword("wrong-password", hash), String(hash)).rejects.toBe(
             failure,
           );
         }
+      }
+
+      // Every cost but today's is checked at its own and re-hashed: each term changed either way,
+      // and the memory and the work of today's cost with another N and r. A cost taken for today's
+      // would be checked at today's, and the right password refused for good. A stand-in scrypt (a
+      // SHA-512 of its inputs) makes these cases free.
+      const standIn = (password: unknown, salt: unknown, { N, r, p }: ScryptOptions) =>
+        createHash("sha512")
+          .update(JSON.stringify([password, salt, N, r, p]))
+          .digest();
+      spy.mockImplementation((password, salt, _keyLength, options, done) =>
+        done(null, standIn(password, salt, options)),
+      );
+      for (const [ln, r, p] of [
+        [14, 8, 3],
+        [16, 8, 3],
+        [15, 4, 3],
+        [15, 16, 3],
+        [15, 8, 1],
+        [15, 8, 4],
+        [16, 4, 3],
+      ]) {
+        const salt = randomBytes(16);
+        const key = standIn("Password123!", salt, { N: 2 ** ln, r, p });
+        const stored = `$scrypt$ln=${ln},r=${r},p=${p}$${base64(salt)}$${base64(key)}`;
+        expect(await checkLoginPassword("Password123!", stored), stored).toEqual({
+          matches: true,
+          rehash: expect.stringMatching(/^\$scrypt\$ln=15,r=8,p=3\$/),
+        });
       }
     } finally {
       spy.mockImplementation(nodeScrypt);

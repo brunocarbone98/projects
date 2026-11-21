@@ -356,9 +356,10 @@ describe("password checks at login", () => {
     }
 
     // Each answer waits for the same two scrypt derivations (about 0.25 s; passwords.test.ts pins
-    // them). Without the one at today's cost, an unknown email was answered after one database read
-    // (a ratio of about 0.02) and an older hash after its own, cheaper check (about 0.2). The wide
-    // bounds keep a machine busy with other work from failing the test with the derivations there.
+    // them). Without the one at today's cost, an unknown email and an older hash were answered after
+    // the first format's alone (a ratio of about 0.2); with neither, an unknown email was answered
+    // after one database read (about 0.02). The wide bounds keep a machine busy with other work from
+    // failing the test with the derivations there.
     const median = (runs: { ms: number }[]) =>
       runs.map((run) => run.ms).sort((a, b) => a - b)[2] ?? 0;
     for (const other of [unknown, older]) {
