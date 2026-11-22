@@ -77,6 +77,8 @@ export const HISTORY_ENTRY_MAX_BYTES = Math.floor((HISTORY_MAX_BYTES - 2) / HIST
  * @property {boolean} report save the "did not download" report at the end of a run with failures
  * @property {boolean} alerts a notification when a drama finishes — complete, or episodes to retry
  *   (`alerts.js`, DramaFetch 1.7.0)
+ * @property {boolean} autoRetry one automatic retry of a drama's episodes that did not download for a
+ *   reason a retry can change — never after a stop (`app.js`, DramaFetch 1.8.0)
  *
  * @typedef {object} TestSettings Overrides honoured only in test mode (`dramafetch_test`).
  * @property {string} [baseUrl] another origin than TikTok's (the fake TikTok server)
@@ -121,6 +123,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   restMaxS: PACING_DEFAULTS.restMaxS,
   report: true,
   alerts: true,
+  autoRetry: true,
 });
 
 /** The numeric test settings and nothing else; anything outside test mode is ignored. */
@@ -164,8 +167,8 @@ function isRecord(value) {
 
 /**
  * Why `settings` cannot be saved, or null: an unknown quality, cover mode or pace, a name format
- * `lib/naming` refuses, a report or alert switch that is not a boolean, pauses below the Python
- * defaults (outside test mode) or inverted.
+ * `lib/naming` refuses, a report, alert or automatic retry switch that is not a boolean, pauses
+ * below the Python defaults (outside test mode) or inverted.
  * @param {Settings} settings
  * @param {boolean} testMode
  * @returns {string | null}
@@ -179,6 +182,7 @@ export function settingsProblem(settings, testMode) {
   if (naming !== null) return naming;
   if (typeof settings.report !== "boolean") return "the report switch must be on or off";
   if (typeof settings.alerts !== "boolean") return "the alert switch must be on or off";
+  if (typeof settings.autoRetry !== "boolean") return "the automatic retry switch must be on or off";
   return pacingProblem(pacingOptions(pickPacing(settings)), { testMode });
 }
 

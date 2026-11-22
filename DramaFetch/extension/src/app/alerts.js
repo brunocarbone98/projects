@@ -19,12 +19,33 @@
  * - **incomplete** — `<drama> — not complete` / the tab's report line: nothing to retry, but not
  *   complete either (a gap in TikTok's list, an episode TikTok did not list, a list it refused);
  * - **stopped** — at the end of a job that stopped with dramas never started — its own, or those of
- *   the download jobs its stop took out of the queue —, one more: `DramaFetch stopped: <reason>` /
+ *   the download jobs its stop took out of the queue, never an automatic retry's (its drama gets the
+ *   ⚠ of **not retried after all**, below) —, one more: `DramaFetch stopped: <reason>` /
  *   `N dramas were not started — download them again later`.
  *
- * Nothing for a drama skipped as complete or refused before any request, nothing of their own for a
- * listing or a removal from the Bookmark (`app.js` asks only for download jobs' dramas), nothing for
- * a job refused at its gate, nor while the **Alert me when a drama finishes** setting is off.
+ * The automatic retry of DramaFetch 1.8.0 (the owner's request of 2026-11-21: retry on its own a
+ * download that did not work, and say so) adds these, all under one id per drama — the one its ⚠
+ * alert would have had (Chrome replaces the notification: one per drama, which changes):
+ *
+ * - **autoretry** — `↻ <drama> — retrying 2 episodes` / `E03, E07 did not download — DramaFetch
+ *   tries them once more on its own.` ({@link autoRetryAlert}), shown INSTEAD of the ⚠ alert when
+ *   `app.js` queued that drama's automatic retry: no button (the retry waits in the queue already);
+ * - the automatic retry's outcome — the retry job's own drama alert, `After an automatic retry.` as
+ *   its context unless the retry stopped ({@link dramaAlert}'s `afterAutoRetry`): ✓, ⚠ with its
+ *   **Retry**, or not complete, as above;
+ * - **not retried after all** — an automatic retry that never ran: **Stop** or a stop took it out of
+ *   the queue, it was refused at its own gate, or **Stop** or an error ended it before any request:
+ *   the ⚠ alert with its **Retry** (the job's own episodes), `Not retried automatically: <reason>`
+ *   its context ({@link notRetriedAlert});
+ * - an automatic retry that ran — asked TikTok for its list — and that **Stop** or an error ended
+ *   before its drama's alert: the ⚠ alert with its **Retry** of the episodes it did not get on disk,
+ *   the stop's reason its context, as for any automatic retry that stopped ({@link stoppedRetryAlert});
+ *   with none left, `app.js` takes “retrying” away.
+ *
+ * Beyond **not retried after all**, nothing for a drama skipped as complete or refused before any
+ * request, nothing of their own for a listing or a removal from the Bookmark (`app.js` asks only for
+ * download jobs' dramas), nothing for a job refused at its gate (but an automatic retry's, above),
+ * nor while the **Alert me when a drama finishes** setting is off.
  * Plain text in the page's display language
  * (`t()`, and the engine's English texts through `lib/display` as the tab shows them); the drama's
  * name cut to {@link MAX_NAME_LENGTH}; never a URL — an address in a text is replaced by its host
@@ -51,13 +72,18 @@ export const MAX_TEXT_LENGTH = 200;
  * @typedef {import("./engine.js").SeriesRun} SeriesRun
  * @typedef {import("./app.js").RetryTarget} RetryTarget
  *
- * @typedef {"complete" | "retry" | "incomplete" | "stopped"} AlertKind
+ * @typedef {"complete" | "retry" | "incomplete" | "stopped" | "autoretry"} AlertKind
  *
  * @typedef {object} AlertTexts What one notification says.
  * @property {AlertKind} kind
  * @property {string} title
  * @property {string} message
- * @property {string | null} context Chrome's `contextMessage` (the stop's reason), or none
+ * @property {string | null} context Chrome's `contextMessage` (the stop's reason, what an
+ *   automatic retry came to), or none
+ *
+ * @typedef {object} DramaAlertOptions
+ * @property {boolean} [afterAutoRetry] the run is an automatic retry's (DramaFetch 1.8.0): its
+ *   context says so — `After an automatic retry.` —, or, when the run stopped, gives the stop's reason
  */
 
 /**
@@ -97,32 +123,65 @@ export function plainText(text, max = MAX_TEXT_LENGTH) {
 }
 
 /**
+ * A drama's name as a title carries it: its report's name, else its list's, else its id — plain
+ * text, cut to {@link MAX_NAME_LENGTH}.
+ * @param {SeriesRun} run
+ * @returns {string}
+ */
+function nameOf(run) {
+  return plainText(run.report.name || run.series?.name || run.ref.seriesId, MAX_NAME_LENGTH);
+}
+
+/**
+ * `E03, E07, E12` — at most {@link MAX_NAMED_EPISODES} of them, then `and N more` (`alertMore`).
+ * @param {readonly number[]} numbers
+ * @returns {string}
+ */
+function namedEpisodes(numbers) {
+  const named = numbers.slice(0, MAX_NAMED_EPISODES).map(episodeLabel).join(", ");
+  return numbers.length > MAX_NAMED_EPISODES ? t("alertMore", [named, numbers.length - MAX_NAMED_EPISODES]) : named;
+}
+
+/**
+ * The ⚠ alert of a drama's episodes to retry: `⚠ <drama> — 3 episodes to retry` / `E03, E07, E12
+ * did not download.`; its **Retry** button is {@link notificationOptions}'.
+ * @param {string} name the drama's name, plain already
+ * @param {readonly number[]} numbers at least one
+ * @param {string | null} context
+ * @returns {AlertTexts}
+ */
+function retryTexts(name, numbers, context) {
+  const one = numbers.length === 1;
+  return {
+    kind: "retry",
+    title: one ? t("alertRetryTitleOne", [name]) : t("alertRetryTitle", [name, numbers.length]),
+    message: t(one ? "alertRetryMessageOne" : "alertRetryMessage", [namedEpisodes(numbers)]),
+    context,
+  };
+}
+
+/**
  * The texts of the notification of a drama a download job finished, or null when it gets none:
  * skipped as complete (no request was made), or refused before any request (a cooldown or a write
  * the storage refused at its gate) or never started (after a stop). `target` is what the tab's
- * **Retry** takes for that drama (`app.retryTargets` over its record), null when nothing.
+ * **Retry** takes for that drama (`app.retryTargets` over its record), null when nothing. With
+ * `afterAutoRetry` (the run of an automatic retry, DramaFetch 1.8.0) the context — of whichever
+ * kind — is `After an automatic retry.`, or the stop's reason when the run stopped.
  * @param {SeriesRun} run
  * @param {RetryTarget | null} target
  * @param {(text: string) => string} show an engine text as the tab shows it (`lib/display`)
+ * @param {DramaAlertOptions} [options]
  * @returns {AlertTexts | null}
  */
-export function dramaAlert(run, target, show) {
+export function dramaAlert(run, target, show, options = {}) {
   const report = run.report;
   if (report.skippedComplete) return null;
   if (!run.contacted && run.results.length === 0) return null;
-  const name = plainText(report.name || run.series?.name || run.ref.seriesId, MAX_NAME_LENGTH);
-  if (target !== null && target.numbers.length > 0) {
-    const numbers = target.numbers;
-    const named = numbers.slice(0, MAX_NAMED_EPISODES).map(episodeLabel).join(", ");
-    const episodes = numbers.length > MAX_NAMED_EPISODES ? t("alertMore", [named, numbers.length - MAX_NAMED_EPISODES]) : named;
-    const one = numbers.length === 1;
-    return {
-      kind: "retry",
-      title: one ? t("alertRetryTitleOne", [name]) : t("alertRetryTitle", [name, numbers.length]),
-      message: t(one ? "alertRetryMessageOne" : "alertRetryMessage", [episodes]),
-      context: report.stopped ? plainText(show(report.stopped)) : null,
-    };
-  }
+  const name = nameOf(run);
+  const stopped = report.stopped ? plainText(show(report.stopped)) : null;
+  /** @param {string | null} context what the alert says as its context outside an automatic retry */
+  const contextOf = (context) => (options.afterAutoRetry === true ? (stopped ?? t("alertAfterAutoRetry")) : context);
+  if (target !== null && target.numbers.length > 0) return retryTexts(name, target.numbers, contextOf(stopped));
   if (report.complete) {
     const have = report.done + report.onDisk;
     // the locked ones in the words of the report line (`2 locked (61, 62)`), as the tab shows them
@@ -132,19 +191,84 @@ export function dramaAlert(run, target, show) {
     // and its title says so — no ✓, no “downloaded”: nothing was saved
     const message = have > 1 ? t("alertAllOnDisk", [have, locked]) : t(have === 1 ? "alertOneOnDisk" : "alertNoneOnDisk", [locked]);
     const title = have === 0 ? t("alertNothingPlayableTitle", [name]) : t("alertCompleteTitle", [name]);
-    return { kind: "complete", title, message, context: null };
+    return { kind: "complete", title, message, context: contextOf(null) };
   }
   return {
     kind: "incomplete",
     title: t("alertIncompleteTitle", [name]),
     message: plainText(show(run.error !== null ? run.error : reportLine(report))), // what the tab's report line shows
+    context: contextOf(null),
+  };
+}
+
+/**
+ * The texts of the notification shown INSTEAD of the ⚠ alert when DramaFetch queued an automatic
+ * retry of a drama's episodes (DramaFetch 1.8.0): `↻ <drama> — retrying 2 episodes` / `E03, E07
+ * did not download — DramaFetch tries them once more on its own.` (at most
+ * {@link MAX_NAMED_EPISODES} named, then `and N more`); no context, and no button
+ * ({@link notificationOptions}): the retry waits in the queue already. `target` is what the
+ * automatic retry takes — episodes the tab's **Retry** would take besides (a short-served one, say)
+ * are not named here.
+ * @param {SeriesRun} run
+ * @param {RetryTarget} target at least one episode
+ * @returns {AlertTexts}
+ */
+export function autoRetryAlert(run, target) {
+  const name = nameOf(run);
+  const numbers = target.numbers;
+  const one = numbers.length === 1;
+  return {
+    kind: "autoretry",
+    title: one ? t("alertAutoRetryTitleOne", [name]) : t("alertAutoRetryTitle", [name, numbers.length]),
+    message: t(one ? "alertAutoRetryMessageOne" : "alertAutoRetryMessage", [namedEpisodes(numbers)]),
     context: null,
   };
 }
 
 /**
+ * A retry target's drama name as a title carries it: its name, else its id — plain text, cut to
+ * {@link MAX_NAME_LENGTH}, as {@link nameOf} gives a run's.
+ * @param {RetryTarget} target
+ * @returns {string}
+ */
+function targetName(target) {
+  return plainText(target.name || target.seriesId, MAX_NAME_LENGTH);
+}
+
+/**
+ * The texts of the notification of an automatic retry that never ran (DramaFetch 1.8.0): **Stop**
+ * or a stop took it out of the queue, it was refused at its own gate, or **Stop** or an error ended
+ * it before any request. The ⚠ alert of the episodes it would have retried — `target`, the job's
+ * own — with its **Retry**, and `Not retried automatically: <reason>` as its context (`reason` an
+ * engine text, shown as the tab shows it).
+ * @param {RetryTarget} target at least one episode
+ * @param {string} reason
+ * @param {(text: string) => string} show
+ * @returns {AlertTexts}
+ */
+export function notRetriedAlert(target, reason, show) {
+  return retryTexts(targetName(target), target.numbers, t("alertAutoRetryNotRun", [plainText(show(reason))]));
+}
+
+/**
+ * The texts of the notification of an automatic retry that ran — asked TikTok for its list, maybe
+ * saved episodes — and that **Stop** or an error ended before its drama's alert (DramaFetch 1.8.0):
+ * the ⚠ alert of the episodes it did not get on disk — `target` — with its **Retry**, the stop's
+ * reason as its context (`reason` an engine text, shown as the tab shows it), as for an automatic
+ * retry whose run stopped ({@link dramaAlert}); never `Not retried automatically`: it ran.
+ * @param {RetryTarget} target at least one episode
+ * @param {string} reason
+ * @param {(text: string) => string} show
+ * @returns {AlertTexts}
+ */
+export function stoppedRetryAlert(target, reason, show) {
+  return retryTexts(targetName(target), target.numbers, plainText(show(reason)));
+}
+
+/**
  * The texts of the one notification at the end of a job that stopped with dramas never started —
- * a download job's own, or those of the download jobs its stop took out of the queue.
+ * a download job's own, or those of the download jobs its stop took out of the queue (never an
+ * automatic retry's: its drama gets its own ⚠, {@link notRetriedAlert}).
  * @param {string} reason why the job stopped (an engine text: `stopped by you`, a stop summary, …)
  * @param {number} notStarted how many dramas were not started (at least one)
  * @param {(text: string) => string} show
@@ -162,7 +286,7 @@ export function stoppedAlert(reason, notStarted, show) {
 /**
  * Chrome's options for `texts`: a basic notification with DramaFetch's icon, an ordinary priority,
  * not held on screen (Windows keeps it in its notification centre), with Windows' sound; the
- * **Retry** button on a retry alert only.
+ * **Retry** button on a retry alert only — never on an `autoretry` one, whose retry is queued.
  * @param {AlertTexts} texts
  * @returns {chrome.notifications.NotificationOptions}
  */
@@ -231,13 +355,16 @@ export class PageAlerts {
   }
 
   /**
-   * Show a notification (never throws, never waits); `target` is what its **Retry** queues.
+   * Show a notification (never throws, never waits); `target` is what its **Retry** queues. One
+   * shown under the id of an earlier one replaces it in Chrome (an automatic retry's alerts, one id
+   * per drama): without a target, the earlier one's retry goes with its button.
    * @param {string} id
    * @param {AlertTexts} texts
    * @param {RetryTarget | null} [target]
    */
   show(id, texts, target = null) {
     if (target !== null) this.retries.set(id, target);
+    else this.retries.delete(id);
     send(
       (api) => api.create(id, notificationOptions(texts)),
       () => this.retries.delete(id),

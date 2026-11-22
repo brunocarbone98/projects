@@ -910,13 +910,16 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
     does its history entry. The retry is one selection job over exactly those episodes (never the
     locked one): a fresh resolve, the state's DRM memory respected (episode 2 skipped without a
     request), the others requested once more and failing again; nothing saved; the block then
-    shows what failed again, the result table keeping only the skip."""
+    shows what failed again, the result table keeping only the skip. With the settings' defaults:
+    a run that three failures in a row stopped is never retried on its own (1.8.0), so this retry
+    is the user's."""
     drm = frozenset({(SERIES_ID, 2)})
     with (
         FakeTikTok(truncate_media=True, drm_media=drm) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         first = ext.paste_and_wait(MAIN_LINK)
+        assert [entry["label"] for entry in ext.history()] == [first["label"]]  # nothing queued
         (series,) = first["series"]
         assert _statuses(series) == [
             "failed",
@@ -934,6 +937,7 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
 
         page = ext.page
         assert page.locator("#failed-block").is_visible()
+        assert page.locator("#failed-auto").is_hidden()  # nothing will be retried on its own
         assert _table_rows(page, "#failed-table") == [
             ("1", "failed"),
             ("2", "failed-unavailable"),

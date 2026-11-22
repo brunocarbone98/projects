@@ -2988,8 +2988,14 @@ const BATCH_JOB = /** @type {import("../src/app/app.js").Job} */ ({
   recheck: false,
 });
 
+/**
+ * The stored settings of a page that retries nothing on its own (DramaFetch 1.8.0's automatic retry
+ * off): the path the tests of a plain failure's ⚠ alert and the tab's own Retry prove, as in 1.7.0.
+ */
+const NO_AUTO_RETRY = { settings: { autoRetry: false } };
+
 test("the page: the engine's hook releases each finished series of a batch and keeps the table light", async () => {
-  const page = await fakePage();
+  const page = await fakePage({ storage: NO_AUTO_RETRY }); // its run's E02 failed: no automatic retry started under this test
   try {
     const { element, module } = page;
     /** @type {import("../src/app/app.js").JobRecord} */
@@ -7408,7 +7414,7 @@ const recordsOf = (runs) =>
   runs.map((run) => ({ series_id: run.ref.seriesId, name: run.report.name, rows: run.results.map((result) => ({ number: result.episode.number, status: result.status, message: result.message })) }));
 
 test("the alert: as each drama of a batch is done — its rows and records stored — the complete one says ✓ with its episodes on disk and its locked one in the report line's words; the one with failures says ⚠, names them and has ONE button, Retry; the ids are this page's, the job's and the drama's", async () => {
-  const page = await fakePage();
+  const page = await fakePage({ storage: NO_AUTO_RETRY }); // the ⚠ alert of plain failures: the automatic retry off
   try {
     const { module } = page;
     const notes = fakeNotifications();
@@ -7462,18 +7468,22 @@ test("the alert: as each drama of a batch is done — its rows and records store
 });
 
 test("the alert's Retry, handed over by the worker: the page that made it queues exactly the selection job the tab's Retry queues for that drama and takes the alert away — once; a cooldown in force: nothing queued, the alert kept, the tab named for the worker to bring forward; an alert of another page, or a sender that is no page of the extension: no answer", async () => {
-  const page = await fakePage();
+  /** @type {import("../src/app/engine.js").SeriesRun[]} */
+  let runs = [];
+  /** @type {Omit<import("../src/app/app.js").Job, "id"> | undefined} */
+  let expected;
+  const page = await fakePage({ storage: NO_AUTO_RETRY }); // the ⚠ alert of plain failures: the automatic retry off
   try {
     const { element, module } = page;
     const notes = fakeNotifications();
     const job = { ...BATCH_JOB, id: 3, refs: [refOf(OTHER_ID)] };
     const { engine } = scriptedEngine(page, job, { episodes: 12, statuses: { [`${OTHER_ID}:3`]: "failed", [`${OTHER_ID}:7`]: "failed-unavailable", [`${OTHER_ID}:12`]: "failed" } });
-    const runs = await runBatch(engine, job.refs);
+    runs = await runBatch(engine, job.refs);
     const [id] = notes.created;
     assert.ok(id !== undefined);
     const [target] = module.retryTargets(recordsOf(runs));
     assert.ok(target !== undefined);
-    const [expected] = module.retryJobs([target]);
+    [expected] = module.retryJobs([target]);
     // not from a TikTok page (the content script) nor another extension
     assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, { id: "dramafetch-test-id", url: "https://www.tiktok.com/@invented_viewer", tab: /** @type {chrome.tabs.Tab} */ ({ id: 42, index: 0, windowId: 1, active: true }) }), []);
     assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, "another-extension"), []);
@@ -7493,13 +7503,31 @@ test("the alert's Retry, handed over by the worker: the page that made it queues
     assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, WORKER), []);
     await page.turn();
     assert.deepEqual(queuedLabels(page), []);
-    // the tab's own Retry over the same run's records queues the very same job
+    // the tab's own Retry over the same run's records while that retry runs: its episodes are held
+    // already — nothing queued twice (DramaFetch 1.8.0), the button spent, and the status line says so
     module.renderFailed(recordsOf(runs));
     element("retry-button").fire("click");
     await page.turn();
-    assert.deepEqual(queuedLabels(page), [expected?.label]);
+    assert.deepEqual(queuedLabels(page), []);
+    assert.equal(element("retry-button").disabled, true);
+    assert.equal(element("input-status").textContent, "Already queued — not queued twice.");
   } finally {
     page.restore();
+  }
+  // the tab's own Retry over the same run's records, where no retry holds them, queues the very same job
+  const tab = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    tab.hold();
+    tab.module.renderFailed(recordsOf(runs));
+    tab.element("retry-button").fire("click");
+    await tab.turn();
+    assert.equal(tab.element("progress-current").textContent, expected?.label);
+    assert.deepEqual(
+      tab.module.queuedJobs().map(({ id: _id, ...queued }) => queued),
+      [expected],
+    );
+  } finally {
+    tab.restore();
   }
   // a cooldown in force: the gate of the tab's Retry button
   const now = Date.now() / 1000;
@@ -7719,8 +7747,9 @@ test("the alert: nothing for a drama skipped as complete (no request), nothing o
   }
   // the favorites listed (the popup's Open my library), then a listing TikTok stops with a 429 while
   // a batch and an alert's Retry wait behind it: both are cancelled, the listing gets no alert of its
-  // own, and ONE says how many dramas its stop left unstarted — the retry's among them
-  page = await fakePage({ testSettings: QUICK });
+  // own, and ONE says how many dramas its stop left unstarted — the retry's among them (the earlier
+  // batch's plain failure keeps its ⚠ alert: the automatic retry off)
+  page = await fakePage({ testSettings: QUICK, storage: NO_AUTO_RETRY });
   try {
     const { element, catalog, module } = page;
     const notes = fakeNotifications();
@@ -7862,7 +7891,7 @@ test("a notification Chrome refuses — a throw, a rejected promise, an answer t
     /** @type {unknown[]} */
     const entries = [];
     for (const refuse of /** @type {const} */ (["throw", "reject", "hang", "missing", "none"])) {
-      const page = await fakePage({ testSettings: QUICK });
+      const page = await fakePage({ testSettings: QUICK, storage: NO_AUTO_RETRY }); // the ⚠ alert's retry kept or not: the automatic retry off
       try {
         const { element, module } = page;
         const notes = refuse === "missing" ? null : fakeNotifications(refuse === "none" ? {} : { refuse });
@@ -7891,5 +7920,1266 @@ test("a notification Chrome refuses — a throw, a rejected promise, an answer t
     for (const entry of entries.slice(1)) assert.deepEqual(entry, entries[0]);
   } finally {
     console.warn = warn;
+  }
+});
+
+// ------------------------------------------ the automatic retry of what did not download (1.8.0)
+
+/** The fake TikTok's third and fourth series, as these tests name them. */
+const THIRD_ID = "7699393770256782388";
+const FOURTH_ID = "7699393770256782377";
+
+/**
+ * Every job of the page waits at its `chrome.tabs.getCurrent` until the test opens the gate: a job
+ * queued meanwhile starts and waits there, asking nothing of anything; once open, jobs run on (and
+ * `page.hold()` still holds them).
+ * @returns {() => void} what opens the gate
+ */
+function gateJobs() {
+  const tabs = /** @type {{getCurrent: () => Promise<unknown>}} */ (/** @type {unknown} */ (globalThis.chrome.tabs));
+  const answer = tabs.getCurrent;
+  /** @type {(value?: unknown) => void} */
+  let open = () => undefined;
+  const opened = new Promise((resolve) => {
+    open = resolve;
+  });
+  tabs.getCurrent = () => opened.then(() => answer());
+  return () => open();
+}
+
+/**
+ * The page's jobs as the unit tests compare them: their ids left out (the queue numbers them).
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ */
+const jobsOf = (page) => page.module.queuedJobs().map(({ id: _id, ...job }) => job);
+
+/**
+ * A batch of one drama — `OTHER_ID` unless `seriesId` names another — (job `id`) run through the
+ * page's own hooks, the page held (a job it queues starts and waits, asking nothing): returns what
+ * its engine kept. `ready` gets the engine before the batch runs.
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ * @param {number} id
+ * @param {Parameters<typeof scriptedEngine>[2]} [options]
+ * @param {(engine: import("../src/app/engine.js").Engine) => void} [ready]
+ * @param {string} [seriesId]
+ */
+async function batchOfOther(page, id, options = {}, ready = () => undefined, seriesId = OTHER_ID) {
+  const job = { ...BATCH_JOB, id, refs: [refOf(seriesId)] };
+  const scripted = scriptedEngine(page, job, options);
+  ready(scripted.engine);
+  const runs = await runBatch(scripted.engine, job.refs);
+  await page.turn(); // a job it queued is started (and held)
+  return { ...scripted, job, runs };
+}
+
+test("the automatic retry (1.8.0): a drama of a batch done with plain failures — a cut transfer, a file that failed its check — queues ONE retry of exactly those episodes at the END of the queue, as its alert's Retry would — a selection job, includeLocked false, its label, its alert's id — and says “retrying” instead of ⚠: no button, no retry kept; a short-served, locked or stopped row is never taken", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold(); // every job stays at its tabs.getCurrent: it runs, and makes no request
+    assert.equal(paste(page, SERIES_ID), true); // running
+    assert.equal(paste(page, THIRD_ID), true); // waiting
+    const job = { ...BATCH_JOB, id: 7, refs: [refOf(SERIES_ID), refOf(OTHER_ID)] };
+    const { engine, jobRecord } = scriptedEngine(page, job, { episodes: 12, statuses: { [`${OTHER_ID}:3`]: "failed", [`${OTHER_ID}:7`]: "failed-unavailable", [`${OTHER_ID}:12`]: "failed" } });
+    const runs = await runBatch(engine, job.refs);
+    await page.turn();
+    assert.deepEqual(runs.map((run) => [run.report.complete, run.stop]), [[true, false], [false, false]]);
+    const page7 = `dramafetch-alert:${module.alerts.page}:7`;
+    const alertId = `${page7}:${OTHER_ID}:retry`; // the ⚠ alert's own id
+    // after the job running and the one waiting: ONE automatic retry of E03 and E12, never E07
+    assert.deepEqual(jobsOf(page).slice(0, 2).map((queued) => [queued.kind, queued.label]), [["batch", `Series ${SERIES_ID}`], ["batch", `Series ${THIRD_ID}`]]);
+    assert.deepEqual(jobsOf(page).slice(2), [
+      {
+        kind: "selection",
+        label: "Automatic retry: 2 of Drama 2399",
+        refs: [refOf(OTHER_ID)],
+        series: null,
+        numbers: [3, 12],
+        includeLocked: false,
+        recheck: false,
+        autoRetry: { alertId, name: "Drama 2399" },
+      },
+    ]);
+    // exactly the job the alert's Retry would have queued, but for its label and its alert's id
+    const [manual] = module.retryJobs([{ seriesId: OTHER_ID, name: "Drama 2399", numbers: [3, 12] }]);
+    const { label: _label, autoRetry: _auto, ...same } = /** @type {Omit<import("../src/app/app.js").Job, "id">} */ (jobsOf(page)[2]);
+    assert.deepEqual({ ...same, label: manual?.label }, manual);
+    assert.deepEqual(queuedLabels(page), [`Series ${THIRD_ID}`, "Automatic retry: 2 of Drama 2399"]);
+    assert.deepEqual(jobRecord.autoRetried, [alertId]);
+    // the alerts: ✓ for the complete one; “retrying” in place of ⚠ — no button, nothing kept behind it
+    assert.deepEqual(notes.created, [`${page7}:${SERIES_ID}:complete`, alertId]);
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "↻ Drama 2399 — retrying 2 episodes",
+      message: "E03, E12 did not download — DramaFetch tries them once more on its own.",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+    assert.equal(module.alerts.retryOf(alertId), null);
+    // the tab's own Retry would take E07 too (failed-unavailable): left to the user
+    assert.deepEqual(module.retryTargets(recordsOf(runs))[0]?.numbers, [3, 7, 12]);
+    assert.equal(element("app-status").dataset["state"], "running");
+  } finally {
+    page.restore();
+  }
+  // a `failed` row a stop left (`stopped: …`) and a locked one are never taken, only the plain failure
+  const other = await fakePage();
+  try {
+    const notes = fakeNotifications();
+    other.hold();
+    const job = { ...BATCH_JOB, id: 5, refs: [refOf(SERIES_ID)] };
+    other.module.dramaDone(job, finishedRun(SERIES_ID, "Test Series", reportRows()), {});
+    await other.turn();
+    assert.deepEqual(jobsOf(other).map((queued) => [queued.label, queued.numbers]), [["Automatic retry: 1 of Test Series", [2]]]);
+    assert.equal(notes.shown.get(`dramafetch-alert:${other.module.alerts.page}:5:${SERIES_ID}:retry`)?.["message"], "E02 did not download — DramaFetch tries it once more on its own.");
+  } finally {
+    other.restore();
+  }
+});
+
+test("no automatic retry — the 1.7.0 ⚠ alert with its Retry instead — when the setting is off, when the only failures are short-served or DRM, when the run stopped (a 429, three failures in a row, a cooldown met before an episode: never a retry after a stop) or when a cooldown is in force", async () => {
+  const now = Date.now() / 1000;
+  const cooldown = { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now };
+  /**
+   * @type {{label: string, storage?: Record<string, unknown>, episodes?: number, statuses: Record<string, string>, coolAfter?: number, title: string, message: string, numbers: number[], context?: (text: unknown) => boolean}[]}
+   */
+  const cases = [
+    { label: "the setting off", storage: NO_AUTO_RETRY, statuses: { [`${OTHER_ID}:2`]: "failed" }, title: "⚠ Drama 2399 — 1 episode to retry", message: "E02 did not download.", numbers: [2] },
+    { label: "short-served or DRM only", statuses: { [`${OTHER_ID}:2`]: "failed-unavailable" }, title: "⚠ Drama 2399 — 1 episode to retry", message: "E02 did not download.", numbers: [2] },
+    {
+      label: "a 429 after a plain failure",
+      statuses: { [`${OTHER_ID}:1`]: "failed", [`${OTHER_ID}:2`]: "failed-rate-limited" },
+      title: "⚠ Drama 2399 — 3 episodes to retry",
+      message: "E01, E02, E03 did not download.",
+      numbers: [1, 2, 3],
+      context: (text) => text === "episode 2 failed-rate-limited",
+    },
+    {
+      label: "three failures in a row",
+      episodes: 4,
+      statuses: { [`${OTHER_ID}:1`]: "failed", [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:3`]: "failed" },
+      title: "⚠ Drama 2399 — 4 episodes to retry",
+      message: "E01, E02, E03, E04 did not download.",
+      numbers: [1, 2, 3, 4],
+      context: (text) => text === "3 consecutive failures",
+    },
+    {
+      label: "a cooldown met before an episode",
+      statuses: { [`${OTHER_ID}:1`]: "failed" },
+      coolAfter: 1,
+      title: "⚠ Drama 2399 — 3 episodes to retry",
+      message: "E01, E02, E03 did not download.",
+      numbers: [1, 2, 3],
+      context: (text) => /^cooldown until \d\d:\d\d$/.test(String(text)),
+    },
+    { label: "a cooldown in force", storage: { cooldown }, statuses: { [`${OTHER_ID}:2`]: "failed" }, title: "⚠ Drama 2399 — 1 episode to retry", message: "E02 did not download.", numbers: [2] },
+  ];
+  for (const item of cases) {
+    const page = await fakePage(item.storage === undefined ? {} : { storage: item.storage });
+    try {
+      const { module } = page;
+      const notes = fakeNotifications();
+      page.hold();
+      /** @type {import("../src/app/engine.js").Engine | null} */
+      let used = null;
+      const coolAfter = item.coolAfter;
+      const { runs } = await batchOfOther(
+        page,
+        4,
+        {
+          ...(item.episodes === undefined ? {} : { episodes: item.episodes }),
+          statuses: item.statuses,
+          // TikTok refused a request elsewhere meanwhile: recorded as this episode is asked for
+          ...(coolAfter === undefined ? {} : { onDownload: (ep) => void (ep.number === coolAfter && used !== null && recordBlock(used.cooldownStore, MEDIA_RATE_LIMIT_MESSAGE, "browser", { now: used.wallClock() })) }),
+        },
+        (engine) => {
+          used = engine;
+        },
+      );
+      assert.equal(runs.length, 1, item.label);
+      assert.equal(runs[0]?.stop, item.context !== undefined, item.label); // the stopped cases stopped
+      assert.deepEqual(jobsOf(page), [], item.label); // nothing queued
+      const id = `dramafetch-alert:${module.alerts.page}:4:${OTHER_ID}:retry`;
+      assert.deepEqual(notes.created, [id], item.label);
+      const shown = notes.shown.get(id);
+      assert.equal(shown?.["title"], item.title, item.label);
+      assert.equal(shown?.["message"], item.message, item.label);
+      assert.deepEqual(shown?.["buttons"], [{ title: "Retry" }], item.label);
+      if (item.context === undefined) assert.equal(shown?.["contextMessage"], undefined, item.label);
+      else assert.ok(item.context(shown?.["contextMessage"]), `${item.label}: ${String(shown?.["contextMessage"])}`);
+      assert.deepEqual(module.alerts.retryOf(id)?.numbers, item.numbers, item.label);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test("the automatic retry is not behind the alert setting: alerts off, it is queued all the same, and nothing is shown", async () => {
+  const page = await fakePage({ storage: { settings: { alerts: false } } });
+  try {
+    const notes = fakeNotifications();
+    page.hold();
+    await batchOfOther(page, 4, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers, queued.autoRetry?.alertId]), [["Automatic retry: 1 of Drama 2399", [2], `dramafetch-alert:${page.module.alerts.page}:4:${OTHER_ID}:retry`]]);
+    assert.deepEqual(notes.created, []);
+  } finally {
+    page.restore();
+  }
+});
+
+test("a selection job's drama the same (1.8.0): a retry the user asked for (a past run's Retry) — its plain failures get their one automatic retry, queued behind it; the selection job itself, running, holds its episodes no more", async () => {
+  const failures = historyEntry("batch", "1 series", [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "done"], [4, "failed"]])]);
+  const page = await fakePage({ storage: { history: [failures] } });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const found = retryLineOf(/** @type {FakeElement} */ (element("history-list").children[0]));
+    assert.ok(found);
+    found.retry.fire("click"); // a past run's Retry: the selection job of E02 and E04, running
+    await page.turn();
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined && running.kind === "selection");
+    assert.deepEqual(running.numbers, [2, 4]);
+    // its run, as runJob gets it (listed again, then the downloads): E02 fails again, plain
+    const scripted = scriptedEngine(page, running, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    const run = await runSelectionJob(scripted.engine, refOf(OTHER_ID), running.numbers, { lastContactAt: null });
+    assert.deepEqual(run.results.map((result) => [result.episode.number, result.status]), [[2, "failed"], [4, "done"]]);
+    module.dramaDone(running, run, scripted.jobRecord); // where runJob makes the drama's alert
+    await page.turn();
+    const alertId = `dramafetch-alert:${module.alerts.page}:${running.id}:${OTHER_ID}:retry`;
+    assert.deepEqual(jobsOf(page).slice(1), [
+      { kind: "selection", label: "Automatic retry: 1 of Drama 2399", refs: [refOf(OTHER_ID)], series: null, numbers: [2], includeLocked: false, recheck: false, autoRetry: { alertId, name: "Drama 2399" } },
+    ]);
+    assert.deepEqual(notes.created, [alertId]);
+    assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2399 — retrying 1 episode");
+    assert.equal(notes.shown.get(alertId)?.["buttons"], undefined);
+  } finally {
+    page.restore();
+  }
+});
+
+test("what came of the automatic retry (1.8.0): its drama's alert under the id of “retrying” — Chrome replaces it —, `After an automatic retry.` its context: ✓ once its episodes are on disk, ⚠ with its Retry when one still did not download, the stop's reason when it stopped; never a second automatic retry", async () => {
+  const page = await fakePage();
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const first = await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    const [auto] = module.queuedJobs(); // started, held
+    assert.ok(auto?.autoRetry !== undefined);
+    const alertId = auto.autoRetry.alertId;
+    assert.equal(alertId, `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`);
+    assert.deepEqual(notes.created, [alertId]);
+    /**
+     * The automatic retry's own run, as runJob gets it: the series listed again, `statuses` its
+     * downloads, the records the batch left (E01 and E03 on disk); then its drama's alert.
+     * @param {Record<string, string>} statuses
+     */
+    const retried = async (statuses) => {
+      const scripted = scriptedEngine(page, auto, { statuses });
+      scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
+      const run = await runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null });
+      module.dramaDone(auto, run, scripted.jobRecord);
+      await page.turn();
+      return { run, jobRecord: scripted.jobRecord };
+    };
+    // E02 fails again: ⚠ with its Retry, the same id, the context; nothing more queued
+    const again = await retried({ [`${OTHER_ID}:2`]: "failed" });
+    assert.equal(again.run.stop, false);
+    assert.deepEqual(notes.created, [alertId, alertId]);
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 1 episode to retry",
+      message: "E02 did not download.",
+      contextMessage: "After an automatic retry.",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2] });
+    assert.deepEqual(jobsOf(page).length, 1); // the automatic retry alone: no second round
+    assert.equal(again.jobRecord.autoRetried, undefined);
+    // its episodes on disk now: ✓, the whole drama, the context; no Retry kept behind it
+    await retried({});
+    assert.deepEqual(notes.created, [alertId, alertId, alertId]);
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "✓ Drama 2399 — downloaded",
+      message: "All 3 episodes are on disk.",
+      contextMessage: "After an automatic retry.",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+    assert.equal(module.alerts.retryOf(alertId), null);
+    // a 429 while it retried: the stop's reason as its context, as for any download
+    const stopped = await retried({ [`${OTHER_ID}:2`]: "failed-rate-limited" });
+    assert.equal(stopped.run.stop, true);
+    assert.equal(notes.shown.get(alertId)?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "episode 2 failed-rate-limited");
+    assert.deepEqual(jobsOf(page).length, 1);
+  } finally {
+    page.restore();
+  }
+});
+
+test("no retry is queued twice (1.8.0): the automatic one leaves out the episodes a running or waiting selection job holds — nothing left: none, and the 1.7.0 ⚠ alert —; a past run's and the progress card's Retry queue only what no retry holds and, with nothing left, say so, spent; an alert's Retry with nothing left answers queued and takes the alert away", async () => {
+  const failures = historyEntry("batch", "1 series", [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed"]])]);
+  const page = await fakePage({ storage: { history: [failures] } });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    // a batch's drama: its automatic retry of E02, running
+    await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    assert.deepEqual(jobsOf(page).map((queued) => queued.label), ["Automatic retry: 1 of Drama 2399"]);
+    // a past run's Retry of E02 and E03: E03 only, waiting behind it
+    const found = retryLineOf(/** @type {FakeElement} */ (element("history-list").children[0]));
+    assert.ok(found);
+    found.retry.fire("click");
+    await page.turn();
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers]), [["Automatic retry: 1 of Drama 2399", [2]], ["Retry 1 of Drama 2399", [3]]]);
+    assert.equal(found.retry.disabled, true);
+    assert.equal(element("input-status").textContent, ""); // something was queued: nothing to say
+    // the progress card's Retry of the same two: both held — nothing queued, said, the button spent
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed"]])]);
+    assert.equal(element("retry-button").disabled, false);
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.equal(jobsOf(page).length, 2);
+    assert.equal(element("retry-button").disabled, true);
+    assert.equal(element("input-status").textContent, "Already queued — not queued twice.");
+    // another batch's drama with E02 and E03 failing: both held — no automatic retry, the ⚠ alert
+    await batchOfOther(page, 8, { statuses: { [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:3`]: "failed" } });
+    assert.equal(jobsOf(page).length, 2);
+    const warned = `dramafetch-alert:${module.alerts.page}:8:${OTHER_ID}:retry`;
+    assert.equal(notes.shown.get(warned)?.["title"], "⚠ Drama 2399 — 2 episodes to retry");
+    assert.deepEqual(notes.shown.get(warned)?.["buttons"], [{ title: "Retry" }]);
+    // ... whose Retry finds both queued: answered queued, nothing queued twice, the alert taken away
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: warned }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await page.turn();
+    assert.equal(jobsOf(page).length, 2);
+    assert.deepEqual(notes.cleared, [warned]);
+    assert.equal(module.alerts.retryOf(warned), null);
+    // a third batch's drama with E02 and E04 failing: its automatic retry takes E04 alone
+    await batchOfOther(page, 9, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:4`]: "failed" } });
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers]), [
+      ["Automatic retry: 1 of Drama 2399", [2]],
+      ["Retry 1 of Drama 2399", [3]],
+      ["Automatic retry: 1 of Drama 2399", [4]],
+    ]);
+    assert.equal(notes.shown.get(`dramafetch-alert:${module.alerts.page}:9:${OTHER_ID}:retry`)?.["message"], "E04 did not download — DramaFetch tries it once more on its own.");
+    // an episode of the same drama no retry holds is queued
+    await batchOfOther(page, 10, { statuses: { [`${OTHER_ID}:1`]: "failed" } });
+    assert.deepEqual(jobsOf(page).at(-1)?.numbers, [1]);
+    // another drama's episodes are never held by these: Drama 2388's own E02, while Drama 2399's E02
+    // is held, gets its automatic retry
+    await batchOfOther(page, 11, { statuses: { [`${THIRD_ID}:2`]: "failed" } }, undefined, THIRD_ID);
+    assert.deepEqual([jobsOf(page).at(-1)?.label, jobsOf(page).at(-1)?.refs, jobsOf(page).at(-1)?.numbers], ["Automatic retry: 1 of Drama 2388", [refOf(THIRD_ID)], [2]]);
+    assert.equal(notes.shown.get(`dramafetch-alert:${module.alerts.page}:11:${THIRD_ID}:retry`)?.["title"], "↻ Drama 2388 — retrying 1 episode");
+    // ... and one progress card's Retry over two more dramas that did not download the same
+    // episodes queues each its own
+    module.renderFailed([seriesRecord(SERIES_ID, "Test Series", [[1, "done"], [2, "failed"], [3, "failed"]]), seriesRecord(FOURTH_ID, "Four", [[2, "failed"], [3, "failed"]])]);
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.deepEqual(jobsOf(page).slice(-2).map((queued) => [queued.label, queued.refs, queued.numbers]), [
+      ["Retry 2 of Test Series", [refOf(SERIES_ID)], [2, 3]],
+      ["Retry 2 of Four", [refOf(FOURTH_ID)], [2, 3]],
+    ]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("an automatic retry a later stop takes out of the queue (1.8.0): its drama's ⚠ alert WITH its Retry under the id of “retrying”, `Not retried automatically: <the stop's reason>` — never counted among the dramas the stopped alert says were not started; its history entry is any cancelled job's; its Retry queues it", async () => {
+  const page = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    const open = gateJobs();
+    assert.equal(paste(page, `${SERIES_ID}\n${THIRD_ID}`), true); // job 1, started: waits at the gate
+    await page.turn();
+    // a drama of another download done meanwhile, a plain failure: its automatic retry waits behind
+    await batchOfOther(page, 90, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    assert.equal(paste(page, FOURTH_ID), true); // a download behind it
+    assert.deepEqual(jobsOf(page).map((queued) => queued.label), ["2 series", "Automatic retry: 1 of Drama 2399", `Series ${FOURTH_ID}`]);
+    const alertId = `dramafetch-alert:${module.alerts.page}:90:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [alertId]);
+    // job 1 goes on: the discovery can open no tab here — its first list fails, a stop
+    open();
+    for (let turn = 0; turn < 1000 && (history().length < 3 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.deepEqual(history().map((entry) => [entry["kind"], entry["label"]]), [
+      ["batch", "2 series"],
+      ["batch", `Series ${FOURTH_ID}`],
+      ["selection", "Automatic retry: 1 of Drama 2399"],
+    ]);
+    const stop = "the episode list could not be fetched";
+    assert.equal(history()[0]?.["stopped"], stop);
+    assert.ok(String(history()[2]?.["error"]).startsWith("not started: batch stopped in "), String(history()[2]?.["error"])); // as any cancelled job
+    const job1 = `dramafetch-alert:${module.alerts.page}:1`;
+    assert.deepEqual(notes.created, [alertId, `${job1}:${SERIES_ID}:incomplete`, alertId, `${job1}:stopped`]);
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 1 episode to retry",
+      message: "E02 did not download.",
+      contextMessage: `Not retried automatically: ${stop}`,
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    // the stopped alert counts job 1's drama never started and the download behind — not the retry's
+    assert.equal(notes.shown.get(`${job1}:stopped`)?.["title"], `DramaFetch stopped: ${stop}`);
+    assert.equal(notes.shown.get(`${job1}:stopped`)?.["message"], "2 dramas were not started — download them again later");
+    // its Retry queues what the automatic one would have: the job's own episodes
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2] });
+    page.hold();
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: alertId }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await page.turn();
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers, queued.autoRetry]), [["Retry 1 of Drama 2399", [2], undefined]]);
+    assert.deepEqual(notes.cleared, [alertId]);
+  } finally {
+    page.restore();
+  }
+  // only an automatic retry cancelled: the stopped alert counts the job's own dramas never started,
+  // as before — here none, so none is shown
+  const only = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = only;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (only.local.get("history") ?? []);
+    const open = gateJobs();
+    assert.equal(paste(only, SERIES_ID), true);
+    await only.turn();
+    await batchOfOther(only, 90, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    open();
+    for (let turn = 0; turn < 1000 && (history().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await only.turn();
+    const alertId = `dramafetch-alert:${module.alerts.page}:90:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [alertId, `dramafetch-alert:${module.alerts.page}:1:${SERIES_ID}:incomplete`, alertId]);
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "Not retried automatically: the episode list could not be fetched");
+  } finally {
+    only.restore();
+  }
+});
+
+test("an automatic retry refused at its own gate (1.8.0) — a cooldown in force when it starts —: no request, its history entry says why, and its drama's ⚠ alert WITH its Retry replaces “retrying”, `Not retried automatically: <the cooldown>`; nothing else said; alerts off, nothing at all", async () => {
+  for (const alertsOn of [true, false]) {
+    const page = await fakePage({ testSettings: QUICK, ...(alertsOn ? {} : { storage: { settings: { alerts: false } } }) });
+    try {
+      const { element, module } = page;
+      const notes = fakeNotifications();
+      const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+      const open = gateJobs();
+      await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // its retry starts: waits at the gate
+      assert.deepEqual(jobsOf(page).map((queued) => queued.label), ["Automatic retry: 1 of Drama 2399"]);
+      // TikTok refused a request meanwhile (another DramaFetch page): the cooldown is stored
+      const now = Date.now() / 1000;
+      page.local.set("cooldown", { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now });
+      open();
+      for (let turn = 0; turn < 1000 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+      const [entry] = history();
+      assert.equal(entry?.["label"], "Automatic retry: 1 of Drama 2399");
+      assert.ok(String(entry?.["error"]).startsWith("TikTok refused a request at "), String(entry?.["error"]));
+      assert.deepEqual(entry?.["series"], []); // no request, no row
+      const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+      if (!alertsOn) {
+        assert.deepEqual(notes.created, []);
+        continue;
+      }
+      assert.deepEqual(notes.created, [alertId, alertId]);
+      const shown = notes.shown.get(alertId);
+      assert.equal(shown?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+      assert.equal(shown?.["message"], "E02 did not download.");
+      assert.ok(String(shown?.["contextMessage"]).startsWith("Not retried automatically: TikTok refused a request at "), String(shown?.["contextMessage"]));
+      assert.ok([...String(shown?.["contextMessage"])].length <= "Not retried automatically: ".length + 200);
+      assert.deepEqual(shown?.["buttons"], [{ title: "Retry" }]);
+      assert.deepEqual(module.alerts.retryOf(alertId)?.numbers, [2]);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test("an automatic retry refused at its run's own gates (1.8.0), past the job's — a write Chrome refuses right before its listing, a cooldown met during its rest between jobs —: no request, its history entry says why, and its drama's ⚠ alert WITH its Retry replaces “retrying”, `Not retried automatically: <the reason>` — never left saying “retrying”", async () => {
+  for (const refusal of /** @type {const} */ (["write", "cooldown"])) {
+    // the cooldown's case: a rest between jobs due (the last contact just now), the cooldown met in it
+    const page = await fakePage(refusal === "write" ? { testSettings: QUICK } : { testSettings: { ...QUICK, restMinS: 0.3, restMaxS: 0.4 }, storage: { pacing: { lastContactAt: Date.now() / 1000 } } });
+    try {
+      const { element, module } = page;
+      const notes = fakeNotifications();
+      const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+      const open = gateJobs();
+      await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // its retry starts: waits at the gate
+      assert.deepEqual(jobsOf(page).map((queued) => queued.label), ["Automatic retry: 1 of Drama 2399"], refusal);
+      const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+      assert.deepEqual(notes.created, [alertId], refusal);
+      // the job's own gate lets it through; then, from the retry's first write of the pacing on —
+      // its rest's, or the one right before its listing —, the disk under Chrome's profile is full;
+      // or, with that rest's write, TikTok refused a request meanwhile (another DramaFetch page)
+      const area = /** @type {{set: (items: Record<string, unknown>) => Promise<void>}} */ (/** @type {unknown} */ (globalThis.chrome.storage.local));
+      const set = area.set;
+      let armed = true;
+      area.set = async (items) => {
+        if (!("pacing" in items)) return set(items);
+        if (refusal === "write") throw new Error(REFUSED);
+        if (armed) {
+          armed = false;
+          const at = Date.now() / 1000;
+          page.local.set("cooldown", { until: at + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: at });
+        }
+        return set(items);
+      };
+      open();
+      for (let turn = 0; turn < 20000 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+      const [entry] = history();
+      const series = /** @type {Record<string, unknown>[]} */ (entry?.["series"] ?? []);
+      assert.equal(entry?.["label"], "Automatic retry: 1 of Drama 2399", refusal);
+      assert.equal(series.length, 1, refusal);
+      assert.equal(series[0]?.["contacted"], false, refusal); // refused by the run's own gate: no request
+      assert.deepEqual(series[0]?.["rows"], [], refusal);
+      if (refusal === "write") {
+        assert.equal(entry?.["stopped"], UNSAVED);
+      } else {
+        assert.ok(String(entry?.["stopped"]).startsWith("cooldown until "), String(entry?.["stopped"]));
+        // met after the rest, by the run's own second look at the cooldown
+        assert.deepEqual(/** @type {{kind: string}[]} */ (entry?.["pauses"]).map((pause) => pause.kind), ["job-rest"]);
+      }
+      assert.deepEqual(notes.created, [alertId, alertId], refusal); // ONE more, replacing “retrying”
+      const shown = notes.shown.get(alertId);
+      assert.equal(shown?.["title"], "⚠ Drama 2399 — 1 episode to retry", refusal);
+      assert.equal(shown?.["message"], "E02 did not download.", refusal);
+      const reason = refusal === "write" ? "the progress could not be saved: " : "cooldown until ";
+      assert.ok(String(shown?.["contextMessage"]).startsWith(`Not retried automatically: ${reason}`), String(shown?.["contextMessage"]));
+      assert.deepEqual(shown?.["buttons"], [{ title: "Retry" }], refusal);
+      assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2] }, refusal);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test("an automatic retry an error ends before its drama's alert (1.8.0) is not left saying “retrying”: its drama's ⚠ alert WITH its Retry under that id, `Not retried automatically: <the error>`", async () => {
+  const page = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    const open = gateJobs();
+    await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // its retry starts: waits at the gate
+    // Chrome refuses the job's header rule, right after its gate: the job ends with that error
+    Object.assign(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis.chrome)), {
+      declarativeNetRequest: { updateSessionRules: async () => Promise.reject(new Error("Internal error: the rule could not be set")) },
+    });
+    open();
+    for (let turn = 0; turn < 1000 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.equal(history()[0]?.["label"], "Automatic retry: 1 of Drama 2399");
+    assert.equal(history()[0]?.["error"], "Internal error: the rule could not be set");
+    const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [alertId, alertId]);
+    assert.equal(notes.shown.get(alertId)?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "Not retried automatically: Internal error: the rule could not be set");
+    assert.deepEqual(notes.shown.get(alertId)?.["buttons"], [{ title: "Retry" }]);
+    assert.deepEqual(module.alerts.retryOf(alertId)?.numbers, [2]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("an automatic retry that ran and then stopped (1.8.0) — its fresh listing asked for, then the stop —: its own outcome alert under the id of “retrying”, the stop's reason its context; never “Not retried automatically”, which is for one that never ran", async () => {
+  const page = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    const open = gateJobs();
+    await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // its retry starts: waits at the gate
+    const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [alertId]);
+    open(); // it runs: the rest, then its fresh listing, which fails here (no tab can open): a stop after a request
+    for (let turn = 0; turn < 1000 && (history().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const [entry] = history();
+    const series = /** @type {Record<string, unknown>[]} */ (entry?.["series"] ?? []);
+    assert.equal(entry?.["label"], "Automatic retry: 1 of Drama 2399");
+    assert.equal(entry?.["stopped"], "the episode list could not be fetched");
+    assert.equal(series[0]?.["contacted"], true); // it made a request: it ran
+    assert.deepEqual(notes.created, [alertId, alertId]); // ONE outcome notification, replacing “retrying”
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "the episode list could not be fetched");
+  } finally {
+    page.restore();
+  }
+});
+
+test("an automatic retry Stop ends after it saved some of its episodes (1.8.0): its drama's ⚠ alert under the id of “retrying” names only those not on disk, with their Retry, the stop's reason its context — never “Not retried automatically”: it ran —; every one on disk, “retrying” goes; one that never ran keeps “Not retried automatically”", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const first = await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:3`]: "failed" } });
+    const [auto] = module.queuedJobs(); // started, held
+    assert.ok(auto?.autoRetry !== undefined);
+    assert.deepEqual(auto.numbers, [2, 3]);
+    const alertId = auto.autoRetry.alertId;
+    assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2399 — retrying 2 episodes");
+    // its run, as runJob gets it: E02 saved, Stop pressed meanwhile — the engine meets it before E03
+    const scripted = scriptedEngine(page, auto, {
+      onDownload: (ep) => {
+        if (ep.number === 2) element("stop-button").fire("click");
+      },
+    });
+    scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
+    await assert.rejects(runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null }), StopRequested);
+    assert.deepEqual(scripted.jobRecord.saved, [2]); // what it got on disk, as it went
+    // runJob's end: E03 alone, the stop's reason as the context
+    module.alertNotRetried(auto, "stopped by you", scripted.jobRecord.saved ?? []);
+    assert.deepEqual(notes.created, [alertId, alertId]);
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 1 episode to retry",
+      message: "E03 did not download.",
+      contextMessage: "stopped by you",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [3] });
+    // every episode it retried on disk: “retrying” goes, nothing in its place
+    module.alertNotRetried(auto, "stopped by you", [2, 3]);
+    assert.deepEqual(notes.cleared, [alertId]);
+    assert.equal(notes.created.length, 2);
+    assert.equal(module.alerts.retryOf(alertId), null);
+    // one that never ran (no request: Stop in the rest before its list): the job's own episodes
+    module.alertNotRetried(auto, "stopped by you", null);
+    assert.equal(notes.shown.get(alertId)?.["message"], "E02, E03 did not download.");
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "Not retried automatically: stopped by you");
+    assert.deepEqual(module.alerts.retryOf(alertId)?.numbers, [2, 3]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("an automatic retry Stop ends counts on disk only what it saved or found saved (1.8.0): an episode that failed again, or that it found served short, is named in its drama's ⚠ alert and taken by its Retry with the ones it never reached; one it found on disk already is not", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    // the paste: E02, E03 and E05 cut short, E04 and E06 saved between them (the failure streak back at 0)
+    const statuses = { [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:3`]: "failed", [`${OTHER_ID}:5`]: "failed" };
+    const first = await batchOfOther(page, 7, { episodes: 6, statuses });
+    const [auto] = module.queuedJobs(); // started, held
+    assert.ok(auto?.autoRetry !== undefined);
+    assert.deepEqual(auto.numbers, [2, 3, 5]);
+    const alertId = auto.autoRetry.alertId;
+    /** @type {string[]} */
+    const results = [];
+    // its run, as runJob gets it: E02 fails again, E03 is served short, Stop pressed meanwhile — met before E05
+    const scripted = scriptedEngine(page, auto, {
+      episodes: 6,
+      statuses: { [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:3`]: "failed-unavailable" },
+      onDownload: (ep) => {
+        if (ep.number === 3) element("stop-button").fire("click");
+      },
+    });
+    const onResult = scripted.engine.onResult;
+    scripted.engine.onResult = (result) => {
+      results.push(`${result.episode.number}:${result.status}`);
+      onResult?.(result);
+    };
+    scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
+    await assert.rejects(runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null }), StopRequested);
+    assert.deepEqual(results, ["2:failed", "3:failed-unavailable"]);
+    assert.equal(scripted.jobRecord.saved, undefined); // nothing of it on disk
+    // runJob's end: every one of its episodes named, the stop's reason the context
+    module.alertNotRetried(auto, "stopped by you", scripted.jobRecord.saved ?? []);
+    assert.deepEqual(notes.created, [alertId, alertId]);
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 3 episodes to retry",
+      message: "E02, E03, E05 did not download.",
+      contextMessage: "stopped by you",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2, 3, 5] });
+  } finally {
+    page.restore();
+  }
+  const found = await fakePage();
+  try {
+    const { element, module } = found;
+    const notes = fakeNotifications();
+    found.hold();
+    const first = await batchOfOther(found, 7, { statuses: { [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:3`]: "failed" } });
+    const [auto] = module.queuedJobs(); // started, held
+    assert.ok(auto?.autoRetry !== undefined);
+    assert.deepEqual(auto.numbers, [2, 3]);
+    const alertId = auto.autoRetry.alertId;
+    // E02 saved meanwhile — another download of the drama ahead of the retry —: recorded done, its file there
+    const state = structuredClone(/** @type {import("../src/lib/state.js").SeriesState} */ (first.states.get(OTHER_ID)));
+    record(state, { episode: episode(2, { seriesId: OTHER_ID }), status: "done", path: `/dl/${OTHER_ID}/E2.mp4`, message: "saved E2.mp4 (0.1 MiB) + cover embedded", downloadId: 2 }, { exists: () => true, now: 1_800_000_000 });
+    /** @type {string[]} */
+    const results = [];
+    const scripted = scriptedEngine(found, auto);
+    const onResult = scripted.engine.onResult;
+    scripted.engine.onResult = (result) => {
+      results.push(`${result.episode.number}:${result.status}`);
+      onResult?.(result);
+      if (result.episode.number === 2) element("stop-button").fire("click"); // met in the pause before E03
+    };
+    scripted.states.set(OTHER_ID, state);
+    await assert.rejects(runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null }), StopRequested);
+    assert.deepEqual(results, ["2:skipped-exists"]);
+    assert.deepEqual(scripted.jobRecord.saved, [2]); // found on disk: on disk all the same
+    module.alertNotRetried(auto, "stopped by you", scripted.jobRecord.saved ?? []);
+    assert.equal(notes.shown.get(alertId)?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+    assert.equal(notes.shown.get(alertId)?.["message"], "E03 did not download.");
+    assert.deepEqual(module.alerts.retryOf(alertId)?.numbers, [3]);
+  } finally {
+    found.restore();
+  }
+});
+
+test("Stop pressed while a drama's last episode downloads (1.8.0) — after the engine's last look at it, so the run ends unstopped —: a stop all the same, no automatic retry for that drama, its 1.7.0 ⚠ alert with its Retry; a selection job's drama the same", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const { runs } = await batchOfOther(page, 7, {
+      statuses: { [`${OTHER_ID}:3`]: "failed" },
+      onDownload: (ep) => {
+        if (ep.number === 3) element("stop-button").fire("click"); // E03, the drama's last: no checkpoint after it
+      },
+    });
+    assert.deepEqual(runs.map((run) => [run.stop, run.report.stopped]), [[false, null]]); // the engine never met it
+    assert.deepEqual(jobsOf(page), []); // nothing queued
+    const id = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [id]);
+    assert.equal(notes.shown.get(id)?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+    assert.equal(notes.shown.get(id)?.["message"], "E03 did not download.");
+    assert.deepEqual(notes.shown.get(id)?.["buttons"], [{ title: "Retry" }]);
+    assert.deepEqual(module.alerts.retryOf(id)?.numbers, [3]);
+  } finally {
+    page.restore();
+  }
+  const failures = historyEntry("batch", "1 series", [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed"]])]);
+  const other = await fakePage({ storage: { history: [failures] } });
+  try {
+    const { element, module } = other;
+    const notes = fakeNotifications();
+    other.hold();
+    const found = retryLineOf(/** @type {FakeElement} */ (element("history-list").children[0]));
+    assert.ok(found);
+    found.retry.fire("click"); // a past run's Retry of E02 and E03: running
+    await other.turn();
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined && running.kind === "selection");
+    const scripted = scriptedEngine(other, running, {
+      statuses: { [`${OTHER_ID}:3`]: "failed" },
+      onDownload: (ep) => {
+        if (ep.number === 3) element("stop-button").fire("click");
+      },
+    });
+    const run = await runSelectionJob(scripted.engine, refOf(OTHER_ID), running.numbers, { lastContactAt: null });
+    assert.equal(run.stop, false);
+    module.dramaDone(running, run, scripted.jobRecord); // where runJob makes the drama's alert
+    await other.turn();
+    assert.deepEqual(jobsOf(other).map((queued) => queued.label), ["Retry 2 of Drama 2399"]); // itself: nothing behind it
+    const id = `dramafetch-alert:${module.alerts.page}:${running.id}:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [id]);
+    assert.equal(notes.shown.get(id)?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+    assert.deepEqual(notes.shown.get(id)?.["buttons"], [{ title: "Retry" }]);
+  } finally {
+    other.restore();
+  }
+});
+
+test("Stop takes DramaFetch's own automatic retries out of the queue at once (1.8.0) — none starts after a Stop, even when the running job ends no run —: the Did not download block's line that promised one goes; at the running job's end each one's drama gets the ⚠ alert with its Retry, `Not retried automatically: stopped by you`, and its history entry is any cancelled job's — never counted in the stopped alert", async () => {
+  const page = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    const open = gateJobs();
+    assert.equal(paste(page, SERIES_ID), true); // job 1, started: waits at the gate
+    await page.turn();
+    const first = await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // its automatic retry waits behind job 1
+    assert.equal(paste(page, THIRD_ID), true); // a download the user queued behind it
+    assert.deepEqual(queuedLabels(page), ["Automatic retry: 1 of Drama 2399", `Series ${THIRD_ID}`]);
+    // the end of the job that queued it, as runJob draws it: its line says it is retried
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "done"]])], module.waitingAutoRetries(first.jobRecord));
+    assert.equal(element("failed-auto").textContent, "1 of them will be retried automatically, once.");
+    const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [alertId]);
+    element("stop-button").fire("click");
+    // out of the queue at once, whatever job 1 does now; the user's own download is left to the stop
+    assert.deepEqual(queuedLabels(page), [`Series ${THIRD_ID}`]);
+    assert.equal(element("failed-auto").hidden, true);
+    assert.equal(element("failed-auto").textContent, "");
+    assert.deepEqual(notes.created, [alertId]); // said at job 1's end
+    open(); // job 1 goes on, and meets the Stop before any request
+    for (let turn = 0; turn < 1000 && (history().length < 3 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const notStarted = `not started: batch stopped in Series ${SERIES_ID} (stopped by you)`;
+    assert.deepEqual(history().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["series"]]), [
+      ["batch", `Series ${SERIES_ID}`, "stopped by you", []],
+      ["batch", `Series ${THIRD_ID}`, notStarted, []],
+      ["selection", "Automatic retry: 1 of Drama 2399", notStarted, []],
+    ]);
+    assert.deepEqual(notes.created, [alertId, alertId]); // no “DramaFetch stopped”: job 1 asked for nothing
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 1 episode to retry",
+      message: "E02 did not download.",
+      contextMessage: "Not retried automatically: stopped by you",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2] });
+    // its Retry, pressed once the stopped job is over: queued, and it runs
+    page.hold();
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: alertId }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await page.turn();
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers, queued.autoRetry]), [["Retry 1 of Drama 2399", [2], undefined]]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("Stop takes EVERY automatic retry waiting out of the queue at once (1.8.0) — two side by side — and never a job the user queued: a past run's Retry (a selection job of the user's) and a paste stay, left to the stop; at the running job's end each automatic retry is said in turn — its `not started: …` entry, its drama's ⚠ `Not retried automatically: stopped by you` —, before the jobs the stop cancels", async () => {
+  const PAST_ID = "7699393770256782366";
+  const failures = historyEntry("batch", "1 series", [seriesRecord(PAST_ID, "Drama 2366", [[1, "done"], [2, "failed"]])]);
+  const page = await fakePage({ testSettings: QUICK, storage: { history: [failures] } });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    const open = gateJobs();
+    assert.equal(paste(page, SERIES_ID), true); // job 1, started: waits at the gate
+    await page.turn();
+    await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // Drama 2399's automatic retry waits
+    await batchOfOther(page, 8, { statuses: { [`${FOURTH_ID}:3`]: "failed" } }, undefined, FOURTH_ID); // Drama 2377's, right behind it
+    const found = retryLineOf(/** @type {FakeElement} */ (element("history-list").children[0]));
+    assert.ok(found);
+    found.retry.fire("click"); // the user's own Retry of a past run: a selection job, not an automatic retry
+    await page.turn();
+    assert.equal(paste(page, THIRD_ID), true); // and the user's own download
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.kind, queued.label, queued.autoRetry !== undefined]), [
+      ["batch", `Series ${SERIES_ID}`, false],
+      ["selection", "Automatic retry: 1 of Drama 2399", true],
+      ["selection", "Automatic retry: 1 of Drama 2377", true],
+      ["selection", "Retry 1 of Drama 2366", false],
+      ["batch", `Series ${THIRD_ID}`, false],
+    ]);
+    const first = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    const second = `dramafetch-alert:${module.alerts.page}:8:${FOURTH_ID}:retry`;
+    assert.deepEqual(notes.created, [first, second]);
+    element("stop-button").fire("click");
+    // both out at once, whatever job 1 does now; the jobs the user queued are left to the stop
+    assert.deepEqual(queuedLabels(page), ["Retry 1 of Drama 2366", `Series ${THIRD_ID}`]);
+    assert.deepEqual(notes.created, [first, second]); // said at job 1's end
+    open(); // job 1 goes on, and meets the Stop before any request
+    for (let turn = 0; turn < 1000 && (history().length < 6 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const notStarted = `not started: batch stopped in Series ${SERIES_ID} (stopped by you)`;
+    // newest first: job 1, the jobs its stop took out of the queue, and before them each automatic retry in turn
+    assert.deepEqual(history().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["series"]]).slice(0, 5), [
+      ["batch", `Series ${SERIES_ID}`, "stopped by you", []],
+      ["batch", `Series ${THIRD_ID}`, notStarted, []],
+      ["selection", "Retry 1 of Drama 2366", notStarted, []],
+      ["selection", "Automatic retry: 1 of Drama 2377", notStarted, []],
+      ["selection", "Automatic retry: 1 of Drama 2399", notStarted, []],
+    ]);
+    assert.equal(history().length, 6); // and the past run, as it was
+    assert.deepEqual(notes.created, [first, second, first, second]); // no “DramaFetch stopped”: job 1 asked for nothing
+    assert.equal(notes.shown.get(first)?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+    assert.equal(notes.shown.get(first)?.["contextMessage"], "Not retried automatically: stopped by you");
+    assert.deepEqual(notes.shown.get(first)?.["buttons"], [{ title: "Retry" }]);
+    assert.deepEqual(module.alerts.retryOf(first), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2] });
+    assert.equal(notes.shown.get(second)?.["title"], "⚠ Drama 2377 — 1 episode to retry");
+    assert.equal(notes.shown.get(second)?.["message"], "E03 did not download.");
+    assert.equal(notes.shown.get(second)?.["contextMessage"], "Not retried automatically: stopped by you");
+    assert.deepEqual(notes.shown.get(second)?.["buttons"], [{ title: "Retry" }]);
+    assert.deepEqual(module.alerts.retryOf(second), { seriesId: FOURTH_ID, name: "Drama 2377", numbers: [3] });
+  } finally {
+    page.restore();
+  }
+});
+
+test("Stop pressed while the Did not download block is kept for the first of its job's automatic retries (1.8.0): the others leave the queue and the block's line that counted them goes at once — the block, its table and its Retry stay until that retry's own end, which draws its own —; each drama then gets its ⚠ alert, `Not retried automatically: stopped by you`", async () => {
+  // a rest between jobs due (the last contact just now): the running retry meets the Stop there, before any request
+  const page = await fakePage({ testSettings: { ...QUICK, restMinS: 0.3, restMaxS: 0.4 }, storage: { pacing: { lastContactAt: Date.now() / 1000 } } });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (page.local.get("history") ?? []);
+    const open = gateJobs();
+    const first = module.alerts.idOf(7, `${OTHER_ID}:retry`);
+    const second = module.alerts.idOf(7, `${THIRD_ID}:retry`);
+    // job 7's end as runJob draws it, its two automatic retries waiting
+    module.renderFailed(
+      [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "done"]]), seriesRecord(THIRD_ID, "Drama 2388", [[1, "done"], [2, "done"], [3, "failed"]])],
+      [
+        { numbers: [2], autoRetry: { alertId: first, name: "Drama 2399" } },
+        { numbers: [3], autoRetry: { alertId: second, name: "Drama 2388" } },
+      ],
+    );
+    // job 7's two dramas, through the page's own hooks, queue those two: the first starts — the
+    // block kept for it — and waits at the gate, the second waits behind it
+    const job = { ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID), refOf(THIRD_ID)] };
+    const { engine } = scriptedEngine(page, job, { statuses: { [`${OTHER_ID}:2`]: "failed", [`${THIRD_ID}:3`]: "failed" } });
+    await runBatch(engine, job.refs);
+    await page.turn();
+    assert.deepEqual(module.queuedJobs().map((queued) => queued.label), ["Automatic retry: 1 of Drama 2399", "Automatic retry: 1 of Drama 2388"]);
+    assert.deepEqual(queuedLabels(page), ["Automatic retry: 1 of Drama 2388"]);
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    assert.equal(element("failed-auto").hidden, false);
+    assert.equal(element("failed-auto").textContent, "2 of them will be retried automatically, once.");
+    element("stop-button").fire("click");
+    // the second out of the queue at once, and the line that promised it with it
+    assert.deepEqual(queuedLabels(page), []);
+    assert.equal(element("failed-auto").hidden, true);
+    assert.equal(element("failed-auto").textContent, "");
+    // the block itself stays while the first one runs
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    assert.equal(element("failed-table").querySelector("tbody").children.length, 2);
+    assert.equal(element("retry-button").disabled, false);
+    open(); // the first one goes on and meets the Stop in its rest between jobs
+    for (let turn = 0; turn < 1000 && (history().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.deepEqual(history().map((entry) => [entry["label"], entry["error"], entry["series"]]), [
+      ["Automatic retry: 1 of Drama 2399", "stopped by you", []],
+      ["Automatic retry: 1 of Drama 2388", "not started: batch stopped in Automatic retry: 1 of Drama 2399 (stopped by you)", []],
+    ]);
+    assert.equal(element("failed-block").hidden, true); // its own end: nothing of its own to show
+    assert.deepEqual(notes.created, [first, second, second, first]);
+    for (const id of [first, second]) {
+      assert.equal(notes.shown.get(id)?.["contextMessage"], "Not retried automatically: stopped by you", id);
+      assert.deepEqual(notes.shown.get(id)?.["buttons"], [{ title: "Retry" }], id);
+    }
+    assert.deepEqual(module.alerts.retryOf(first)?.numbers, [2]);
+    assert.deepEqual(module.alerts.retryOf(second)?.numbers, [3]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the duplicate guard lets go of a selection job done with its drama (1.8.0): from its drama's alert on it asks for none of its episodes, so its alert's Retry of what it could not save is queued behind it, answered queued, the alert taken away — the progress card's Retry then finds those episodes held by that waiting retry; an automatic retry's ⚠ outcome the same", async () => {
+  const failures = historyEntry("batch", "1 series", [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "done"]])]);
+  const page = await fakePage({ storage: { ...NO_AUTO_RETRY, history: [failures] } });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const found = retryLineOf(/** @type {FakeElement} */ (element("history-list").children[0]));
+    assert.ok(found);
+    found.retry.fire("click"); // a past run's Retry of E02: running
+    await page.turn();
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined);
+    assert.deepEqual([running.label, running.numbers], ["Retry 1 of Drama 2399", [2]]);
+    const scripted = scriptedEngine(page, running, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    module.dramaDone(running, await runSelectionJob(scripted.engine, refOf(OTHER_ID), running.numbers, { lastContactAt: null }), scripted.jobRecord);
+    const id = `dramafetch-alert:${module.alerts.page}:${running.id}:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.shown.get(id)?.["buttons"], [{ title: "Retry" }]);
+    // its alert's Retry while the job ends (it runs on, held): queued behind it
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: id }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await page.turn();
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers]), [
+      ["Retry 1 of Drama 2399", [2]],
+      ["Retry 1 of Drama 2399", [2]],
+    ]);
+    assert.deepEqual(notes.cleared, [id]);
+    // the progress card's Retry of E02 now: held by that waiting retry, nothing twice
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[2, "failed"]])]);
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.equal(element("input-status").textContent, "Already queued — not queued twice.");
+    assert.equal(jobsOf(page).length, 2);
+  } finally {
+    page.restore();
+  }
+  const auto = await fakePage();
+  try {
+    const { module } = auto;
+    const notes = fakeNotifications();
+    auto.hold();
+    const first = await batchOfOther(auto, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    const [running] = module.queuedJobs(); // the automatic retry, running
+    assert.ok(running?.autoRetry !== undefined);
+    const scripted = scriptedEngine(auto, running, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
+    module.dramaDone(running, await runSelectionJob(scripted.engine, refOf(OTHER_ID), running.numbers, { lastContactAt: null }), scripted.jobRecord);
+    const id = running.autoRetry.alertId;
+    assert.equal(notes.shown.get(id)?.["contextMessage"], "After an automatic retry.");
+    assert.deepEqual(auto.message({ type: "dramafetch:retry", notificationId: id }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await auto.turn();
+    assert.deepEqual(jobsOf(auto).map((queued) => [queued.label, queued.numbers]), [
+      ["Automatic retry: 1 of Drama 2399", [2]],
+      ["Retry 1 of Drama 2399", [2]],
+    ]);
+    assert.deepEqual(notes.cleared, [id]);
+  } finally {
+    auto.restore();
+  }
+});
+
+test("the Did not download block (1.8.0): a line says how many of its episodes will be retried automatically, once — hidden when none —; the block stays, line, table and Retry, while that automatic retry runs, and goes as any other job starts", async () => {
+  const records = [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed-unavailable", DRM_MESSAGE], [4, "failed"]])];
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const alertId = module.alerts.idOf(7, `${OTHER_ID}:retry`);
+    const auto = (/** @type {number[]} */ numbers, id = alertId) => ({ numbers, autoRetry: { alertId: id, name: "Drama 2399" } });
+    // none queued: hidden, as in 1.7.0
+    module.renderFailed(records);
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-auto").hidden, true);
+    assert.equal(element("failed-auto").textContent, "");
+    module.renderFailed(records, [auto([2, 4])]);
+    assert.equal(element("failed-auto").hidden, false);
+    assert.equal(element("failed-auto").textContent, "2 of them will be retried automatically, once.");
+    module.renderFailed(records, [auto([2])]);
+    assert.equal(element("failed-auto").textContent, "1 of them will be retried automatically, once.");
+    // nothing failed: the block and its line hidden
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"]])], [auto([2])]);
+    assert.equal(element("failed-block").hidden, true);
+    assert.equal(element("failed-auto").hidden, true);
+    // the job's end as runJob draws it, that retry waiting — then it starts: the block stays
+    page.hold();
+    module.renderFailed(records, [auto([2, 4])]);
+    await batchOfOther(page, 7, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed", [`${OTHER_ID}:4`]: "failed" } }); // queues it, under that id: it starts
+    assert.equal(element("progress-current").textContent, "Automatic retry: 2 of Drama 2399");
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-heading").textContent, "Did not download (3)");
+    assert.equal(element("failed-auto").textContent, "2 of them will be retried automatically, once.");
+    assert.equal(element("failed-table").querySelector("tbody").children.length, 3);
+    assert.equal(element("retry-button").disabled, false);
+    // its Retry takes what that retry does not hold: E03 (the short-served one), not E02 or E04
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.deepEqual(queuedLabels(page), ["Retry 1 of Drama 2399"]);
+    assert.deepEqual(jobsOf(page).at(-1)?.numbers, [3]);
+  } finally {
+    page.restore();
+  }
+  // any other job — a download, an automatic retry another job queued — starts: the block goes
+  for (const next of ["paste", "another retry"]) {
+    const other = await fakePage();
+    try {
+      const { element, module } = other;
+      const alertId = module.alerts.idOf(7, `${OTHER_ID}:retry`);
+      other.hold();
+      module.renderFailed(records, [{ numbers: [2, 4], autoRetry: { alertId: next === "paste" ? alertId : "dramafetch-alert:another:1:x:retry", name: "Drama 2399" } }]);
+      if (next === "paste") {
+        assert.equal(paste(other, SERIES_ID), true);
+        await other.turn();
+      } else {
+        await batchOfOther(other, 7, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed" } });
+      }
+      assert.equal(element("app-status").dataset["state"], "running", next);
+      assert.equal(element("failed-block").hidden, true, next);
+      assert.equal(element("failed-auto").hidden, true, next);
+      assert.equal(element("failed-auto").textContent, "", next);
+      assert.equal(element("failed-heading").textContent, "", next);
+      assert.equal(element("retry-button").disabled, true, next);
+    } finally {
+      other.restore();
+    }
+  }
+});
+
+test("the Did not download block counts only the automatic retries its own job queued (1.8.0): another job's, waiting too, are never in its line", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    page.hold();
+    assert.equal(paste(page, SERIES_ID), true); // running: what the batches below queue waits
+    await page.turn();
+    const first = await batchOfOther(page, 7, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    const second = await batchOfOther(page, 8, { episodes: 4, statuses: { [`${OTHER_ID}:3`]: "failed", [`${OTHER_ID}:4`]: "failed" } });
+    assert.deepEqual(queuedLabels(page), ["Automatic retry: 1 of Drama 2399", "Automatic retry: 2 of Drama 2399"]);
+    assert.deepEqual(module.waitingAutoRetries(first.jobRecord).map((job) => job.numbers), [[2]]);
+    assert.deepEqual(module.waitingAutoRetries(second.jobRecord).map((job) => job.numbers), [[3, 4]]);
+    assert.deepEqual(module.waitingAutoRetries({}), []); // a job that queued none
+    // the second job's end as runJob draws it: its own two, never the first job's one
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "done"], [3, "failed"], [4, "failed"]])], module.waitingAutoRetries(second.jobRecord));
+    assert.equal(element("failed-auto").textContent, "2 of them will be retried automatically, once.");
+  } finally {
+    page.restore();
+  }
+});
+
+test("the Did not download block kept while its automatic retry runs keeps its Save the report (1.8.0): the report setting off, the job's report is saved on demand then — every row, the short-served one the retry leaves too —; the retry's own end takes that report's line away; a block any other job takes away takes its report too, as in 1.7.0", async () => {
+  const truncated = "download looks incomplete or wrong: truncated body (100000 of 131072 bytes) from v16-webapp-prime.tiktok.com";
+  const results = [
+    { episode: episode(1, { seriesId: OTHER_ID }), status: /** @type {const} */ ("done"), path: "/dl/E1.mp4", message: "saved E1.mp4 (0.1 MiB)", downloadId: 1 },
+    { episode: episode(2, { seriesId: OTHER_ID }), status: /** @type {const} */ ("failed"), path: null, message: truncated },
+    { episode: episode(3, { seriesId: OTHER_ID }), status: /** @type {const} */ ("failed-unavailable"), path: null, message: DRM_MESSAGE },
+  ];
+  const records = [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed", truncated], [3, "failed-unavailable", DRM_MESSAGE]])];
+  const page = await fakePage({ storage: { settings: { report: false } } });
+  try {
+    const { element, module, downloads } = page;
+    const alertId = module.alerts.idOf(7, `${OTHER_ID}:retry`);
+    page.hold();
+    // job 7's end as runJob makes it: its block (its automatic retry of E02 waits), then its report — kept, not saved
+    module.renderFailed(records, [{ numbers: [2], autoRetry: { alertId, name: "Drama 2399" } }]);
+    await module.reportJobEnd({ kind: "batch", label: `Series ${OTHER_ID}` }, OUTCOME, [finishedRun(OTHER_ID, "Drama 2399", results)], TRACES.of);
+    assert.deepEqual(downloads, []);
+    assert.equal(element("report-button").disabled, false);
+    // that automatic retry starts: the block stays, its Save the report with it
+    await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // queues it under that id: it starts
+    assert.equal(element("progress-current").textContent, "Automatic retry: 1 of Drama 2399");
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("report-button").disabled, false);
+    element("report-button").fire("click");
+    for (let turns = 0; turns < 20 && downloads.length < 1; turns += 1) await page.turn();
+    assert.equal(downloads.length, 1);
+    assert.match(/** @type {string} */ (downloads[0]?.filename), /^DramaFetch\/reports\/Drama 2399 - did not download /);
+    const report = JSON.parse(/** @type {string} */ (downloads[0]?.text));
+    assert.deepEqual(
+      report.series[0].not_downloaded.map((/** @type {Record<string, unknown>} */ row) => [row["number"], row["status"]]),
+      [
+        [2, "failed"],
+        [3, "failed-unavailable"],
+      ],
+    );
+    assert.ok(String(element("failed-report").textContent).startsWith("Report saved: Drama 2399 - did not download "));
+    // the retry's own end (E02 did not download again): its block and its report; the line of the
+    // earlier one goes — nothing of the retry's is saved (the setting off), its own on demand
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[2, "failed", truncated]])]);
+    await module.reportJobEnd({ kind: "selection", label: "Automatic retry: 1 of Drama 2399" }, OUTCOME, [finishedRun(OTHER_ID, "Drama 2399", [/** @type {(typeof results)[number]} */ (results[1])])], TRACES.of);
+    assert.equal(element("failed-report").hidden, true);
+    assert.equal(element("failed-report").textContent, "");
+    assert.equal(downloads.length, 1);
+    assert.equal(element("report-button").disabled, false);
+  } finally {
+    page.restore();
+  }
+  const other = await fakePage({ storage: { settings: { report: false } } });
+  try {
+    const { element, module } = other;
+    other.hold();
+    module.renderFailed(records, [{ numbers: [2], autoRetry: { alertId: module.alerts.idOf(7, `${OTHER_ID}:retry`), name: "Drama 2399" } }]);
+    await module.reportJobEnd({ kind: "batch", label: `Series ${OTHER_ID}` }, OUTCOME, [finishedRun(OTHER_ID, "Drama 2399", results)], TRACES.of);
+    assert.equal(element("report-button").disabled, false);
+    assert.equal(paste(other, SERIES_ID), true); // another download starts first
+    await other.turn();
+    assert.equal(element("failed-block").hidden, true);
+    assert.equal(element("report-button").disabled, true);
+  } finally {
+    other.restore();
+  }
+});
+
+test("the automatic retry setting (1.8.0): Retry on its own what did not download, on by default, saved with the settings and back with Defaults; off, a plain failure gets the 1.7.0 ⚠ alert and nothing is queued", async () => {
+  const page = await fakePage();
+  try {
+    const { element, local, module } = page;
+    assert.equal(element("setting-auto-retry").checked, true);
+    element("setting-auto-retry").checked = false;
+    element("settings-form").fire("submit");
+    for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+    assert.equal(element("settings-status").className, "status ok");
+    assert.equal(/** @type {Record<string, unknown>} */ (local.get("settings"))["autoRetry"], false);
+    assert.equal(/** @type {Record<string, unknown>} */ (local.get("settings"))["alerts"], true); // the others as they were
+    const notes = fakeNotifications();
+    page.hold();
+    await batchOfOther(page, 4, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    assert.deepEqual(jobsOf(page), []);
+    const id = `dramafetch-alert:${module.alerts.page}:4:${OTHER_ID}:retry`;
+    assert.deepEqual(notes.created, [id]);
+    assert.deepEqual(notes.shown.get(id)?.["buttons"], [{ title: "Retry" }]);
+    // Defaults: on again
+    element("settings-reset").fire("click");
+    for (let turns = 0; turns < 20 && !element("setting-auto-retry").checked; turns += 1) await page.turn();
+    assert.equal(element("setting-auto-retry").checked, true);
+    assert.equal(/** @type {Record<string, unknown>} */ (local.get("settings"))["autoRetry"], true);
+  } finally {
+    page.restore();
+  }
+  const off = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    assert.equal(off.element("setting-auto-retry").checked, false);
+    assert.equal(off.element("setting-alerts").checked, true);
+  } finally {
+    off.restore();
+  }
+});
+
+test("the automatic retry in Spanish under a Spanish Chrome (1.8.0): its queue label, “retrying”, what came of it, the Did not download line and the duplicate guard's status line", async () => {
+  const page = await fakePage({ language: "es" });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const first = await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    const [auto] = module.queuedJobs();
+    assert.ok(auto?.autoRetry !== undefined);
+    assert.equal(auto.label, "Reintento automático: 1 de Drama 2399");
+    const alertId = auto.autoRetry.alertId;
+    assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2399 — reintentando 1 episodio");
+    assert.equal(notes.shown.get(alertId)?.["message"], "E02 no se descargó: DramaFetch lo intenta una vez más por su cuenta.");
+    // the block's line, and the progress card's Retry of what that retry — running, its drama not
+    // done yet — holds
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed"]])], [{ numbers: [2, 3], autoRetry: { alertId: "x", name: null } }]);
+    assert.equal(element("failed-auto").textContent, "Se reintentarán automáticamente 2, una vez.");
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"]])], [{ numbers: [2], autoRetry: { alertId: "x", name: null } }]);
+    assert.equal(element("failed-auto").textContent, "Se reintentará automáticamente 1, una vez.");
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.equal(element("input-status").textContent, "Ya está en la cola: no se encola dos veces.");
+    // what came of it: still not downloaded
+    const scripted = scriptedEngine(page, auto, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
+    module.dramaDone(auto, await runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null }), scripted.jobRecord);
+    assert.equal(notes.shown.get(alertId)?.["title"], "⚠ Drama 2399 — 1 episodio por reintentar");
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "Tras un reintento automático.");
+    assert.deepEqual(notes.shown.get(alertId)?.["buttons"], [{ title: "Reintentar" }]);
+    // an automatic retry of E02 and E03 that Stop ended once E02 was saved: the stop's reason as the tab shows it
+    const later = { refs: [refOf(OTHER_ID)], numbers: [2, 3], autoRetry: { alertId: module.alerts.idOf(9, `${OTHER_ID}:retry`), name: "Drama 2399" } };
+    module.alertNotRetried(later, "stopped by you", [2]);
+    assert.equal(notes.shown.get(later.autoRetry.alertId)?.["message"], "E03 no se descargó.");
+    assert.equal(notes.shown.get(later.autoRetry.alertId)?.["contextMessage"], "detenido por ti");
+  } finally {
+    page.restore();
+  }
+  // an automatic retry a later stop took out of the queue: its reason as the tab shows it, in Spanish
+  const es = await fakePage({ testSettings: QUICK, language: "es" });
+  try {
+    const { element, module } = es;
+    const notes = fakeNotifications();
+    const history = () => /** @type {Record<string, unknown>[]} */ (es.local.get("history") ?? []);
+    const open = gateJobs();
+    assert.equal(paste(es, SERIES_ID), true); // job 1, started: waits at the gate
+    await es.turn();
+    await batchOfOther(es, 90, { statuses: { [`${OTHER_ID}:2`]: "failed" } }); // its automatic retry waits behind it
+    open(); // job 1's list fails here (no tab can open): a stop, which takes the retry out of the queue
+    for (let turn = 0; turn < 1000 && (history().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await es.turn();
+    assert.equal(history()[0]?.["stopped"], "the episode list could not be fetched"); // stored in English
+    const alertId = `dramafetch-alert:${module.alerts.page}:90:${OTHER_ID}:retry`;
+    assert.equal(notes.shown.get(alertId)?.["title"], "⚠ Drama 2399 — 1 episodio por reintentar");
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "No se reintentó automáticamente: no se pudo obtener la lista de episodios");
+    assert.deepEqual(notes.shown.get(alertId)?.["buttons"], [{ title: "Reintentar" }]);
+  } finally {
+    es.restore();
   }
 });

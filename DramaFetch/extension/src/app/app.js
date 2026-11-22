@@ -49,7 +49,7 @@ import {
   twinIds,
   unchangedSince,
 } from "../lib/library.js";
-import { TIKTOK_BASE_URL } from "../lib/messages.js";
+import { DONE, FAILED, SKIPPED_EXISTS, STOPPED_PREFIX, TIKTOK_BASE_URL } from "../lib/messages.js";
 import { fileBaseName } from "../lib/naming.js";
 import {
   PAGE_DELAY_S,
@@ -64,7 +64,7 @@ import {
 import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib/report.js";
 import { doneEntries, drmProtected, readState } from "../lib/state.js";
 import { parseSeriesList, seriesPageUrl } from "../lib/urls.js";
-import { PageAlerts, dramaAlert, episodeLabel, stoppedAlert } from "./alerts.js";
+import { PageAlerts, autoRetryAlert, dramaAlert, episodeLabel, notRetriedAlert, stoppedAlert, stoppedRetryAlert } from "./alerts.js";
 import { BOOKMARK_MESSAGES, BookmarkCooldown, BookmarkError, countAfterRemoval, removeFromBookmark } from "./bookmark.js";
 import { DiscoveryError, closeLeftoverDiscoveryTab, discoverSeries } from "./discovery.js";
 import { CoverLane, CoverLoader, DownloadsView, Downloader, applyRefererRule, oneLine, saveFile } from "./downloader.js";
@@ -161,6 +161,10 @@ const ENGINE_LOCK = "dramafetch-engine";
  *   the job's status line and history entry say, whatever became of the library
  *   ({@link fetchFavorites}: a listing that stops short of TikTok's end leaves a library that held
  *   dramas as it was)
+ * @property {{alertId: string, name: string | null}} [autoRetry] a `selection` job DramaFetch
+ *   queued on its own (DramaFetch 1.8.0, {@link queueAutoRetry}): the id of its drama's alert —
+ *   “retrying”, then what came of it, under that one id — and the drama's name as its records had
+ *   it. Never retried automatically again: its failures wait for the user's **Retry**.
  *
  * @typedef {object} FavoritesShown The favorites list the library shows: one TikTok tab's, or the
  *   library kept from an earlier session (no tab: a card's resolution never trusts it).
@@ -213,6 +217,12 @@ const ENGINE_LOCK = "dramafetch-engine";
  *   (`onStart`) or that was done (`onSeriesDone`) —: those after them were never started when
  *   **Stop** ended it ({@link alertJobEnd}), the one Stop caught in the rest before it or while its
  *   list was read among them
+ * @property {string[]} [autoRetried] the automatic retries it queued for its dramas (their
+ *   `autoRetry.alertId`, {@link queueAutoRetry}): those still waiting at its end are what its
+ *   **Did not download** block says will be retried ({@link waitingAutoRetries}, {@link renderFailed})
+ * @property {number[]} [saved] an automatic retry's episodes on disk as it went — saved, or found
+ *   saved already —: when **Stop** or an error ends it before its drama's alert, that alert names
+ *   only the others ({@link alertNotRetried})
  *
  * @typedef {object} JobOutcome How a job ended, as its history entry records it ({@link reportJobEnd}).
  * @property {string} startedAt
@@ -258,12 +268,32 @@ const app = {
   favorites: null,
   /** @type {RetryTarget[] | null} the last finished job's episodes that did not download (the progress card's retry button) */
   failed: null,
+  /**
+   * The automatic retries the last finished job queued that still waited at its end (their
+   * `autoRetry.alertId`): when one of them is the next job, that job's **Did not download** block
+   * stays on screen while it runs — its line says they are retried — until its own end
+   * ({@link startProgress}, {@link renderFailed}).
+   * @type {Set<string>}
+   */
+  failedAuto: new Set(),
   /** @type {{report: Record<string, unknown>, stem: string} | null} the last finished job's "did not download" report (**Save the report**) */
   lastReport: null,
   /** @type {Job[]} */
   queue: [],
   /** @type {Job | null} */
   running: null,
+  /**
+   * The running job is done with its drama (DramaFetch 1.8.0): a `selection` job once its drama's
+   * alert was made ({@link dramaDone}) or its end began — it asks for none of its episodes any more,
+   * so it holds none ({@link heldNumbers}): a **Retry** pressed then is queued behind it.
+   */
+  runningDone: false,
+  /**
+   * DramaFetch's own automatic retries **Stop** took out of the queue ({@link dropAutoRetries}), said
+   * once the job that ran then ends ({@link sayDroppedRetries}): their history entries and alerts.
+   * @type {Job[]}
+   */
+  droppedRetries: [],
   finished: 0,
   nextJobId: 1,
   pacing: new PacingState(),
@@ -626,6 +656,8 @@ export function buildEngine(job, jobRecord) {
     onResult: (result) => {
       clearPause();
       renderResult(result);
+      // an automatic retry's episode on disk now: never named as not downloaded should Stop end it
+      if (job.autoRetry !== undefined && (result.status === DONE || result.status === SKIPPED_EXISTS)) (jobRecord.saved ??= []).push(result.episode.number);
       // the library's card of the series being downloaded: its count after every episode
       if (result.episode.seriesId === library.running) void refreshLibraryStatuses([result.episode.seriesId]);
     },
@@ -641,7 +673,7 @@ export function buildEngine(job, jobRecord) {
       releaseSeries(run, downloader, jobRecord);
       trimResultRows();
       libraryFinished(run.ref.seriesId);
-      alertDrama(job, run); // its rows and records are stored: the drama's notification, now
+      dramaDone(job, run, jobRecord); // its rows and records are stored: its automatic retry when due, its notification, now
     },
   };
 }
@@ -852,21 +884,34 @@ function renderBatchTable(runs) {
   table.hidden = runs.length === 0;
 }
 
-/** @param {Job} job */
+/**
+ * A job starts: the progress card shows it, the last job's rows and lines go. The last job's
+ * **Did not download** block goes too — this job's comes at its end —, its report with it, except
+ * while the job is an automatic retry that job queued (DramaFetch 1.8.0): the block, its line
+ * saying what is retried automatically, its **Retry** and its **Save the report** (with its
+ * `Report saved: …` line) stay until this job's end, which draws its own ({@link reportJobEnd}) —
+ * but the line, which a **Stop** taking the other automatic retries it counted out of the queue
+ * takes away at once ({@link dropAutoRetries}).
+ * @param {Job} job
+ */
 function startProgress(job) {
   $("progress-card").hidden = false;
   /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody")).textContent = "";
   $("result-trimmed").hidden = true;
   $("report-lines").textContent = "";
   $("batch-table").hidden = true;
-  $("failed-block").hidden = true; // the last job's episodes that did not download; this job's come at its end
-  /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody")).textContent = "";
-  $("failed-heading").textContent = "";
-  app.failed = null;
-  const report = $("failed-report"); // the last job's report line: this job's report comes at its end
-  report.hidden = true;
-  report.textContent = "";
-  app.lastReport = null;
+  const retrying = job.autoRetry !== undefined && app.failedAuto.has(job.autoRetry.alertId);
+  app.failedAuto = new Set();
+  if (!retrying) {
+    $("failed-block").hidden = true; // the last job's episodes that did not download; this job's come at its end
+    /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody")).textContent = "";
+    $("failed-heading").textContent = "";
+    $("failed-auto").hidden = true;
+    $("failed-auto").textContent = "";
+    app.failed = null;
+    hideReportLine(); // the last job's report line: this job's report comes at its end
+    app.lastReport = null;
+  }
   updateButtons(); // `#report-button` disabled while no report exists
   $("progress-activity").textContent = "";
   $("progress-current").textContent = job.label;
@@ -1001,9 +1046,51 @@ function retryAllowed() {
 }
 
 /**
+ * The episodes of `seriesId` a `selection` job holds already — one waiting, or the one running
+ * until it is done with its drama ({@link app}.runningDone: from then on it asks for none of them,
+ * and a retry of what it could not save is no duplicate) —: no retry queues them twice (DramaFetch
+ * 1.8.0). `exceptId` is the job whose drama is being decided (it is done with it).
+ * @param {string} seriesId
+ * @param {number | null} [exceptId]
+ * @returns {Set<number>}
+ */
+function heldNumbers(seriesId, exceptId = null) {
+  /** @type {Set<number>} */
+  const held = new Set();
+  for (const job of [...(app.running === null || app.runningDone ? [] : [app.running]), ...app.queue]) {
+    if (job.id === exceptId || job.kind !== "selection" || !job.refs.some((ref) => ref.seriesId === seriesId)) continue;
+    for (const number of job.numbers) held.add(number);
+  }
+  return held;
+}
+
+/**
+ * Queue the retry of `targets` — {@link retryJobs} → {@link enqueue}, at the end of the queue —
+ * over the episodes no `selection` job holds already ({@link heldNumbers}: asked again before each,
+ * so a series named twice is queued once); a target left with none queues nothing. Returns how
+ * many jobs were queued.
+ * @param {readonly RetryTarget[]} targets
+ * @returns {number}
+ */
+function queueRetries(targets) {
+  let queued = 0;
+  for (const target of targets) {
+    const held = heldNumbers(target.seriesId);
+    const numbers = target.numbers.filter((number) => !held.has(number));
+    if (numbers.length === 0) continue;
+    for (const job of retryJobs([{ ...target, numbers }])) if (enqueue(job)) queued += 1;
+  }
+  return queued;
+}
+
+/**
  * Queue the retry of `targets` and spend `source`, the button that asked for it, until the next
  * job ends (the progress card and the history are rendered again then, their buttons new). The
- * gate of every download button holds: never from a read-only tab, never during a cooldown.
+ * gate of every download button holds: never from a read-only tab, never during a cooldown. The
+ * episodes a `selection` job of their series holds already — a waiting one (a retry, **Download
+ * selected**, **Download all available**), or the running one until it is done with its drama
+ * ({@link heldNumbers}) — are not queued twice: with nothing left, the status line says so
+ * (`retryAlreadyQueued`) — and no listing is asked for twice.
  * @param {readonly RetryTarget[]} targets
  * @param {HTMLButtonElement} source
  */
@@ -1011,17 +1098,20 @@ function startRetry(targets, source) {
   if (!retryAllowed() || spentRetries.has(source)) return;
   source.disabled = true;
   spentRetries.add(source);
-  for (const job of retryJobs(targets)) enqueue(job);
+  if (queueRetries(targets) === 0) setStatus($("input-status"), t("retryAlreadyQueued"), "error");
 }
 
 /**
  * The **Retry** button of a notification this page made, handed over by the worker
- * (`dramafetch:retry`): what the tab's **Retry** does for that drama — {@link retryJobs} →
- * {@link enqueue}, behind the same gate, so the job then takes the cooldown gate, the rest between
- * jobs and a fresh list like any other —, and the notification is taken away. Refused by the gate
- * (a cooldown in force, a refused write), nothing is queued and the notification stays: the worker
- * brings this tab to the front, where the banner or the status line says why. Null when this page
- * holds no such retry — the worker then only opens or focuses the DramaFetch tab.
+ * (`dramafetch:retry`): what the tab's **Retry** does for that drama — {@link queueRetries}, behind
+ * the same gate, so the job then takes the cooldown gate, the rest between jobs and a fresh list
+ * like any other —, and the notification is taken away. Its episodes queued already (a waiting
+ * `selection` job of that series holds them, or the running one not yet done with its drama:
+ * {@link heldNumbers}): nothing queued twice, and the answer is `queued` all the same — the work
+ * waits in the queue. Refused by the gate (a cooldown in force, a refused write), nothing is
+ * queued and the notification stays: the worker brings this tab to the front, where the banner or
+ * the status line says why. Null when this page holds no such retry — the worker then only opens
+ * or focuses the DramaFetch tab.
  * @param {string} notificationId
  * @returns {{ok: true, queued: boolean, tabId: number | null} | null}
  */
@@ -1029,9 +1119,81 @@ function retryFromAlert(notificationId) {
   const target = alerts.retryOf(notificationId);
   if (target === null) return null;
   if (!retryAllowed()) return { ok: true, queued: false, tabId: app.tabId ?? null };
-  for (const job of retryJobs([target])) enqueue(job);
+  queueRetries([target]);
   alerts.clear(notificationId);
   return { ok: true, queued: true, tabId: app.tabId ?? null };
+}
+
+/**
+ * The automatic retry of a drama a download job just finished (DramaFetch 1.8.0, the owner's
+ * request of 2026-11-21: “retry on its own a download that did not work”) — ONE, queued when all of
+ * these hold: the **Retry on its own what did not download** setting is on; the job is a `batch` or
+ * a `selection` that is not itself an automatic retry (one automatic round per download); the
+ * drama's run made a request and did NOT stop — any stop (a 429, a 403, a captcha, a login wall,
+ * the cooldown, three failures in a row, a refused write, **Stop**, an error) means none:
+ * DramaFetch/CLAUDE.md → Pacing, “do not retry … automatically after one” —, and **Stop** was not
+ * pressed during the job (the engine looks at Stop between two episodes and in its pauses only: one
+ * pressed while the drama's last episode downloaded ends no run, but it is a stop all the same,
+ * {@link app}.stopRequested until the job's end); the run left episodes
+ * whose last row is exactly `failed` and not `stopped: …` — a cut transfer, a file that failed its
+ * check, a network error —, never `failed-unavailable` (short-served, DRM, gone: no retry changes
+ * it), a locked one or a stop's; the tab may queue a download now ({@link retryAllowed}); and no
+ * `selection` job holds those episodes already ({@link heldNumbers}). It is exactly what the alert's
+ * **Retry** would queue the moment the alert appeared — {@link retryJobs} → {@link enqueue}, at the
+ * END of the queue (after the rest of this job and every job waiting), `includeLocked` false — so
+ * it takes the job gate, the cooldown, the rest between jobs, a fresh list and every pause like any
+ * retry: nothing faster, no request a manual **Retry** would not make. Its label is `jobAutoRetry`;
+ * `autoRetry` names its drama's alert. Returns what it queued and that alert's id, or null.
+ * @param {Job} job
+ * @param {SeriesRun} run
+ * @param {Pick<JobRecord, "autoRetried">} jobRecord
+ * @returns {{target: RetryTarget, alertId: string} | null}
+ */
+function queueAutoRetry(job, run, jobRecord) {
+  if (!app.settings.autoRetry || job.autoRetry !== undefined) return null;
+  if (job.kind !== "batch" && job.kind !== "selection") return null;
+  if (!run.contacted || run.stop || run.report.stopped) return null;
+  if (app.stopRequested) return null; // Stop pressed after the engine's last look at it: a stop too
+  if (!retryAllowed()) return null;
+  // the rows as the tab's Retry reads them (the last per episode), then only the plain failures
+  const rows = failedRows([runToHistory(run)]).filter((row) => row.status === FAILED && !row.message.startsWith(STOPPED_PREFIX));
+  const [failed] = targetsOf(rows);
+  if (failed === undefined) return null;
+  const held = heldNumbers(failed.seriesId, job.id);
+  const target = { ...failed, numbers: failed.numbers.filter((number) => !held.has(number)) };
+  if (target.numbers.length === 0) return null;
+  const [retry] = retryJobs([target]);
+  if (retry === undefined) return null;
+  const alertId = alerts.idOf(job.id, `${run.ref.seriesId}:retry`); // the ⚠ alert's: “retrying” takes its place
+  const label = t("jobAutoRetry", [target.numbers.length, target.name ?? target.seriesId]);
+  if (!enqueue({ ...retry, label, autoRetry: { alertId, name: target.name } })) return null;
+  if (jobRecord.autoRetried === undefined) jobRecord.autoRetried = [];
+  jobRecord.autoRetried.push(alertId);
+  return { target, alertId };
+}
+
+/**
+ * A drama of a download job is done — its rows and records stored —: its automatic retry when one
+ * is due ({@link queueAutoRetry}, whatever the alert setting), then its notification
+ * ({@link alertDrama}). A batch's from `onSeriesDone`, a selection job's from {@link runJob} — the
+ * running selection job holds its episodes no more ({@link app}.runningDone): a **Retry** of what it
+ * could not save, its alert's included, is queued behind it. Never throws (the engine calls it
+ * between two series), never waits. (Exported for the unit tests, which cannot run a selection job
+ * to its drama.)
+ * @param {Job} job
+ * @param {SeriesRun} run
+ * @param {Pick<JobRecord, "autoRetried">} jobRecord
+ */
+export function dramaDone(job, run, jobRecord) {
+  if (job.kind === "selection" && app.running !== null && app.running.id === job.id) app.runningDone = true;
+  /** @type {{target: RetryTarget, alertId: string} | null} */
+  let queued = null;
+  try {
+    queued = queueAutoRetry(job, run, jobRecord);
+  } catch (error) {
+    console.warn(error);
+  }
+  alertDrama(job, run, queued);
 }
 
 /**
@@ -1039,17 +1201,64 @@ function retryFromAlert(notificationId) {
  * **Alert me when a drama finishes** setting is on (`alerts.dramaAlert`: complete, episodes to
  * retry — the tab's own {@link retryTargets} for that drama behind its **Retry** —, or not
  * complete; none for a drama skipped as complete, refused before any request or never started).
- * Never throws (the engine calls it between two series), never waits.
+ * DramaFetch 1.8.0: when its automatic retry was queued just now (`queued`), “retrying” instead of
+ * the ⚠ alert, with no button (`alerts.autoRetryAlert`); an automatic retry's own drama gets its
+ * alert under the id of its “retrying” one, which Chrome replaces, `After an automatic retry.` its
+ * context unless it stopped. Never throws (the engine calls it between two series), never waits.
  * @param {Job} job
  * @param {SeriesRun} run
+ * @param {{target: RetryTarget, alertId: string} | null} [queued]
  */
-function alertDrama(job, run) {
+function alertDrama(job, run, queued = null) {
   if (!app.settings.alerts) return;
   try {
+    if (queued !== null) {
+      alerts.show(queued.alertId, autoRetryAlert(run, queued.target)); // its retry is queued: no button, none kept
+      return;
+    }
     const target = retryTargets([runToHistory(run)])[0] ?? null;
-    const texts = dramaAlert(run, target, shownText);
+    const auto = job.autoRetry;
+    const texts = dramaAlert(run, target, shownText, { afterAutoRetry: auto !== undefined });
     if (texts === null) return;
-    alerts.show(alerts.idOf(job.id, `${run.ref.seriesId}:${texts.kind}`), texts, texts.kind === "retry" ? target : null);
+    const id = auto === undefined ? alerts.idOf(job.id, `${run.ref.seriesId}:${texts.kind}`) : auto.alertId;
+    alerts.show(id, texts, texts.kind === "retry" ? target : null);
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+/**
+ * An automatic retry that did not get to its drama's alert (DramaFetch 1.8.0), under the id of its
+ * “retrying” one (Chrome replaces it), its drama's ⚠ alert WITH its **Retry**:
+ * - one that never ran — **Stop** or a stop took it out of the queue, it was refused at its own
+ *   gate, or **Stop** or an error ended it before any request (`saved` null) —: the job's own
+ *   episodes, `Not retried automatically: <reason>` its context (`alerts.notRetriedAlert`);
+ * - one that ran — asked TikTok for its list, maybe saved episodes — and that **Stop** or an error
+ *   ended before its drama's alert: the episodes it did not get on disk (`saved` the others), the
+ *   stop's reason its context, as for an automatic retry whose run stopped
+ *   (`alerts.stoppedRetryAlert`); none left — “retrying” goes.
+ * What the alert's **Retry** queues is what it names. Behind the **Alert me when a drama finishes**
+ * setting; never throws, never waits. (Exported for the unit tests, which cannot run an automatic
+ * retry through its job to a Stop.)
+ * @param {Pick<Job, "refs" | "numbers" | "autoRetry">} job
+ * @param {string} reason why it did not run, or why it ended: the stop's reason, an engine text
+ * @param {readonly number[] | null} [saved] null: it never ran; else its episodes on disk
+ *   ({@link JobRecord}.saved)
+ */
+export function alertNotRetried(job, reason, saved = null) {
+  const auto = job.autoRetry;
+  const ref = job.refs[0];
+  if (auto === undefined || ref === undefined || job.numbers.length === 0 || !app.settings.alerts) return;
+  try {
+    const numbers = saved === null ? [...job.numbers] : job.numbers.filter((number) => !saved.includes(number));
+    if (numbers.length === 0) {
+      alerts.clear(auto.alertId); // every episode it retried is on disk: nothing to say “retrying” of
+      return;
+    }
+    /** @type {RetryTarget} */
+    const target = { seriesId: ref.seriesId, name: auto.name, numbers };
+    const texts = saved === null ? notRetriedAlert(target, reason, shownText) : stoppedRetryAlert(target, reason, shownText);
+    alerts.show(auto.alertId, texts, target);
   } catch (error) {
     console.warn(error);
   }
@@ -1061,14 +1270,16 @@ function alertDrama(job, run) {
  * those of the download jobs its stop took out of the queue, whatever job stopped (a listing or a
  * removal from the Bookmark too: an alert's **Retry** may wait behind one) —, ONE more notification
  * says so (`alerts.stoppedAlert`: the reason as the tab shows it, how many). Nothing for a job that
- * asked TikTok for nothing (refused at its gate). Never throws, never waits. (Exported for the unit
- * tests.)
+ * asked TikTok for nothing (refused at its gate). An automatic retry (DramaFetch 1.8.0) is never
+ * among `cancelled`: its drama gets its own ⚠ alert ({@link alertNotRetried}). Never throws, never
+ * waits. (Exported for the unit tests.)
  * @param {Pick<Job, "id" | "kind" | "refs" | "contacted">} job
  * @param {string | null} stop why it stopped, or null
  * @param {readonly SeriesRun[] | null} runs the runs it produced; null when it ended before them
  *   (**Stop** in a batch: the series after the ones it began were never started)
  * @param {Pick<JobRecord, "begun">} jobRecord
- * @param {readonly Pick<Job, "kind" | "refs">[]} cancelled the jobs its stop took out of the queue
+ * @param {readonly Pick<Job, "kind" | "refs">[]} cancelled the jobs its stop took out of the queue,
+ *   but the automatic retries
  */
 export function alertJobEnd(job, stop, runs, jobRecord, cancelled) {
   if (stop === null || job.contacted !== true || !app.settings.alerts) return;
@@ -1110,10 +1321,14 @@ function historyRetryButton(targets) {
  * `#result-table` for `#failed-table`, under a heading with their count and the button that
  * queues them again ({@link retryJobs}); the result table keeps what completed (done, skipped,
  * dry run). Nothing failed, or nothing was downloaded (a listing, a job the cooldown refused):
- * the block stays hidden. (Exported for the unit tests, which cannot run a job.)
+ * the block stays hidden. `retrying`: the automatic retries the job queued that still wait
+ * (DramaFetch 1.8.0, {@link queueAutoRetry}) — when there are any, `#failed-auto` under the heading
+ * says how many of those episodes will be retried automatically, once; hidden otherwise. (Exported
+ * for the unit tests, which cannot run a job.)
  * @param {readonly unknown[]} seriesRecords the job's per-series records ({@link runToHistory})
+ * @param {readonly Pick<Job, "numbers" | "autoRetry">[]} [retrying]
  */
-export function renderFailed(seriesRecords) {
+export function renderFailed(seriesRecords, retrying = []) {
   const rows = failedRows(seriesRecords);
   const retry = button("retry-button");
   const body = /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody"));
@@ -1121,6 +1336,12 @@ export function renderFailed(seriesRecords) {
   spentRetries.delete(retry);
   app.failed = rows.length > 0 ? targetsOf(rows) : null;
   $("failed-block").hidden = rows.length === 0;
+  const automatic = rows.length > 0 ? retrying.reduce((count, job) => count + job.numbers.length, 0) : 0;
+  const line = $("failed-auto");
+  line.hidden = automatic === 0;
+  line.textContent = automatic === 0 ? "" : automatic === 1 ? t("failedAutoRetryOne") : t("failedAutoRetry", [automatic]);
+  // the block stays while the first of them runs (startProgress)
+  app.failedAuto = new Set(automatic === 0 ? [] : retrying.flatMap((job) => (job.autoRetry === undefined ? [] : [job.autoRetry.alertId])));
   if (rows.length > 0) {
     const leaving = new Set(rows.map((row) => `${row.seriesId}:${row.number}`));
     const results = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
@@ -1201,8 +1422,10 @@ function seriesInput(run, traceOf) {
  * it produced and the downloader's traces — kept in `app.lastReport` for **Save the report** when
  * at least one episode failed, and saved at once under `DramaFetch/reports/` when the `report`
  * setting is on. A listing, a job that produced no run (it threw before, or the cooldown refused
- * it) or a job in which nothing failed leaves no report. Never throws: the save must not break the
- * job's end. (Exported for the unit tests, which cannot run a job.)
+ * it) or a job in which nothing failed leaves no report. The report before it goes first, its
+ * `Report saved: …` line too (an automatic retry's start keeps them on screen, {@link startProgress}).
+ * Never throws: the save must not break the job's end. (Exported for the unit tests, which cannot
+ * run a job.)
  * @param {Pick<Job, "kind" | "label">} job
  * @param {JobOutcome} outcome
  * @param {readonly SeriesRun[] | null} runs the `SeriesRun`s the job produced, in order
@@ -1213,6 +1436,7 @@ function seriesInput(run, traceOf) {
  */
 export async function reportJobEnd(job, outcome, runs, traceOf, taken = []) {
   app.lastReport = null;
+  hideReportLine();
   try {
     if (job.kind !== "load" && runs !== null) {
       const series = runs.map((run, index) => taken[index] ?? seriesInput(run, traceOf));
@@ -1253,6 +1477,13 @@ async function saveReport() {
   } catch (error) {
     showReportOutcome(t("reportNotSaved", [oneLine(error)]), true);
   }
+}
+
+/** `#failed-report`, the line of the last report saved (or not), hidden and emptied. */
+function hideReportLine() {
+  const line = $("failed-report");
+  line.hidden = true;
+  line.textContent = "";
 }
 
 /**
@@ -1330,6 +1561,7 @@ async function pump() {
   }
   const job = /** @type {Job} */ (app.queue.shift());
   app.running = job;
+  app.runningDone = false;
   app.stopRequested = false;
   library.running = null;
   library.finished.clear();
@@ -1339,7 +1571,10 @@ async function pump() {
     await libraryCovers.idle();
     await runJob(job);
   } finally {
+    // Stop pressed during the job's very end, after its own end said what it took out: said now
+    if (app.droppedRetries.length > 0) await sayDroppedRetries(job.label);
     app.running = null;
+    app.runningDone = false;
     app.finished += 1;
     app.stopRequested = false;
     library.running = null;
@@ -1355,27 +1590,81 @@ async function pump() {
 }
 
 /**
+ * The history entry of a queued job that never started: `error` says why (`not started: …`).
+ * @param {Job} job
+ * @param {string} error
+ * @returns {Record<string, unknown>}
+ */
+function notStartedEntry(job, error) {
+  const at = new Date().toISOString();
+  return { id: Date.now(), kind: job.kind, label: job.label, started_at: at, finished_at: at, error, stopped: null, refreshes: 0, pauses: [], series: [] };
+}
+
+/**
  * Every queued job ends without a request: `not started: …` in the history.
  * @param {string} reason
  * @returns {Promise<Job[]>} the jobs it took out of the queue
  */
 async function cancelQueue(reason) {
   const cancelled = app.queue.splice(0);
-  for (const job of cancelled) {
-    await appendHistory({
-      id: Date.now(),
-      kind: job.kind,
-      label: job.label,
-      started_at: new Date().toISOString(),
-      finished_at: new Date().toISOString(),
-      error: reason,
-      stopped: null,
-      refreshes: 0,
-      pauses: [],
-      series: [],
-    });
-  }
+  for (const job of cancelled) await appendHistory(notStartedEntry(job, reason));
   return cancelled;
+}
+
+/**
+ * **Stop** pressed (DramaFetch 1.8.0): DramaFetch's own automatic retries waiting in the queue come
+ * out of it at once — none ever starts after a Stop (DramaFetch/CLAUDE.md → Pacing), not even when
+ * the job running does not stop: the engine looks at Stop between two episodes and in its pauses,
+ * so one pressed while the job's last episode downloads, or during its end, ends no run (the jobs
+ * the user queued then start, as before; a Stop the engine meets takes them out too,
+ * {@link cancelQueue}). The **Did not download** block's line that said they would be retried goes
+ * now — drawn at the end of the job that queued them, or kept with its block while the first of
+ * them runs ({@link startProgress}, which empties {@link app}.failedAuto then: every automatic retry
+ * still waiting is that block's job's, and its line counted it) —; what is said of them — as of any
+ * job a stop took out of the queue — waits for the running job's end ({@link sayDroppedRetries}),
+ * so that an alert's **Retry** pressed then is never taken out by that same Stop. A drama whose
+ * automatic retry was not queued yet gets none ({@link queueAutoRetry}).
+ */
+function dropAutoRetries() {
+  const dropped = app.queue.filter((waiting) => waiting.autoRetry !== undefined);
+  if (dropped.length === 0) return;
+  for (let index = app.queue.length - 1; index >= 0; index -= 1) if (app.queue[index]?.autoRetry !== undefined) app.queue.splice(index, 1);
+  app.droppedRetries.push(...dropped);
+  renderAppStatus();
+  const line = $("failed-auto");
+  if (app.failedAuto.size > 0 || !line.hidden) {
+    app.failedAuto = new Set(); // every one of them is out of the queue: the line that counted them goes
+    line.hidden = true;
+    line.textContent = "";
+  }
+}
+
+/**
+ * The automatic retries **Stop** took out of the queue ({@link dropAutoRetries}), said at the end of
+ * the job that ran then, `where` its label: each one's history entry is any cancelled job's
+ * (`not started: batch stopped in <where> (stopped by you)`), and its drama gets the ⚠ alert WITH
+ * its **Retry**, `Not retried automatically: stopped by you` ({@link alertNotRetried}).
+ * @param {string} where
+ * @returns {Promise<void>}
+ */
+async function sayDroppedRetries(where) {
+  const reason = new StopRequested().message; // `stopped by you`: stored in English, like every engine text
+  for (const job of app.droppedRetries.splice(0)) {
+    await appendHistory(notStartedEntry(job, `not started: batch stopped in ${where} (${reason})`));
+    alertNotRetried(job, reason);
+  }
+}
+
+/**
+ * The automatic retries `jobRecord`'s job queued for its dramas that still wait at its end — what
+ * its **Did not download** block says will be retried ({@link renderFailed}) —, never another
+ * job's. (Exported for the unit tests, which cannot run a job to its end with one waiting.)
+ * @param {Pick<JobRecord, "autoRetried">} jobRecord
+ * @returns {Job[]}
+ */
+export function waitingAutoRetries(jobRecord) {
+  const queuedHere = new Set(jobRecord.autoRetried ?? []);
+  return app.queue.filter((waiting) => waiting.autoRetry !== undefined && queuedHere.has(waiting.autoRetry.alertId));
 }
 
 /**
@@ -1422,6 +1711,8 @@ async function runJob(job) {
   let runs = null;
   /** @type {Series | null} a selection job's fresh list of its series, listed for this job */
   let fresh = null;
+  /** whether a selection job's drama had its alert (an automatic retry's: what came of it) */
+  let told = false;
   try {
     const cooldown = await checkCooldown(engine); // the gate, before the job's first request
     if (cooldown !== null) {
@@ -1459,7 +1750,8 @@ async function runJob(job) {
       renderReportLine(run);
       renderBatchTable([run]);
       entry["series"] = [runToHistory(run)];
-      alertDrama(job, run); // its rows are stored: the drama's notification, now
+      dramaDone(job, run, jobRecord); // its rows are stored: its automatic retry when due, its notification, now
+      told = run.contacted || run.results.length > 0; // refused before any request: no alert of its own
       if (run.stop) {
         stopping = run;
         stop = run.report.stopped || run.error || "stopped";
@@ -1475,6 +1767,7 @@ async function runJob(job) {
       setStatus($("input-status"), shownText(stop), "error");
     }
   } finally {
+    app.runningDone = true; // it asks for none of its episodes any more: a Retry pressed now queues behind it
     clearPause();
     if (job.contacted) app.lastContactAt = now(); // the rest between jobs counts from the job's end
     await storePacing();
@@ -1485,14 +1778,25 @@ async function runJob(job) {
     }
     entry["stopped"] = stop;
     entry["finished_at"] = new Date().toISOString();
+    await sayDroppedRetries(job.label); // the automatic retries a Stop pressed meanwhile took out of the queue
     /** @type {Job[]} */
     let cancelled = [];
     if (stopping !== null) cancelled = await cancelQueue(notStartedMessage(stopping));
     else if (stop !== null) cancelled = await cancelQueue(`not started: batch stopped in ${job.label} (${stop})`);
-    alertJobEnd(job, stop, runs, jobRecord, cancelled); // the dramas a stop left unstarted, said once
+    if (stop !== null) {
+      // an automatic retry without its drama's alert — this one, refused at its gate or ended by
+      // Stop or an error before that alert (it never ran when it asked TikTok for nothing; else
+      // what it saved is not named), and those the stop took out of the queue —: each drama's ⚠
+      // alert with its Retry, in place of "retrying"
+      if (job.autoRetry !== undefined && !told) alertNotRetried(job, stop, job.contacted === true ? (jobRecord.saved ?? []) : null);
+      for (const waiting of cancelled) if (waiting.autoRetry !== undefined) alertNotRetried(waiting, stop);
+    }
+    // the dramas a stop left unstarted, said once — an automatic retry's said above, never counted
+    alertJobEnd(job, stop, runs, jobRecord, cancelled.filter((waiting) => waiting.autoRetry === undefined));
     await appendHistory(entry);
     $("progress-activity").textContent = "";
-    renderFailed(Array.isArray(entry["series"]) ? entry["series"] : []); // what did not download, apart, with its retry
+    // what did not download, apart, with its retry — and the automatic retries of it still waiting
+    renderFailed(Array.isArray(entry["series"]) ? entry["series"] : [], waitingAutoRetries(jobRecord));
     // and the report of it (nothing goes into the history entry: its 1 MiB cap)
     await reportJobEnd(
       job,
@@ -4067,6 +4371,7 @@ function onStop() {
   app.stopRequested = true;
   for (const cancel of [...app.stopWaiters]) cancel();
   app.stopWaiters.clear();
+  dropAutoRetries(); // never an automatic retry after a Stop, even one the running job does not meet
 }
 
 // -------------------------------------------------------------------------- the cooldown
@@ -4143,6 +4448,7 @@ function fillSettings() {
   input("setting-rest-max").value = String(settings.restMaxS);
   input("setting-report").checked = settings.report;
   input("setting-alerts").checked = settings.alerts;
+  input("setting-auto-retry").checked = settings.autoRetry;
   const pacing = effectivePacing();
   $("pacing-line").textContent = `${shownText(describePacing(pacing))}; ${shownText(describeBatchPacing(pacing))}`;
 }
@@ -4163,6 +4469,7 @@ async function onSaveSettings(event) {
     restMaxS: Number(input("setting-rest-max").value),
     report: input("setting-report").checked,
     alerts: input("setting-alerts").checked,
+    autoRetry: input("setting-auto-retry").checked,
   };
   try {
     await saveSettings(settings);
