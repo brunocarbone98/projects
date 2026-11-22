@@ -7,10 +7,12 @@ import {
 import jwt from "jsonwebtoken";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { hashPassword } from "../src/auth/passwords.js";
 import { generateRefreshToken, hashRefreshToken } from "../src/auth/tokens.js";
 import { env } from "../src/env.js";
 import { prisma } from "../src/prisma.js";
-import { api, DEFAULT_PASSWORD, nextReleaseHash, registerCustomer } from "./helpers.js";
+import { api, DEFAULT_PASSWORD, firstFormatHash, registerCustomer } from "./helpers.js";
+import { verifyPassword as release103Verify } from "./release-103-passwords.js";
 
 const refresh = (refreshToken: string) => api().post("/api/v1/auth/refresh").send({ refreshToken });
 
@@ -325,47 +327,97 @@ describe("password checks at login", () => {
     api().post("/api/v1/auth/login").send({ email, password });
   const storedHash = async (id: string) =>
     (await prisma.user.findUniqueOrThrow({ where: { id } })).passwordHash;
+  /** An account holding a first-format hash, as #103 and every release before it wrote. */
+  const olderAccount = (email: string) =>
+    prisma.user.create({
+      data: { email, name: "Older Hash", passwordHash: firstFormatHash(DEFAULT_PASSWORD) },
+    });
+  const todaysFormat = /^\$scrypt\$ln=15,r=8,p=3\$[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{86}$/;
 
-  it("answers an unknown email like a wrong password, after the same scrypt work", async () => {
+  it("answers an unknown email like a wrong password, for current and older hashes alike", async () => {
     await registerCustomer("known@example.com");
+    await olderAccount("older@example.com");
     const timed = async (email: string) => {
       const started = performance.now();
       const res = await login(email, "wrong-password");
       return { res, ms: performance.now() - started };
     };
     const known: Awaited<ReturnType<typeof timed>>[] = [];
+    const older: Awaited<ReturnType<typeof timed>>[] = [];
     const unknown: Awaited<ReturnType<typeof timed>>[] = [];
     for (let i = 0; i < 5; i += 1) {
       known.push(await timed("known@example.com"));
+      older.push(await timed("older@example.com"));
       unknown.push(await timed(`nobody-${i}@example.com`));
     }
-    for (const { res } of [...known, ...unknown]) {
+    for (const { res } of [...known, ...older, ...unknown]) {
       expect(res.status).toBe(401);
       expect(res.body).toEqual(known[0]?.res.body);
     }
 
-    // Without the check, an unknown email was answered after one database read and a known one after
-    // a scrypt derivation as well (about 40 ms): a ratio of about 0.02 to 0.12. With it, about 1. The
-    // wide bounds keep a machine busy with other work from failing the test with the check in place.
+    // Each answer waits for the same two scrypt derivations (about 0.25 s; passwords.test.ts pins
+    // them). Without the one at today's cost, an unknown email and an older hash were answered after
+    // the first format's alone (a ratio of about 0.2); with neither, an unknown email was answered
+    // after one database read (about 0.02). The wide bounds keep a machine busy with other work from
+    // failing the test with the derivations there.
     const median = (runs: { ms: number }[]) =>
       runs.map((run) => run.ms).sort((a, b) => a - b)[2] ?? 0;
-    expect(median(unknown) / median(known)).toBeGreaterThan(0.3);
-    expect(median(unknown) / median(known)).toBeLessThan(3);
+    for (const other of [unknown, older]) {
+      expect(median(other) / median(known)).toBeGreaterThan(0.3);
+      expect(median(other) / median(known)).toBeLessThan(3);
+    }
   });
 
-  it("signs in an account the next release re-hashed, and leaves its hash as it is", async () => {
-    const next = nextReleaseHash(DEFAULT_PASSWORD);
-    const user = await prisma.user.create({
-      data: { email: "next-hash@example.com", name: "Next Hash", passwordHash: next },
-    });
+  it("re-hashes an older hash at today's cost when the account signs in, and only then", async () => {
+    const user = await olderAccount("rehash@example.com");
 
-    expect((await login("next-hash@example.com", "wrong-password")).status).toBe(401);
-    expect((await login("Next-Hash@example.com", DEFAULT_PASSWORD)).status).toBe(200);
-    expect(await storedHash(user.id)).toBe(next);
+    expect((await login("rehash@example.com", "wrong-password")).status).toBe(401);
+    expect(await storedHash(user.id)).toBe(user.passwordHash);
+
+    expect((await login("Rehash@example.com", DEFAULT_PASSWORD)).status).toBe(200);
+    const upgraded = await storedHash(user.id);
+    expect(upgraded).toMatch(todaysFormat);
+    // Rolled back to #103, the account still signs in.
+    expect(await release103Verify(DEFAULT_PASSWORD, upgraded)).toBe(true);
+
+    // A hash at today's cost stays as it is.
+    expect((await login("rehash@example.com", DEFAULT_PASSWORD)).status).toBe(200);
+    expect(await storedHash(user.id)).toBe(upgraded);
   });
 
-  it("stores a new account's password in the format every release reads", async () => {
+  it("never overwrites a hash changed in between, and never fails a sign-in on the write", async () => {
+    // The password changes (as a reset by hand would) after the sign-in read the account: the
+    // sign-in succeeds, but its re-hash of the old password is not stored, so the new password
+    // stays the one that works.
+    const raced = await olderAccount("raced@example.com");
+    const changed = await hashPassword("Another-Password1!");
+    await prisma.user.update({ where: { id: raced.id }, data: { passwordHash: changed } });
+    vi.spyOn(prisma.user, "findUnique").mockResolvedValueOnce(raced);
+    expect((await login("raced@example.com", DEFAULT_PASSWORD)).status).toBe(200);
+    expect(await storedHash(raced.id)).toBe(changed);
+    expect((await login("raced@example.com", "Another-Password1!")).status).toBe(200);
+    expect((await login("raced@example.com", DEFAULT_PASSWORD)).status).toBe(401);
+
+    // The write fails with an error that repeats the query's values, as a Prisma error can: the
+    // sign-in still succeeds, the older hash stays, and the warning names the account but neither
+    // the password nor a hash.
+    const failing = await olderAccount("write-fails@example.com");
+    const echoed = `Invalid prisma.user.updateMany() invocation: passwordHash "${failing.passwordHash}"`;
+    vi.spyOn(prisma.user, "updateMany").mockRejectedValueOnce(new Error(echoed));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect((await login("write-fails@example.com", DEFAULT_PASSWORD)).status).toBe(200);
+    expect(await storedHash(failing.id)).toBe(failing.passwordHash);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const logged = (warn.mock.calls[0] ?? []).map(String).join(" ");
+    expect(logged).toContain(failing.id);
+    expect(logged).not.toContain(DEFAULT_PASSWORD);
+    expect(logged).not.toContain("scrypt$");
+  });
+
+  it("stores a new account's password at today's cost, which #103 reads too", async () => {
     const { user } = await registerCustomer("format@example.com");
-    expect(await storedHash(user.id)).toMatch(/^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/);
+    const stored = await storedHash(user.id);
+    expect(stored).toMatch(todaysFormat);
+    expect(await release103Verify(DEFAULT_PASSWORD, stored)).toBe(true);
   });
 });

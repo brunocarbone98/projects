@@ -1,13 +1,22 @@
-import { randomBytes, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  scrypt,
+  type ScryptOptions,
+  scryptSync,
+  timingSafeEqual,
+} from "node:crypto";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import {
   checkLoginPassword,
+  FIRST_FORMAT_COST,
   hashPassword,
   STORED_COST,
   verifyPassword,
 } from "../src/auth/passwords.js";
-import { nextReleaseHash } from "./helpers.js";
+import { firstFormatHash } from "./helpers.js";
+import { verifyPassword as release103Verify } from "./release-103-passwords.js";
 
 // Node's own scrypt behind a spy that changes nothing, so a test can see the derivations a check does.
 vi.mock("node:crypto", async (importOriginal) => {
@@ -17,8 +26,8 @@ vi.mock("node:crypto", async (importOriginal) => {
 
 const base64 = (bytes: Buffer) => bytes.toString("base64").replace(/=+$/, "");
 
-/** The release before this one's `verifyPassword`, verbatim: what a rollback to it runs. */
-async function previousReleaseVerify(password: string, stored: string): Promise<boolean> {
+/** `verifyPassword` of the releases before #103, verbatim: what rolling back past #103 would run. */
+async function before103Verify(password: string, stored: string): Promise<boolean> {
   const [scheme, saltHex, hashHex] = stored.split("$");
   if (scheme !== "scrypt" || !saltHex || !hashHex) return false;
   const salt = Buffer.from(saltHex, "hex");
@@ -28,25 +37,25 @@ async function previousReleaseVerify(password: string, stored: string): Promise<
 }
 
 describe("password hashes", () => {
-  it("writes the format every release reads, which the previous release verifies too", async () => {
-    expect(STORED_COST).toEqual({ N: 2 ** 14, r: 8, p: 1 });
+  it("writes PHC at today's cost, which the release before this one (#103) verifies too", async () => {
+    expect(STORED_COST).toEqual({ N: 2 ** 15, r: 8, p: 3 });
     const stored = await hashPassword("Password123!");
 
-    expect(stored).toMatch(/^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/);
+    expect(stored).toMatch(/^\$scrypt\$ln=15,r=8,p=3\$[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{86}$/);
     expect(await verifyPassword("Password123!", stored)).toBe(true);
     expect(await verifyPassword("Password123?", stored)).toBe(false);
-    // Rolled back, the previous release signs the same account in, and only with its password.
-    expect(await previousReleaseVerify("Password123!", stored)).toBe(true);
-    expect(await previousReleaseVerify("Password123?", stored)).toBe(false);
+    // Rolled back to #103, the same account signs in, and only with its password.
+    expect(await release103Verify("Password123!", stored)).toBe(true);
+    expect(await release103Verify("Password123?", stored)).toBe(false);
     // A fresh salt every time.
     expect(await hashPassword("Password123!")).not.toBe(stored);
   });
 
-  it("reads the PHC hashes the next release writes, at its cost or another, in either alphabet", async () => {
-    const next = nextReleaseHash("Password123!");
-    expect(next).toMatch(/^\$scrypt\$ln=15,r=8,p=3\$[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{86}$/);
-    expect(await verifyPassword("Password123!", next)).toBe(true);
-    expect(await verifyPassword("wrong-password", next)).toBe(false);
+  it("reads the first format, and PHC strings at other costs, in either alphabet", async () => {
+    expect(FIRST_FORMAT_COST).toEqual({ N: 2 ** 14, r: 8, p: 1 });
+    const first = firstFormatHash("Password123!");
+    expect(await verifyPassword("Password123!", first)).toBe(true);
+    expect(await verifyPassword("wrong-password", first)).toBe(false);
 
     const salt = randomBytes(16);
     const key = scryptSync("Password123!", salt, 64, { N: 2 ** 14, r: 8, p: 1 });
@@ -64,14 +73,14 @@ describe("password hashes", () => {
     expect(await verifyPassword("wrong-password", urlSafe)).toBe(false);
   });
 
-  it("never lets the previous release read a PHC hash as a match", async () => {
-    const next = nextReleaseHash("Password123!");
-    expect(await previousReleaseVerify("any password at all", next)).toBe(false);
-    expect(await previousReleaseVerify("Password123!", next)).toBe(false);
-    // The previous release reads `scrypt$<N>$<r>$<p>$<salt>$<key>` as an empty key and lets any
-    // password in: the reason the cost is never stored that way.
+  it("never lets a release before #103 read a PHC hash as a match", async () => {
+    const stored = await hashPassword("Password123!");
+    expect(await before103Verify("any password at all", stored)).toBe(false);
+    expect(await before103Verify("Password123!", stored)).toBe(false);
+    // Those releases read `scrypt$<N>$<r>$<p>$<salt>$<key>` as an empty key and let any password
+    // in: the reason the cost is never stored that way.
     const unsafe = `scrypt$32768$8$3$${randomBytes(16).toString("hex")}$${randomBytes(64).toString("hex")}`;
-    expect(await previousReleaseVerify("any password at all", unsafe)).toBe(true);
+    expect(await before103Verify("any password at all", unsafe)).toBe(true);
     expect(await verifyPassword("any password at all", unsafe)).toBe(false);
   });
 
@@ -92,7 +101,7 @@ describe("password hashes", () => {
       "scrypt$",
       "scrypt$$",
       `scrypt$${saltHex}$`,
-      // The previous release matches any password against these two (an empty key).
+      // The releases before #103 match any password against these two (an empty key).
       `scrypt$${saltHex}$8`,
       `scrypt$${saltHex}$zz`,
       `scrypt$${saltHex}$${keyHex.slice(2)}`,
@@ -103,7 +112,7 @@ describe("password hashes", () => {
       `$scrypt$ln=15,r=8,p=3$${salt}$${key}$`,
       `$scrypt$ln=15,r=8$${salt}$${key}`,
       // Below the floor, above the range, above the memory cap (512 MiB), above the work cap (32 times
-      // the stored cost: ln=20, r=2, p=16 is 256 MiB but 256 times the work), no block size or lanes.
+      // the first format's: ln=20, r=2, p=16 is 256 MiB but 256 times its work), no block size or lanes.
       `$scrypt$ln=9,r=8,p=3$${saltAndKey({ N: 2 ** 9, r: 8, p: 3 })}`,
       `$scrypt$ln=30,r=8,p=3$${salt}$${key}`,
       `$scrypt$ln=19,r=8,p=1$${salt}$${key}`,
@@ -123,49 +132,150 @@ describe("password hashes", () => {
     }
   });
 
-  it("checks a login with one derivation at the stored cost, whether or not there is an account", async () => {
-    const stored = await hashPassword("Password123!");
-    expect(await checkLoginPassword("Password123!", stored)).toBe(true);
-    expect(await checkLoginPassword("wrong-password", stored)).toBe(false);
-    expect(await checkLoginPassword("Password123!", null)).toBe(false);
-    expect(await checkLoginPassword("Password123!", "not a hash")).toBe(false);
+  it("checks a login with the same two derivations on every path, and re-hashes an older hash", async () => {
+    const current = await hashPassword("Password123!");
+    const older = firstFormatHash("Password123!");
+    const refused = { matches: false, rehash: null };
+    expect(await checkLoginPassword("Password123!", current)).toEqual({
+      matches: true,
+      rehash: null,
+    });
+    expect(await checkLoginPassword("wrong-password", current)).toEqual(refused);
+    expect(await checkLoginPassword("Password123!", null)).toEqual(refused);
+    expect(await checkLoginPassword("Password123!", "not a hash")).toEqual(refused);
+    expect(await checkLoginPassword("wrong-password", older)).toEqual(refused);
+    // The right password for an older hash: a new hash at today's cost, which #103 reads too.
+    const upgraded = await checkLoginPassword("Password123!", older);
+    expect(upgraded.matches).toBe(true);
+    const rehash = upgraded.rehash ?? "";
+    expect(rehash).toMatch(/^\$scrypt\$ln=15,r=8,p=3\$[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{86}$/);
+    expect(await verifyPassword("Password123!", rehash)).toBe(true);
+    expect(await verifyPassword("wrong-password", rehash)).toBe(false);
+    expect(await release103Verify("Password123!", rehash)).toBe(true);
+    // Any other cost is re-hashed too, a higher one included: one term changed at a time. Each
+    // re-hash gets a salt of its own, neither the account's nor one another re-hash has.
+    const salts: string[] = [];
+    for (const cost of [
+      { N: 2 ** 14, r: 8, p: 3 },
+      { N: 2 ** 15, r: 4, p: 3 },
+      { N: 2 ** 15, r: 8, p: 4 },
+    ]) {
+      const salt = randomBytes(16);
+      const key = scryptSync("Password123!", salt, 64, { ...cost, maxmem: 2 ** 26 });
+      const stored = `$scrypt$ln=${Math.log2(cost.N)},r=${cost.r},p=${cost.p}$${base64(salt)}$${base64(key)}`;
+      const check = await checkLoginPassword("Password123!", stored);
+      expect(check.matches, stored).toBe(true);
+      expect(check.rehash ?? "", stored).toMatch(/^\$scrypt\$ln=15,r=8,p=3\$/);
+      salts.push(base64(salt), (check.rehash ?? "").split("$")[3]);
+    }
+    expect(new Set(salts).size).toBe(salts.length);
 
-    // The scrypt calls one check makes, run by Node's own scrypt. The same single call on every path
-    // (same cost, salt and key lengths), finished before the check answers, means the response time
-    // does not tell an account from no account. Without the extra derivation, no account (or an
-    // unreadable hash) made no call at all; a derivation the check did not wait for answered at once.
+    // The scrypt calls one check makes, run by Node's own scrypt: all started together, and each
+    // finished before the check answers. Every path makes the same calls in the same order, one at
+    // the first format's cost and then one at today's, with the same salt and key lengths. Node's
+    // pool runs jobs in the order they come, so the response time tells neither an account from no
+    // account nor an older hash from a current one, even with every core and pool thread busy.
+    // Without the first call on the other paths, an older hash's check was extra work that showed
+    // whenever the pool or the CPU was busy; with the two calls the other way round, it still did.
     const { scrypt: nodeScrypt } =
       await vi.importActual<typeof import("node:crypto")>("node:crypto");
     const derivations = async (hash: string | null) => {
       const spy = vi.mocked(scrypt);
       spy.mockClear();
       const events: string[] = [];
-      spy.mockImplementationOnce((password, salt, keyLength, options, done) =>
+      spy.mockImplementation((password, salt, keyLength, options, done) => {
+        events.push("started");
         nodeScrypt(password, salt, keyLength, options, (error, key) => {
           events.push("derived");
           done(error, key);
-        }),
-      );
-      await checkLoginPassword("wrong-password", hash);
+        });
+      });
+      try {
+        await checkLoginPassword("wrong-password", hash);
+      } finally {
+        spy.mockImplementation(nodeScrypt);
+      }
       events.push("answered");
-      expect(events).toEqual(["derived", "answered"]);
-      return spy.mock.calls.map(([password, salt, keyLength, options]) => ({
+      const calls = spy.mock.calls.map(([password, salt, keyLength, options]) => ({
         password,
         saltLength: Buffer.byteLength(salt),
         keyLength,
         options,
       }));
+      expect(events).toEqual([
+        ...calls.map(() => "started"),
+        ...calls.map(() => "derived"),
+        "answered",
+      ]);
+      return calls;
     };
-    const account = await derivations(stored);
-    expect(account).toEqual([
-      {
-        password: "wrong-password",
-        saltLength: 16,
-        keyLength: 64,
-        options: expect.objectContaining({ N: 2 ** 14, r: 8, p: 1 }),
-      },
-    ]);
-    expect(await derivations(null)).toEqual(account);
-    expect(await derivations("not a hash")).toEqual(account);
+    const call = (cost: { N: number; r: number; p: number }) => ({
+      password: "wrong-password",
+      saltLength: 16,
+      keyLength: 64,
+      options: expect.objectContaining(cost),
+    });
+    const account = await derivations(current);
+    expect(account).toEqual([call({ N: 2 ** 14, r: 8, p: 1 }), call({ N: 2 ** 15, r: 8, p: 3 })]);
+    // No account, an unreadable hash, and an older hash (checked with the first call) alike.
+    for (const hash of [null, "not a hash", older]) {
+      expect(await derivations(hash), String(hash)).toEqual(account);
+    }
+
+    // Either call failing, or both, fails the check on every path, and the login answers 500. A
+    // failing call fails first, while the other still runs, as an allocation failure at a job's
+    // start would: a call not awaited from the start (left unawaited, or awaited only after the
+    // other, in a `finally` or a chain) would then leave its error unhandled, which stops the API.
+    const failure = new Error("scrypt failed");
+    const spy = vi.mocked(scrypt);
+    try {
+      for (const failing of [[0], [1], [0, 1]]) {
+        for (const hash of [current, null, "not a hash", older]) {
+          let call = 0;
+          spy.mockImplementation((_password, _salt, keyLength, _options, done) => {
+            if (failing.includes(call++)) setImmediate(() => done(failure, Buffer.alloc(0)));
+            else setImmediate(() => setImmediate(() => done(null, Buffer.alloc(keyLength))));
+          });
+          await expect(checkLoginPassword("wrong-password", hash), String(hash)).rejects.toBe(
+            failure,
+          );
+        }
+      }
+
+      // Every cost but today's is checked at its own and re-hashed: each term changed either way,
+      // the memory and the work of today's cost with another N and r, and the most memory a stored
+      // hash may ask for (256 MiB). A cost taken for today's would be checked at today's, and the
+      // right password refused for good. A stand-in scrypt (a SHA-512 of its inputs) makes these
+      // cases free. Node's own checks of each call's options still run, without the work (a key
+      // length of 0): a cost above the memory derive allows fails here as at a sign-in.
+      const standIn = (password: unknown, salt: unknown, { N, r, p }: ScryptOptions) =>
+        createHash("sha512")
+          .update(JSON.stringify([password, salt, N, r, p]))
+          .digest();
+      spy.mockImplementation((password, salt, _keyLength, options, done) => {
+        scryptSync(password, salt, 0, options);
+        done(null, standIn(password, salt, options));
+      });
+      for (const [ln, r, p] of [
+        [14, 8, 3],
+        [16, 8, 3],
+        [15, 4, 3],
+        [15, 16, 3],
+        [15, 8, 1],
+        [15, 8, 4],
+        [16, 4, 3],
+        [18, 8, 1],
+      ]) {
+        const salt = randomBytes(16);
+        const key = standIn("Password123!", salt, { N: 2 ** ln, r, p });
+        const stored = `$scrypt$ln=${ln},r=${r},p=${p}$${base64(salt)}$${base64(key)}`;
+        expect(await checkLoginPassword("Password123!", stored), stored).toEqual({
+          matches: true,
+          rehash: expect.stringMatching(/^\$scrypt\$ln=15,r=8,p=3\$/),
+        });
+      }
+    } finally {
+      spy.mockImplementation(nodeScrypt);
+    }
   });
 });
