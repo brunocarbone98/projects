@@ -94,7 +94,8 @@ Routes (all GET):
                                  decodes it, so covers can be embedded), distinct per episode —
                                  403 when `expire` is in the past (or, with
                                  `require_login`, without the session cookie) and 429 when the
-                                 server was started with `cdn_rate_limit`. `expired_media_first`
+                                 server was started with `cdn_rate_limit` (or, for the episodes
+                                 of `rate_limit_media`, theirs only). `expired_media_first`
                                  makes the FIRST item_list response carry already-expired URLs and
                                  the later ones fresh URLs, to exercise the download engine's
                                  refresh; `expired_media_first_visit` expires every list served
@@ -109,7 +110,10 @@ Routes (all GET):
                                  must fail it.
                                  `truncate_media` announces the full `Content-Length` but sends
                                  only 60 % of the body (`TRUNCATE_RATIO`) and drops the
-                                 connection: a transfer cut short by the network. `gzip_media`
+                                 connection: a transfer cut short by the network;
+                                 `truncate_once` / `truncate_twice` cut only the first one / two
+                                 media requests of the episodes they name (`cut_first`), and the
+                                 later ones get the whole file. `gzip_media`
                                  serves the body `Content-Encoding: gzip` with the COMPRESSED
                                  size as `Content-Length`: the client's decoded body is longer
                                  than announced, which is no truncation. `drm_media` — a set of
@@ -517,12 +521,18 @@ class FakeOptions:
     # (the first discovery's lists, however many requests it makes); a fresh visit's are fresh.
     expired_media_first_visit: bool = False
     cdn_rate_limit: bool = False  # every /cdn/ request answers HTTP 429
+    # Episodes, as (series id, episode number), whose media requests answer HTTP 429 as
+    # `cdn_rate_limit` answers every one: a refusal met in the middle of a series.
+    rate_limit_media: frozenset[tuple[str, int]] = frozenset()
     # Integrity failures (both make the engines fail the episode without a retry):
     truncate_media: bool = False  # Content-Length says all, the body stops at 60 %, then EOF
     # Episodes, as (series id, episode number), whose FIRST media request is cut short the way
     # `truncate_media` cuts every one (a transfer the network dropped once); every later request
     # of them gets the whole file — what **Retry** is for.
     truncate_once: frozenset[tuple[str, int]] = frozenset()
+    # The same for their first TWO media requests (a transfer dropped twice): what the Chrome
+    # extension's one automatic retry (1.8.0) cannot heal, and the user's **Retry** then does.
+    truncate_twice: frozenset[tuple[str, int]] = frozenset()
     short_media: bool = False  # lists keep the fixtures' 92 s durations; the CDN serves 3 s
     # Not a failure: a gzip-encoded body whose Content-Length is the compressed size.
     gzip_media: bool = False
@@ -561,6 +571,13 @@ class FakeOptions:
     def page_scrolls(self) -> bool:
         return self.lazy or self.lazy_empty or self.challenge_after_first_page
 
+    def cuts_of(self, episode: tuple[str, int]) -> int:
+        """How many of `episode`'s first media requests are cut short: 2 with `truncate_twice`,
+        1 with `truncate_once`, else 0."""
+        if episode in self.truncate_twice:
+            return 2
+        return 1 if episode in self.truncate_once else 0
+
 
 @dataclass(frozen=True)
 class RequestRecord:
@@ -589,8 +606,8 @@ class FakeTikTokServer(ThreadingHTTPServer):
         #: `FAVORITES` that the Bookmark button's `collect` changes.
         self.favorites: list[tuple[str, str, int, int]] = list(FAVORITES)
         self.media_lists_served = 0  # item_list responses that carried (rewritten) play URLs
-        #: The `truncate_once` episodes whose one cut-short request has been served.
-        self.cut_once: set[tuple[str, int]] = set()
+        #: How many cut-short media requests each `truncate_once` / `truncate_twice` episode got.
+        self.cuts: dict[tuple[str, int], int] = {}
         self.lock = threading.Lock()
         self.release = threading.Event()  # set at shutdown: wakes handlers sleeping on purpose
 
@@ -615,13 +632,15 @@ class FakeTikTokServer(ThreadingHTTPServer):
 
     def cut_first(self, episode: tuple[str, int] | None) -> bool:
         """Whether this media request of `episode` is to be cut short: its first one, when it is
-        one of `truncate_once`."""
-        if episode is None or episode not in self.options.truncate_once:
+        one of `truncate_once`; its first two, when it is one of `truncate_twice`."""
+        if episode is None:
             return False
+        budget = self.options.cuts_of(episode)
         with self.lock:
-            if episode in self.cut_once:
+            served = self.cuts.get(episode, 0)
+            if served >= budget:
                 return False
-            self.cut_once.add(episode)
+            self.cuts[episode] = served + 1
             return True
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -839,7 +858,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _media(
         self, options: FakeOptions, query: dict[str, str], logged_in: bool, item_id: str, index: str
     ) -> None:
-        if options.cdn_rate_limit:
+        if options.cdn_rate_limit or EPISODE_OF_ITEM.get(item_id) in options.rate_limit_media:
             self._send(
                 HTTPStatus.TOO_MANY_REQUESTS,
                 b'{"statusCode": 429, "statusMsg": "too many requests"}',

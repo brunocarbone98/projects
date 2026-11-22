@@ -21,6 +21,7 @@ import {
   favoritesTemplateKey,
   forgetFavoritesTemplate,
   historyEntry,
+  loadSettings,
   normalizeSettings,
   readFavoritesTemplate,
   LIBRARY_SORT_KEY,
@@ -28,6 +29,7 @@ import {
   readLibraryCovers,
   readLibrarySort,
   rememberFavoritesTemplate,
+  saveSettings,
   settingsProblem,
   trimHistory,
   writeLibrary,
@@ -504,6 +506,33 @@ test("the alert switch: on by default, a stored non-boolean falls back to it, an
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, alerts: /** @type {never} */ ("x") }, false), "the alert switch must be on or off");
   // checked before the pacing: a bad switch is named even when the pauses are bad too
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, alerts: /** @type {never} */ (1), delayMinS: 0 }, false), "the alert switch must be on or off");
+});
+
+test("the automatic retry switch (1.8.0): on by default — a 1.7.0 install's settings too —, a stored non-boolean falls back to it, it must be a boolean to save; saved and read back", async () => {
+  assert.equal(DEFAULT_SETTINGS.autoRetry, true);
+  assert.equal(normalizeSettings({}, false).autoRetry, true);
+  assert.equal(normalizeSettings({ report: true, alerts: true }, false).autoRetry, true); // stored by 1.7.0: no such key
+  assert.equal(normalizeSettings({ autoRetry: false }, false).autoRetry, false);
+  for (const odd of ["no", 0, 1, null, [], {}]) assert.equal(normalizeSettings({ autoRetry: odd }, false).autoRetry, true, JSON.stringify(odd)); // dropped: the default stays
+  assert.equal(normalizeSettings({ autoRetry: false, alerts: true }, false).alerts, true); // each switch its own
+  assert.equal(normalizeSettings({ autoRetry: true, alerts: false }, false).autoRetry, true);
+  assert.equal(normalizeSettings({ autoRetry: false, delayMinS: 0 }, false).autoRetry, false); // a bad pause never takes the switch with it
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRetry: false }, false), null);
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRetry: /** @type {never} */ ("x") }, false), "the automatic retry switch must be on or off");
+  // checked before the pacing: a bad switch is named even when the pauses are bad too
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRetry: /** @type {never} */ (1), delayMinS: 0 }, false), "the automatic retry switch must be on or off");
+  // saved with the settings and read back; refused, nothing is saved
+  const { stored } = fakeLocal();
+  Object.assign(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis.chrome)), { runtime: { getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "1.8.0" }) } });
+  assert.equal((await loadSettings()).autoRetry, true); // nothing stored yet: the default
+  await saveSettings({ ...DEFAULT_SETTINGS, autoRetry: false });
+  assert.deepEqual(stored["settings"], { ...DEFAULT_SETTINGS, autoRetry: false });
+  assert.equal((await loadSettings()).autoRetry, false);
+  await assert.rejects(saveSettings({ ...DEFAULT_SETTINGS, autoRetry: /** @type {never} */ ("off") }), /the automatic retry switch must be on or off/);
+  assert.equal(/** @type {Record<string, unknown>} */ (stored["settings"])["autoRetry"], false);
+  stored["settings"] = { ...(/** @type {Record<string, unknown>} */ (stored["settings"])), autoRetry: "off" }; // written by something else
+  assert.equal((await loadSettings()).autoRetry, true);
+  assert.equal((await loadSettings()).alerts, true); // the rest as stored
 });
 
 test("the library's sort order: kept in chrome.storage.local under its own key and read back checked; best effort — a refused write or read never throws (the list's own order then)", async () => {

@@ -162,6 +162,7 @@
     <p id="result-trimmed" class="meta" data-i18n="resultTrimmed" hidden>Only the most recent episode rows are shown; every finished series keeps its line below.</p>
     <div id="failed-block" hidden>
       <h3 id="failed-heading"></h3>
+      <p id="failed-auto" class="meta" hidden></p>
       <div class="buttons">
         <button type="button" id="retry-button" class="retry"></button>
         <button type="button" id="report-button" data-i18n="reportButton">Save the report</button>
@@ -242,9 +243,12 @@
         <input type="checkbox" id="setting-report">
         <label for="setting-alerts" data-i18n="settingAlerts">Alert me when a drama finishes</label>
         <input type="checkbox" id="setting-alerts">
+        <label for="setting-auto-retry" data-i18n="settingAutoRetry">Retry on its own what did not download</label>
+        <input type="checkbox" id="setting-auto-retry">
       </div>
       <p class="hint" data-i18n="settingReportHint">A JSON file in Downloads/DramaFetch/reports: for each episode that did not download, its status, message, probable cause, the requests made (hosts, HTTP statuses, sizes) and the list entry TikTok served to your session — never your cookies.</p>
       <p class="hint" data-i18n="settingAlertsHint">A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.</p>
+      <p class="hint" data-i18n="settingAutoRetryHint">When a drama's download ends with episodes that did not download for a reason a retry can change — a cut transfer, a file that failed its check, a network error —, DramaFetch queues one retry of them, the same as pressing Retry: the rest between downloads, a fresh list, the usual pauses. Never after TikTok refused a request, during the 30-minute cooldown or after a stop, and never for locked, DRM-protected or short-served episodes.</p>
       <p class="hint" data-i18n="settingsHint">File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.</p>
       <div class="buttons">
         <button type="submit" id="settings-save" data-i18n="saveSettings">Save settings</button>

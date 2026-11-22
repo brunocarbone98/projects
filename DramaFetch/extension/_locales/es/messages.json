@@ -202,6 +202,19 @@
       }
     }
   },
+  "failedAutoRetry": {
+    "message": "Se reintentarán automáticamente $count$, una vez.",
+    "description": "Line under the heading of the episodes a job did not download: how many of them DramaFetch queued for its one automatic retry (DramaFetch 1.8.0).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "failedAutoRetryOne": {
+    "message": "Se reintentará automáticamente 1, una vez.",
+    "description": "The same, for one episode."
+  },
   "retryButton": {
     "message": "Reintentar los episodios que no se descargaron ($count$)",
     "description": "Button: download the episodes that did not download again, one job per series.",
@@ -210,6 +223,10 @@
         "content": "$1"
       }
     }
+  },
+  "retryAlreadyQueued": {
+    "message": "Ya está en la cola: no se encola dos veces.",
+    "description": "Status line after a Retry button (the progress card's, a past run's) whose episodes a selection job of the same series already holds — a waiting one (a retry, Download selected, Download all available) or the running one not yet done with that drama: nothing queued twice."
   },
   "reportButton": {
     "message": "Guardar el informe",
@@ -368,6 +385,18 @@
   "jobRetry": {
     "message": "Reintento: $count$ de $name$",
     "description": "Queue label of a retry.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "name": {
+        "content": "$2"
+      }
+    }
+  },
+  "jobAutoRetry": {
+    "message": "Reintento automático: $count$ de $name$",
+    "description": "Queue label of the one automatic retry DramaFetch queued for a drama's episodes that did not download (DramaFetch 1.8.0).",
     "placeholders": {
       "count": {
         "content": "$1"
@@ -1343,6 +1372,14 @@
     "message": "Una notificación de Chrome por cada drama que termina una descarga: descargado, o los episodios por reintentar, con un botón Reintentar. ¿No aparece ninguna? Permite las notificaciones de Chrome en Windows (Configuración → Sistema → Notificaciones) y comprueba que el Asistente de concentración (No molestar) esté desactivado.",
     "description": "Hint under the alert setting."
   },
+  "settingAutoRetry": {
+    "message": "Reintentar por su cuenta lo que no se descargó",
+    "description": "Setting label (a checkbox): one automatic retry of a drama's episodes that did not download for a reason a retry can change (DramaFetch 1.8.0)."
+  },
+  "settingAutoRetryHint": {
+    "message": "Cuando la descarga de un drama termina con episodios que no se descargaron por algo que un reintento puede cambiar (una transferencia cortada, un archivo que no pasó su comprobación, un error de red), DramaFetch pone en cola un reintento de ellos, igual que pulsar Reintentar: el descanso entre descargas, una lista nueva, las pausas de siempre. Nunca después de que TikTok rechazara una solicitud, durante la espera de 30 minutos ni después de una detención, y nunca para episodios bloqueados, protegidos con DRM o servidos cortos.",
+    "description": "Hint under the automatic retry setting."
+  },
   "settingsHint": {
     "message": "Los nombres de archivo pueden usar {series}, {number}, {n}, {title} y {id}. Las pausas solo pueden alargarse respecto de las predeterminadas (4–9 s entre episodios, 60–120 s cada 10): más rápido nunca es seguro frente a TikTok.",
     "description": "Hint of the settings card."
@@ -1514,6 +1551,58 @@
   "alertNotStartedOne": {
     "message": "1 drama no se inició: descárgalo de nuevo más tarde",
     "description": "The same, for one drama."
+  },
+  "alertAutoRetryTitle": {
+    "message": "↻ $name$ — reintentando $count$ episodios",
+    "description": "Notification title instead of alertRetryTitle when DramaFetch queued its one automatic retry of the drama's episodes that did not download (DramaFetch 1.8.0): no button, the retry is queued already.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      }
+    }
+  },
+  "alertAutoRetryTitleOne": {
+    "message": "↻ $name$ — reintentando 1 episodio",
+    "description": "The same, for one episode.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertAutoRetryMessage": {
+    "message": "$episodes$ no se descargaron: DramaFetch los intenta una vez más por su cuenta.",
+    "description": "Notification message under alertAutoRetryTitle: the episodes the automatic retry takes (E03, E07) — at most ten, then alertMore.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertAutoRetryMessageOne": {
+    "message": "$episode$ no se descargó: DramaFetch lo intenta una vez más por su cuenta.",
+    "description": "The same, for one episode (E03).",
+    "placeholders": {
+      "episode": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertAfterAutoRetry": {
+    "message": "Tras un reintento automático.",
+    "description": "Notification context line of the drama's alert at the end of its automatic retry (downloaded, episodes to retry, or not complete) when the retry did not stop."
+  },
+  "alertAutoRetryNotRun": {
+    "message": "No se reintentó automáticamente: $reason$",
+    "description": "Notification context line of the episodes-to-retry alert of a drama whose automatic retry never ran: a stop took it out of the queue, it was refused at its start, or Stop or an error ended it before any request (the reason as the tab shows it).",
+    "placeholders": {
+      "reason": {
+        "content": "$1"
+      }
+    }
   },
   "historySeriesOmitted": {
     "message": "Series de esta ejecución no listadas aquí: $count$.",

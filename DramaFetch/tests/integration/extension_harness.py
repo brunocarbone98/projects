@@ -32,8 +32,9 @@ Element ids it relies on: `#links`, `#download-available-button`, `#download-sel
 `td.cover-cell` whose thumbnail arrives once the row is in view), `#result-table`,
 `#result-trimmed`, `#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`,
 `#failed-table` (rows with `data-number`, `data-status`, a `.badge` and a `td.message`),
-`#retry-button`, `#report-button`,
-`#failed-report`, `#setting-report`, `#settings-save`, `#history-list`, the library
+`#failed-auto`, `#retry-button`, `#report-button`,
+`#failed-report`, `#settings-card`, `#setting-report`, `#setting-auto-retry`, `#settings-save`,
+`#settings-status`, `#history-list`, the library
 (`#favorites-card`, `#favorites-count`, `#favorites-filter`, `#favorites-select-all`,
 `#favorites-status`, `#favorites-grid` with one `article[data-series-id]` per drama — its
 `.favorite-title`, `.favorite-meta`, `.favorite-status[data-status]`, its tick and its
@@ -371,6 +372,25 @@ class ExtensionHarness:
             10,
             "the test settings were not saved",
         )
+
+    def turn_off_auto_retry(self) -> None:
+        """**Settings** → untick **Retry on its own what did not download** (on by default since
+        DramaFetch 1.8.0) → **Save settings**, waited for until the page says so and the stored
+        settings hold it; the card is folded again. A scenario that proves the manual **Retry**
+        after a plain failure does this first: with the setting on, DramaFetch would queue that
+        retry itself."""
+        page = self.page
+        page.click("#settings-card > summary")
+        assert page.locator("#setting-auto-retry").is_checked()  # on by default
+        page.uncheck("#setting-auto-retry")
+        page.click("#settings-save")
+        self.wait_for(
+            lambda: page.locator("#settings-status").text_content() == "Settings saved.",
+            10,
+            "the settings were not saved",
+        )
+        assert self.storage("settings")["settings"]["autoRetry"] is False
+        page.click("#settings-card > summary")
 
     def reopen_app(self) -> Page:
         """Open the app page in a new tab (the test closed the old one) and make it `page`, once

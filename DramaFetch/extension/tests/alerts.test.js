@@ -3,7 +3,10 @@
 // says — the drama complete, its episodes to retry, not complete, the job stopped with dramas never
 // started —, Chrome's options, a notification Chrome refuses, and the worker's answer to a click
 // (src/app/background.js): the body brings the DramaFetch tab forward, Retry goes to the page that
-// made it, and with no such page only the tab opens. The page's side is in app.test.js.
+// made it, and with no such page only the tab opens. DramaFetch 1.8.0's automatic retry: “retrying”
+// (no button), what came of it (`After an automatic retry.`), an automatic retry that never ran
+// (`Not retried automatically: …`, with Retry) and one Stop or an error ended after it ran (the
+// stop's reason, with Retry). The page's side is in app.test.js.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -17,11 +20,14 @@ import {
   MAX_NAMED_EPISODES,
   MAX_NAME_LENGTH,
   PageAlerts,
+  autoRetryAlert,
   dramaAlert,
   isAlertId,
+  notRetriedAlert,
   notificationOptions,
   plainText,
   stoppedAlert,
+  stoppedRetryAlert,
 } from "../src/app/alerts.js";
 
 const ROOT = "chrome-extension://dramafetch-test-id/";
@@ -322,6 +328,209 @@ test("a page's notifications: ids of its own (the page, the job, the drama), the
     assert.equal(warned.length, 2);
   } finally {
     console.warn = warn;
+    fake.restore();
+  }
+});
+
+/** @param {number[]} numbers every one `failed` @returns {[number, string][]} */
+const failedRowsOf = (numbers) => numbers.map((number) => /** @type {[number, string]} */ ([number, "failed"]));
+
+test("the automatic retry's alert (1.8.0): ↻ retrying its episodes — one, several, at most ten named then how many more —, the drama's name plain and cut as every alert's; no context and NO button: the retry is queued already", () => {
+  const fake = fakeChrome();
+  try {
+    const one = autoRetryAlert(run(3, [[1, "done"], [2, "failed"], [3, "done"]]), target([2]));
+    assert.deepEqual(one, { kind: "autoretry", title: "↻ Red Sapphire — retrying 1 episode", message: "E02 did not download — DramaFetch tries it once more on its own.", context: null });
+    assert.deepEqual(notificationOptions(one), {
+      type: "basic",
+      iconUrl: `${ROOT}icons/icon128.png`,
+      title: "↻ Red Sapphire — retrying 1 episode",
+      message: "E02 did not download — DramaFetch tries it once more on its own.",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+    const two = autoRetryAlert(run(12, [[3, "failed"], [7, "failed"]]), target([3, 7]));
+    assert.equal(two.title, "↻ Red Sapphire — retrying 2 episodes");
+    assert.equal(two.message, "E03, E07 did not download — DramaFetch tries them once more on its own.");
+    assert.equal(notificationOptions(two).buttons, undefined);
+    assert.equal(notificationOptions(two).contextMessage, undefined);
+    // thirteen: the first ten named, then how many more
+    const numbers = Array.from({ length: 13 }, (_, index) => index + 1);
+    const many = autoRetryAlert(run(13, failedRowsOf(numbers)), target(numbers));
+    assert.equal(many.title, "↻ Red Sapphire — retrying 13 episodes");
+    assert.equal(many.message, "E01, E02, E03, E04, E05, E06, E07, E08, E09, E10 and 3 more did not download — DramaFetch tries them once more on its own.");
+    // the drama's name as every alert's: one line, an address cut to its host, 60 code points at most
+    const long = `${"A".repeat(58)}😀${"B".repeat(11)}`;
+    assert.equal(autoRetryAlert(run(2, [[2, "failed"]], { name: long }), target([2])).title, `↻ ${"A".repeat(58)}😀… — retrying 1 episode`);
+    assert.equal(autoRetryAlert(run(2, [[2, "failed"]], { name: "Red\nSapphire https://www.tiktok.com/@a/x?sig=1" }), target([2])).title, "↻ Red Sapphire www.tiktok.com — retrying 1 episode");
+    // only what the automatic retry takes is named: a short-served episode beside it (which the tab's
+    // Retry would take) is not
+    const mixed = autoRetryAlert(run(4, [[2, "failed"], [4, "failed-unavailable"]]), target([2]));
+    assert.equal(mixed.message, "E02 did not download — DramaFetch tries it once more on its own.");
+  } finally {
+    fake.restore();
+  }
+});
+
+test("what came of an automatic retry (1.8.0): the drama's alert as ever — ✓, ⚠ with its Retry, not complete —, `After an automatic retry.` its context unless the retry stopped, then the stop's reason as the tab shows it; outside an automatic retry the 1.7.0 contexts", () => {
+  const fake = fakeChrome();
+  try {
+    const after = { afterAutoRetry: true };
+    const whole = run(3, [[1, "done"], [2, "done"], [3, "done"]]);
+    assert.deepEqual(dramaAlert(whole, null, shownAsIs, after), { kind: "complete", title: "✓ Red Sapphire — downloaded", message: "All 3 episodes are on disk.", context: "After an automatic retry." });
+    assert.equal(notificationOptions(/** @type {import("../src/app/alerts.js").AlertTexts} */ (dramaAlert(whole, null, shownAsIs, after))).contextMessage, "After an automatic retry.");
+    // still not downloaded: ⚠, its Retry, the context
+    const again = /** @type {import("../src/app/alerts.js").AlertTexts} */ (dramaAlert(run(3, [[1, "done"], [2, "failed"], [3, "done"]]), target([2]), shownAsIs, after));
+    assert.deepEqual(again, { kind: "retry", title: "⚠ Red Sapphire — 1 episode to retry", message: "E02 did not download.", context: "After an automatic retry." });
+    assert.deepEqual(notificationOptions(again).buttons, [{ title: "Retry" }]);
+    assert.equal(notificationOptions(again).contextMessage, "After an automatic retry.");
+    // not complete, nothing to retry (episode 2 gone from TikTok's list): the same context
+    const gap = run(3, [[1, "done"], [3, "done"]]);
+    gap.series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (gap.series)), episodes: [episode(1), episode(3)] };
+    gap.report = seriesReport(gap.series, gap.results);
+    assert.deepEqual(dramaAlert(gap, null, shownAsIs, after), {
+      kind: "incomplete",
+      title: "Red Sapphire — not complete",
+      message: "incomplete: 2 of 3 — episode 2 missing from TikTok's list",
+      context: "After an automatic retry.",
+    });
+    // the retry stopped (a 429): the stop's reason, as the tab shows it, as for any download
+    const stopped = run(3, [[1, "done"], [2, "failed-rate-limited", MEDIA_RATE_LIMIT_MESSAGE], [3, "failed-rate-limited", "stopped: episode 2 failed-rate-limited"]], { stopped: "episode 2 failed-rate-limited" });
+    const spanishStop = (/** @type {string} */ text) => (text === "episode 2 failed-rate-limited" ? "episodio 2 (limitado por TikTok)" : text);
+    assert.equal(dramaAlert(stopped, target([2, 3]), spanishStop, after)?.context, "episodio 2 (limitado por TikTok)");
+    // refused before any request: no alert of its own here either (the page says it was not retried)
+    const refused = { ...run(2, []), series: null, results: [], report: seriesReport(null, [], { seriesId: SERIES_ID, stopped: "cooldown until 12:30" }), contacted: false, stop: true };
+    assert.equal(dramaAlert(refused, null, shownAsIs, after), null);
+    // outside an automatic retry: no such context
+    assert.equal(dramaAlert(whole, null, shownAsIs)?.context, null);
+    assert.equal(dramaAlert(whole, null, shownAsIs, { afterAutoRetry: false })?.context, null);
+    assert.equal(dramaAlert(run(3, [[1, "done"], [2, "failed"], [3, "done"]]), target([2]), shownAsIs)?.context, null);
+    assert.equal(dramaAlert(gap, null, shownAsIs)?.context, null);
+  } finally {
+    fake.restore();
+  }
+});
+
+test("an automatic retry that never ran (1.8.0): ⚠ with its Retry over the job's own episodes, `Not retried automatically: <reason>` its context — the reason as the tab shows it, one line, its addresses cut to their host, cut to 200 code points", () => {
+  const fake = fakeChrome();
+  try {
+    const texts = notRetriedAlert(target([2, 5]), "episode 3 failed-rate-limited", shownAsIs);
+    assert.deepEqual(texts, { kind: "retry", title: "⚠ Red Sapphire — 2 episodes to retry", message: "E02, E05 did not download.", context: "Not retried automatically: episode 3 failed-rate-limited" });
+    assert.deepEqual(notificationOptions(texts), {
+      type: "basic",
+      iconUrl: `${ROOT}icons/icon128.png`,
+      title: "⚠ Red Sapphire — 2 episodes to retry",
+      message: "E02, E05 did not download.",
+      contextMessage: "Not retried automatically: episode 3 failed-rate-limited",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.equal(notRetriedAlert(target([2]), "stopped by you", shownAsIs).title, "⚠ Red Sapphire — 1 episode to retry");
+    assert.equal(notRetriedAlert(target([2]), "stopped by you", shownAsIs).message, "E02 did not download.");
+    // fourteen: the first ten named, then how many more
+    const numbers = Array.from({ length: 14 }, (_, index) => index + 1);
+    assert.equal(notRetriedAlert(target(numbers), "stopped by you", shownAsIs).message, "E01, E02, E03, E04, E05, E06, E07, E08, E09, E10 and 4 more did not download.");
+    // the drama's name unknown: its id, as the tab
+    assert.equal(notRetriedAlert({ seriesId: SERIES_ID, name: null, numbers: [2] }, "stopped by you", shownAsIs).title, `⚠ ${SERIES_ID} — 1 episode to retry`);
+    // the drama's name as every alert's: one line, an address cut to its host, 60 code points at most
+    assert.equal(notRetriedAlert({ seriesId: SERIES_ID, name: "Red\nSapphire https://www.tiktok.com/@a/x?sig=1", numbers: [2] }, "stopped by you", shownAsIs).title, "⚠ Red Sapphire www.tiktok.com — 1 episode to retry");
+    const long = `${"A".repeat(58)}😀${"B".repeat(11)}`;
+    assert.equal(notRetriedAlert({ seriesId: SERIES_ID, name: long, numbers: [2] }, "stopped by you", shownAsIs).title, `⚠ ${"A".repeat(58)}😀… — 1 episode to retry`);
+    // a reason with an address and of any length: plain, cut
+    const reason = `could not list the series: no episode list within 45 s (page: https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/1?is_from_webapp=1)\n${"z".repeat(300)}`;
+    const context = String(notRetriedAlert(target([2]), reason, shownAsIs).context);
+    assert.ok(context.startsWith("Not retried automatically: could not list the series: no episode list within 45 s (page: www.tiktok.com) zzz"), context);
+    assert.equal([...context].length, "Not retried automatically: ".length + 200);
+    assert.ok(context.endsWith("z…"));
+    assert.ok(!context.includes("is_from_webapp"));
+  } finally {
+    fake.restore();
+  }
+});
+
+test("an automatic retry Stop or an error ended after it ran (1.8.0): ⚠ with its Retry over the episodes it did not get on disk, the stop's reason alone its context — as the tab shows it, one line, its addresses cut to their host, cut to 200 code points — never `Not retried automatically`; the drama's name plain and cut", () => {
+  const fake = fakeChrome();
+  try {
+    const texts = stoppedRetryAlert(target([3]), "stopped by you", shownAsIs);
+    assert.deepEqual(texts, { kind: "retry", title: "⚠ Red Sapphire — 1 episode to retry", message: "E03 did not download.", context: "stopped by you" });
+    assert.deepEqual(notificationOptions(texts), {
+      type: "basic",
+      iconUrl: `${ROOT}icons/icon128.png`,
+      title: "⚠ Red Sapphire — 1 episode to retry",
+      message: "E03 did not download.",
+      contextMessage: "stopped by you",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.equal(stoppedRetryAlert(target([3, 7]), "stopped by you", shownAsIs).title, "⚠ Red Sapphire — 2 episodes to retry");
+    assert.equal(stoppedRetryAlert({ seriesId: SERIES_ID, name: null, numbers: [2] }, "stopped by you", shownAsIs).title, `⚠ ${SERIES_ID} — 1 episode to retry`);
+    assert.equal(stoppedRetryAlert({ seriesId: SERIES_ID, name: "Red\nSapphire https://www.tiktok.com/@a/x?sig=1", numbers: [2] }, "stopped by you", shownAsIs).title, "⚠ Red Sapphire www.tiktok.com — 1 episode to retry");
+    const long = `${"A".repeat(58)}😀${"B".repeat(11)}`;
+    assert.equal(stoppedRetryAlert({ seriesId: SERIES_ID, name: long, numbers: [2] }, "stopped by you", shownAsIs).title, `⚠ ${"A".repeat(58)}😀… — 1 episode to retry`);
+    const reason = `Internal error at https://www.tiktok.com/api/x?sig=1\n${"z".repeat(300)}`;
+    const context = String(stoppedRetryAlert(target([2]), reason, shownAsIs).context);
+    assert.ok(context.startsWith("Internal error at www.tiktok.com zzz"), context);
+    assert.equal([...context].length, 200);
+    assert.ok(!context.includes("sig=") && !context.includes("Not retried"));
+    // the stop's reason as the tab shows it
+    /** @param {string} text */
+    const es = (text) => ({ "stopped by you": "detenido por ti" })[text] ?? text;
+    assert.equal(stoppedRetryAlert(target([3]), "stopped by you", es).context, "detenido por ti");
+  } finally {
+    fake.restore();
+  }
+});
+
+test("Spanish (1.8.0): retrying, after an automatic retry and not retried automatically in the page's language, the engine's words as the tab shows them", () => {
+  const fake = fakeChrome({ language: "es" });
+  try {
+    const one = autoRetryAlert(run(3, [[2, "failed"]]), target([2]));
+    assert.deepEqual(one, { kind: "autoretry", title: "↻ Red Sapphire — reintentando 1 episodio", message: "E02 no se descargó: DramaFetch lo intenta una vez más por su cuenta.", context: null });
+    const two = autoRetryAlert(run(12, [[3, "failed"], [7, "failed"]]), target([3, 7]));
+    assert.equal(two.title, "↻ Red Sapphire — reintentando 2 episodios");
+    assert.equal(two.message, "E03, E07 no se descargaron: DramaFetch los intenta una vez más por su cuenta.");
+    assert.equal(notificationOptions(two).buttons, undefined);
+    const numbers = Array.from({ length: 11 }, (_, index) => index + 1);
+    assert.equal(autoRetryAlert(run(11, failedRowsOf(numbers)), target(numbers)).message, "E01, E02, E03, E04, E05, E06, E07, E08, E09, E10 y 1 más no se descargaron: DramaFetch los intenta una vez más por su cuenta.");
+    assert.equal(dramaAlert(run(3, [[1, "done"], [2, "done"], [3, "done"]]), null, shownAsIs, { afterAutoRetry: true })?.context, "Tras un reintento automático.");
+    /** @param {string} text */
+    const es = (text) => ({ "stopped by you": "detenido por ti" })[text] ?? text;
+    const notRun = notRetriedAlert(target([2, 5]), "stopped by you", es);
+    assert.equal(notRun.title, "⚠ Red Sapphire — 2 episodios por reintentar");
+    assert.equal(notRun.message, "E02, E05 no se descargaron.");
+    assert.equal(notRun.context, "No se reintentó automáticamente: detenido por ti");
+    assert.deepEqual(notificationOptions(notRun).buttons, [{ title: "Reintentar" }]);
+  } finally {
+    fake.restore();
+  }
+});
+
+test("an alert shown under the id of an earlier one replaces it in Chrome (1.8.0: “retrying”, then what came of it, one id per drama): one without a button takes the earlier one's retry away with it", async () => {
+  const fake = fakeChrome();
+  try {
+    const page = new PageAlerts();
+    const id = page.idOf(5, `${SERIES_ID}:retry`);
+    // not retried: ⚠ with its Retry
+    page.show(id, notRetriedAlert(target([2]), "stopped by you", shownAsIs), target([2]));
+    assert.deepEqual(page.retryOf(id), target([2]));
+    // “retrying” under that id: no button, no retry behind it
+    page.show(id, autoRetryAlert(run(3, [[2, "failed"]]), target([2])));
+    assert.equal(page.retryOf(id), null);
+    // what came of it: ⚠ again, its Retry kept; then ✓, none
+    page.show(id, /** @type {import("../src/app/alerts.js").AlertTexts} */ (dramaAlert(run(3, [[2, "failed"]]), target([2]), shownAsIs, { afterAutoRetry: true })), target([2]));
+    assert.deepEqual(page.retryOf(id), target([2]));
+    page.show(id, /** @type {import("../src/app/alerts.js").AlertTexts} */ (dramaAlert(run(3, [[1, "done"], [2, "done"], [3, "done"]]), null, shownAsIs, { afterAutoRetry: true })));
+    assert.equal(page.retryOf(id), null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(
+      fake.calls.map(([call, shown]) => [call, shown]),
+      [1, 2, 3, 4].map(() => ["create", id]),
+    );
+  } finally {
     fake.restore();
   }
 });
