@@ -6,7 +6,8 @@
 // made it, and with no such page only the tab opens. DramaFetch 1.8.0's automatic retry: “retrying”
 // (no button), what came of it (`After an automatic retry.`), an automatic retry that never ran
 // (`Not retried automatically: …`, with Retry) and one Stop or an error ended after it ran (the
-// stop's reason, with Retry). The page's side is in app.test.js.
+// stop's reason, with Retry). DramaFetch 2.0.0's automatic removal from the Favorites: removed (✓)
+// or still in the Favorites (⚠, the reason), never a button. The page's side is in app.test.js.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -23,9 +24,11 @@ import {
   autoRetryAlert,
   dramaAlert,
   isAlertId,
+  notRemovedAlert,
   notRetriedAlert,
   notificationOptions,
   plainText,
+  removedAlert,
   stoppedAlert,
   stoppedRetryAlert,
 } from "../src/app/alerts.js";
@@ -509,6 +512,55 @@ test("Spanish (1.8.0): retrying, after an automatic retry and not retried automa
   }
 });
 
+test("the automatic removal's alerts (2.0.0): removed — ✓ the drama, removed from your Favorites, every episode on disk —, or still in the Favorites — ⚠ the drama, the reason as the library's status line shows it, one line, its addresses cut to their host, cut to 200 code points —; the drama's name plain and cut as every alert's; never a context, never a button; in Spanish too", () => {
+  const fake = fakeChrome();
+  try {
+    const removed = removedAlert("Red Sapphire");
+    assert.deepEqual(removed, { kind: "removed", title: "✓ Red Sapphire — removed from your Favorites", message: "Every episode is on disk.", context: null });
+    assert.deepEqual(notificationOptions(removed), {
+      type: "basic",
+      iconUrl: `${ROOT}icons/icon128.png`,
+      title: "✓ Red Sapphire — removed from your Favorites",
+      message: "Every episode is on disk.",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+    const reason = "TikTok did not keep the change: “Red Sapphire” is still in your Favorites. Remove it yourself: Open on TikTok.";
+    const kept = notRemovedAlert("Red Sapphire", reason);
+    assert.deepEqual(kept, { kind: "notremoved", title: "⚠ Red Sapphire — still in your Favorites", message: reason, context: null });
+    assert.deepEqual(notificationOptions(kept), {
+      type: "basic",
+      iconUrl: `${ROOT}icons/icon128.png`,
+      title: "⚠ Red Sapphire — still in your Favorites",
+      message: reason,
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+    });
+    // the drama's name as every alert's: one line, an address cut to its host, 60 code points at most
+    assert.equal(removedAlert("Red\nSapphire https://www.tiktok.com/@a/x?sig=1").title, "✓ Red Sapphire www.tiktok.com — removed from your Favorites");
+    const long = `${"A".repeat(58)}😀${"B".repeat(11)}`;
+    assert.equal(notRemovedAlert(long, reason).title, `⚠ ${"A".repeat(58)}😀… — still in your Favorites`);
+    // a reason with an address and of any length: plain, cut
+    const message = notRemovedAlert("Red Sapphire", `could not open https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/1?is_from_webapp=1\n${"z".repeat(300)}`).message;
+    assert.ok(message.startsWith("could not open www.tiktok.com zzz"), message);
+    assert.equal([...message].length, 200);
+    assert.ok(message.endsWith("z…") && !message.includes("is_from_webapp"));
+  } finally {
+    fake.restore();
+  }
+  const es = fakeChrome({ language: "es" });
+  try {
+    assert.deepEqual(removedAlert("Red Sapphire"), { kind: "removed", title: "✓ Red Sapphire — quitado de tu Bookmark", message: "Todos sus episodios están en el disco.", context: null });
+    const reason = "TikTok no guardó el cambio: “Red Sapphire” sigue en tu Bookmark. Quítalo tú mismo: Abrir en TikTok.";
+    assert.deepEqual(notRemovedAlert("Red Sapphire", reason), { kind: "notremoved", title: "⚠ Red Sapphire — sigue en tu Bookmark", message: reason, context: null });
+    assert.equal(notificationOptions(notRemovedAlert("Red Sapphire", reason)).buttons, undefined);
+  } finally {
+    es.restore();
+  }
+});
+
 test("an alert shown under the id of an earlier one replaces it in Chrome (1.8.0: “retrying”, then what came of it, one id per drama): one without a button takes the earlier one's retry away with it", async () => {
   const fake = fakeChrome();
   try {
@@ -555,7 +607,6 @@ async function worker() {
     chrome: {
       runtime: {
         id: "dramafetch-test-id",
-        lastError: undefined,
         getURL: (/** @type {string} */ path) => `${ROOT}${path}`,
         getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "1.7.0", host_permissions: ["https://www.tiktok.com/*"] }),
         sendMessage: async (/** @type {unknown} */ message) => {
@@ -564,8 +615,6 @@ async function worker() {
           return state.answer;
         },
         onMessage: ignored,
-        onInstalled: ignored,
-        onStartup: ignored,
       },
       i18n: { getMessage: () => "", getUILanguage: () => "en" },
       tabs: {
@@ -579,7 +628,6 @@ async function worker() {
         onUpdated: ignored,
       },
       windows: { update: async (/** @type {number} */ id, /** @type {unknown} */ info) => void calls.push(["focus", id, info]) },
-      contextMenus: { removeAll: () => undefined, create: () => "", onClicked: ignored },
       storage: { local: { get: async () => ({}) }, session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined } },
       webRequest: { onCompleted: ignored },
       notifications: {

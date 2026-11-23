@@ -1,6 +1,7 @@
-// Hand-written declarations of the Node built-ins the extension's tests and runners use — there is
-// no @types/node because the extension has no dependencies at all. Only what is used is declared;
-// add a member here (never a second declaration of these modules elsewhere) when a test needs it.
+// Hand-written declarations of the Node built-ins the extension's tests, runners and tools use —
+// there is no @types/node because the extension has no dependencies at all. Only what is used is
+// declared; add a member here (never a second declaration of these modules elsewhere) when a test
+// or a tool needs it.
 
 declare module "node:test" {
   export interface TestContext {
@@ -53,3 +54,13 @@ declare module "node:fs" {
   export function existsSync(path: string | URL): boolean;
   export function readdirSync(path: string | URL): string[];
 }
+
+declare module "node:url" {
+  export function fileURLToPath(url: string | URL): string;
+}
+
+/** The running Node process, as far as `tools/contrast.js` uses it: its arguments and its exit code. */
+declare const process: {
+  readonly argv: readonly string[];
+  exitCode: number | undefined;
+};

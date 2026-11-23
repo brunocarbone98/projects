@@ -42,10 +42,25 @@
  *   the stop's reason its context, as for any automatic retry that stopped ({@link stoppedRetryAlert});
  *   with none left, `app.js` takes “retrying” away.
  *
- * Beyond **not retried after all**, nothing for a drama skipped as complete or refused before any
- * request, nothing of their own for a listing or a removal from the Bookmark (`app.js` asks only for
- * download jobs' dramas), nothing for a job refused at its gate (but an automatic retry's, above),
- * nor while the **Alert me when a drama finishes** setting is off.
+ * The automatic removal from the Favorites of DramaFetch 2.0.0 (the owner's decision of 2026-11-22:
+ * a drama leaves the user's TikTok Favorites on its own once every episode is on disk, after its
+ * automatic retry when it needed one — `app.js` `queueAutoRemoval`) adds these, made by `app.js` as
+ * such a removal ends, under the id of the drama's ✓ alert when its download showed one (Chrome
+ * replaces it: one notification per drama), else under the removal's own:
+ *
+ * - **removed** — `✓ <drama> — removed from your Favorites` / `Every episode is on disk.`
+ *   ({@link removedAlert});
+ * - **notremoved** — it removed nothing, for any reason but **Stop**, a Bookmark the drama's page
+ *   showed off already, a drama the library no longer holds (TikTok's list read since, or DramaFetch
+ *   itself, took it out) and the setting saved unticked before its first request:
+ *   `⚠ <drama> — still in your Favorites` / the reason as the library's status line shows it
+ *   ({@link notRemovedAlert}); no button.
+ *
+ * Beyond **not retried after all** and these, nothing for a drama skipped as complete or refused
+ * before any request, nothing of their own for a listing or the user's own removal from the
+ * Bookmark (`app.js` asks only for download jobs' dramas and its own removals), nothing for a job
+ * refused at its gate (but an automatic retry's or an automatic removal's, above), nor while the
+ * **Alert me when a drama finishes** setting is off.
  * Plain text in the page's display language
  * (`t()`, and the engine's English texts through `lib/display` as the tab shows them); the drama's
  * name cut to {@link MAX_NAME_LENGTH}; never a URL — an address in a text is replaced by its host
@@ -72,7 +87,7 @@ export const MAX_TEXT_LENGTH = 200;
  * @typedef {import("./engine.js").SeriesRun} SeriesRun
  * @typedef {import("./app.js").RetryTarget} RetryTarget
  *
- * @typedef {"complete" | "retry" | "incomplete" | "stopped" | "autoretry"} AlertKind
+ * @typedef {"complete" | "retry" | "incomplete" | "stopped" | "autoretry" | "removed" | "notremoved"} AlertKind
  *
  * @typedef {object} AlertTexts What one notification says.
  * @property {AlertKind} kind
@@ -95,7 +110,7 @@ export function isAlertId(notificationId) {
 }
 
 /**
- * `E01`: an episode number as the progress rows and the history show it.
+ * `E01`: an episode number as the progress rows and the **Did not download** block show it.
  * @param {number} number
  * @returns {string}
  */
@@ -133,11 +148,13 @@ function nameOf(run) {
 }
 
 /**
- * `E03, E07, E12` — at most {@link MAX_NAMED_EPISODES} of them, then `and N more` (`alertMore`).
+ * `E03, E07, E12` — at most {@link MAX_NAMED_EPISODES} of them, then `and N more` (`alertMore`):
+ * the episodes as the alerts name them, and as the Waiting card's rows do (DramaFetch 2.0.0,
+ * `app.js` `queueRows`).
  * @param {readonly number[]} numbers
  * @returns {string}
  */
-function namedEpisodes(numbers) {
+export function namedEpisodes(numbers) {
   const named = numbers.slice(0, MAX_NAMED_EPISODES).map(episodeLabel).join(", ");
   return numbers.length > MAX_NAMED_EPISODES ? t("alertMore", [named, numbers.length - MAX_NAMED_EPISODES]) : named;
 }
@@ -284,9 +301,48 @@ export function stoppedAlert(reason, notStarted, show) {
 }
 
 /**
+ * The texts of the notification of DramaFetch's own removal of a drama from the user's TikTok
+ * Favorites that removed it (DramaFetch 2.0.0, `app.js` `queueAutoRemoval`): `✓ <drama> — removed
+ * from your Favorites` / `Every episode is on disk.` — the drama's name plain, cut to
+ * {@link MAX_NAME_LENGTH}; no context, no button.
+ * @param {string} name the drama's name as the library holds it (its title, else its id)
+ * @returns {AlertTexts}
+ */
+export function removedAlert(name) {
+  return {
+    kind: "removed",
+    title: t("alertRemovedTitle", [plainText(name, MAX_NAME_LENGTH)]),
+    message: t("alertRemovedMessage"),
+    context: null,
+  };
+}
+
+/**
+ * The texts of the notification of DramaFetch's own removal of a drama from the user's TikTok
+ * Favorites that removed nothing (DramaFetch 2.0.0) — for any reason but **Stop**, a Bookmark the
+ * drama's page showed off already, a drama the library no longer holds and the setting saved
+ * unticked before its first request, which get none —: `⚠ <drama> — still in your Favorites` /
+ * `reason`, the reason as the library's status line shows it (one line, every address cut to its
+ * host, at most {@link MAX_TEXT_LENGTH} characters: {@link plainText}); no context, and no button —
+ * **Remove from Favorites** on the drama's card is the way to try again.
+ * @param {string} name the drama's name as the library holds it (its title, else its id)
+ * @param {string} reason in the page's language
+ * @returns {AlertTexts}
+ */
+export function notRemovedAlert(name, reason) {
+  return {
+    kind: "notremoved",
+    title: t("alertNotRemovedTitle", [plainText(name, MAX_NAME_LENGTH)]),
+    message: plainText(reason),
+    context: null,
+  };
+}
+
+/**
  * Chrome's options for `texts`: a basic notification with DramaFetch's icon, an ordinary priority,
  * not held on screen (Windows keeps it in its notification centre), with Windows' sound; the
- * **Retry** button on a retry alert only — never on an `autoretry` one, whose retry is queued.
+ * **Retry** button on a retry alert only — never on an `autoretry` one, whose retry is queued, nor
+ * on a removal's.
  * @param {AlertTexts} texts
  * @returns {chrome.notifications.NotificationOptions}
  */

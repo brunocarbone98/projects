@@ -1,26 +1,19 @@
 // @ts-check
-// The history is the least important thing the extension stores: it is cut to the last 20 runs
-// and to HISTORY_MAX_BYTES of JSON, the oldest first, and when chrome.storage.local refuses it (a
-// full disk under the Chrome profile) it gives way and never throws. A refusal's cooldown the
-// storage will not take stays in force from memory. A TikTok tab's favorites address lives in the
-// session's memory only, and is read back only as the first page of a favorites list.
+// What the extension stores, and how it gives way: DramaFetch 2.0.0 keeps no history of past runs —
+// the one 1.x stored is removed at the page's start, best effort, that key alone. A refusal's
+// cooldown the storage will not take stays in force from memory. A TikTok tab's favorites address
+// lives in the session's memory only, and is read back only as the first page of a favorites list.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { activeCooldown, clearCooldown, recordBlock } from "../src/lib/cooldown.js";
 import { MEDIA_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
-import { reportLine, reportToDict } from "../src/lib/report.js";
 import {
   DEFAULT_SETTINGS,
-  HISTORY_ENTRY_MAX_BYTES,
-  HISTORY_KEY,
-  HISTORY_LIMIT,
-  HISTORY_MAX_BYTES,
-  appendHistory,
+  RETIRED_HISTORY_KEY,
   cooldownStore,
   favoritesTemplateKey,
   forgetFavoritesTemplate,
-  historyEntry,
   loadSettings,
   normalizeSettings,
   readFavoritesTemplate,
@@ -29,9 +22,9 @@ import {
   readLibraryCovers,
   readLibrarySort,
   rememberFavoritesTemplate,
+  removeStoredHistory,
   saveSettings,
   settingsProblem,
-  trimHistory,
   writeLibrary,
   writeLibraryCovers,
   writeLibrarySort,
@@ -79,278 +72,27 @@ function fakeLocal(stored = {}, session = {}) {
   return { stored, session, switches };
 }
 
-/**
- * A finished run of about `bytes` bytes of JSON.
- * @param {number} id
- * @param {number} [bytes]
- * @returns {Record<string, unknown>}
- */
-function run(id, bytes = 100) {
-  return { id, label: `run ${id}`, padding: "x".repeat(Math.max(0, bytes - 40)) };
-}
-
-/** @param {unknown} value a history, or one entry of it @returns {number} its size as UTF-8 JSON */
-const size = (value) => new TextEncoder().encode(JSON.stringify(value)).length;
-
-test("the history keeps the last 20 runs, most recent first", () => {
-  const entries = Array.from({ length: 30 }, (_, index) => run(30 - index));
-  const kept = trimHistory(entries);
-  assert.equal(kept.length, HISTORY_LIMIT);
-  assert.deepEqual(
-    kept.map((entry) => entry["id"]),
-    Array.from({ length: 20 }, (_, index) => 30 - index),
-  );
-});
-
-test("over the byte budget the oldest runs go first; the most recent always stays", () => {
-  const entries = [run(5, 400), run(4, 400), run(3, 400), run(2, 400), run(1, 400)];
-  const kept = trimHistory(entries, HISTORY_LIMIT, 1000);
-  assert.deepEqual(
-    kept.map((entry) => entry["id"]),
-    [5, 4],
-  );
-  assert.ok(size(kept) <= 1000);
-  const alone = trimHistory([run(9, 5000), run(8, 10)], HISTORY_LIMIT, 1000);
-  assert.deepEqual(
-    alone.map((entry) => entry["id"]),
-    [9],
-  );
-  // the real budget holds hundreds of ordinary runs' worth of rows
-  assert.ok(HISTORY_MAX_BYTES >= 1024 * 1024);
-  assert.equal(trimHistory([run(1), run(2)]).length, 2);
-});
-
-test("a storage that refuses the history gets the run alone, else no history", async () => {
-  /** @type {Record<string, unknown>} */
-  const stored = { [HISTORY_KEY]: [run(2, 300), run(1, 300)] };
-  let refuseAbove = 500;
-  const local = {
-    /** @param {string} key */
-    async get(key) {
-      return { [key]: stored[key] };
-    },
-    /** @param {Record<string, unknown>} items */
-    async set(items) {
-      if (size(Object.values(items)) > refuseAbove) throw new Error("Resource::kQuotaBytes quota exceeded");
-      Object.assign(stored, items);
-    },
-    /** @param {string} key */
-    async remove(key) {
-      delete stored[key];
-    },
+test("the history 1.x kept of its past runs is removed at the page's start (DramaFetch 2.0.0: no history any more) — that key alone: the settings, the series' records, the pacing, the cooldown and the library stay —; best effort: a refusal never throws, and a key no longer there costs nothing", async () => {
+  const kept = {
+    settings: { ...DEFAULT_SETTINGS },
+    "series:7699393770256782354": { series_id: "7699393770256782354", episodes: {} },
+    pacing: { runAttempts: 3, lastNetworkAt: 1_800_000_000, consecutiveFailures: 0, lastContactAt: 1_800_000_000 },
+    cooldown: { until: 1_800_001_800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: 1_800_000_000 },
+    favoritesLibrary: { version: 1 },
+    [LIBRARY_SORT_KEY]: "title",
   };
-  Object.assign(globalThis, { chrome: { storage: { local } } });
-  await appendHistory(run(3, 300));
-  assert.deepEqual(
-    /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]).map((entry) => entry["id"]),
-    [3],
-  );
-  refuseAbove = 10;
-  await appendHistory(run(4, 300));
-  assert.equal(Object.hasOwn(stored, HISTORY_KEY), false);
-  refuseAbove = Number.POSITIVE_INFINITY;
-  await appendHistory(run(5, 300));
-  assert.deepEqual(
-    /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]).map((entry) => entry["id"]),
-    [5],
-  );
-});
-
-/**
- * A finished series' report: `episodes` listed, the `failedNumbers` failed, the rest downloaded.
- * @param {string} seriesId
- * @param {string} name
- * @param {number} episodes
- * @param {number[]} failedNumbers
- * @returns {import("../src/lib/report.js").SeriesReport}
- */
-function seriesReportOf(seriesId, name, episodes, failedNumbers) {
-  const failed = failedNumbers.length;
-  return { seriesId, name, listed: episodes, done: episodes - failed, onDisk: 0, locked: 0, failed, gaps: [], complete: failed === 0, skippedComplete: false, stopped: null, total: episodes, lockedNumbers: [], failedNumbers, totalHint: episodes, checkedAgoS: null, unlocked: 0, unlockedNumbers: [] };
-}
-
-/**
- * The history entry of a batch as the page records it (app.js `runToHistory`: each series' line,
- * its report as `reportToDict` writes it, a row per episode): `seriesCount` series of `episodes`
- * rows, the second episode of every `failEvery`-th series failed, a pause per episode.
- * @param {number} id
- * @param {number} seriesCount
- * @param {number} episodes
- * @param {number} [failEvery]
- * @returns {Record<string, unknown>}
- */
-function batchRun(id, seriesCount, episodes, failEvery = 10) {
-  return {
-    id,
-    kind: "batch",
-    label: `${seriesCount} series`,
-    started_at: "2026-11-12T08:00:00.000Z",
-    finished_at: "2026-11-12T20:00:00.000Z",
-    error: null,
-    stopped: null,
-    refreshes: 0,
-    pauses: Array.from({ length: seriesCount * episodes }, () => ({ kind: "pace", seconds: 6.4, text: "pausing 6.4 s" })),
-    series: Array.from({ length: seriesCount }, (_, index) => {
-      const seriesId = String(7599400000000000000n + BigInt(index));
-      const name = `Invented Series Number ${index}`;
-      const failedNumbers = index % failEvery === 0 ? [2] : [];
-      const report = seriesReportOf(seriesId, name, episodes, failedNumbers);
-      return {
-        series_id: seriesId,
-        name,
-        status: report.complete ? "complete" : "incomplete",
-        error: null,
-        error_kind: null,
-        stop: false,
-        contacted: true,
-        line: reportLine(report),
-        report: reportToDict(report),
-        rows: Array.from({ length: episodes }, (_, row) => ({
-          number: row + 1,
-          status: failedNumbers.includes(row + 1) ? "failed-unavailable" : "done",
-          message: `saved ${name} - Episode ${String(row + 1).padStart(2, "0")}.mp4 (12.3 MiB) + cover embedded`,
-          path: `C:\\Users\\Owner\\Downloads\\DramaFetch\\${name}\\Episode ${row + 1}.mp4`,
-          download_id: index * 100 + row,
-        })),
-      };
-    }),
-  };
-}
-
-/**
- * @param {Record<string, unknown>} entry a history entry
- * @returns {Record<string, unknown>[]} its series records
- */
-const seriesOf = (entry) => /** @type {Record<string, unknown>[]} */ (entry["series"]);
-
-test("a run too large for its share of the history is stored compact — its failure rows, its series' lines, no pauses, no reports — and pushes no earlier run out", async () => {
-  const small = batchRun(1, 2, 60);
-  assert.ok(size([small]) < HISTORY_MAX_BYTES);
-  assert.equal(historyEntry(small), small); // a run that fits is stored as it is
-  const large = batchRun(2, 70, 60);
-  assert.ok(size([large]) > HISTORY_MAX_BYTES, String(size([large]))); // 4 200 rows and 4 200 pauses: over 1 MiB
-  const compact = historyEntry(large);
-  assert.ok(size(compact) <= HISTORY_ENTRY_MAX_BYTES, String(size(compact)));
-  assert.equal(Object.hasOwn(compact, "series_omitted"), false); // every series listed
-  assert.deepEqual(compact["pauses"], []);
-  assert.equal(compact["pauses_omitted"], 4200);
-  const series = /** @type {Record<string, unknown>[]} */ (compact["series"]);
-  assert.equal(series.length, 70);
-  for (const [index, record] of series.entries()) {
-    const whole = /** @type {Record<string, unknown>[]} */ (large["series"])[index];
-    const { rows, rows_omitted: omitted, ...rest } = record;
-    const { rows: wholeRows, report, ...wholeRest } = /** @type {Record<string, unknown>} */ (whole);
-    assert.deepEqual(rest, wholeRest); // the name, the status, the error and the line stay
-    assert.equal(typeof report, "object"); // the report, which Past runs never reads, goes
-    const failures = /** @type {Record<string, unknown>[]} */ (wholeRows).filter((row) => String(row["status"]).startsWith("failed"));
-    assert.deepEqual(rows, failures); // every row the retry reads, whole
-    assert.equal(omitted, 60 - failures.length);
-  }
-  assert.equal(series.filter((record) => /** @type {unknown[]} */ (record["rows"]).length === 1).length, 7);
-  for (const key of ["id", "kind", "label", "started_at", "finished_at", "error", "stopped", "refreshes"]) assert.deepEqual(compact[key], large[key]);
-  assert.equal(JSON.stringify(large).length > 1_000_000, true); // the run handed in is not touched
-  // malformed parts are left as they are, never a throw
-  const odd = { id: 3, padding: "x".repeat(2000), pauses: "none", series: [null, { series_id: "1", rows: "many" }, { series_id: "2", rows: [null, { status: 7 }, { status: "failed" }] }] };
-  assert.deepEqual(historyEntry(odd, 1000), { ...odd, pauses: [], pauses_omitted: 0, series: [null, { series_id: "1", rows: "many" }, { series_id: "2", rows: [{ status: "failed" }], rows_omitted: 2 }] });
-  // stored: the earlier runs stay, where the whole run would have pushed them all out
-  const { stored } = fakeLocal({ [HISTORY_KEY]: [run(1), run(0)] });
-  await appendHistory(large);
-  const history = /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]);
-  assert.deepEqual(history.map((entry) => entry["id"]), [2, 1, 0]);
-  assert.deepEqual(history[0], compact);
-  assert.ok(size(history) < HISTORY_MAX_BYTES);
-});
-
-test("every run is held to its share of the history: back-to-back batches of 40 series all stay, each with its retry", async () => {
-  // twenty runs of the share, each with its comma, and the brackets fit the history's budget
-  assert.ok(HISTORY_LIMIT * (HISTORY_ENTRY_MAX_BYTES + 1) + 2 <= HISTORY_MAX_BYTES);
-  assert.ok(HISTORY_ENTRY_MAX_BYTES > 50 * 1024);
-  const one = batchRun(1, 40, 60);
-  assert.ok(size([one]) > HISTORY_ENTRY_MAX_BYTES && size([one]) < HISTORY_MAX_BYTES, String(size([one]))); // whole, it would fit 1 MiB alone
-  const { stored } = fakeLocal();
-  for (let id = 1; id <= HISTORY_LIMIT; id += 1) await appendHistory(batchRun(id, 40, 60));
-  const history = /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]);
-  assert.deepEqual(history.map((entry) => entry["id"]), Array.from({ length: HISTORY_LIMIT }, (_, index) => HISTORY_LIMIT - index));
-  for (const entry of history) {
-    const series = /** @type {Record<string, unknown>[]} */ (entry["series"]);
-    assert.equal(series.filter((record) => /** @type {unknown[]} */ (record["rows"]).length === 1).length, 4); // the failures each run's retry reads
-  }
-  assert.ok(size(history) <= HISTORY_MAX_BYTES);
-  // a run within its share is stored as it is: what the end-to-end scenarios read of small runs
-  const small = batchRun(99, 1, 60);
-  assert.ok(size([small]) <= HISTORY_ENTRY_MAX_BYTES);
-  assert.equal(historyEntry(small), small);
-});
-
-test("a batch of hundreds or thousands of series is held to its share too: the series with an episode to retry first, then as many others as fit, and how many more it had", async () => {
-  // 300 series, a failure in every tenth: compact with every series listed it would pass the share
-  const large = batchRun(1, 300, 10);
-  const entry = historyEntry(large);
-  assert.ok(size(entry) <= HISTORY_ENTRY_MAX_BYTES, String(size(entry)));
-  const kept = seriesOf(entry);
-  const omitted = Number(entry["series_omitted"]);
-  assert.ok(omitted > 0 && kept.length > 150, `${kept.length} kept, ${omitted} omitted`);
-  assert.equal(kept.length + omitted, 300);
-  // in batch order; every series with an episode to retry kept, its rows' number and status only
-  const order = seriesOf(large).map((record) => record["series_id"]);
-  const keptIds = kept.map((record) => record["series_id"]);
-  assert.deepEqual(keptIds, order.filter((id) => keptIds.includes(id)));
-  const retried = kept.filter((record) => /** @type {unknown[]} */ (record["rows"]).length > 0);
-  assert.equal(retried.length, 30);
-  for (const record of retried) assert.deepEqual(record["rows"], [{ number: 2, status: "failed-unavailable" }]);
-  for (const record of kept) {
-    assert.equal(Object.hasOwn(record, "report"), false);
-    assert.match(String(record["line"]), /^(complete|incomplete): /);
-  }
-  assert.deepEqual(entry["pauses"], []);
-  assert.equal(entry["pauses_omitted"], 3000);
-  // twenty of them back to back: all twenty stay
-  const { stored } = fakeLocal();
-  for (let id = 1; id <= HISTORY_LIMIT; id += 1) await appendHistory(batchRun(id, 300, 10));
-  const history = /** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]);
-  assert.deepEqual(history.map((run) => run["id"]), Array.from({ length: HISTORY_LIMIT }, (_, index) => HISTORY_LIMIT - index));
-  assert.ok(size(history) <= HISTORY_MAX_BYTES, String(size(history)));
-  // nineteen runs, then one batch of 2 000 series with an episode to retry in each: the nineteen
-  // stay, and the batch keeps as many series to retry as fit, and says how many more it had
-  const { stored: after } = fakeLocal();
-  for (let id = 1; id < HISTORY_LIMIT; id += 1) await appendHistory(run(id));
-  await appendHistory(batchRun(HISTORY_LIMIT, 2000, 2, 1));
-  const both = /** @type {Record<string, unknown>[]} */ (after[HISTORY_KEY]);
-  assert.deepEqual(both.map((run) => run["id"]), Array.from({ length: HISTORY_LIMIT }, (_, index) => HISTORY_LIMIT - index));
-  const huge = /** @type {Record<string, unknown>} */ (both[0]);
-  assert.ok(size(huge) <= HISTORY_ENTRY_MAX_BYTES, String(size(huge)));
-  const listed = seriesOf(huge);
-  assert.ok(listed.length > 100, String(listed.length));
-  assert.ok(listed.every((record) => /** @type {unknown[]} */ (record["rows"]).length === 1));
-  assert.equal(huge["series_omitted"], 2000 - listed.length);
-  // a run that does not even need the second step lists every series and no count
-  assert.equal(Object.hasOwn(historyEntry(batchRun(2, 70, 60)), "series_omitted"), false);
-  // the second step over malformed parts: left as they are, in order, never a throw
-  const records = [null, "odd", { series_id: "x", rows: "many", report: {} }, ...Array.from({ length: 40 }, (_, index) => ({ series_id: String(index), rows: [{ number: 1, status: "failed", message: "m".repeat(50) }] }))];
-  const held = historyEntry({ id: 5, pauses: [], series: records }, 1000);
-  assert.ok(size(held) <= 1000, String(size(held)));
-  const heldSeries = /** @type {unknown[]} */ (held["series"]);
-  assert.deepEqual(heldSeries.slice(0, 2), [null, "odd"]); // small enough to fit after the series to retry, in batch order
-  const retry = heldSeries.slice(2).filter((record) => JSON.stringify(record) !== '{"series_id":"x","rows":"many"}');
-  assert.ok(retry.length > 5, String(retry.length));
-  assert.deepEqual(retry, retry.map((_, index) => ({ series_id: String(index), rows: [{ number: 1, status: "failed" }], rows_omitted: 0 })));
-  assert.equal(Number(held["series_omitted"]) + heldSeries.length, records.length);
-  // a run whose own fields pass the share keeps its series: leaving them out would not bring it in
-  const wordy = historyEntry({ id: 6, error: "e".repeat(2000), series: [{ series_id: "1", rows: [{ status: "done" }] }] }, 1000);
-  assert.deepEqual(wordy["series"], [{ series_id: "1", rows: [], rows_omitted: 1 }]);
-  assert.equal(Object.hasOwn(wordy, "series_omitted"), false);
-});
-
-test("the history never throws: a store that can be neither read nor written ends a job all the same", async () => {
-  const { stored, switches } = fakeLocal({ [HISTORY_KEY]: [run(1)] });
+  const { stored, switches } = fakeLocal({ ...kept, [RETIRED_HISTORY_KEY]: [{ id: 1, label: "Series 7699393770256782354" }] });
+  assert.equal(RETIRED_HISTORY_KEY, "history"); // the key 1.x stored Past runs under
+  // a refusal (a full disk) is ignored: nothing thrown, nothing removed — the next start tries again
   switches.refuseWrites = true;
-  await appendHistory(run(2)); // set, set and remove all reject
-  assert.deepEqual(/** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]).map((entry) => entry["id"]), [1]);
-  switches.refuseReads = true;
-  await appendHistory(run(3)); // and get rejects too
+  assert.equal(await removeStoredHistory(), false);
+  assert.ok(Object.hasOwn(stored, RETIRED_HISTORY_KEY));
   switches.refuseWrites = false;
-  await appendHistory(run(4)); // unreadable but writable: the run alone, the unreadable history gives way
-  assert.deepEqual(/** @type {Record<string, unknown>[]} */ (stored[HISTORY_KEY]).map((entry) => entry["id"]), [4]);
+  assert.equal(await removeStoredHistory(), true);
+  assert.deepEqual(stored, kept);
+  // a key no longer there: nothing to do, nothing else touched
+  assert.equal(await removeStoredHistory(), true);
+  assert.deepEqual(stored, kept);
 });
 
 test("a cooldown the storage refuses to write is in force from memory until it ends; the next one stored replaces it", async () => {
@@ -533,6 +275,33 @@ test("the automatic retry switch (1.8.0): on by default — a 1.7.0 install's se
   stored["settings"] = { ...(/** @type {Record<string, unknown>} */ (stored["settings"])), autoRetry: "off" }; // written by something else
   assert.equal((await loadSettings()).autoRetry, true);
   assert.equal((await loadSettings()).alerts, true); // the rest as stored
+});
+
+test("the automatic removal switch (2.0.0): on by default — a 1.8.0 install's settings too —, a stored non-boolean reads as on, it must be a boolean to save; saved and read back", async () => {
+  assert.equal(DEFAULT_SETTINGS.autoRemove, true);
+  assert.equal(normalizeSettings({}, false).autoRemove, true);
+  assert.equal(normalizeSettings({ report: true, alerts: true, autoRetry: true }, false).autoRemove, true); // stored by 1.8.0: no such key
+  assert.equal(normalizeSettings({ autoRemove: false }, false).autoRemove, false);
+  for (const odd of ["no", 0, 1, null, [], {}]) assert.equal(normalizeSettings({ autoRemove: odd }, false).autoRemove, true, JSON.stringify(odd)); // dropped: the default stays
+  assert.equal(normalizeSettings({ autoRemove: false, autoRetry: true }, false).autoRetry, true); // each switch its own
+  assert.equal(normalizeSettings({ autoRemove: true, autoRetry: false }, false).autoRemove, true);
+  assert.equal(normalizeSettings({ autoRemove: false, delayMinS: 0 }, false).autoRemove, false); // a bad pause never takes the switch with it
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRemove: false }, false), null);
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRemove: /** @type {never} */ ("x") }, false), "the automatic removal switch must be on or off");
+  // checked before the pacing: a bad switch is named even when the pauses are bad too
+  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRemove: /** @type {never} */ (1), delayMinS: 0 }, false), "the automatic removal switch must be on or off");
+  // saved with the settings and read back; refused, nothing is saved
+  const { stored } = fakeLocal();
+  Object.assign(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis.chrome)), { runtime: { getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "2.0.0" }) } });
+  assert.equal((await loadSettings()).autoRemove, true); // nothing stored yet: the default
+  await saveSettings({ ...DEFAULT_SETTINGS, autoRemove: false });
+  assert.deepEqual(stored["settings"], { ...DEFAULT_SETTINGS, autoRemove: false });
+  assert.equal((await loadSettings()).autoRemove, false);
+  await assert.rejects(saveSettings({ ...DEFAULT_SETTINGS, autoRemove: /** @type {never} */ ("off") }), /the automatic removal switch must be on or off/);
+  assert.equal(/** @type {Record<string, unknown>} */ (stored["settings"])["autoRemove"], false);
+  stored["settings"] = { ...(/** @type {Record<string, unknown>} */ (stored["settings"])), autoRemove: "off" }; // written by something else
+  assert.equal((await loadSettings()).autoRemove, true);
+  assert.equal((await loadSettings()).autoRetry, true); // the rest as stored
 });
 
 test("the library's sort order: kept in chrome.storage.local under its own key and read back checked; best effort — a refused write or read never throws (the list's own order then)", async () => {

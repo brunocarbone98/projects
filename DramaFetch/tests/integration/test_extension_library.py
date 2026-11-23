@@ -39,6 +39,10 @@ against the fake TikTok server, whose favorites are the server's own list
   it, the card ends **On disk** and the drama's notification says it is downloaded — with the
   automatic retry (1.8.0) turned off first: the path this scenario proves is the user's own.
 
+(b), (c) and (f) download a drama of the library whole: the automatic removal from the Favorites
+(2.0.0, on by default) is turned off first in each, or that drama would leave the Favorites in a
+job of its own — `test_extension_autoremove.py` proves it.
+
 No cookie value is set, printed or asserted on; nothing reaches TikTok.
 """
 
@@ -180,7 +184,7 @@ def _saved(ext: ExtensionHarness) -> dict[str, bytes]:
 
 
 def _rows(entry: dict[str, Any]) -> list[tuple[str, list[tuple[int, str, str]]]]:
-    """A history entry's series and rows: `(series id, [(number, status, message)])`."""
+    """A journal entry's series and rows: `(series id, [(number, status, message)])`."""
     return [
         (
             series["series_id"],
@@ -191,7 +195,7 @@ def _rows(entry: dict[str, Any]) -> list[tuple[str, list[tuple[int, str, str]]]]
 
 
 def _remove(ext: ExtensionHarness, series_id: str) -> dict[str, Any]:
-    """**Remove from Favorites** on the drama's card, confirmed; the job's history entry."""
+    """**Remove from Favorites** on the drama's card, confirmed; the job's journal entry."""
     page = ext.page
     page.locator("#library").scroll_into_view_if_needed()
     _card(page, series_id).locator("[data-action='remove']").click()
@@ -199,9 +203,9 @@ def _remove(ext: ExtensionHarness, series_id: str) -> dict[str, Any]:
     jobs = ext.finished_jobs()
     page.click("#bookmark-confirm")
     ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "the removal did not end")
-    history = ext.history()
-    assert history
-    return history[0]
+    journal = ext.journal()
+    assert journal
+    return journal[0]
 
 
 def _seed(ext: ExtensionHarness, series_id: str, episodes: int) -> None:
@@ -253,6 +257,14 @@ def _seed(ext: ExtensionHarness, series_id: str, episodes: int) -> None:
     ext.page.evaluate("(items) => chrome.storage.local.set(items)", seeded)
     ext.page.reload()
     ext.wait_for(ext.idle, 20, "the reloaded tab did not start")
+    # the page draws the kept library first, then the records' statuses once it has read them:
+    # waited for, so that the scenario starts from what the tab shows of them
+    card = _card(ext.page, series_id)
+    ext.wait_for(
+        lambda: card.count() == 1 and card.get_attribute("data-status") == "on-disk",
+        20,
+        "the tab did not show the seeded drama on disk",
+    )
 
 
 def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_one_request(
@@ -318,7 +330,7 @@ def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_o
         assert stored["total"] == total
         assert stored["profile"] == "@invented_viewer"
         assert "http" not in json.dumps(stored)
-        entry = ext.history()[0]
+        entry = ext.journal()[0]
         assert (entry["kind"], entry["favorites"]) == ("favorites", total)
         # a second time, nothing changed on TikTok: the first page says so — one request
         popup = _new_popup(ext, profile)
@@ -358,9 +370,13 @@ def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: 
     run, TikTok's count alone) —; each drama's
     notification says it is downloaded — none for the listing before —, and a click on one's body,
     as Chrome hands it to the service worker, brings the DramaFetch tab to the front (no job, no
-    reload, no request) and takes that notification away."""
+    reload, no request) and takes that notification away. **Remove a drama from my Favorites once
+    all its episodes are downloaded** (2.0.0, on by default) is unticked first: the second drama,
+    downloaded whole, would leave the Favorites on its own — a job of its own, which
+    `test_extension_autoremove.py` proves."""
     with FakeTikTok() as server:
         with ExtensionHarness(tmp_path / "library", server.base_url, test_settings=SETTINGS) as ext:
+            ext.turn_off_auto_remove()  # the download is what this scenario proves
             ext.page.evaluate(RECORD_ALERTS_JS)
             profile, popup, _tab = _profile_and_popup(ext, server.base_url)
             _open_library(ext, popup)
@@ -382,7 +398,7 @@ def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: 
             ext.wait_for(
                 lambda: ext.finished_jobs() > jobs and ext.idle(), 120, "the downloads did not end"
             )
-            library_entry = ext.history()[0]
+            library_entry = ext.journal()[0]
             library_files = _saved(ext)
             assert page.input_value("#links") == ""  # the box untouched
             for series_id in (SERIES_ID, SECOND_SERIES_ID):
@@ -481,11 +497,14 @@ def test_c_remove_from_favorites_presses_the_bookmark_once_and_the_count_follows
     records say; confirmed, the drama's page opens in a background tab, its own Bookmark is pressed
     once (one `collect` request with the page's own `action`), the reload shows it off, the tab is
     closed; the fake's list loses it, the card says **Removed from your Favorites**, the count is
-    the fake's new total from ONE first-page request of the profile tab; nothing else is asked."""
+    the fake's new total from ONE first-page request of the profile tab; nothing else is asked. The
+    user's own removal: the automatic one (2.0.0, on by default) is unticked first, or the download
+    would take the drama out of the Favorites itself (`test_extension_autoremove.py`)."""
     with (
         FakeTikTok() as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=SETTINGS) as ext,
     ):
+        ext.turn_off_auto_remove()  # the user's own Remove from Favorites: what this proves
         _profile, popup, _tab = _profile_and_popup(ext, server.base_url)
         _open_library(ext, popup)
         entry = ext.download_card(SECOND_SERIES_ID)
@@ -537,7 +556,7 @@ def test_c_remove_from_favorites_presses_the_bookmark_once_and_the_count_follows
         assert not [r for r in asked[job[0] : job[-1] + 1] if COVER_PATH_RE.match(r.path)]
         assert not [r for r in asked if CDN_PATH_RE.match(r.path)]  # no media asked for
         assert _saved(ext) == files  # no file changed
-        entry = ext.history()[0]
+        entry = ext.journal()[0]
         assert entry["kind"] == "unbookmark"
         assert entry["bookmark"] == {
             "series_id": SECOND_SERIES_ID,
@@ -555,7 +574,8 @@ def test_d_tiktok_not_keeping_the_change_is_not_kept_and_never_clicked_twice(
 ) -> None:
     """(d) A fake that answers the click like TikTok but keeps the drama (`collect_ignored`): the
     button turns off, the reload shows it saved — `not-kept`: the drama stays in the library (on
-    disk) and on the fake, one `collect` request, a stop without a cooldown."""
+    disk) and on the fake, one `collect` request, a stop without a cooldown; and (2.0.0) the
+    status line adds that DramaFetch removes no more dramas on its own until the tab is reloaded."""
     with (
         FakeTikTok(collect_ignored=True) as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=SETTINGS) as ext,
@@ -568,9 +588,12 @@ def test_d_tiktok_not_keeping_the_change_is_not_kept_and_never_clicked_twice(
         assert server.collect_requests == [(COLLECT_PATH, "0")]
         assert SECOND_SERIES_ID in server.favorite_ids
         assert card.get_attribute("data-status") == "on-disk"
+        # the user's own removal TikTok did not keep halts the automatic ones (2.0.0, on by default)
         assert page.locator("#favorites-status").inner_text() == (
             f"TikTok did not keep the change: “{SECOND_SERIES_NAME}” is still in your Favorites. "
-            "Remove it yourself: Open on TikTok."
+            "Remove it yourself: Open on TikTok. TikTok did not keep a removal, or refused one: "
+            "DramaFetch removes no more dramas from your Favorites on its own until you reload "
+            "this tab. Remove from Favorites on a card still works."
         )
         assert entry["error"] == (
             "TikTok did not keep the change: the drama is still in your Favorites — remove it on "
@@ -610,7 +633,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
 ) -> None:
     """(f) The second drama ticked and **Download selected dramas**, the fake cutting the first
     transfer of its episode 2 short (`truncate_once`): episodes 1 and 3 saved, episode 2 shown apart
-    — **Did not download (1)** with its **Retry** button, in the history too — and the card
+    — **Did not download (1)** with its **Retry** button — and the card
     **Partly · 2/3** — and its notification `⚠ … — 1 episode to retry` / `E02 did not download.`
     with ONE button, **Retry**. That button, clicked as Chrome hands the click to the service
     worker (its own `onButtonClicked` listener), is handed to the DramaFetch tab, which queues one
@@ -619,7 +642,9 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
     a clean paste of its id saves in another profile —, the block gone, the card **On disk · 3/3**
     and the drama's notification `✓ … — downloaded`. The manual path: **Retry on its own what did
     not download** (1.8.0, on by default) is unticked first, or DramaFetch would queue that retry
-    itself (`test_extension_autoretry.py`)."""
+    itself (`test_extension_autoretry.py`) — and so is the automatic removal from the Favorites
+    (2.0.0, on by default), or the drama, whole after the retry, would leave the Favorites in a job
+    of its own (`test_extension_autoremove.py`)."""
     second = (SECOND_SERIES_ID, 2)
 
     def media_requests(server: FakeTikTok) -> int:
@@ -636,6 +661,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         ExtensionHarness(tmp_path / "library", server.base_url, test_settings=SETTINGS) as ext,
     ):
         ext.turn_off_auto_retry()  # the manual Retry is what this scenario proves
+        ext.turn_off_auto_remove()
         ext.page.evaluate(RECORD_ALERTS_JS)
         _profile, popup, _tab = _profile_and_popup(ext, server.base_url)
         _open_library(ext, popup)
@@ -647,7 +673,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         ext.wait_for(
             lambda: ext.finished_jobs() > jobs and ext.idle(), 120, "the download did not end"
         )
-        first = ext.history()[0]
+        first = ext.journal()[0]
         assert first["kind"] == "batch"
         ((series_id, rows),) = _rows(first)
         assert series_id == SECOND_SERIES_ID
@@ -663,9 +689,6 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         retry = page.locator("#retry-button")
         assert retry.is_visible() and retry.is_enabled()
         assert retry.text_content() == "Retry the episodes that did not download (1)"
-        history = page.locator("#history-list li")
-        ext.wait_for(lambda: history.count() >= 1, 10, "the run is not in the history yet")
-        assert history.first.locator(".retry-line span").text_content() == "Did not download: E02"
         ext.wait_for(
             lambda: card.get_attribute("data-status") == "partly", 10, "the card is not partly"
         )
@@ -687,7 +710,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         in_worker(ext, RETRY_CLICK_JS, alert["id"])
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 90, "the retry did not end")
         assert page.evaluate(CLEARED_JS) == [alert["id"]]
-        entry = ext.history()[0]
+        entry = ext.journal()[0]
         assert entry["kind"] == "selection"
         assert entry["label"] == f"Retry 1 of {SECOND_SERIES_NAME}"
         ((series_id, rows),) = _rows(entry)

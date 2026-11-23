@@ -2,7 +2,7 @@
 /**
  * What the DramaFetch tab SHOWS of the engine's texts. The engine writes its statuses, messages,
  * report lines, pause announcements and errors in English, byte for byte the Python tool's (they
- * are stored in the per-series state and the history, and the parity tests compare them); this
+ * are stored in the per-series state and the report, and the parity tests compare them); this
  * module only changes how they read on screen, never what is stored:
  *
  * - `lang: "es"` translates every text the extension can show into Spanish — through ordered rules
@@ -23,6 +23,12 @@
  * hints, technical details — passes through unchanged; a text no rule knows passes through
  * unchanged, never half translated; {@link displayText} never throws. Pure: no `chrome.*`, no
  * DOM (the app page picks the language and the labels, `src/app/i18n.js`).
+ *
+ * The progress card's pause line (DramaFetch 2.0.0, the owner's request of 2026-11-22: the
+ * countdown between downloads in minutes and seconds, not only seconds) is not an engine text:
+ * {@link pauseLine} picks its UI message from the pause's kind, and {@link formatDuration} writes
+ * both the pause's length and the time left. The engine's own pause texts (`pacing.pauseMessage`,
+ * parity-tested with the Python tool) do not change: they stay in the job's pauses, for its report.
  */
 
 import { NO_PLAY_ADDRESS, SHORT_HEADER_HINT_PREFIX } from "./catalog.js";
@@ -55,7 +61,7 @@ import {
   UNAVAILABLE_MESSAGE,
 } from "./messages.js";
 import { NAME_PLACEHOLDERS } from "./naming.js";
-import { MAX_PAUSE_S, PACES } from "./pacing.js";
+import { JOB_REST, LONG_REST, MAX_PAUSE_S, PACE, PACES, REST, SERIES_REST } from "./pacing.js";
 import {
   CHALLENGE_MESSAGE,
   EMPTY_LIST_MESSAGE,
@@ -169,6 +175,77 @@ export function statusLabel(status, options = {}) {
   } catch {
     return typeof status === "string" ? status : "";
   }
+}
+
+/**
+ * A length of time as the DramaFetch tab counts a pause down (DramaFetch 2.0.0, the owner's request
+ * of 2026-11-22: minutes and seconds, not only seconds): from 60 s up, minutes and seconds, the
+ * seconds on two digits — `1 min 00 s`, `1 min 07 s`, `22 min 40 s`, `83 min 20 s` (no hours: the
+ * minutes go on) —; below a minute, seconds — `0 s`, `45 s`. A fraction of a second counts as a
+ * whole one (`Math.ceil`, as the countdown has always rounded: it never reads `0 s` while time is
+ * left); below 0, or not a finite number, it is `0 s`. The same units in Spanish.
+ * @param {number} seconds
+ * @returns {string}
+ */
+export function formatDuration(seconds) {
+  const whole = Number.isFinite(seconds) ? Math.max(0, Math.ceil(seconds)) : 0;
+  if (whole < 60) return `${whole} s`;
+  return `${Math.floor(whole / 60)} min ${String(whole % 60).padStart(2, "0")} s`;
+}
+
+/**
+ * @typedef {object} PauseLine The progress card's pause line (DramaFetch 2.0.0): a message key of
+ *   `_locales/<lang>/messages.json` and its substitutions, in the order of its placeholders.
+ * @property {string} key
+ * @property {string[]} substitutions
+ */
+
+/**
+ * The count a rest's engine text carries (`pacing.pauseMessage`: `resting 95 s after 10
+ * downloads`, `long break 22 min after 100 episodes`), by the pause's kind.
+ * @type {Readonly<Record<string, RegExp>>}
+ */
+const PAUSE_COUNTS = Object.freeze({
+  [REST]: / after (\d+) downloads$/,
+  [LONG_REST]: / after (\d+) episodes$/,
+});
+
+/**
+ * The progress card's pause line for a pause the engine announced — `onPause(kind, seconds,
+ * text)` — with `left` seconds of it still to wait (DramaFetch 2.0.0): what the pause is, from its
+ * kind, with its length and the time left, both as {@link formatDuration} writes them:
+ * - `pace` (between two episodes): `Pausing 7 s before the next episode — 4 s left` (`pausePace`);
+ * - `rest` (every N downloads): `Resting 1 min 35 s after 10 downloads — 1 min 07 s left`
+ *   (`pauseRest`; `pauseRestOne` after one);
+ * - `long-rest` (every 100 episodes): `Long break of 22 min 40 s after 100 episodes — 21 min 03 s
+ *   left` (`pauseLongRest`; `pauseLongRestOne` after one);
+ * - `series-rest` (between two dramas of a batch): `Resting 1 min 12 s before the next drama — 58
+ *   s left` (`pauseSeriesRest`);
+ * - `job-rest` (the rest between jobs, before a job's first request — a download, a listing, a
+ *   removal from the Favorites): `Resting 1 min 12 s before contacting TikTok again — 58 s left`
+ *   (`pauseJobRest`).
+ * A rest's count is the one the engine's own text carries (`pacing.pauseMessage`, never changed
+ * here: the job keeps that text for its report). Null for a kind the line does not know, or a rest
+ * whose text carries no count: the page then shows the engine's text with the time left
+ * (`pauseInForce`).
+ * @param {string} kind `pacing`'s PACE, REST, LONG_REST, SERIES_REST or JOB_REST
+ * @param {number} seconds the pause's length
+ * @param {string} text the engine's text of it
+ * @param {number} left the seconds still to wait
+ * @returns {PauseLine | null}
+ */
+export function pauseLine(kind, seconds, text, left) {
+  const length = formatDuration(seconds);
+  const remaining = formatDuration(left);
+  if (kind === PACE) return { key: "pausePace", substitutions: [length, remaining] };
+  if (kind === SERIES_REST) return { key: "pauseSeriesRest", substitutions: [length, remaining] };
+  if (kind === JOB_REST) return { key: "pauseJobRest", substitutions: [length, remaining] };
+  if (kind !== REST && kind !== LONG_REST) return null;
+  const counted = PAUSE_COUNTS[kind]?.exec(text);
+  if (counted === null || counted === undefined) return null;
+  const count = String(Number(counted[1]));
+  if (count === "1") return { key: kind === REST ? "pauseRestOne" : "pauseLongRestOne", substitutions: [length, remaining] };
+  return { key: kind === REST ? "pauseRest" : "pauseLongRest", substitutions: [length, count, remaining] };
 }
 
 /**

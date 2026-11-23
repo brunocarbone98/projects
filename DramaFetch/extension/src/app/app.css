@@ -1,156 +1,378 @@
+/* DramaFetch 2.0.0 (the owner's request of 2026-11-22: “colores más vivos”): a brighter palette —
+   a pink-to-violet header, one colour per card, filled status badges, a tinted pause line and
+   Waiting rows — in which every text keeps a contrast of at least 4.5:1 with what it sits on
+   (WCAG AA), in the light and the dark scheme alike: `node tools/contrast.js` checks it, and
+   `tests/contrast.test.js` with it. Every colour is a token below; every rule that sets a text
+   colour says what it sits on — its own background, or `on: <tokens>` —, every background that
+   holds text says which texts (`text: <tokens>`) or that it holds none (`no text`), and `ui:` names
+   the outlines that must reach 3:1 (a focus ring, a field's border). The header's gradient is the
+   same in both schemes. */
 :root {
   color-scheme: light dark;
-  --bg: #f6f6f8;
+  /* the page and its cards */
+  --bg: #f7f2ff;
   --card: #ffffff;
-  --text: #1d1d22;
-  --muted: #5f6070;
-  --border: #dcdce4;
-  --accent: #e11d5c;
+  --text: #1d1433;
+  --muted: #5a5074;
+  --border: #e3d6f6;
+  --shadow: rgba(76, 29, 149, 0.16);
+  /* text fields */
+  --field: #ffffff;
+  --field-border: #8b7ab2;
+  --placeholder: #6b6185;
+  --focus: #7c3aed;
+  /* the accent: Download, Retry, Save settings, a pressed chip, a ticked card */
+  --accent: #db0f5c;
+  --accent-hover: #b30b4b;
   --accent-text: #ffffff;
-  --ok: #157f3d;
-  --warn: #9a5b00;
-  --bad: #b3261e;
-  --badge: #ececf2;
+  /* the other buttons; Stop and the confirmation of Remove from Favorites */
+  --btn: #f1eaff;
+  --btn-hover: #e2d4ff;
+  --btn-border: #cdbbf0;
+  --btn-text: #2b1a55;
+  --danger: #cf1240;
+  --danger-hover: #a80e33;
+  --danger-text: #ffffff;
+  /* links and the library's link buttons (See episodes, Open on TikTok) */
+  --link: #6d28d9;
+  --link-hover: #5b21b6;
+  /* each card's colour: its top edge and its heading */
+  --edge-pink: #ec4899;
+  --edge-violet: #8b5cf6;
+  --edge-cyan: #06b6d4;
+  --edge-amber: #f59e0b;
+  --edge-gray: #94a3b8;
+  --ink-pink: #be185d;
+  --ink-violet: #6d28d9;
+  --ink-cyan: #0e7490;
+  --ink-amber: #b45309;
+  /* the statuses: a line's colour on a card; a badge's text on its own tint */
+  --ok: #15803d;
+  --bad: #be123c;
+  --warn: #a14400;
+  --ok-bg: #dcfce7;
+  --ok-fg: #166534;
+  --bad-bg: #ffe4e6;
+  --bad-fg: #9f1239;
+  --warn-bg: #fef3c7;
+  --warn-fg: #92400e;
+  --run-bg: #ede9fe;
+  --run-fg: #5b21b6;
+  --wait-bg: #cffafe;
+  --wait-fg: #155e75;
+  --pink-bg: #fce7f3;
+  --pink-fg: #9d174d;
+  --gone-bg: #eeeaf5;
+  --gone-fg: #4f4668;
+  --chip: #f3edff;
+  /* the banners (a refusal's cooldown, a second tab), the pause line */
+  --banner-bg: #fff0f3;
+  --banner-fg: #9f1239;
+  --banner-edge: #e11d48;
+  --pause-bg: #f3e8ff;
+  --pause-fg: #6b21a8;
+  --pause-edge: #a855f7;
+  /* the Waiting card's rows: a drama to download, a retry or a pick, a removal, a listing */
+  --queue-bg: #ecfeff;
+  --queue-edge: #06b6d4;
+  --queue-retry-bg: #f5f3ff;
+  --queue-retry-edge: #8b5cf6;
+  --queue-remove-bg: #fff1f3;
+  --queue-remove-edge: #f43f5e;
+  --queue-list-bg: #fffbeb;
+  --queue-list-edge: #f59e0b;
+  --id-ink: #0e6a80;
+  /* a series' header row in the tables */
+  --row-head-bg: #f3edff;
+  --row-head-fg: #3b1f73;
+  /* the library: the connection box, the selection bar, a cover not loaded yet, a card's tick */
+  --conn-bg: #f6f0ff;
+  --bar-bg: #2e1065;
+  --bar-hover: #4c1d95;
+  --bar-text: #ffffff;
+  --bar-note: #ddd6fe;
+  --bar-line: #c4b5fd;
+  --ph-1: #c2185b;
+  --ph-2: #6d28d9;
+  --ph-text: #ffffff;
+  --pick-bg: #ffffff;
+  --pick-text: #1d1433;
+  --backdrop: rgba(29, 20, 51, 0.6);
+  /* the header, both schemes */
+  --hero-1: #c2185b;
+  --hero-2: #7c3aed;
+  --hero-3: #4338ca;
+  --hero-text: #ffffff;
+  --hero-soft: #fde7f3;
+  --hero-line: rgba(255, 255, 255, 0.6);
+  --hero-badge: #ffffff;
+  --hero-ink: #be185d;
+  --hero-idle: #0e7490;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #15151a;
-    --card: #1f1f26;
-    --text: #ececf1;
-    --muted: #a3a3b3;
-    --border: #34343f;
-    --accent: #ff4d84;
-    --accent-text: #15151a;
-    --ok: #5fd38a;
-    --warn: #f0b85a;
-    --bad: #ff7a70;
-    --badge: #2c2c36;
+    --bg: #120c1f;
+    --card: #1c1530;
+    --text: #f4efff;
+    --muted: #b8acd6;
+    --border: #3b2d5e;
+    --shadow: rgba(0, 0, 0, 0.45);
+    --field: #150f25;
+    --field-border: #8a77bf;
+    --placeholder: #a497c6;
+    --focus: #c4b5fd;
+    --accent: #ff4d94;
+    --accent-hover: #ff7ab0;
+    --accent-text: #1a0714;
+    --btn: #2a2046;
+    --btn-hover: #382b5d;
+    --btn-border: #54428a;
+    --btn-text: #f4efff;
+    --danger: #ff5c7a;
+    --danger-hover: #ff8399;
+    --danger-text: #1a0714;
+    --link: #c4b5fd;
+    --link-hover: #ddd6fe;
+    --edge-pink: #ff4d94;
+    --edge-violet: #a78bfa;
+    --edge-cyan: #22d3ee;
+    --edge-amber: #fbbf24;
+    --edge-gray: #64748b;
+    --ink-pink: #ff8fc7;
+    --ink-violet: #c4b5fd;
+    --ink-cyan: #67e8f9;
+    --ink-amber: #fcd34d;
+    --ok: #4ade80;
+    --bad: #ff7a8f;
+    --warn: #fbbf24;
+    --ok-bg: #0e3b23;
+    --ok-fg: #86efac;
+    --bad-bg: #4a1022;
+    --bad-fg: #fda4af;
+    --warn-bg: #432707;
+    --warn-fg: #fcd34d;
+    --run-bg: #2e1a5e;
+    --run-fg: #d8b4fe;
+    --wait-bg: #083344;
+    --wait-fg: #67e8f9;
+    --pink-bg: #4c0f2e;
+    --pink-fg: #f9a8d4;
+    --gone-bg: #2a2340;
+    --gone-fg: #c9bfe3;
+    --chip: #241b3d;
+    --banner-bg: #3f0d1f;
+    --banner-fg: #fecdd3;
+    --banner-edge: #ff4d6d;
+    --pause-bg: #2e1a5e;
+    --pause-fg: #e9d5ff;
+    --pause-edge: #c084fc;
+    --queue-bg: #0b2c38;
+    --queue-edge: #22d3ee;
+    --queue-retry-bg: #251b42;
+    --queue-retry-edge: #a78bfa;
+    --queue-remove-bg: #3a1022;
+    --queue-remove-edge: #fb7185;
+    --queue-list-bg: #33260a;
+    --queue-list-edge: #fbbf24;
+    --id-ink: #67e8f9;
+    --row-head-bg: #2a2045;
+    --row-head-fg: #e9d5ff;
+    --conn-bg: #191229;
+    --bar-bg: #ede9fe;
+    --bar-hover: #ddd6fe;
+    --bar-text: #2e1065;
+    --bar-note: #5b21b6;
+    --bar-line: #6d28d9;
+    --ph-1: #be185d;
+    --ph-2: #6d28d9;
+    --ph-text: #ffffff;
+    --pick-bg: #1c1530;
+    --pick-text: #f4efff;
+    --backdrop: rgba(0, 0, 0, 0.65);
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-.top { display: flex; align-items: center; gap: 12px; max-width: 980px; margin: 0 auto; padding: 18px 16px 6px; }
+a { color: var(--link); /* on: --card --bg */ }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; /* ui: --focus on --card --bg --conn-bg */ }
+::placeholder { color: var(--placeholder); /* on: --field */ }
+
+/* the header: the gradient, the title, the version, the section links and the state badge */
+.top { display: flex; align-items: center; gap: 12px; width: calc(100% - 32px); max-width: 948px; margin: 0 auto; padding: 16px 18px; color: var(--hero-text); background: linear-gradient(120deg, var(--hero-1) 0%, var(--hero-2) 55%, var(--hero-3) 100%); border-radius: 0 0 18px 18px; box-shadow: 0 10px 26px -14px var(--shadow); }
+.top img { background: var(--hero-badge); border-radius: 10px; padding: 3px; /* no text */ }
 .top .titles { flex: 1; }
+.top :focus-visible { outline-color: var(--hero-text); /* ui: --hero-text on --hero-1 --hero-2 --hero-3 */ }
 .title-line { display: flex; align-items: baseline; gap: 8px; }
-.version { font-size: 0.72rem; color: var(--muted); } /* the manifest's version: what chrome://extensions shows, so a user can tell which build is loaded */
+.version { font-size: 0.72rem; color: var(--muted); /* on: --bg */ } /* the manifest's version: what chrome://extensions shows, so a user can tell which build is loaded */
+.top .version, .top .sub { color: var(--hero-soft); /* on: --hero-1 --hero-2 --hero-3 */ }
 h1 { font-size: 1.35rem; margin: 0; }
 h2 { font-size: 1.08rem; margin: 0 0 10px; }
-.sub { margin: 0; color: var(--muted); font-size: 0.92rem; }
-main { max-width: 980px; margin: 0 auto; padding: 8px 16px 24px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
-.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
-details.card > summary { cursor: pointer; font-weight: 600; }
+.sub { margin: 0; font-size: 0.92rem; }
+main { max-width: 980px; margin: 0 auto; padding: 14px 16px 24px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+
+/* the cards: a coloured top edge and heading — the box pink, Waiting cyan, Settings amber, the test card grey, the others violet */
+.card { background: var(--card); border: 1px solid var(--border); border-top: 4px solid var(--edge-violet); border-radius: 14px; padding: 14px 16px; box-shadow: 0 8px 22px -16px var(--shadow); /* text: --text */ }
+#input-card { border-top-color: var(--edge-pink); }
+#queue-card { border-top-color: var(--edge-cyan); }
+#settings-card { border-top-color: var(--edge-amber); }
+#test-card { border-top-color: var(--edge-gray); }
+#input-card h2 { color: var(--ink-pink); /* on: --card */ }
+#favorites-card h2, #series-card h2, #progress-card h2 { color: var(--ink-violet); /* on: --card */ }
+#queue-card h2 { color: var(--ink-cyan); /* on: --card */ }
+details.card > summary { cursor: pointer; font-weight: 700; }
+#settings-card > summary { color: var(--ink-amber); /* on: --card */ }
 details.card[open] > summary { margin-bottom: 10px; }
 label { display: block; margin: 0 0 6px; }
-textarea, input[type="text"], input[type="number"], input[type="search"], select { width: 100%; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; }
+textarea, input[type="text"], input[type="number"], input[type="search"], select { width: 100%; font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--field-border); border-radius: 8px; padding: 7px 9px; /* ui: --field-border on --card */ }
 textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.9rem; }
+input[type="checkbox"] { accent-color: var(--accent); }
 .options { margin: 10px 0 0; }
 .options label { display: flex; gap: 8px; align-items: baseline; font-size: 0.92rem; }
+
+/* the buttons: the accent for what downloads and saves, red for Stop, the others tinted */
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0 0; }
-button { font: inherit; cursor: pointer; border: 1px solid var(--border); background: var(--badge); color: var(--text); border-radius: 6px; padding: 7px 14px; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button { font: inherit; font-weight: 600; cursor: pointer; border: 1px solid var(--btn-border); background: var(--btn); color: var(--btn-text); border-radius: 8px; padding: 7px 14px; }
+button:hover:not(:disabled) { background: var(--btn-hover); color: var(--btn-text); }
+button.primary, #retry-button, #settings-save { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button.primary:hover:not(:disabled), #retry-button:hover:not(:disabled), #settings-save:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-text); }
+#stop-button { background: var(--danger); border-color: var(--danger); color: var(--danger-text); }
+#stop-button:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); color: var(--danger-text); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
-.hint, .meta { color: var(--muted); font-size: 0.88rem; }
+.hint, .meta { color: var(--muted); font-size: 0.88rem; /* on: --card --bg --conn-bg */ }
 .status { min-height: 1.2em; margin: 8px 0 0; font-size: 0.92rem; overflow-wrap: anywhere; }
-.status.error { color: var(--bad); }
-.status.ok { color: var(--ok); }
-.banner { border-radius: 10px; padding: 12px 16px; border: 1px solid var(--bad); color: var(--bad); background: var(--card); }
-.countdown { font-weight: 600; }
-.warnings { margin: 6px 0; padding-left: 18px; color: var(--warn); font-size: 0.88rem; }
+.status.error { color: var(--bad); font-weight: 600; /* on: --card */ }
+.status.ok { color: var(--ok); font-weight: 600; /* on: --card */ }
+.banner { border-radius: 12px; padding: 12px 16px; border: 1px solid var(--banner-edge); border-left-width: 6px; color: var(--banner-fg); background: var(--banner-bg); }
+.countdown { font-weight: 700; }
+.warnings { margin: 6px 0; padding-left: 18px; color: var(--warn); font-size: 0.88rem; /* on: --card */ }
+
+/* the progress card: the job now, the pause line, the tables */
+#progress-current { color: var(--text); font-weight: 600; /* on: --card */ }
+.pause { font-weight: 600; color: var(--pause-fg); background: var(--pause-bg); border-left: 4px solid var(--pause-edge); border-radius: 10px; padding: 6px 12px; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9rem; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-th { color: var(--muted); font-weight: 600; }
-td.message, .report li, .history li, .banner { overflow-wrap: anywhere; }
-tr.series-row td { font-weight: 600; background: var(--bg); }
+th { color: var(--muted); font-weight: 600; /* on: --card */ }
+td.message, .report li, .banner { overflow-wrap: anywhere; }
+tr.series-row td { font-weight: 600; color: var(--row-head-fg); background: var(--row-head-bg); }
+#batch-table td[data-status="complete"], #batch-table td[data-status="skipped (complete)"] { color: var(--ok); font-weight: 600; /* on: --card */ }
+#batch-table td[data-status="incomplete"], #batch-table td[data-status^="failed"] { color: var(--bad); font-weight: 600; /* on: --card */ }
+#batch-table td[data-status="not started"] { color: var(--muted); /* on: --card */ }
 /* a thumbnail, or the empty frame it fills once its row has been in view (so no row ever jumps) */
-.cover { width: 40px; height: 54px; object-fit: cover; border-radius: 4px; background: var(--badge); display: block; }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--badge); font-size: 0.8rem; white-space: nowrap; margin-right: 4px; }
-.badge.free, .badge.done, .badge.complete { color: var(--ok); }
-.badge.unlocked { color: var(--accent); }
-.badge.locked, .badge.skipped { color: var(--muted); }
-.badge.failed, .badge.incomplete { color: var(--bad); }
-.badge.running { color: var(--accent); }
-.badge.ondisk { color: var(--ok); }
-.badge.partly { color: var(--warn); }
-.hints { display: block; color: var(--muted); font-size: 0.78rem; }
-/* the header's section links (every section stays on the page: no hidden tabs) */
+.cover { width: 40px; height: 54px; object-fit: cover; border-radius: 4px; background: var(--chip); display: block; /* no text */ }
+.badge { display: inline-block; padding: 1px 9px; border-radius: 999px; background: var(--btn); color: var(--btn-text); font-size: 0.8rem; font-weight: 600; white-space: nowrap; margin-right: 4px; }
+.badge.free, .badge.done, .badge.complete, .badge.ondisk, .badge.on-disk { color: var(--ok-fg); background: var(--ok-bg); }
+.badge.unlocked { color: var(--pink-fg); background: var(--pink-bg); }
+.badge.locked, .badge.none, .badge.twin { color: var(--gone-fg); background: var(--gone-bg); }
+.badge.skipped, .badge.partly { color: var(--warn-fg); background: var(--warn-bg); }
+.badge.skipped[data-status="skipped-exists"], .badge.queued { color: var(--wait-fg); background: var(--wait-bg); } /* already on disk; waiting in the queue */
+.badge.skipped[data-status="skipped-locked"] { color: var(--gone-fg); background: var(--gone-bg); }
+.badge.failed, .badge.incomplete { color: var(--bad-fg); background: var(--bad-bg); }
+.badge.running { color: var(--run-fg); background: var(--run-bg); }
+.badge.removed { color: var(--pink-fg); background: var(--pink-bg); }
+.badge.idle { color: var(--wait-fg); background: var(--wait-bg); }
+.hints { display: block; color: var(--muted); font-size: 0.78rem; /* on: --card */ }
+
+/* the header's section links (every section stays on the page: no hidden tabs) and its state badge */
 .top { flex-wrap: wrap; }
-nav.sections { display: flex; flex-wrap: wrap; gap: 4px; }
-nav.sections a { padding: 6px 12px; border-radius: 8px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: 0.92rem; }
-nav.sections a:hover, nav.sections a:focus-visible { background: var(--badge); color: var(--text); }
+nav.sections { display: flex; flex-wrap: wrap; gap: 6px; }
+nav.sections a { padding: 5px 12px; border-radius: 999px; color: var(--hero-text); border: 1px solid var(--hero-line); text-decoration: none; font-weight: 600; font-size: 0.92rem; /* on: --hero-1 --hero-2 --hero-3 */ }
+nav.sections a:hover, nav.sections a:focus-visible { background: var(--hero-badge); color: var(--hero-ink); }
+.top .badge.idle { color: var(--hero-idle); background: var(--hero-badge); font-weight: 700; }
+.top .badge.running { color: var(--hero-ink); background: var(--hero-badge); font-weight: 700; }
+
 /* the library: the user's TikTok Bookmark as cards */
 .library { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
-.connection { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--bg); }
-.connection .dot { width: 10px; height: 10px; border-radius: 999px; background: var(--muted); flex: none; }
-.connection .dot.connected { background: var(--ok); }
+.connection { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--conn-bg); /* text: --text */ }
+.connection .dot { width: 10px; height: 10px; border-radius: 999px; background: var(--muted); flex: none; /* no text */ }
+.connection .dot.connected { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); /* no text */ }
 .connection-text { flex: 1 1 320px; min-width: 0; }
 .connection-text p { margin: 0; }
 .connection-line { font-weight: 600; overflow-wrap: anywhere; }
-.stale { color: var(--warn); }
+.stale { color: var(--warn); /* on: --conn-bg --card */ }
 button.refresh, #library-download { display: inline-flex; align-items: center; gap: 8px; }
 .library-tools { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin: 12px 0 0; }
 .library-tools input[type="search"] { flex: 1 1 220px; width: auto; }
 .library-tools select { width: auto; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { border-radius: 999px; padding: 6px 12px; background: var(--card); font-size: 0.9rem; }
+.chip { border-radius: 999px; padding: 6px 12px; background: var(--chip); color: var(--text); font-size: 0.9rem; }
 .chip.pressed { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+.chip.pressed:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-text); }
 .select-shown { display: flex; gap: 6px; align-items: baseline; margin: 0; font-size: 0.92rem; }
-.selection-bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--text); color: var(--bg); }
+.selection-bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 12px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--bar-bg); color: var(--bar-text); }
 .selection-bar .selection-count { font-weight: 600; }
-.selection-bar .selection-note { opacity: 0.75; font-size: 0.88rem; }
+.selection-bar .selection-note { color: var(--bar-note); font-size: 0.88rem; /* on: --bar-bg */ }
 .selection-bar .spacer { flex: 1 1 0; }
-.selection-bar button:not(.primary) { background: transparent; color: inherit; border-color: currentColor; }
+.selection-bar button:not(.primary) { background: var(--bar-bg); color: var(--bar-text); border-color: var(--bar-line); }
+.selection-bar button:not(.primary):hover:not(:disabled) { background: var(--bar-hover); color: var(--bar-text); }
+.selection-bar :focus-visible { outline-color: var(--bar-text); /* ui: --bar-text on --bar-bg */ }
 .drama-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; margin-top: 12px; }
-.drama-card { display: flex; flex-direction: column; border: 2px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--card); }
-.drama-card.removed { border-style: dashed; opacity: 0.85; }
+.drama-card { display: flex; flex-direction: column; border: 2px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--card); box-shadow: 0 8px 20px -16px var(--shadow); /* text: --text */ }
+.drama-card.running { border-color: var(--edge-violet); }
+.drama-card.removed { border-style: dashed; }
 /* a ticked card: framed in the accent, as in the approved sketch (only a card that can be ticked has a .pick) */
 .drama-card:has(.pick input:checked) { border-color: var(--accent); }
-.drama-cover { position: relative; height: 150px; background: var(--badge); display: flex; align-items: flex-end; }
+.drama-cover { position: relative; height: 150px; background: linear-gradient(135deg, var(--ph-1), var(--ph-2)); display: flex; align-items: flex-end; /* text: --ph-text */ }
 .drama-img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.drama-placeholder { padding: 12px 14px; font-family: Georgia, "Times New Roman", serif; font-style: italic; font-size: 1.1rem; line-height: 1.15; color: var(--muted); overflow-wrap: anywhere; }
-.drama-cover .pick { position: absolute; top: 8px; left: 8px; display: flex; gap: 6px; align-items: center; margin: 0; padding: 4px 10px; border-radius: 8px; background: var(--card); color: var(--text); font-size: 0.82rem; cursor: pointer; }
+.drama-placeholder { padding: 12px 14px; font-family: Georgia, "Times New Roman", serif; font-style: italic; font-size: 1.1rem; line-height: 1.15; color: var(--ph-text); overflow-wrap: anywhere; /* on: --ph-1 --ph-2 */ }
+.drama-cover .pick { position: absolute; top: 8px; left: 8px; display: flex; gap: 6px; align-items: center; margin: 0; padding: 4px 10px; border-radius: 8px; background: var(--pick-bg); color: var(--pick-text); font-size: 0.82rem; cursor: pointer; }
 .drama-body { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 12px; flex: 1; }
 .drama-body h3 { margin: 0; font-size: 0.98rem; line-height: 1.3; overflow-wrap: anywhere; }
 .drama-body p { margin: 0; }
-.favorite-meta { color: var(--muted); font-size: 0.86rem; }
+.favorite-meta { color: var(--muted); font-size: 0.86rem; /* on: --card */ }
 .drama-badges { display: flex; flex-wrap: wrap; gap: 4px; }
-.badge.on-disk { color: var(--ok); }
-.badge.none, .badge.removed, .badge.twin { color: var(--muted); }
-.badge.queued { color: var(--accent); }
 .drama-progress { width: 100%; height: 6px; accent-color: var(--warn); }
 .drama-card.running .drama-progress { accent-color: var(--accent); }
 .drama-actions { margin-top: auto; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding-top: 4px; }
-button.link { background: none; border: none; padding: 4px 2px; color: var(--accent); text-decoration: underline; font-size: 0.88rem; }
+button.link { background: none; border: none; padding: 4px 2px; color: var(--link); text-decoration: underline; font-size: 0.88rem; /* on: --card */ }
+button.link:hover:not(:disabled) { background: none; color: var(--link-hover); /* on: --card */ }
 /* a card's own Download: the accent, at the size of the card's other buttons */
 .drama-actions button.primary { font-size: 0.86rem; padding: 6px 12px; }
-button.danger-outline { background: var(--card); border-color: var(--bad); color: var(--bad); font-weight: 600; font-size: 0.86rem; padding: 6px 10px; }
-button.danger { background: var(--bad); border-color: var(--bad); color: var(--card); font-weight: 600; }
+button.danger-outline { background: var(--card); border-color: var(--danger); color: var(--bad); font-weight: 600; font-size: 0.86rem; padding: 6px 10px; }
+button.danger-outline:hover:not(:disabled) { background: var(--bad-bg); color: var(--bad-fg); }
+button.danger { background: var(--danger); border-color: var(--danger); color: var(--danger-text); font-weight: 600; }
+button.danger:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); color: var(--danger-text); }
 .library-foot { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 12px; }
 /* the confirmation of Remove from Favorites */
-#bookmark-dialog { max-width: min(520px, calc(100vw - 32px)); border: none; border-radius: 14px; padding: 20px 22px; background: var(--card); color: var(--text); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28); }
-#bookmark-dialog::backdrop { background: rgba(21, 21, 26, 0.55); }
-#bookmark-dialog h2 { font-size: 1.15rem; }
+#bookmark-dialog { max-width: min(520px, calc(100vw - 32px)); border: none; border-top: 5px solid var(--danger); border-radius: 16px; padding: 20px 22px; background: var(--card); color: var(--text); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28); }
+#bookmark-dialog::backdrop { background: var(--backdrop); /* no text */ }
+#bookmark-dialog h2 { font-size: 1.15rem; color: var(--bad); /* on: --card */ }
 .dialog-drama { display: flex; gap: 12px; align-items: center; margin: 10px 0; }
-.dialog-cover { width: 54px; height: 72px; border-radius: 6px; overflow: hidden; background: var(--badge); flex: none; display: block; }
+.dialog-cover { width: 54px; height: 72px; border-radius: 6px; overflow: hidden; background: linear-gradient(135deg, var(--ph-1), var(--ph-2)); flex: none; display: block; /* no text */ }
 .dialog-name { font-weight: 600; overflow-wrap: anywhere; }
 .facts { margin: 6px 0; padding-left: 22px; font-size: 0.92rem; }
 .facts li { margin: 2px 0; }
-.facts li::marker { content: "✓  "; color: var(--ok); }
+.facts li::marker { content: "✓  "; color: var(--ok); /* on: --card */ }
 .dialog-buttons { justify-content: flex-end; }
-.pause { font-weight: 600; }
 .report { padding-left: 18px; }
 /* the episodes a job did not download, apart from the ones that completed, with their retry */
 #failed-block { margin-top: 14px; }
-#failed-block h3 { font-size: 1rem; margin: 0; color: var(--bad); }
+#failed-block h3 { font-size: 1rem; margin: 0; color: var(--bad); /* on: --card */ }
 #failed-report { margin: 8px 0 0; overflow-wrap: anywhere; }
-#failed-report.error { color: var(--bad); }
-.history .retry-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
-.history button.retry { padding: 2px 10px; font-size: 0.82rem; }
-.history { padding-left: 20px; font-size: 0.88rem; }
-.history li { margin-bottom: 8px; }
+#failed-report.error { color: var(--bad); /* on: --card */ }
+
+/* the Waiting card (2.0.0): one row per drama still to run — what the row is, the drama's name, its
+   whole id (never cut; one click selects it all, to copy), or the muted note while its name is not
+   known —, tinted by kind: a drama to download, a retry or a pick of See episodes, a removal from
+   the Favorites (the re-listing of an automatic one with it), a listing */
+#queue-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.queue-row { padding: 7px 12px; border-radius: 10px; color: var(--text); background: var(--queue-bg); border-left: 4px solid var(--queue-edge); overflow-wrap: anywhere; }
+.queue-row.retry, .queue-row.autoretry, .queue-row.selected, .queue-row.available { color: var(--text); background: var(--queue-retry-bg); border-left-color: var(--queue-retry-edge); }
+.queue-row.unbookmark, .queue-row.autounbookmark, .queue-row.autorelist { color: var(--text); background: var(--queue-remove-bg); border-left-color: var(--queue-remove-edge); }
+.queue-row.load, .queue-row.favorites { color: var(--text); background: var(--queue-list-bg); border-left-color: var(--queue-list-edge); }
+.queue-what { color: var(--run-fg); font-weight: 700; /* on: --queue-bg --queue-retry-bg --queue-remove-bg --queue-list-bg */ }
+.queue-name { font-weight: 600; }
+.queue-sep, .queue-note { color: var(--muted); /* on: --queue-bg --queue-retry-bg --queue-remove-bg --queue-list-bg */ }
+.queue-note { font-style: italic; }
+.queue-id { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.9em; font-weight: 600; color: var(--id-ink); white-space: nowrap; user-select: all; cursor: text; /* on: --queue-bg --queue-retry-bg --queue-remove-bg --queue-list-bg */ }
+
+/* the toolbar popup: its title on the header's gradient */
+.popup .title-line { margin: -14px -16px 2px; padding: 12px 16px; color: var(--hero-text); background: linear-gradient(120deg, var(--hero-1) 0%, var(--hero-2) 55%, var(--hero-3) 100%); }
+.popup .version { color: var(--hero-soft); /* on: --hero-1 --hero-2 --hero-3 */ }
+
 .grid { display: grid; grid-template-columns: minmax(180px, 1fr) 2fr; gap: 8px 12px; align-items: center; }
 .grid label { margin: 0; }
-.legal { max-width: 980px; margin: 0 auto; padding: 0 16px 28px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); }
+.legal { max-width: 980px; margin: 0 auto; padding: 0 16px 28px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); /* on: --bg */ }
 @media (max-width: 560px) {
   .grid { grid-template-columns: 1fr; }
   .drama-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
