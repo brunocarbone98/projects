@@ -3878,7 +3878,10 @@ function bookmarkFailed(error, title, record, entry, auto = false) {
  * and the records must also hold no locked episode (`lockedNumbers`), else `not-on-disk`, nothing
  * asked. Where the user's own removal ends `stale` / `no-count`, DramaFetch's own lists its drama
  * again first — once per removal chain, only while it may ({@link queueRelist}) —, nothing asked of
- * TikTok either; **Stop** pressed since its job began ends it there as a stop. Its setting is asked
+ * TikTok either. **Stop** pressed while a removal of either kind starts — its job's gate, the
+ * drama's records read, the cooldown checks, the pacing stored — ends it as a stop before its first
+ * request (2.0.0): whatever its gate would have ended it with, no tab, no ⚠, the jobs waiting
+ * cancelled (bookmark.js asks it from then on). Its setting is asked
  * again after each cooldown check of the gate — before the rest between jobs and after it, so
  * before its first request —: saved unticked since the removal was queued, it ends there with
  * nothing asked of TikTok ({@link autoRemovalTurnedOff}). As it ends, its
@@ -3903,6 +3906,9 @@ export async function runUnbookmark(job, engine, entry) {
     return await removeFavorite(job, engine, entry, record);
   } catch (error) {
     thrown = { error };
+    // **Stop** before anything was pressed (2.0.0): the library's line no longer says a tab opens
+    const status = $("favorites-status");
+    if (error instanceof StopRequested && record["outcome"] === null && status.textContent === t("bookmarkWorking", [target.title ?? target.seriesId])) setStatus(status, "");
     throw error;
   } finally {
     removalEnded(job, record, thrown, halted);
@@ -3958,9 +3964,9 @@ const RELIST_PENDING = "not removed yet: a download of the drama waiting in the 
  * queues NEXT ({@link queueAutoRemoval}), so that its count is fresh at its turn. Nothing is asked
  * of TikTok here. Only when ALL hold:
  * 0. no **Stop** was pressed during the job ({@link app}.stopRequested) — asked by its caller,
- *    {@link removeFavorite}, before this and before the ⚠ `stale` / `no-count`: a Stop pressed
- *    while the removal started (its job's gate, the drama's records read) is a stop, as one met
- *    past its freshness check is — no re-listing, no ⚠, the jobs waiting cancelled;
+ *    {@link removeFavorite}, as soon as the drama's records are read, before every end of its gate:
+ *    a Stop pressed while the removal started (its job's gate, the drama's records read) is a stop,
+ *    as one met past its freshness check is — no re-listing, no ⚠, the jobs waiting cancelled;
  * 1. the removal is not one a re-listing led to (`auto.relisted`): never two for one removal chain
  *    (the setting saved unticked still ends such a one as item 2 says: an untick never gets a ⚠);
  * 2. the automatic removal is on — saved unticked since, it ends as {@link autoRemovalTurnedOff}
@@ -4117,6 +4123,11 @@ async function removeFavorite(job, engine, entry, record) {
   } catch {
     raw = undefined;
   }
+  // **Stop** pressed since the job began — while it waited for its gate or read the drama's records
+  // — is a stop (2.0.0), whatever the gate below would end it with (`gone`, `not-on-disk`, `stale` /
+  // `no-count`, the re-listing of DramaFetch's own removal): nothing asked of TikTok, no ⚠, no
+  // re-listing, the jobs waiting cancelled (runJob), as a Stop met further on (bookmark.js)
+  if (app.stopRequested) throw new StopRequested();
   // the drama as the library holds it NOW, never the count the dialog showed: a listing that ran
   // between the confirmation and this job (Update from TikTok) may have
   // read another episode count — new episodes, not on disk —; a drama the library no longer holds
@@ -4148,20 +4159,18 @@ async function removeFavorite(job, engine, entry, record) {
   const found = target.auto === undefined ? null : target.auto.foundCompleteAt;
   const listed = counted && countsFresh(library.fullReadAt, now());
   if (!listed && !countsFresh(completeAt, now()) && !countsFresh(found, now())) {
-    if (target.auto !== undefined) {
-      // DramaFetch's own removal (2.0.0): Stop pressed since its job began — while it waited for its
-      // gate or read the drama's records — is a stop, as past this check (bookmark.js): never a
-      // re-listing nor a ⚠ after a Stop, and the jobs waiting are cancelled (runJob)
-      if (app.stopRequested) throw new StopRequested();
-      // else what the user would do by hand — the drama listed again first, once (queueRelist);
-      // nothing asked of TikTok here either
-      if (queueRelist(job, title, record, entry)) return null;
-    }
+    // DramaFetch's own removal (2.0.0): what the user would do by hand — the drama listed again
+    // first, once (queueRelist); nothing asked of TikTok here either (a Stop pressed since the job
+    // began ended it above, as a stop: never a re-listing nor a ⚠ after a Stop)
+    if (target.auto !== undefined && queueRelist(job, title, record, entry)) return null;
     return bookmarkFailed(new BookmarkError(counted ? "stale" : "no-count"), title, record, entry);
   }
   setStatus($("favorites-status"), t("bookmarkWorking", [title]));
   for (const rest of [false, true]) {
     const refused = await checkCooldown(engine);
+    // **Stop** pressed while the cooldown was read (2.0.0): a stop, before the cooldown's end or the
+    // setting's below — as during the rest between jobs, whose sleep ends at once on a Stop
+    if (app.stopRequested) throw new StopRequested();
     if (refused !== null) return bookmarkFailed(new BookmarkCooldown(cooldownMessage(refused, { now: now() })), title, record, entry);
     // DramaFetch's own removal (2.0.0): the setting saved unticked since it was queued — before its
     // rest or during it — ends it here, before its first request (autoRemovalTurnedOff)
@@ -4176,14 +4185,20 @@ async function removeFavorite(job, engine, entry, record) {
   }
   const test = app.testMode ? app.testSettings : {};
   let pressed = false;
+  /** whether bookmark.js asked TikTok for the drama's page (2.0.0): a removal that ended before asked nothing */
+  let asked = false;
   /** @type {import("./bookmark.js").BookmarkOptions} */
-  const options = { baseUrl: baseUrl(), onPressed: () => void (pressed = true) };
+  const options = { baseUrl: baseUrl(), onPressed: () => void (pressed = true), onRequest: () => void (asked = true) };
   if (app.windowId !== undefined) options.windowId = app.windowId;
   if (app.tabId !== undefined) options.appTabId = app.tabId;
   if (test.discoveryTimeoutS !== undefined) options.timeoutS = test.discoveryTimeoutS;
   if (test.bookmarkWaitS !== undefined) options.waitS = test.bookmarkWaitS;
   if (test.bookmarkPollS !== undefined) options.pollS = test.bookmarkPollS;
   if (test.pageDelayS !== undefined) options.pageDelayS = test.pageDelayS;
+  // **Stop** pressed while the pacing was stored (2.0.0): a stop too — no tab opened, nothing asked of
+  // TikTok; bookmark.js asks it again before it opens its tab and before it asks for the drama's page
+  if (app.stopRequested) throw new StopRequested();
+  const contacted = job.contacted === true;
   await noteContact(job);
   if (app.unsaved !== null) {
     entry["error"] = app.unsaved; // that save refused: not one request
@@ -4205,7 +4220,11 @@ async function removeFavorite(job, engine, entry, record) {
     }
     return bookmarkFailed(error, title, record, entry);
   } finally {
-    await noteContact(job);
+    // the contact noted again once TikTok was asked; a removal that ended before it asked for the
+    // drama's page — a Stop, a tab that would not open — asked TikTok nothing after all (2.0.0): its
+    // job made no contact, so no “DramaFetch stopped” alert counts it (alertJobEnd)
+    if (asked) await noteContact(job);
+    else job.contacted = contacted;
   }
   record["outcome"] = outcome;
   if (outcome === "already") {
