@@ -8310,6 +8310,18 @@ function completeRun(seriesId, count = 3, rows = {}) {
 const autoRemovalsOf = (page) => jobsOf(page).filter((job) => job.kind === "unbookmark" && job.bookmark?.auto !== undefined);
 
 /**
+ * The re-listings DramaFetch's own removals queued (2.0.0: a removal whose episode count was more
+ * than 24 hours old at its turn lists its drama again first) — running or waiting —, in order.
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ */
+const relistsOf = (page) => jobsOf(page).filter((job) => job.kind === "batch" && job.relist !== undefined);
+
+/** The outcome of DramaFetch's own removal that queued a re-listing of its drama in its place (2.0.0). */
+const RELISTED = "not removed yet: its episode count was more than 24 hours old — DramaFetch lists the drama again first, then removes it";
+/** The same, when a download of the drama waiting in the queue lists it again by itself (nothing queued). */
+const RELIST_PENDING = "not removed yet: a download of the drama waiting in the queue lists it again first";
+
+/**
  * `chrome.storage.local.get` and `chrome.storage.session.get` counted while `act` runs (what it asks
  * of the storage before it returns).
  * @param {() => void} act
@@ -8551,7 +8563,7 @@ test("after its automatic retry (2.0.0): a drama whose E02 did not download is n
   }
 });
 
-test("the gate of DramaFetch's own removal (2.0.0): when its download found the drama complete counts like the records' complete mark in the 24 h freshness check — the library's counts read 25 h ago and no complete mark (a retry's selection sets none): the user's removal is stale, DramaFetch's own goes on and removes it; found complete 25 h ago, or at no known time, stale too —; the records holding a locked episode stop DramaFetch's own (not on disk, nothing asked) while the user's own goes on", async () => {
+test("the gate of DramaFetch's own removal (2.0.0): when its download found the drama complete counts like the records' complete mark in the 24 h freshness check — the library's counts read 25 h ago and no complete mark (a retry's selection sets none): the user's removal is stale, DramaFetch's own goes on and removes it; found complete 25 h ago, or at no known time, too old as well: nothing pressed — the first such removal lists its drama again (one re-listing queued), one a re-listing led to (`relisted`) is stale —; the records holding a locked episode stop DramaFetch's own (not on disk, nothing asked) while the user's own goes on", async () => {
   const dayAgo = Date.now() / 1000 - 25 * 3600;
   const old = {
     favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946, fullReadAt: dayAgo, listedAt: dayAgo }),
@@ -8561,13 +8573,16 @@ test("the gate of DramaFetch's own removal (2.0.0): when its download found the 
   const cases = [
     ["the user's own", undefined, 0, BOOKMARK_MESSAGES.stale],
     ["DramaFetch's own, found complete a minute ago", { foundCompleteAt: Date.now() / 1000 - 60, alertId: null }, 1, undefined],
-    ["DramaFetch's own, found complete 25 h ago", { foundCompleteAt: dayAgo, alertId: null }, 0, BOOKMARK_MESSAGES.stale],
-    ["DramaFetch's own, at no known time", { foundCompleteAt: null, alertId: null }, 0, BOOKMARK_MESSAGES.stale],
+    ["DramaFetch's own, found complete 25 h ago: its drama listed again first", { foundCompleteAt: dayAgo, alertId: null }, 0, RELISTED],
+    ["DramaFetch's own, found complete 25 h ago, a re-listing's", { foundCompleteAt: dayAgo, alertId: null, relisted: true }, 0, BOOKMARK_MESSAGES.stale],
+    ["DramaFetch's own, at no known time: its drama listed again first", { foundCompleteAt: null, alertId: null }, 0, RELISTED],
+    ["DramaFetch's own, at no known time, a re-listing's", { foundCompleteAt: null, alertId: null, relisted: true }, 0, BOOKMARK_MESSAGES.stale],
   ];
   for (const [label, auto, clicks, error] of cases) {
     const page = await fakePage({ storage: old });
     try {
       const { site } = bookmarkChrome({ profileTab: false });
+      page.hold(); // a re-listing queued starts and waits at its tabs.getCurrent: it asks nothing
       const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3, auto);
       /** @type {Record<string, unknown>} */
       const entry = {};
@@ -8575,6 +8590,7 @@ test("the gate of DramaFetch's own removal (2.0.0): when its download found the 
       assert.equal(site.clicks, clicks, label);
       assert.equal(entry["error"], error, label);
       assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], error ?? "removed", label);
+      assert.equal(relistsOf(page).length, error === RELISTED ? 1 : 0, label);
     } finally {
       page.restore();
     }
@@ -8606,7 +8622,7 @@ test("the gate of DramaFetch's own removal (2.0.0): when its download found the 
   }
 });
 
-test("the gate of DramaFetch's own removal of a drama TikTok's favorites list gives no episode count for (2.0.0): the records are checked against the count of the list its download read (`auto.episodes`) — a retry's selection sets no complete mark, which is all the records could vouch with otherwise —: every episode saved, found complete a minute ago, removes it; fewer saved than that count, no count carried (a complete skip's), or found complete 25 h ago ask nothing; the user's own removal is unchanged; a drama the library holds a count for is checked against the library's count, never the download's", async () => {
+test("the gate of DramaFetch's own removal of a drama TikTok's favorites list gives no episode count for (2.0.0): the records are checked against the count of the list its download read (`auto.episodes`) — a retry's selection sets no complete mark, which is all the records could vouch with otherwise —: every episode saved, found complete a minute ago, removes it; fewer saved than that count, no count carried (a complete skip's), or found complete 25 h ago ask nothing — found complete 25 h ago, the first such removal lists the drama again (one re-listing queued), one a re-listing led to ends `no-count` —; the user's own removal is unchanged; a drama the library holds a count for is checked against the library's count, never the download's", async () => {
   const TITLE = "The Lighthouse Keeper's Promise";
   const soon = Date.now() / 1000 - 60;
   const dayAgo = Date.now() / 1000 - 25 * 3600;
@@ -8623,7 +8639,8 @@ test("the gate of DramaFetch's own removal of a drama TikTok's favorites list gi
     ["DramaFetch's own, its download's list counted 3, 2 saved", null, [1, 2], { foundCompleteAt: soon, alertId: null, episodes: 3 }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
     ["DramaFetch's own, no count carried", null, [1, 2, 3], { foundCompleteAt: soon, alertId: null }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
     ["DramaFetch's own, count carried as null", null, [1, 2, 3], { foundCompleteAt: soon, alertId: null, episodes: null }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
-    ["DramaFetch's own, found complete 25 h ago", null, [1, 2, 3], { foundCompleteAt: dayAgo, alertId: null, episodes: 3 }, 0, BOOKMARK_MESSAGES["no-count"]],
+    ["DramaFetch's own, found complete 25 h ago: its drama listed again first", null, [1, 2, 3], { foundCompleteAt: dayAgo, alertId: null, episodes: 3 }, 0, RELISTED],
+    ["DramaFetch's own, found complete 25 h ago, a re-listing's", null, [1, 2, 3], { foundCompleteAt: dayAgo, alertId: null, episodes: 3, relisted: true }, 0, BOOKMARK_MESSAGES["no-count"]],
     ["DramaFetch's own, the library counts 4", 4, [1, 2, 3], { foundCompleteAt: soon, alertId: null, episodes: 3 }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
     ["DramaFetch's own, the library counts 3", 3, [1, 2, 3], { foundCompleteAt: soon, alertId: null, episodes: 9 }, 1, undefined],
   ];
@@ -8631,6 +8648,7 @@ test("the gate of DramaFetch's own removal of a drama TikTok's favorites list gi
     const page = await fakePage({ storage: storage(count, saved) });
     try {
       const { site, log } = bookmarkChrome({ profileTab: false });
+      page.hold(); // a re-listing queued starts and waits at its tabs.getCurrent: it asks nothing
       const { job, engine } = removalJob(page, LIGHTHOUSE, TITLE, count, auto);
       /** @type {Record<string, unknown>} */
       const entry = {};
@@ -8638,6 +8656,7 @@ test("the gate of DramaFetch's own removal of a drama TikTok's favorites list gi
       assert.equal(site.clicks, clicks, label);
       assert.equal(entry["error"], error, label);
       assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], error ?? "removed", label);
+      assert.equal(relistsOf(page).length, error === RELISTED ? 1 : 0, label);
       if (clicks === 0) assert.deepEqual(log, [], label); // nothing asked: no tab opened
     } finally {
       page.restore();
@@ -9367,6 +9386,977 @@ test("the automatic removal in Spanish under a Spanish Chrome (2.0.0): its queue
   }
 });
 
+// ------- DramaFetch 2.0.0: an automatic removal too old at its turn lists its drama again, once (A1)
+
+/** The drama of the re-listing tests, as the library holds it. */
+const KEEPER = "The Lighthouse Keeper's Promise";
+/** The label of its re-listing (the progress card, the test journal). */
+const RELIST_LABEL = `List “${KEEPER}” again, then remove it from your Favorites (automatic)`;
+/** Its re-listing's row in the Waiting card: what it is, the drama's name and its whole id. */
+const RELIST_ROW = `List again, then remove from Favorites (automatic) — ${KEEPER} · ${LIGHTHOUSE}`;
+/** The library's status line of a removal that lists its drama again first (or finds a download of it waiting). */
+const RELIST_LINE = `“${KEEPER}”: its episode count is more than a day old — DramaFetch lists it again, then removes it from your Favorites.`;
+/** The stale gate's line: the user's own removal's, and that of a removal a re-listing led to. */
+const STALE_LINE = `“${KEEPER}” was not removed: its episode count was read from TikTok more than 24 hours ago, and new episodes may have come since. Press Update from TikTok first, then remove it. Nothing was asked of TikTok.`;
+/** The library's status line of DramaFetch's own removal ended by its setting, saved unticked. */
+const TURNED_OFF_LINE = `“${KEEPER}” stays in your Favorites: the automatic removal was turned off before DramaFetch asked TikTok anything.`;
+/** The drama's ✓ alert of the download that queued the removal: what the removal's own alert replaces. */
+const EARLIER_ALERT = `dramafetch-alert:earlier:7:${LIGHTHOUSE}:complete`;
+
+/**
+ * Storage in which every count DramaFetch holds of LIGHTHOUSE is more than a day old: the library's
+ * whole list read 25 hours ago — LIGHTHOUSE with 3 episodes (none with `episodes` null), OTHER_ID,
+ * SNOW_A — and LIGHTHOUSE's three episodes saved, found complete 25 hours ago.
+ * @param {number | null} [episodes]
+ * @returns {Record<string, unknown>}
+ */
+function staleStorage(episodes = 3) {
+  const dayAgo = Date.now() / 1000 - 25 * 3600;
+  return {
+    favoritesLibrary: storedLibrary(
+      [
+        [LIGHTHOUSE, KEEPER, episodes],
+        [OTHER_ID, SECOND_TITLE, 3],
+        [SNOW_A, "Snowfall in Two Cities", 60],
+      ],
+      { total: 946, fullReadAt: dayAgo, listedAt: dayAgo },
+    ),
+    [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3, completeAt: dayAgo }),
+  };
+}
+
+/**
+ * DramaFetch's own removal of LIGHTHOUSE as a download that found it complete 25 hours ago — and
+ * showed the drama's ✓ alert — queued it.
+ * @param {Partial<import("../src/app/app.js").AutoRemoval>} [changes]
+ * @returns {import("../src/app/app.js").AutoRemoval}
+ */
+const dayOld = (changes = {}) => ({ foundCompleteAt: Date.now() / 1000 - 25 * 3600, alertId: EARLIER_ALERT, episodes: 3, ...changes });
+
+/**
+ * The re-listing a removal of LIGHTHOUSE queues, as the queue holds it (its id left out): a batch
+ * over the drama, `recheck` on, `relist` the removal's alert id.
+ * @param {string | null} alertId
+ * @returns {Omit<import("../src/app/app.js").Job, "id">}
+ */
+const relistOf = (alertId) => ({ kind: "batch", label: RELIST_LABEL, refs: [refOf(LIGHTHOUSE)], series: null, numbers: [], includeLocked: false, recheck: true, relist: { alertId } });
+
+/**
+ * A removal of LIGHTHOUSE run as its job runs it (`auto`: DramaFetch's own, else the user's), the
+ * drama's TikTok page faked: what it returned, its record and what it asked of TikTok.
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ * @param {import("../src/app/app.js").AutoRemoval | undefined} auto
+ * @param {{episodes?: number | null, chrome?: Parameters<typeof bookmarkChrome>[0]}} [options] the
+ *   library's count the job carries; the faked page
+ */
+async function removalOfKeeper(page, auto, options = {}) {
+  const { site, log } = bookmarkChrome(options.chrome ?? { profileTab: false });
+  const { job, engine, pauses } = removalJob(page, LIGHTHOUSE, KEEPER, options.episodes === undefined ? 3 : options.episodes, auto);
+  /** @type {Record<string, unknown>} */
+  const entry = {};
+  const stop = await page.module.runUnbookmark(job, engine, entry);
+  return { stop, entry, site, log, pauses };
+}
+
+test("DramaFetch's own removal whose episode count is more than 24 hours old at its turn (2.0.0) — found complete 25 h ago, the library's whole list read 25 h ago, the records' mark as old — asks TikTok nothing (no tab, no press, no pause) and, in place of `stale` and its ⚠, lists its drama again first: ONE re-listing at the END of the queue — a batch over the drama, `recheck` on, `relist` the removal's alert id, labelled (automatic) —, its own row in the Waiting card, its card Queued (a download of it, as a paste) — a paste of the drama, the user's own request, queued behind it all the same —; the outcome in the job's record, the library's line says so, no alert, not a stop; in Spanish too", async () => {
+  const page = await fakePage({ storage: staleStorage() });
+  try {
+    const { element } = page;
+    const notes = fakeNotifications();
+    page.hold(); // every job stays at its tabs.getCurrent: it runs, and makes no request
+    assert.equal(paste(page, SERIES_ID), true); // running
+    assert.equal(paste(page, THIRD_ID), true); // waiting
+    const { stop, entry, site, log, pauses } = await removalOfKeeper(page, dayOld());
+    assert.equal(stop, null); // not a stop: the jobs waiting go on
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []); // no tab: nothing asked of TikTok
+    assert.deepEqual(pauses, []); // it ended at its gate, before the rest between jobs
+    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: RELISTED });
+    assert.equal(entry["error"], RELISTED);
+    assert.deepEqual(notes.created, []); // no alert: the drama's ✓ one stays as it was
+    assert.equal(element("favorites-status").textContent, RELIST_LINE);
+    // ONE re-listing, at the end of the queue: after the job running and the one waiting
+    assert.deepEqual(
+      jobsOf(page).map((queued) => queued.label),
+      [`Series ${SERIES_ID}`, `Series ${THIRD_ID}`, RELIST_LABEL],
+    );
+    assert.deepEqual(jobsOf(page)[2], relistOf(EARLIER_ALERT));
+    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), dramaRow(THIRD_ID), RELIST_ROW]);
+    const row = element("queue-list").children[2];
+    assert.equal(row?.getAttribute("data-kind"), "autorelist");
+    assert.equal(row?.className, "queue-row autorelist");
+    // a download of the drama, as a paste of it is: its card says Queued — yet a paste of the drama,
+    // the user's own request, is never folded into it (an untick or Stop takes the re-listing out):
+    // queued behind it, the user's own job
+    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "queued");
+    assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, false);
+    assert.equal(paste(page, LIGHTHOUSE), true);
+    assert.equal(element("input-status").textContent, `Series ${LIGHTHOUSE} queued: it downloads whole, with the usual pauses.`);
+    assert.deepEqual(
+      jobsOf(page).map((queued) => queued.label),
+      [`Series ${SERIES_ID}`, `Series ${THIRD_ID}`, RELIST_LABEL, `Series ${LIGHTHOUSE}`],
+    );
+    assert.equal(jobsOf(page)[3]?.relist, undefined);
+  } finally {
+    page.restore();
+  }
+  const es = await fakePage({ language: "es", storage: staleStorage() });
+  try {
+    fakeNotifications();
+    es.hold();
+    const { entry } = await removalOfKeeper(es, dayOld());
+    assert.equal(entry["error"], RELISTED); // the engine's English
+    assert.equal(es.element("favorites-status").textContent, `“${KEEPER}”: su número de episodios tiene más de un día — DramaFetch lo vuelve a listar y después lo quita de tu Bookmark.`);
+    assert.equal(relistsOf(es)[0]?.label, `Volver a listar “${KEEPER}” y quitarlo de tu Bookmark (automático)`);
+    assert.deepEqual(waitingRows(es), [`Volver a listar y quitar de Bookmark (automático) — ${KEEPER} · ${LIGHTHOUSE}`]); // running: not begun yet
+  } finally {
+    es.restore();
+  }
+});
+
+test("the same for a drama TikTok's favorites list gives no episode count for (2.0.0, `no-count`): every episode saved against the count of the list its download read (`auto.episodes` 3), found complete 25 h ago — nothing asked of TikTok, ONE re-listing queued (`relist.alertId` null: its download showed no ✓ alert), the library's line says so, no alert, not a stop", async () => {
+  const page = await fakePage({ storage: staleStorage(null) });
+  try {
+    const notes = fakeNotifications();
+    page.hold();
+    const { stop, entry, site, log } = await removalOfKeeper(page, dayOld({ alertId: null }), { episodes: null });
+    assert.equal(stop, null);
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: RELISTED });
+    assert.equal(entry["error"], RELISTED);
+    assert.deepEqual(notes.created, []);
+    assert.equal(page.element("favorites-status").textContent, RELIST_LINE);
+    assert.deepEqual(jobsOf(page), [relistOf(null)]); // nothing else to run: it started (held)
+    assert.deepEqual(waitingRows(page), [RELIST_ROW]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the re-listing runs as a paste of its drama does (2.0.0): its drama listed again — `recheck`: even a complete mark of an hour ago skips nothing —, found complete: its ✓ alert under the removal's alert id (Chrome replaces the drama's earlier one), and its automatic removal queued, `auto.relisted` with that same alert id, when it found it complete; that removal, its count fresh now, presses TikTok's Bookmark ONCE, and ✓ removed takes the same id", async () => {
+  const page = await fakePage({ storage: staleStorage() });
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    await removalOfKeeper(page, dayOld());
+    const [relist] = module.queuedJobs(); // running, held at its tabs.getCurrent
+    assert.ok(relist !== undefined && relist.relist !== undefined);
+    // its run as runJob makes it: the page's own hooks over a scripted TikTok, the drama's records
+    // saying complete an hour ago (the scripted clock's) — what a paste without `recheck` skips
+    const scripted = scriptedEngine(page, relist);
+    const state = newState(LIGHTHOUSE, KEEPER);
+    for (const number of [1, 2, 3]) {
+      record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: 1_800_000_000 - 7200 });
+    }
+    markComplete(state, 1_800_000_000 - 3600, 3);
+    scripted.states.set(LIGHTHOUSE, JSON.parse(JSON.stringify(state)));
+    /** @type {string[]} */
+    const listed = [];
+    const discover = scripted.engine.discover;
+    scripted.engine.discover = (ref) => (listed.push(ref.seriesId), discover(ref));
+    const before = Date.now() / 1000;
+    const runs = await runBatch(scripted.engine, relist.refs);
+    await page.turn();
+    assert.deepEqual(listed, [LIGHTHOUSE]); // listed again: one listing
+    assert.deepEqual(runs.map((run) => [run.report.skippedComplete, run.report.complete, run.report.locked, run.stop]), [[false, true, 0, false]]);
+    // the drama's ✓ alert under the removal's id: Chrome replaces the earlier one
+    assert.deepEqual(notes.created, [EARLIER_ALERT]);
+    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], "✓ Drama 4561 — downloaded");
+    // its removal, at the end of the queue, marked: a re-listing led to it
+    const [removal, ...more] = autoRemovalsOf(page);
+    assert.deepEqual(more, []);
+    assert.deepEqual(jobsOf(page).map((queued) => queued.label), [RELIST_LABEL, `Remove “${KEEPER}” from your Favorites (automatic)`]);
+    const auto = removal?.bookmark?.auto;
+    assert.ok(auto !== undefined);
+    assert.ok(Number(auto.foundCompleteAt) >= before, `found complete at ${auto.foundCompleteAt}`);
+    assert.deepEqual({ ...auto, foundCompleteAt: 0 }, { foundCompleteAt: 0, alertId: EARLIER_ALERT, episodes: 3, relisted: true });
+    // that removal: its count fresh now — one press, removed, ✓ under the same id
+    const { stop, entry, site } = await removalOfKeeper(page, auto);
+    assert.equal(stop, null);
+    assert.equal(site.clicks, 1);
+    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
+    assert.deepEqual(notes.created, [EARLIER_ALERT, EARLIER_ALERT]);
+    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `✓ ${KEEPER} — removed from your Favorites`);
+  } finally {
+    page.restore();
+  }
+});
+
+test("a removal a re-listing led to (`auto.relisted`) whose count is more than 24 hours old again at its turn (2.0.0): today's end — `stale`, its line, its ⚠ alert under the drama's ✓ one —, and never a second re-listing", async () => {
+  const page = await fakePage({ storage: staleStorage() });
+  try {
+    const notes = fakeNotifications();
+    page.hold();
+    const { stop, entry, site, log } = await removalOfKeeper(page, dayOld({ relisted: true }));
+    assert.equal(stop, null);
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
+    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], BOOKMARK_MESSAGES.stale);
+    assert.equal(page.element("favorites-status").textContent, STALE_LINE);
+    assert.deepEqual(jobsOf(page), []); // no second re-listing
+    assert.deepEqual(notes.created, [EARLIER_ALERT]);
+    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `⚠ ${KEEPER} — still in your Favorites`);
+    assert.equal(notes.shown.get(EARLIER_ALERT)?.["message"], plainText(STALE_LINE));
+  } finally {
+    page.restore();
+  }
+});
+
+test("a download of the drama already waiting in the queue — a paste of it, a Retry of some of its episodes — lists it again by itself, and its drama's end queues a fresh removal (2.0.0): the removal too old at its turn queues nothing (`RELIST_PENDING`), asks TikTok nothing, no alert, the library's line says so, not a stop", async () => {
+  for (const waiting of ["a paste", "a Retry"]) {
+    const page = await fakePage({ storage: staleStorage() });
+    try {
+      const { element, module } = page;
+      const notes = fakeNotifications();
+      page.hold();
+      assert.equal(paste(page, SERIES_ID), true); // running
+      if (waiting === "a paste") {
+        assert.equal(paste(page, LIGHTHOUSE), true);
+      } else {
+        module.renderFailed([seriesRecord(LIGHTHOUSE, KEEPER, [[2, "failed"]])]);
+        element("retry-button").fire("click");
+      }
+      const queued = jobsOf(page);
+      assert.equal(queued.length, 2, waiting);
+      assert.equal(queued[1]?.kind, waiting === "a paste" ? "batch" : "selection", waiting);
+      const { stop, entry, site, log } = await removalOfKeeper(page, dayOld());
+      assert.equal(stop, null, waiting);
+      assert.equal(site.clicks, 0, waiting);
+      assert.deepEqual(log, [], waiting);
+      assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: RELIST_PENDING }, waiting);
+      assert.equal(entry["error"], RELIST_PENDING, waiting);
+      assert.deepEqual(jobsOf(page), queued, waiting); // nothing queued
+      assert.deepEqual(notes.created, [], waiting);
+      assert.equal(element("favorites-status").textContent, RELIST_LINE, waiting);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test("refused, the removal too old at its turn ends as before (2.0.0): with a cooldown in force, a write the storage refused, or the automatic removals halted in this page — `stale`, its line, its ⚠ alert —; with the setting saved unticked meanwhile, as an untick ends it before its first request — its line, no alert —, a removal a re-listing led to (`relisted`) as well; never a re-listing, nothing asked of TikTok", async () => {
+  const at = Date.now() / 1000;
+  /** @type {{label: string, storage?: Record<string, unknown>, before?: (page: Awaited<ReturnType<typeof fakePage>>) => Promise<void>, auto?: import("../src/app/app.js").AutoRemoval, error: string, line: string, alert: boolean}[]} */
+  const cases = [
+    { label: "a cooldown in force", storage: { cooldown: { until: at + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: at } }, error: BOOKMARK_MESSAGES.stale, line: STALE_LINE, alert: true },
+    {
+      label: "a write refused earlier in this page",
+      before: async (page) => {
+        const engine = page.module.buildEngine({ ...BATCH_JOB }, { pauses: [], inputs: [], taking: true });
+        Object.assign(chrome.storage.local, {
+          set: async () => {
+            throw new Error(REFUSED);
+          },
+        });
+        await engine.persist?.(); // a save of the pacing, refused: remembered (`app.unsaved`)
+        assert.equal(engine.unsaved?.(), UNSAVED);
+      },
+      error: BOOKMARK_MESSAGES.stale,
+      line: STALE_LINE,
+      alert: true,
+    },
+    {
+      label: "the automatic removals halted",
+      before: async (page) => {
+        // a removal TikTok did not keep — DramaFetch's own, its count fresh: it presses — halts them
+        const { stop } = await removalOfKeeper(page, dayOld({ foundCompleteAt: Date.now() / 1000 - 60, alertId: null }), { chrome: { keeps: false, profileTab: false } });
+        assert.equal(stop, BOOKMARK_MESSAGES["not-kept"]);
+      },
+      error: BOOKMARK_MESSAGES.stale,
+      line: STALE_LINE,
+      alert: true,
+    },
+    { label: "the setting saved unticked", storage: { settings: { autoRemove: false } }, error: "not removed: the automatic removal from the Favorites was turned off before anything was asked of TikTok", line: TURNED_OFF_LINE, alert: false },
+    // an untick wins over the once-only rule too: the user's own doing, never a ⚠ `stale`
+    { label: "the setting saved unticked, a removal a re-listing led to", storage: { settings: { autoRemove: false } }, auto: dayOld({ relisted: true }), error: "not removed: the automatic removal from the Favorites was turned off before anything was asked of TikTok", line: TURNED_OFF_LINE, alert: false },
+  ];
+  for (const item of cases) {
+    const page = await fakePage({ storage: { ...staleStorage(), ...item.storage } });
+    try {
+      const notes = fakeNotifications();
+      page.hold();
+      await item.before?.(page);
+      const created = [...notes.created];
+      const { stop, entry, site, log } = await removalOfKeeper(page, item.auto ?? dayOld());
+      assert.equal(stop, null, item.label);
+      assert.equal(site.clicks, 0, item.label);
+      assert.deepEqual(log, [], item.label);
+      assert.equal(entry["error"], item.error, item.label);
+      assert.equal(page.element("favorites-status").textContent, item.line, item.label);
+      assert.deepEqual(relistsOf(page), [], item.label);
+      if (!item.alert) {
+        assert.deepEqual(notes.created, created, item.label);
+        continue;
+      }
+      assert.deepEqual(notes.created, [...created, EARLIER_ALERT], item.label);
+      assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `⚠ ${KEEPER} — still in your Favorites`, item.label);
+      assert.equal(notes.shown.get(EARLIER_ALERT)?.["message"], plainText(STALE_LINE), item.label);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test("the user's own Remove from Favorites too old at its turn is unchanged (2.0.0): `stale`, its line — Press Update from TikTok first, then remove it —, no alert, never a re-listing", async () => {
+  const page = await fakePage({ storage: staleStorage() });
+  try {
+    const notes = fakeNotifications();
+    page.hold();
+    const { stop, entry, site, log } = await removalOfKeeper(page, undefined);
+    assert.equal(stop, null);
+    assert.equal(site.clicks, 0);
+    assert.deepEqual(log, []);
+    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
+    assert.equal(page.element("favorites-status").textContent, STALE_LINE);
+    assert.deepEqual(jobsOf(page), []);
+    assert.deepEqual(notes.created, []);
+  } finally {
+    page.restore();
+  }
+});
+
+test("Stop and the automatic removal saved unticked — in this tab (Save settings) or in another one (the page follows the stored settings) — take a waiting re-listing out of the queue with the automatic removals (2.0.0): a part of an automatic removal, counted in the library's line, `not started: …` in the journal, no alert; the user's download behind them stays in the queue", async () => {
+  for (const how of ["Stop", "Save settings", "another tab"]) {
+    const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
+    try {
+      const { element, local, module } = page;
+      const notes = fakeNotifications();
+      page.hold();
+      assert.equal(paste(page, SERIES_ID), true); // running
+      await removalOfKeeper(page, dayOld()); // its re-listing, waiting
+      module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {}); // an automatic removal, waiting
+      assert.equal(paste(page, THIRD_ID), true); // the user's download, waiting
+      assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), RELIST_ROW, AUTO_ROW, dramaRow(THIRD_ID)], how);
+      const created = [...notes.created]; // the second drama's ✓
+      if (how === "Stop") {
+        element("stop-button").fire("click");
+      } else if (how === "Save settings") {
+        element("setting-auto-remove").checked = false;
+        element("settings-form").fire("submit");
+        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+      } else {
+        local.set("settings", { ...DEFAULT_SETTINGS, autoRemove: false });
+        page.storageChanged("settings");
+        await settled(page);
+      }
+      assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), dramaRow(THIRD_ID)], how);
+      assert.deepEqual(relistsOf(page), [], how);
+      assert.equal(element("favorites-status").textContent, "2 automatic removals from your Favorites taken out of the queue: their cards keep Remove from Favorites.", how);
+      const notStarted = how === "Stop" ? `not started: batch stopped in Series ${SERIES_ID} (stopped by you)` : "not started: the automatic removal from the Favorites was turned off";
+      assert.deepEqual(
+        module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"]]),
+        [
+          ["unbookmark", AUTO_LABEL, notStarted],
+          ["batch", RELIST_LABEL, notStarted],
+        ],
+        how,
+      );
+      assert.deepEqual(notes.created, created, how); // no alert for them
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test("a re-listing a stop takes out of the queue (2.0.0) is part of an automatic removal, never a download the user lost: `not started: …` in the journal, no alert of its own, and the stop's one alert counts only the user's dramas not started", async () => {
+  const page = await fakePage({
+    testSettings: { ...QUICK, bookmarkPollS: 0.001, bookmarkWaitS: 0.5 },
+    storage: { ...staleStorage(), [`series:${OTHER_ID}`]: savedState(OTHER_ID, [1, 2, 3], { complete: 3, completeAt: Date.now() / 1000 - 60 }) },
+  });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const open = gateJobs();
+    // the user's own removal of the second drama (found complete a minute ago), which TikTok does not keep — a stop
+    bookmarkChrome({ keeps: false, profileTab: false });
+    actionOf(page, OTHER_ID, "remove")?.fire("click");
+    await settled(page);
+    element("bookmark-confirm").fire("click");
+    await page.turn(); // running: at its tabs.getCurrent
+    const userLabel = `Remove “${SECOND_TITLE}” from your Favorites`;
+    // behind it: the re-listing of a removal too old at its turn, and a download the user pasted
+    const { entry } = await removalOfKeeper(page, dayOld(), { chrome: { keeps: false, profileTab: false } });
+    assert.equal(entry["error"], RELISTED);
+    assert.equal(paste(page, THIRD_ID), true);
+    assert.deepEqual(jobsOf(page).map((job) => job.label), [userLabel, RELIST_LABEL, `Series ${THIRD_ID}`]);
+    open();
+    for (let turn = 0; turn < 2000 && (module.journal().length < 3 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const notKept = BOOKMARK_MESSAGES["not-kept"];
+    const notStarted = `not started: batch stopped in ${userLabel} (${notKept})`;
+    assert.deepEqual(
+      module.journal().map((job) => [job["label"], job["error"]]),
+      [
+        [userLabel, notKept],
+        [`Series ${THIRD_ID}`, notStarted],
+        [RELIST_LABEL, notStarted],
+      ],
+    );
+    // the stop's one alert: the user's download only — the re-listing's drama is on disk
+    const stopped = `dramafetch-alert:${module.alerts.page}:1:stopped`;
+    assert.deepEqual(notes.created, [stopped]);
+    assert.equal(notes.shown.get(stopped)?.["title"], `DramaFetch stopped: ${notKept}`);
+    assert.equal(notes.shown.get(stopped)?.["message"], "1 drama was not started — download it again later");
+  } finally {
+    page.restore();
+  }
+});
+
+/**
+ * The first job the page starts waits at its `chrome.tabs.getCurrent` until the test releases it;
+ * every later one waits there for good (it runs, and makes no request).
+ * @returns {() => void} what releases the first one
+ */
+function gateFirstJob() {
+  const tabs = /** @type {{getCurrent: () => Promise<unknown>}} */ (/** @type {unknown} */ (globalThis.chrome.tabs));
+  const answer = tabs.getCurrent;
+  /** @type {(value?: unknown) => void} */
+  let release = () => undefined;
+  const released = new Promise((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  tabs.getCurrent = () => {
+    calls += 1;
+    return calls === 1 ? released.then(() => answer()) : new Promise(() => undefined);
+  };
+  return () => release();
+}
+
+test("the re-listing's own gate (2.0.0), asked before its rest between jobs and again after it: the automatic removal saved unticked, halted, or its drama no longer in the library — marked removed, or left out of TikTok's whole list an Update from TikTok read — met as it starts, or during its rest — ends it there with no request and no alert; not a stop: the next waiting job runs; the journal's `not started: …`, the library's line says why — the halt's sentence added to the line as it stands then", async () => {
+  /** @type {Record<"off" | "halted" | "gone" | "dropped", string>} */
+  const ENDS = {
+    off: "not started: the automatic removal from the Favorites was turned off",
+    halted: "not started: the automatic removal from the Favorites is halted",
+    gone: "not started: the drama is no longer in the library",
+    dropped: "not started: the drama is no longer in the library",
+  };
+  /** @param {string} name */
+  const goneLine = (name) => `“${name}” was not removed: it is no longer in your library — TikTok's list, read after DramaFetch queued its removal, no longer holds it, or it was removed already. Nothing was asked of TikTok.`;
+  /** The library's line as it stands when the re-listing's gate asks, once a removal halted the automatic ones: another one since (a listing's, say). */
+  const LATER_LINE = "Listed 3 dramas.";
+  /** TikTok's whole favorites list, one page, without LIGHTHOUSE: the owner took it out of their Favorites in the TikTok app meanwhile. */
+  const withoutKeeper = { "0": { ...FAVORITES_CAPTURE, total: "2", cursor: "1794350100", hasMore: false, dramaList: [listed(OTHER_ID, SECOND_TITLE, 3), listed(SNOW_A, "Snowfall in Two Cities", 60)] } };
+  const REST_S = 0.5;
+  for (const when of /** @type {const} */ (["at its start", "during its rest"])) {
+    for (const what of /** @type {const} */ (["off", "halted", "gone", "dropped"])) {
+      const label = `${what}, ${when}`;
+      // TikTok contacted "a minute from now" as the page reads its clock: the rest between jobs is due whatever the test's pace
+      const page = await fakePage({ testSettings: { ...QUICK, restMinS: REST_S, restMaxS: REST_S }, storage: { ...staleStorage(), pacing: { lastContactAt: Date.now() / 1000 + 60 } } });
+      try {
+        const { element, module } = page;
+        const notes = fakeNotifications();
+        const release = gateFirstJob();
+        let requests = (await removalOfKeeper(page, dayOld())).log; // its re-listing: started, at its tabs.getCurrent
+        assert.deepEqual(relistsOf(page), [relistOf(EARLIER_ALERT)], label);
+        assert.equal(paste(page, THIRD_ID), true); // the user's download, waiting behind it
+        /** @type {string[]} the favorites list's pages fetched from inside the profile's tab */
+        let fetched = [];
+        /** the condition, met now */
+        const meet = async () => {
+          if (what === "off") {
+            element("setting-auto-remove").checked = false;
+            element("settings-form").fire("submit");
+            for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+            assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("settings"))["autoRemove"], false, label);
+            return;
+          }
+          if (what === "dropped") {
+            // an Update from TikTok ran meanwhile and read TikTok's whole list without the drama: the
+            // library no longer holds it — and marks nothing removed
+            const tab = favoritesTab({ pages: withoutKeeper });
+            tab.remember(1_794_351_500);
+            const listing = favoritesJob();
+            assert.equal(await module.runFavorites(listing, favoritesEngine(page, listing).engine, {}), null, label);
+            fetched = tab.fetched;
+            assert.equal(fetched.length, 1, label); // the whole list: its one page
+            const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
+            assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), [OTHER_ID, SNOW_A], label);
+            assert.deepEqual(kept["removed"], [], label);
+            return;
+          }
+          // a removal of the drama ran meanwhile — DramaFetch's own, its count fresh: it presses —, which
+          // TikTok did not keep (the automatic removals halted) or kept (the drama marked removed)
+          const { stop, log } = await removalOfKeeper(page, dayOld({ foundCompleteAt: Date.now() / 1000 - 60, alertId: null }), { chrome: { keeps: what === "gone", profileTab: false } });
+          assert.equal(stop, what === "gone" ? null : BOOKMARK_MESSAGES["not-kept"], label);
+          requests = log;
+          if (what === "halted") element("favorites-status").textContent = LATER_LINE; // the line as it stands when the gate asks
+        };
+        if (when === "at its start") {
+          await meet();
+          release();
+        } else {
+          release();
+          for (let turns = 0; turns < 200 && element("progress-pause").hidden; turns += 1) await page.turn();
+          assert.equal(element("progress-pause").hidden, false, `${label}: the re-listing rests`);
+          const resting = Date.now();
+          await meet();
+          assert.ok(Date.now() - resting < REST_S * 1000, `${label}: the condition was met while the re-listing rested`);
+        }
+        const asked = [...requests];
+        const pagesAsked = fetched.length;
+        const alerted = [...notes.created];
+        // its rest is real time (the page's own sleep): waited for, for a few seconds at most
+        const deadline = Date.now() + 5000;
+        while (module.journal().length === 0 && Date.now() < deadline) await page.turn();
+        // ended at its gate: no request, no alert, not a stop
+        assert.deepEqual(
+          module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
+          [["batch", RELIST_LABEL, ENDS[what], null]],
+          label,
+        );
+        assert.deepEqual(module.journal()[0]?.["series"], [], label);
+        // met at its start: ended before its rest; met during its rest: ended right after it
+        const pauses = /** @type {{kind: string}[]} */ (module.journal()[0]?.["pauses"]);
+        assert.deepEqual(pauses.map((pause) => pause.kind), when === "at its start" ? [] : [JOB_REST], label);
+        assert.deepEqual(requests, asked, label);
+        assert.equal(fetched.length, pagesAsked, label);
+        assert.deepEqual(notes.created, alerted, label);
+        // the next waiting job runs (held at its tabs.getCurrent)
+        await settled(page);
+        assert.equal(element("app-status").dataset["state"], "running", label);
+        assert.equal(element("progress-current").textContent, `Series ${THIRD_ID}`, label);
+        assert.equal(module.journal().length, 1, label); // the download behind it was not taken out
+        const line = String(element("favorites-status").textContent);
+        if (what === "off") assert.equal(line, TURNED_OFF_LINE, label);
+        else if (what === "halted") assert.equal(line, `${LATER_LINE} ${HALTED_LINE}`, label); // said by the gate itself
+        // a drama the library no longer holds is named as DramaFetch's records name it (these tests' records: `A drama`)
+        else assert.equal(line, goneLine(what === "dropped" ? "A drama" : KEEPER), label);
+      } finally {
+        page.restore();
+      }
+    }
+  }
+});
+
+test("an automatic retry a re-listing queued (2.0.0) carries its `relist` — its “retrying” alert, its drama's ✓ and the removal's alert under the re-listing's alert id when it has one (one notification per drama), else its own — and the removal it queues once it completes the drama is marked `relisted`: never a second re-listing; it is a download, never taken out with the automatic removals when the setting is saved unticked", async () => {
+  for (const alertId of [`dramafetch-alert:earlier:5:${OTHER_ID}:complete`, null]) {
+    const page = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
+    try {
+      const { element, module } = page;
+      const notes = fakeNotifications();
+      page.hold();
+      assert.equal(paste(page, SERIES_ID), true); // running: what it queues waits behind it
+      /** @type {import("../src/app/app.js").Job} */
+      const relist = { ...BATCH_JOB, id: 7, label: `List “${SECOND_TITLE}” again, then remove it from your Favorites (automatic)`, refs: [refOf(OTHER_ID)], recheck: true, relist: { alertId } };
+      const scripted = scriptedEngine(page, relist, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+      const runs = await runBatch(scripted.engine, relist.refs);
+      await page.turn();
+      assert.deepEqual(runs.map((run) => [run.report.complete, run.stop]), [[false, false]]);
+      const retryId = alertId ?? `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+      const [, retry, ...more] = module.queuedJobs();
+      assert.deepEqual(more, []); // not complete: no removal
+      assert.ok(retry !== undefined);
+      assert.deepEqual(
+        { kind: retry.kind, numbers: retry.numbers, autoRetry: retry.autoRetry, relist: retry.relist },
+        { kind: "selection", numbers: [2], autoRetry: { alertId: retryId, name: "Drama 2399" }, relist: { alertId } },
+        String(alertId),
+      );
+      assert.deepEqual(notes.created, [retryId]); // “retrying”, in place of the drama's earlier alert when there is one
+      assert.equal(notes.shown.get(retryId)?.["title"], "↻ Drama 2399 — retrying 1 episode");
+      assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), whatRow("Automatic retry E02", OTHER_ID, "Drama 2399")]); // an automatic retry's row
+      // the retry's run, as runJob gets it: listed again, E02 saved now — every episode on disk
+      const second = scriptedEngine(page, retry);
+      second.states.set(OTHER_ID, scripted.states.get(OTHER_ID));
+      const run = await runSelectionJob(second.engine, refOf(OTHER_ID), retry.numbers, { lastContactAt: null });
+      assert.deepEqual([run.report.complete, run.report.locked], [true, 0]);
+      module.dramaDone(retry, run, second.jobRecord);
+      await page.turn();
+      const [removal] = autoRemovalsOf(page);
+      assert.equal(removal?.bookmark?.auto?.relisted, true, String(alertId)); // a re-listing led to it
+      assert.equal(removal?.bookmark?.auto?.alertId, retryId, String(alertId));
+      assert.deepEqual(notes.created, [retryId, retryId]); // “retrying”, then ✓ — one notification per drama
+      // the setting saved unticked: the automatic removal leaves the queue, the retry — a download — stays
+      element("setting-auto-remove").checked = false;
+      element("settings-form").fire("submit");
+      for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+      assert.deepEqual(autoRemovalsOf(page), []);
+      assert.deepEqual(module.queuedJobs().map((job) => job.label), [`Series ${SERIES_ID}`, "Automatic retry: 1 of Drama 2399"]);
+      assert.equal(element("favorites-status").textContent, "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.");
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+/**
+ * A complete skip of LIGHTHOUSE whose removal's turn comes more than a day after the records'
+ * complete mark (`checkedAgoS` 25 h: a skip finds a mark less than 24 hours old, and the queue ran
+ * on): through the page's own `dramaDone`, what queues DramaFetch's own removal of it, too old at
+ * its turn.
+ * @returns {import("../src/app/engine.js").SeriesRun}
+ */
+function staleSkipOfKeeper() {
+  const nowS = Date.now() / 1000;
+  const state = newState(LIGHTHOUSE, KEEPER);
+  for (const number of [1, 2, 3]) {
+    record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: nowS - 7200 });
+  }
+  markComplete(state, nowS - 3600, 3);
+  const skipped = completeSkip(state, { seriesId: LIGHTHOUSE, nowS, exists: () => true });
+  assert.ok(skipped !== null);
+  return { ref: refOf(LIGHTHOUSE), series: null, results: skipped.results, report: { ...skipped.report, checkedAgoS: 25 * 3600 }, error: null, stop: false, exitCode: 0, errorKind: null, contacted: false };
+}
+
+test("Stop pressed while DramaFetch's own removal too old at its turn is starting (2.0.0) — its job held at its gate (`chrome.tabs.getCurrent`), or reading the drama's records, before its freshness check —: a stop, as one met past that check is — no re-listing queued, no tab, no press, no alert, `stopped by you` in the journal and the jobs waiting cancelled; the library's line left as it was; the last download's Did not download block stays, and its Retry, pressed meanwhile, is given back — Stop asked before anything else that check may end it with: the same for a removal a re-listing led to (`relisted`: else `stale` and its ⚠) and for one whose setting is saved unticked as it starts (else the untick's end, not a stop)", async () => {
+  const AUTO_KEEPER = `Remove “${KEEPER}” from your Favorites (automatic)`;
+  /** @type {[string, "first" | "relisted" | "unticked"][]} where the removal is held; which removal */
+  const cases = [
+    ["its job's gate", "first"],
+    ["the records' read", "first"],
+    ["its job's gate", "relisted"],
+    ["its job's gate", "unticked"],
+  ];
+  for (const [where, variant] of cases) {
+    const label = `${where}, ${variant}`;
+    const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
+    try {
+      const { element, module } = page;
+      const notes = fakeNotifications();
+      const { site, log } = bookmarkChrome({ profileTab: false });
+      /** @type {() => void} what lets the removal go on */
+      let release = () => undefined;
+      /** @type {Promise<unknown>} the removal held where this case holds it */
+      let held = Promise.resolve();
+      if (where === "its job's gate") {
+        release = gateFirstJob(); // every later job waits there for good
+      } else {
+        // its read of the drama's records — the last thing it awaits before its freshness check — waits
+        const local = /** @type {{get: (keys: unknown) => Promise<Record<string, unknown>>}} */ (/** @type {unknown} */ (chrome.storage.local));
+        const get = local.get;
+        /** @type {(value?: unknown) => void} */
+        let reached = () => undefined;
+        held = new Promise((resolve) => {
+          reached = resolve;
+        });
+        const opened = new Promise((resolve) => {
+          release = () => resolve(undefined);
+        });
+        local.get = (keys) => {
+          if (keys !== `series:${LIGHTHOUSE}`) return get(keys);
+          local.get = get;
+          reached();
+          return opened.then(() => get(keys));
+        };
+      }
+      // the last download's Did not download block, with its Retry
+      module.renderFailed([seriesRecord(OTHER_ID, SECOND_TITLE, [[2, "failed"]])]);
+      // DramaFetch's own removal of LIGHTHOUSE, queued by a complete skip of it: it starts at once —
+      // `relisted`: queued by a re-listing's drama (the job carries `relist`), so that a count too
+      // old at its turn would end it `stale`, with its ⚠, and never list the drama again
+      const done = { ...BATCH_JOB, id: 7, refs: [refOf(LIGHTHOUSE)] };
+      module.dramaDone(variant === "relisted" ? { ...done, recheck: true, relist: { alertId: null } } : done, staleSkipOfKeeper(), {});
+      await held;
+      if (where === "the records' read") page.hold(); // every later job waits at its gate for good
+      assert.deepEqual(jobsOf(page).map((job) => job.label), [AUTO_KEEPER], label); // running
+      assert.equal(jobsOf(page)[0]?.bookmark?.auto?.relisted, variant === "relisted" ? true : undefined, label);
+      if (variant === "unticked") {
+        // the automatic removal saved unticked while it starts (Settings → Save settings): without
+        // the Stop it would end there as an untick ends it — not a stop, the jobs waiting going on
+        element("setting-auto-remove").checked = false;
+        element("settings-form").fire("submit");
+        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+        assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("settings"))["autoRemove"], false, label);
+      }
+      // behind it: the user's paste, and the block's Retry — spent until a job ends
+      assert.equal(paste(page, THIRD_ID), true, label);
+      element("retry-button").fire("click");
+      assert.equal(element("retry-button").disabled, true, label);
+      const waiting = jobsOf(page)
+        .slice(1)
+        .map((job) => [job.kind, job.label]);
+      assert.deepEqual(
+        waiting.map(([kind]) => kind),
+        ["batch", "selection"],
+        label,
+      );
+      const line = element("favorites-status").textContent;
+      element("stop-button").fire("click");
+      release();
+      for (let turns = 0; turns < 200 && (module.journal().length < 3 || element("app-status").dataset["state"] !== "idle"); turns += 1) await page.turn();
+      // a stop: the removal's own entry, then each job it took out of the queue
+      const notStarted = `not started: batch stopped in ${AUTO_KEEPER} (stopped by you)`;
+      assert.deepEqual(
+        module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
+        [["unbookmark", AUTO_KEEPER, "stopped by you", "stopped by you"], ...[...waiting].reverse().map(([kind, name]) => [kind, name, notStarted, null])],
+        label,
+      );
+      assert.deepEqual(module.journal()[0]?.["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: null }, label);
+      assert.deepEqual(jobsOf(page), [], label); // nothing queued after the Stop: no re-listing
+      assert.equal(element("app-status").dataset["state"], "idle", label);
+      assert.deepEqual(log, [], label); // no tab
+      assert.equal(site.clicks, 0, label);
+      assert.deepEqual(notes.created, [], label); // no alert: neither ⚠ nor “DramaFetch stopped” (nothing was asked of TikTok)
+      assert.equal(element("favorites-status").textContent, line, label); // never the re-listing's line, nor `stale`'s, nor the untick's
+      // the block stays, and its Retry is given back
+      assert.equal(element("failed-block").hidden, false, label);
+      assert.equal(element("retry-button").disabled, false, label);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+test("the removal a re-listing's drama queues runs NEXT (2.0.0): at the head of the queue — ahead of the paste the user queued while the re-listing ran, which Waiting shows after it —, so that its count is minutes old at its turn whatever waits behind: it presses once, and the paste runs after it; the removal an automatic retry a re-listing queued queues once it completes the drama, the same; any other automatic removal still waits at the END", async () => {
+  const REMOVE_KEEPER = `Remove “${KEEPER}” from your Favorites (automatic)`;
+  const page = await fakePage({ storage: staleStorage() });
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    await removalOfKeeper(page, dayOld()); // its re-listing: started, held before its gate
+    const [relist] = module.queuedJobs();
+    assert.ok(relist !== undefined && relist.relist !== undefined);
+    assert.equal(paste(page, THIRD_ID), true); // the user's next paste, waiting behind it
+    // its run as runJob makes it — the page's own hooks over a scripted TikTok —: listed again, every episode on disk
+    const scripted = scriptedEngine(page, relist);
+    const runs = await runBatch(scripted.engine, relist.refs);
+    await page.turn();
+    assert.deepEqual(runs.map((run) => [run.report.complete, run.report.locked, run.stop]), [[true, 0, false]]);
+    // its removal: next — ahead of the paste —, marked
+    assert.deepEqual(jobsOf(page).map((job) => job.label), [RELIST_LABEL, REMOVE_KEEPER, `Series ${THIRD_ID}`]);
+    assert.deepEqual(waitingRows(page), [whatRow("Remove from Favorites (automatic)", LIGHTHOUSE, KEEPER), dramaRow(THIRD_ID)]);
+    const auto = jobsOf(page)[1]?.bookmark?.auto;
+    assert.ok(auto !== undefined);
+    assert.equal(auto.relisted, true);
+    // its turn, right after the re-listing: its count minutes old — ONE press, ✓ removed under the drama's alert id
+    const { stop, entry, site } = await removalOfKeeper(page, auto);
+    assert.equal(stop, null);
+    assert.equal(site.clicks, 1);
+    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
+    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `✓ ${KEEPER} — removed from your Favorites`);
+  } finally {
+    page.restore();
+  }
+  // an automatic retry a re-listing queued: once it completes the drama, its removal goes next too
+  const second = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
+  try {
+    const { module } = second;
+    fakeNotifications();
+    second.hold();
+    assert.equal(paste(second, SERIES_ID), true); // running: what is queued waits behind it
+    /** @type {import("../src/app/app.js").Job} */
+    const relist = { ...BATCH_JOB, id: 7, label: `List “${SECOND_TITLE}” again, then remove it from your Favorites (automatic)`, refs: [refOf(OTHER_ID)], recheck: true, relist: { alertId: null } };
+    const scripted = scriptedEngine(second, relist, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    await runBatch(scripted.engine, relist.refs); // E02 fails: its automatic retry queued, carrying `relist`
+    await second.turn();
+    const [, retry] = module.queuedJobs();
+    assert.ok(retry !== undefined && retry.relist !== undefined);
+    assert.equal(paste(second, THIRD_ID), true); // the user's paste, behind the retry
+    // the retry's run (the test runs it: its job still waits in the page's queue): E02 saved, every episode on disk
+    const rerun = scriptedEngine(second, retry);
+    rerun.states.set(OTHER_ID, scripted.states.get(OTHER_ID));
+    const run = await runSelectionJob(rerun.engine, refOf(OTHER_ID), retry.numbers, { lastContactAt: null });
+    assert.deepEqual([run.report.complete, run.report.locked], [true, 0]);
+    module.dramaDone(retry, run, rerun.jobRecord);
+    await second.turn();
+    assert.equal(autoRemovalsOf(second)[0]?.bookmark?.auto?.relisted, true);
+    assert.deepEqual(jobsOf(second).map((job) => job.label), [`Series ${SERIES_ID}`, AUTO_LABEL, "Automatic retry: 1 of Drama 2399", `Series ${THIRD_ID}`]);
+  } finally {
+    second.restore();
+  }
+});
+
+test("a download the user asks for is never folded into DramaFetch's own re-listing (2.0.0): a paste, Enter, the popup's Download this series or a card's Download — enabled, though the card says Queued — of a drama only a re-listing holds, waiting or running before its first request, is queued behind it as the user's own job, which then holds the drama as any download does (asked again, nothing more is queued); the setting saved unticked takes the waiting re-listing out of the queue, or ends the running one at its gate, and the user's job stays — it runs next; once the re-listing asked TikTok for its list, it holds the drama as any download does", async () => {
+  const LINK = `https://www.tiktok.com/shortdrama/episode/${LIGHTHOUSE}/1`;
+  const MINE = `Series ${LIGHTHOUSE}`;
+  /** @type {[string, (page: Awaited<ReturnType<typeof fakePage>>) => void][]} */
+  const ASKS = [
+    ["a paste", (page) => void paste(page, LIGHTHOUSE)],
+    [
+      "Enter",
+      (page) => {
+        page.element("links").value = LIGHTHOUSE;
+        press(page);
+      },
+    ],
+    ["the popup's Download this series", (page) => void page.message({ type: "dramafetch:load", input: LINK })],
+    ["a card's Download", (page) => actionOf(page, LIGHTHOUSE, "download")?.fire("click")],
+  ];
+  for (const [how, ask] of ASKS) {
+    for (const state of ["waiting", "running"]) {
+      const label = `${how}, the re-listing ${state}`;
+      const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
+      try {
+        const { element, module } = page;
+        fakeNotifications();
+        /** @type {() => void} */
+        let release = () => undefined;
+        if (state === "waiting") {
+          page.hold(); // every job waits at its gate: it runs, and makes no request
+          assert.equal(paste(page, SERIES_ID), true, label); // running: the re-listing waits behind it
+        } else {
+          release = gateFirstJob(); // the re-listing runs first, held before its own gate; every later job waits for good
+        }
+        await removalOfKeeper(page, dayOld()); // its re-listing
+        const before = jobsOf(page).map((job) => job.label);
+        assert.equal(before.at(-1), RELIST_LABEL, label);
+        assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "queued", label);
+        assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, false, label);
+        ask(page);
+        assert.deepEqual(jobsOf(page).map((job) => job.label), [...before, MINE], label);
+        assert.equal(jobsOf(page).at(-1)?.relist, undefined, label); // the user's own job
+        // the user's own job holds the drama now: asked again, nothing more is queued
+        assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, true, label);
+        ask(page);
+        assert.deepEqual(jobsOf(page).map((job) => job.label), [...before, MINE], label);
+        // the setting saved unticked: the re-listing comes out of the queue — or ends at its own gate —, the user's job stays
+        element("setting-auto-remove").checked = false;
+        element("settings-form").fire("submit");
+        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+        if (state === "waiting") {
+          assert.deepEqual(jobsOf(page).map((job) => job.label), [`Series ${SERIES_ID}`, MINE], label);
+          assert.equal(element("favorites-status").textContent, "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.", label);
+        } else {
+          release();
+          for (let turns = 0; turns < 200 && module.journal().length === 0; turns += 1) await page.turn();
+          await settled(page);
+          assert.deepEqual(
+            module.journal().map((entry) => [entry["label"], entry["error"], entry["stopped"]]),
+            [[RELIST_LABEL, "not started: the automatic removal from the Favorites was turned off", null]],
+            label,
+          );
+          assert.deepEqual(jobsOf(page).map((job) => job.label), [MINE], label); // the user's job runs next
+        }
+      } finally {
+        page.restore();
+      }
+    }
+  }
+  // the box keeping a typed id of such a drama beside a paste: Enter would download it, and the line says so
+  const typed = await fakePage({ storage: staleStorage() });
+  try {
+    typed.hold();
+    assert.equal(paste(typed, SERIES_ID), true); // running
+    await removalOfKeeper(typed, dayOld()); // its re-listing, waiting
+    typed.element("links").value = LIGHTHOUSE;
+    assert.equal(paste(typed, THIRD_ID), true);
+    assert.equal(typed.element("links").value, LIGHTHOUSE);
+    assert.equal(typed.element("input-status").textContent, `Series ${THIRD_ID} queued: it downloads whole, with the usual pauses. · What the box held before stays there: press Enter to download it.`);
+  } finally {
+    typed.restore();
+  }
+  // once the re-listing asked TikTok for its list — its drama's tab opened —, a download of it as any other
+  const page = await fakePage({ testSettings: { ...QUICK, discoveryTimeoutS: 0.2 }, storage: staleStorage() });
+  try {
+    const { element } = page;
+    fakeNotifications();
+    const release = gateFirstJob();
+    const { log } = await removalOfKeeper(page, dayOld()); // its re-listing: the first job, held at its gate
+    release();
+    for (let turns = 0; turns < 500 && !log.includes("open about:blank"); turns += 1) await page.turn();
+    // what the page shows and does while it lists the drama — read now, checked once the job is over
+    const asked = [...log];
+    const disabled = actionOf(page, LIGHTHOUSE, "download")?.disabled;
+    const taken = paste(page, LIGHTHOUSE);
+    const said = element("input-status").textContent;
+    const queued = jobsOf(page).map((job) => job.label);
+    // its listing gets nothing from the fake (a stop): the page idle again before the test ends
+    const deadline = Date.now() + 5000;
+    while (element("app-status").dataset["state"] !== "idle" && Date.now() < deadline) await page.turn();
+    assert.equal(element("app-status").dataset["state"], "idle");
+    assert.ok(asked.includes("open about:blank"), `the re-listing asked for its list: ${JSON.stringify(asked)}`);
+    assert.equal(disabled, true);
+    assert.equal(taken, true);
+    assert.equal(said, `Already being downloaded, or waiting to be — not queued twice: ${LIGHTHOUSE}.`);
+    assert.deepEqual(queued, [RELIST_LABEL]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the re-listing's own gate (2.0.0) after an Update from TikTok queued ahead of it — the popup's Open my library, say — read TikTok's whole list without its drama (the owner took it out of their Favorites in the TikTok app meanwhile): the library no longer holds the drama and marks nothing removed; the re-listing ends at its gate, `not started: the drama is no longer in the library`, nothing asked of TikTok, no alert, not a stop", async () => {
+  const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    // the first job waits at its gate until released; every later one goes on at once
+    const tabs = /** @type {{getCurrent: () => Promise<unknown>}} */ (/** @type {unknown} */ (globalThis.chrome.tabs));
+    const answer = tabs.getCurrent;
+    /** @type {(value?: unknown) => void} */
+    let release = () => undefined;
+    const released = new Promise((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    tabs.getCurrent = () => {
+      calls += 1;
+      return calls === 1 ? released.then(() => answer()) : answer();
+    };
+    // the update, through the page's own runtime message: running, held
+    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), [{ ok: true, tabId: 1 }]);
+    await settled(page);
+    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["favorites"]);
+    // the automatic removal's turn, too old: ONE re-listing at the END, behind the update
+    const { entry, log } = await removalOfKeeper(page, dayOld());
+    assert.equal(entry["error"], RELISTED);
+    assert.deepEqual(relistsOf(page), [relistOf(EARLIER_ALERT)]);
+    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["favorites", "batch"]);
+    // TikTok's whole list no longer holds LIGHTHOUSE
+    const tab = favoritesTab({ pages: { "0": { ...FAVORITES_CAPTURE, total: "2", cursor: "1794351568", hasMore: false, dramaList: [listed(OTHER_ID, SECOND_TITLE, 3), listed(SNOW_A, "Snowfall in Two Cities", 60)] } } });
+    tab.remember(1_794_351_500);
+    const asked = [...log];
+    release();
+    const deadline = Date.now() + 8000;
+    while ((module.journal().length < 2 || element("app-status").dataset["state"] !== "idle") && Date.now() < deadline) await page.turn();
+    const stored = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
+    assert.deepEqual(/** @type {{seriesId: string}[]} */ (stored["items"]).map((item) => item.seriesId), [OTHER_ID, SNOW_A]);
+    assert.deepEqual(stored["removed"], []);
+    assert.equal(cardOf(page, LIGHTHOUSE), undefined);
+    assert.equal(tab.fetched.length, 1); // the update's one page
+    assert.deepEqual(
+      module.journal().map((job) => [job["kind"], job["error"], job["stopped"]]),
+      [
+        ["batch", "not started: the drama is no longer in the library", null],
+        ["favorites", null, null],
+      ],
+    );
+    assert.deepEqual(module.journal()[0]?.["series"], []);
+    assert.deepEqual(log.slice(asked.length), []); // nothing asked of TikTok for the drama
+    assert.deepEqual(notes.created, []);
+    assert.equal(element("app-status").dataset["state"], "idle");
+  } finally {
+    page.restore();
+  }
+});
+
+test("a re-listing Stop ends while it lists its drama (2.0.0): its stop's alert never counts that drama — on disk, its listing a part of DramaFetch's own removal — among the dramas not started, unlike a paste of it stopped the same way; the user's downloads the stop took out of the queue still are", async () => {
+  for (const kind of ["a re-listing", "a paste"]) {
+    const page = await fakePage({ storage: staleStorage() });
+    try {
+      const { element, module } = page;
+      const notes = fakeNotifications();
+      /** @type {import("../src/app/app.js").Job} */
+      const job = { ...BATCH_JOB, id: 12, label: kind === "a paste" ? `Series ${LIGHTHOUSE}` : RELIST_LABEL, refs: [refOf(LIGHTHOUSE)], ...(kind === "a paste" ? {} : { recheck: true, relist: { alertId: EARLIER_ALERT } }) };
+      const { engine, jobRecord } = scriptedEngine(page, job);
+      // Stop, pressed while the drama's list is read (the listing noted its contact first)
+      engine.discover = async () => {
+        job.contacted = true;
+        element("stop-button").fire("click");
+        throw new StopRequested();
+      };
+      await assert.rejects(runBatch(engine, job.refs), StopRequested);
+      const stopped = `dramafetch-alert:${module.alerts.page}:12:stopped`;
+      // what runJob says as such a job ends: its own drama only for the paste
+      module.alertJobEnd(job, "stopped by you", null, jobRecord, []);
+      assert.deepEqual(notes.created, kind === "a paste" ? [stopped] : [], kind);
+      if (kind === "a paste") {
+        assert.equal(notes.shown.get(stopped)?.["message"], "1 drama was not started — download it again later");
+        continue;
+      }
+      // the user's own download the same stop took out of the queue: counted, and alone
+      module.alertJobEnd(job, "stopped by you", null, jobRecord, [{ kind: "batch", refs: [refOf(THIRD_ID)] }]);
+      assert.deepEqual(notes.created, [stopped], kind);
+      assert.equal(notes.shown.get(stopped)?.["title"], "DramaFetch stopped: stopped by you", kind);
+      assert.equal(notes.shown.get(stopped)?.["message"], "1 drama was not started — download it again later", kind);
+    } finally {
+      page.restore();
+    }
+  }
+});
+
 // --------------- DramaFetch 2.0.0: the countdown in minutes and seconds (C1), the Waiting card (C2)
 
 /**
@@ -9533,12 +10523,14 @@ function tickEpisodes(page, ticked) {
   table.querySelectorAll = () => boxes;
 }
 
-test("the Waiting card (2.0.0): one row per drama still to run, in the order they will run — the running batch's dramas not begun yet, then every waiting job's —, each by its name when DramaFetch knows it without asking TikTok (the library's title, its stored records', a name a run of this page read) and its WHOLE id, else its id and `name shown once its list is read`; every other kind of row says what it is — a Retry and an automatic retry of E02, E07 (ten at most, then `and N more`), Download all available, Download selected, See episodes, Remove from Favorites and the automatic one, Update from TikTok (no drama)", async () => {
+test("the Waiting card (2.0.0): one row per drama still to run, in the order they will run — the running batch's dramas not begun yet, then every waiting job's —, each by its name when DramaFetch knows it without asking TikTok (the library's title, its stored records', a name a run of this page read) and its WHOLE id, else its id and `name shown once its list is read`; every other kind of row says what it is — a Retry and an automatic retry of E02, E07 (ten at most, then `and N more`), Download all available, Download selected, See episodes, Remove from Favorites and the automatic one, the re-listing an automatic one too old at its turn queued, Update from TikTok (no drama)", async () => {
   const page = await fakePage({
     storage: {
-      favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [BETA, "Beta Heir", 3], [DELTA, "Delta Vows", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]),
+      favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [BETA, "Beta Heir", 3], [DELTA, "Delta Vows", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [LANTERN_ID, "The Last Lantern", null]]),
       [`series:${STORED}`]: savedState(STORED, [1]), // named `A drama` by its records alone
       [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
+      // on disk, found complete 25 h ago, and TikTok's list gives no count for it: its automatic removal comes too old
+      [`series:${LANTERN_ID}`]: savedState(LANTERN_ID, [1, 2, 3], { complete: 3, completeAt: Date.now() / 1000 - 25 * 3600 }),
     },
   });
   try {
@@ -9590,6 +10582,12 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
     await settled(page);
     element("bookmark-confirm").fire("click");
     module.dramaDone({ ...BATCH_JOB, id: 8, refs: [refOf(DELTA)] }, completeRun(DELTA), {});
+    // DramaFetch's own removal whose count is more than a day old at its turn: the re-listing of its drama
+    const stale = removalJob(page, LANTERN_ID, "The Last Lantern", null, { foundCompleteAt: Date.now() / 1000 - 25 * 3600, alertId: null, episodes: 3 });
+    /** @type {Record<string, unknown>} */
+    const relisted = {};
+    assert.equal(await module.runUnbookmark(stale.job, stale.engine, relisted), null);
+    assert.equal(relisted["error"], RELISTED);
     // Update from TikTok (the popup's hand-over of a TikTok tab's favorites): no drama
     page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
     await settled(page);
@@ -9607,11 +10605,12 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
       whatRow("Download selected E01, E02, E04", SERIES_ID, "Test Series"),
       whatRow("Remove from Favorites", LIGHTHOUSE, "The Lighthouse Keeper's Promise"),
       whatRow("Remove from Favorites (automatic)", DELTA, "Delta Vows"),
+      whatRow("List again, then remove from Favorites (automatic)", LANTERN_ID, "The Last Lantern"),
       "Update from TikTok",
     ]);
     assert.deepEqual(
       list.children.map((row) => row.getAttribute("data-kind")),
-      ["download", "download", "download", "download", "retry", "retry", "autoretry", "load", "available", "selected", "unbookmark", "autounbookmark", "favorites"],
+      ["download", "download", "download", "download", "retry", "retry", "autoretry", "load", "available", "selected", "unbookmark", "autounbookmark", "autorelist", "favorites"],
     );
     assert.equal(list.children.at(-1)?.getAttribute("data-series-id"), null); // the favorites' listing names no drama
     // the rows as the page holds them: the episodes only where a row names them
@@ -9630,6 +10629,7 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
         ["selected", SERIES_ID, [1, 2, 4]],
         ["unbookmark", LIGHTHOUSE, []],
         ["autounbookmark", DELTA, []],
+        ["autorelist", LANTERN_ID, []],
         ["favorites", null, []],
       ],
     );

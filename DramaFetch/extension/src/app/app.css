@@ -354,11 +354,11 @@ button.danger:hover:not(:disabled) { background: var(--danger-hover); border-col
 /* the Waiting card (2.0.0): one row per drama still to run — what the row is, the drama's name, its
    whole id (never cut; one click selects it all, to copy), or the muted note while its name is not
    known —, tinted by kind: a drama to download, a retry or a pick of See episodes, a removal from
-   the Favorites, a listing */
+   the Favorites (the re-listing of an automatic one with it), a listing */
 #queue-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .queue-row { padding: 7px 12px; border-radius: 10px; color: var(--text); background: var(--queue-bg); border-left: 4px solid var(--queue-edge); overflow-wrap: anywhere; }
 .queue-row.retry, .queue-row.autoretry, .queue-row.selected, .queue-row.available { color: var(--text); background: var(--queue-retry-bg); border-left-color: var(--queue-retry-edge); }
-.queue-row.unbookmark, .queue-row.autounbookmark { color: var(--text); background: var(--queue-remove-bg); border-left-color: var(--queue-remove-edge); }
+.queue-row.unbookmark, .queue-row.autounbookmark, .queue-row.autorelist { color: var(--text); background: var(--queue-remove-bg); border-left-color: var(--queue-remove-edge); }
 .queue-row.load, .queue-row.favorites { color: var(--text); background: var(--queue-list-bg); border-left-color: var(--queue-list-edge); }
 .queue-what { color: var(--run-fg); font-weight: 700; /* on: --queue-bg --queue-retry-bg --queue-remove-bg --queue-list-bg */ }
 .queue-name { font-weight: 600; }

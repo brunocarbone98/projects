@@ -41,7 +41,15 @@ tab asks Chrome for recorded on its way (`extension_alerts.RECORD_ALERTS_JS`):
   fail it — and the second drama, saved whole: the batch, the retry, then the second drama's
   automatic removal, which leaves the progress card as it is — the retry's **Did not download**
   block with its **Retry** and the line of its report saved stay while the removal runs and after
-  it ends.
+  it ends;
+- (l) a removal whose turn comes more than 24 hours after its drama was found complete: the second
+  drama, on disk with a complete mark just under 24 hours old, pasted with the main series — its
+  paste skips it as complete, the main series keeps its removal waiting past the mark's 24 hours —:
+  the removal presses nothing and queues ONE re-listing of the drama (`not removed yet: …`); the
+  drama, pasted again while that re-listing rests, is queued behind it as a job of its own; the
+  re-listing lists it again, finds it complete and queues the removal NEXT, ahead of that paste:
+  it presses once, then the paste skips the drama as complete — the drama leaves the fake's
+  favorites, one `collect`, the drama's page three times, no `⚠` notification.
 
 The other two scenarios of the 2.0.0 release are in `test_extension_ui.py`: (h) the **Waiting**
 card of two pastes, and (i) a pause of a minute or more read in minutes and seconds.
@@ -128,6 +136,22 @@ RECORD_PROGRESS_JS = """() => {
 }"""
 #: What the worker kept of a TikTok tab's favorites list (`chrome.storage.session`), or null.
 TEMPLATE_JS = "async (key) => (await chrome.storage.session.get(key))[key] ?? null"
+#: The outcome of DramaFetch's own removal whose episode count was more than 24 hours old at its
+#: turn: it queued a re-listing of its drama in its place (2.0.0).
+RELISTED = (
+    "not removed yet: its episode count was more than 24 hours old — DramaFetch lists the drama "
+    "again first, then removes it"
+)
+#: The label of the re-listing of the second drama.
+RELIST_LABEL = f"List “{SECOND_SERIES_NAME}” again, then remove it from your Favorites (automatic)"
+#: In the DramaFetch tab: a series' stored records (`key`) with their complete mark set to `at` (an
+#: ISO time, as the extension writes it), nothing else changed; their complete episodes.
+COMPLETE_MARK_JS = """async ([key, at]) => {
+  const state = (await chrome.storage.local.get(key))[key];
+  state.complete_at = at;
+  await chrome.storage.local.set({ [key]: state });
+  return state.complete_episodes;
+}"""
 TAB_IDS_JS = (
     "async (prefix) => (await chrome.tabs.query({}))"
     ".filter((tab) => (tab.url || tab.pendingUrl || '').startsWith(prefix)).map((tab) => tab.id)"
@@ -643,3 +667,140 @@ def test_k_dramafetch_s_own_removal_leaves_the_progress_card_s_did_not_download_
         report = page.locator("#failed-report")
         assert report.is_visible()
         assert (report.text_content() or "").startswith("Report saved: ")
+
+
+def test_l_a_removal_whose_count_is_more_than_a_day_old_at_its_turn_lists_its_drama_again_first(
+    tmp_path: Path,
+) -> None:
+    """(l) The second drama is downloaded whole while the library holds nothing (no removal);
+    then the library is kept with it — no whole read, so its count vouches for nothing — and its
+    records' complete mark is set to 8 s less than 24 h ago, right before ONE paste of it and the
+    main series, with 4 s between episodes and 2 to 2.5 s of rest between jobs. The 24 h edge is
+    reached for real, never seeded past it: the paste's batch skips the drama as complete (its
+    mark less than 24 h old: no request), so its automatic removal carries that mark as when it
+    was found complete, at the end of the queue; the main series' four downloads — 12 s of pauses
+    at least — keep it waiting past the mark's 24 h. At its turn the removal presses nothing and
+    queues ONE re-listing (`not removed yet: …`, no notification). While that re-listing rests
+    before its first request, the drama is pasted again (as the owner pastes the next block of a
+    long queue): queued behind it as a job of its own, never folded into DramaFetch's re-listing
+    (which the setting unticked or **Stop** could take out). The re-listing — what a paste of the
+    drama queues, `recheck` on — lists it again (the drama's page once, no media: every episode on
+    disk), finds it complete and queues its removal NEXT, ahead of that paste: the removal presses
+    the Bookmark once, then the paste runs and skips the drama as complete — no request. The drama
+    leaves the fake's favorites; the journal reads the batch, the removal (`RELISTED`), the
+    re-listing, the removal (`removed`), the paste; one `collect`; the drama's page three times
+    since the first paste; no `⚠` notification."""
+    margin_s = 8
+    with (
+        FakeTikTok() as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=SETTINGS) as ext,
+    ):
+        # the second drama on disk, while the library holds nothing: no removal
+        first = ext.paste_and_wait(SECOND_LINK, timeout_s=120)
+        assert first["series"][0]["line"] == "complete: 3 of 3 (3 downloaded)"
+        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))  # a reload: a fresh journal
+        page = ext.page
+        page.evaluate(RECORD_ALERTS_JS)
+        # 2 to 2.5 s of rest between jobs: time to paste while the re-listing rests
+        pacing = {"delayMinS": 4, "delayMaxS": 4, "restMinS": 2, "restMaxS": 2.5}
+        ext.save_test_settings({**ext.settings, **pacing})
+        jobs = ext.finished_jobs()
+        asked = len(server.requests)
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 24 * 3600 + margin_s))
+        assert page.evaluate(COMPLETE_MARK_JS, [f"series:{SECOND_SERIES_ID}", at]) == 3
+        ext.paste(f"{SECOND_LINK}\n{MAIN_LINK}")
+        # the batch and the removal ended: the re-listing rests before its first request
+        ext.wait_for(
+            lambda: ext.finished_jobs() >= jobs + 2, 180, "the batch and the removal did not end"
+        )
+        assert ext.journal()[0]["error"] == RELISTED  # the removal: a re-listing queued
+        ext.paste(SECOND_LINK)  # the drama pasted again, the re-listing waiting
+        # queued as the user's own job, behind the re-listing: never folded into it
+        expected = f"Series {SECOND_SERIES_ID} queued: it downloads whole, with the usual pauses."
+        assert page.locator("#input-status").text_content() == expected
+        _until_jobs(
+            ext,
+            jobs + 5,
+            180,
+            "the re-listing, its removal and the paste after it did not end",
+        )
+        journal = ext.journal()
+        assert len(journal) == 5  # nothing more
+        again, removal, relist, relisted, batch = journal
+        # the paste: the second drama skipped as complete (no request), the main series downloaded
+        assert batch["kind"] == "batch"
+        on_disk = [(1, "skipped-exists"), (2, "skipped-exists"), (3, "skipped-exists")]
+        main = [(1, "done"), (2, "done"), (3, "done"), (4, "done"), (5, "skipped-locked")]
+        assert _rows(batch) == [(SECOND_SERIES_ID, on_disk), (SERIES_ID, main)]
+        assert batch["series"][0]["report"]["skipped_complete"] is True
+        # its removal, at its turn more than 24 h after the mark: nothing pressed, ONE re-listing
+        assert (relisted["kind"], relisted["label"]) == ("unbookmark", AUTO_LABEL)
+        assert relisted["bookmark"] == {
+            "series_id": SECOND_SERIES_ID,
+            "title": SECOND_SERIES_NAME,
+            "outcome": RELISTED,
+        }
+        assert (relisted["error"], relisted["stopped"]) == (RELISTED, None)
+        assert relisted["pauses"] == []  # ended at its gate, before the rest between jobs
+        # the re-listing: the drama listed again, every episode on disk
+        assert (relist["kind"], relist["label"]) == ("batch", RELIST_LABEL)
+        assert (relist["error"], relist["stopped"]) == (None, None)
+        assert _rows(relist) == [(SECOND_SERIES_ID, on_disk)]
+        assert relist["series"][0]["line"] == "complete: 3 of 3 (3 already on disk)"
+        assert relist["series"][0]["report"]["skipped_complete"] is False
+        # and the removal its drama queued, run NEXT — ahead of the paste made meanwhile: one press
+        assert (removal["kind"], removal["label"]) == ("unbookmark", AUTO_LABEL)
+        assert removal["bookmark"]["outcome"] == "removed"
+        assert (removal["error"], removal["stopped"]) == (None, None)
+        # the paste made while the re-listing rested, run after that removal — a complete skip, the
+        # drama listed a moment before: no request
+        assert (again["kind"], again["label"]) == ("batch", f"Series {SECOND_SERIES_ID}")
+        assert (again["error"], again["stopped"]) == (None, None)
+        assert _rows(again) == [(SECOND_SERIES_ID, on_disk)]
+        assert again["series"][0]["report"]["skipped_complete"] is True
+        assert server.collect_requests == [(COLLECT_PATH, "0")]
+        assert SECOND_SERIES_ID not in server.favorite_ids
+        assert _card(page, SECOND_SERIES_ID).get_attribute("data-status") == "removed"
+        # since the paste: the drama's page three times — the re-listing's listing, then the
+        # removal's page and its reload around the one press; none for the paste after them —, and
+        # none of its media
+        after = server.requests[asked:]
+        pages = [
+            index
+            for index, record in enumerate(after)
+            if (match := SERIES_PATH_RE.match(record.path))
+            and match.group("id") == SECOND_SERIES_ID
+        ]
+        presses = [index for index, record in enumerate(after) if record.path == COLLECT_PATH]
+        assert len(pages) == 3
+        assert pages[1] < presses[0] < pages[2]
+        # the re-listing's own listing: the drama's episode list, asked for from its page before
+        # the removal's page opened
+        lists = [
+            index
+            for index, record in enumerate(after)
+            if record.path == "/api/drama/episode/item_list/"
+            and record.query.get("dramaID") == SECOND_SERIES_ID
+        ]
+        assert lists
+        assert pages[0] < lists[0] < pages[1]
+        second_media = [
+            record
+            for record in after
+            if (match := CDN_PATH_RE.match(record.path))
+            and EPISODE_OF_ITEM.get(match.group("id"), ("", 0))[0] == SECOND_SERIES_ID
+        ]
+        assert second_media == []
+        # the notifications: the main series' ✓; the re-listing's ✓, then — the same id — removed
+        main_done, downloaded, removed = recorded_alerts(ext, 3)
+        alerts = page.evaluate(ALERTS_JS)
+        assert len(alerts) == 3
+        assert not [alert for alert in alerts if alert["options"]["title"].startswith("⚠")]
+        assert main_done["options"]["title"] == f"✓ {SERIES_NAME} — downloaded"
+        assert downloaded["id"].endswith(f":{SECOND_SERIES_ID}:complete")
+        assert downloaded["options"]["title"] == f"✓ {SECOND_SERIES_NAME} — downloaded"
+        assert removed["id"] == downloaded["id"]
+        assert (removed["options"]["title"], removed["options"]["message"]) == (
+            f"✓ {SECOND_SERIES_NAME} — removed from your Favorites",
+            "Every episode is on disk.",
+        )

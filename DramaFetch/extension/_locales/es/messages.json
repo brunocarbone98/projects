@@ -424,6 +424,10 @@
     "message": "Quitar de Bookmark (automático)",
     "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): DramaFetch's own removal of a drama whose every episode is on disk (DramaFetch 2.0.0)."
   },
+  "queueAutoRelist": {
+    "message": "Volver a listar y quitar de Bookmark (automático)",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): the re-listing DramaFetch's own removal queued because the drama's episode count was more than 24 hours old at its turn — the drama listed again, then removed from the Favorites (DramaFetch 2.0.0)."
+  },
   "queueFavorites": {
     "message": "Actualizar desde TikTok",
     "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): the listing of the user's TikTok favorites into the library (no drama)."
@@ -1236,6 +1240,15 @@
       }
     }
   },
+  "jobAutoRelist": {
+    "message": "Volver a listar “$title$” y quitarlo de tu Bookmark (automático)",
+    "description": "Job label of the re-listing DramaFetch's own removal from the Favorites queued because the drama's episode count was more than 24 hours old at its turn: what a paste of the drama queues, the drama then removed once found complete (DramaFetch 2.0.0).",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
   "bookmarkWorking": {
     "message": "Quitando “$title$” de tu Bookmark: se abre una pestaña de TikTok en segundo plano…",
     "description": "While the removal runs.",
@@ -1332,6 +1345,15 @@
   "autoRemoveTurnedOff": {
     "message": "“$title$” sigue en tu Bookmark: la eliminación automática se desactivó antes de que DramaFetch pidiera nada a TikTok.",
     "description": "DramaFetch's own removal (2.0.0) ended because the setting was saved unticked after it was queued, while it waited or rested before its first request: nothing was asked of TikTok.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "autoRemoveRelist": {
+    "message": "“$title$”: su número de episodios tiene más de un día — DramaFetch lo vuelve a listar y después lo quita de tu Bookmark.",
+    "description": "Library status line: DramaFetch's own removal (2.0.0) found the drama's episode count more than 24 hours old at its turn, so it queued one re-listing of the drama (or found a download of it waiting that lists it again) instead of removing it now: nothing was asked of TikTok.",
     "placeholders": {
       "title": {
         "content": "$1"
