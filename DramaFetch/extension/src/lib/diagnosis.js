@@ -180,7 +180,7 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s â€
  *   listed): when present it is the report's digest and `listedEpisodes` is not read â€” a batch
  *   takes it when a series is done, so the list's raw items need not stay until the job ends
  *
- * @typedef {object} JobInput The job as the history records it.
+ * @typedef {object} JobInput The job as its report records it.
  * @property {string} kind
  * @property {string} label
  * @property {string} startedAt

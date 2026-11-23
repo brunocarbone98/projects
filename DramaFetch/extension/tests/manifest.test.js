@@ -1,15 +1,15 @@
 // @ts-check
 // The manifest is part of the line: exactly the permissions the README justifies, host access to
-// TikTok and its CDNs only, exactly one content script (the read-only card reader of the favorites
-// right-click), no test key and no localhost in the shipped file (the test harness adds both to a
-// temporary COPY), no remote code — and the sources never reach for an API the extension must not
-// use (cookies, debugger, blocking webRequest).
+// TikTok and its CDNs only, no content script and no right-click menu (DramaFetch 2.0.0 took the
+// right-click items and their favorites card reader away), no test key and no localhost in the
+// shipped file (the test harness adds both to a temporary COPY), no remote code — and the sources
+// never reach for an API the extension must not use (cookies, debugger, blocking webRequest) or no
+// longer uses (contextMenus, a message to a content script).
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 
 import { TIKTOK_DOMAINS, hostCovered } from "../src/app/downloader.js";
-import { FAVORITES_CARD_SELECTOR } from "../src/lib/favorites.js";
 
 /** @param {string} relative @returns {URL} */
 const file = (relative) => new URL(`../${relative}`, import.meta.url);
@@ -24,7 +24,6 @@ const PERMISSIONS = [
   "tabs",
   "webRequest",
   "declarativeNetRequestWithHostAccess",
-  "contextMenus", // the right-click "Download this drama" (README: the permissions table)
   "notifications", // the alert when a drama finishes, the owner's request of 2026-11-19 (README: the permissions table)
 ];
 const HOSTS = [
@@ -87,34 +86,21 @@ test("exactly the permissions the README justifies: no cookies, no debugger, no 
   }
 });
 
-test("exactly one content script: the favorites card reader, on TikTok's www pages only, isolated, read-only", () => {
-  // the owner's decision of 2026-11-15 (README: the permissions table): it needs no permission and
-  // no host beyond the ones above
-  assert.deepEqual(manifest["content_scripts"], [
-    { matches: ["https://www.tiktok.com/*"], js: ["src/content/cards.js"], run_at: "document_idle", world: "ISOLATED" },
-  ]);
-  const source = readFileSync(file("src/content/cards.js"), "utf8");
-  assert.match(source, /^\/\/ @ts-check\n/);
-  // a classic script (MV3 content scripts are no modules) wrapped so that it declares no global
-  const code = source.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim();
-  assert.ok(code.startsWith("(() => {") && code.endsWith("})();"), "the content script is one arrow function called at once");
-  assert.doesNotMatch(code, /^\s*(import|export)\b/m);
-  // it reads the card's label and its position, and answers only the extension's own message
-  assert.ok(source.includes(`"${FAVORITES_CARD_SELECTOR}"`), "the same card selector as lib/favorites.js");
-  assert.match(source, /\bwindow\.addEventListener\(\s*"contextmenu"/); // on window: first in the capture path
-  assert.doesNotMatch(code, /\bdocument\.addEventListener\(/);
-  assert.match(source, /\{ capture: true, passive: true \}/);
-  assert.match(source, /sender\.id !== chrome\.runtime\.id/);
-  /** @type {[RegExp, string][]} */
-  const forbidden = [
-    [/\.(innerHTML|outerHTML|textContent|innerText)\s*=/, "writing to the page"],
-    [/\b(setAttribute|removeAttribute|appendChild|append|prepend|remove|insertAdjacent\w*)\(/, "changing the page"],
-    [/preventDefault|stopPropagation|stopImmediatePropagation/, "changing how the page handles the click"],
-    [/\bfetch\(|XMLHttpRequest|sendBeacon|WebSocket/, "a request"],
-    [/chrome\s*\.\s*(storage|tabs|scripting|webRequest|downloads)/, "an API beyond answering a message"],
-    [/postMessage|addEventListener\(\s*"message"/, "talking to the page"],
-  ];
-  for (const [pattern, what] of forbidden) assert.doesNotMatch(code, pattern, what);
+test("no content script and no right-click menu (DramaFetch 2.0.0, the owner's decision of 2026-11-22): no content_scripts, no contextMenus, and no source that reaches for either", () => {
+  assert.equal(Object.hasOwn(manifest, "content_scripts"), false);
+  assert.ok(!(/** @type {string[]} */ (manifest["permissions"]).includes("contextMenus")));
+  assert.equal(existsSync(file("src/content")), false, "src/content: the favorites card reader is gone");
+  assert.equal(existsSync(file("src/app/menus.js")), false, "src/app/menus.js: the right-click items are gone");
+  const sources = [...walk("src/app"), ...walk("src/lib")].filter((path) => path.endsWith(".js"));
+  for (const path of sources) {
+    const text = readFileSync(file(path), "utf8");
+    assert.doesNotMatch(text, /chrome\s*\.\s*contextMenus/, `${path}: chrome.contextMenus`);
+    assert.doesNotMatch(text, /chrome\s*\.\s*tabs\s*\.\s*sendMessage/, `${path}: a message to a content script`);
+    assert.doesNotMatch(text, /chrome\s*\.\s*runtime\s*\.\s*on(Installed|Startup)/, `${path}: an install or start-up hook (the menu's)`);
+  }
+  // the type declarations follow: no API the extension stopped using
+  const declared = readFileSync(file("types/chrome.d.ts"), "utf8");
+  assert.doesNotMatch(declared, /namespace contextMenus|function sendMessage\(tabId|onInstalled|onStartup|lastError/);
 });
 
 test("host access to TikTok and its media and image CDNs only, https, never localhost", () => {
@@ -161,7 +147,7 @@ test("the icons are PNGs of the declared sizes", () => {
 });
 
 test("the sources never use an API or a trick the line forbids", () => {
-  const sources = [...walk("src/app"), ...walk("src/lib"), ...walk("src/content")].filter((path) => path.endsWith(".js"));
+  const sources = [...walk("src/app"), ...walk("src/lib")].filter((path) => path.endsWith(".js"));
   assert.ok(sources.length > 10);
   const forbidden = [
     [/chrome\s*\.\s*cookies/, "chrome.cookies"],

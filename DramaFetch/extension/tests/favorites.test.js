@@ -2,28 +2,20 @@
 // The user's TikTok favorites list as DramaFetch reads it (src/lib/favorites.js, pure): which
 // request is the list's first page (the only one the worker keeps), one page of TikTok's
 // `drama_list` answer — the anonymized capture of 2026-11-15, tests/fixtures/drama_list_page.json,
-// with two DIFFERENT dramas of the same title, as in the owner's list —, the resolver that turns a
-// right-clicked card into its drama (never a guess between dramas of the same title) and how far a
-// card's listing reads, the checks of what a TikTok tab's
-// content script answers, the hand-over's address and the status DramaFetch's own records give a
-// favorite. No browser, no network.
+// with two DIFFERENT dramas of the same title, as in the owner's list —, the hand-over (a message's,
+// an address's: the TikTok tab alone since 2.0.0, which took the right-clicked card away) and the
+// status DramaFetch's own records give a favorite. No browser, no network.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
-  CARD_MAX_AGE_S,
-  FAVORITES_CARD_SELECTOR,
   FAVORITES_MAX_PAGES,
   FAVORITES_URL_WORD,
   FavoritesPayloadError,
-  MAX_CARD_TITLE_LENGTH,
   NOT_A_LIST_MESSAGE,
-  cardOf,
   cleanTitle,
   coverUrlOf,
-  coversCard,
-  coversShift,
   durationParts,
   favoritesOfQuery,
   favoritesQuery,
@@ -34,7 +26,6 @@ import {
   parseDramaListPayload,
   knownEpisodes,
   progressStatus,
-  resolveCard,
   titleMatches,
 } from "../src/lib/favorites.js";
 import { completeSince, markComplete, newState, record } from "../src/lib/state.js";
@@ -64,10 +55,8 @@ const zoom240 = (index) => {
   return String(entry["zoomCover"]?.["240"]);
 };
 
-test("the constants: 100 pages at most, the card's selector and age, the drama_list path", () => {
+test("the constants: 100 pages at most, the drama_list path", () => {
   assert.equal(FAVORITES_MAX_PAGES, 100);
-  assert.equal(FAVORITES_CARD_SELECTOR, "button[aria-label][class*=FavoriteDramaCard]");
-  assert.equal(CARD_MAX_AGE_S, 30);
   for (const url of [
     "https://www.tiktok.com/api/user/favorite/drama_list/?WebIdLastTime=1794300000&aid=1988&cursor=0",
     "https://www.tiktok.com/api/favorite/drama_list?aid=1988",
@@ -241,105 +230,6 @@ test("TikTok's own error (statusCode or status_code not 0) is an error carrying 
   }
 });
 
-test("a right-clicked card: the one series of its title, wherever it is; several different series of that title are shared — never a guess by position —; none, missing", () => {
-  const items = [item("7700000000000000001", "Moonlight Over the Harbor"), item(SNOW_A, "Snowfall in Two Cities"), item(LIGHTHOUSE, "The Lighthouse Keeper's Promise"), item(SNOW_B, "Snowfall in Two Cities"), item("7700000000000000005", "Paper Crowns")];
-  // the one series of that title: at the card's position, or elsewhere (a favorite added or removed since the grid loaded)
-  assert.deepEqual(resolveCard(items, { title: "Paper Crowns", index: 4 }), { kind: "found", item: items[4], index: 4 });
-  assert.deepEqual(resolveCard(items, { title: "Paper Crowns", index: 3 }), { kind: "found", item: items[4], index: 4 });
-  assert.deepEqual(resolveCard(items, { title: "Moonlight Over the Harbor", index: 40 }), { kind: "found", item: items[0], index: 0 });
-  // the title compared on one line, NFC (the page's aria-label against TikTok's dramaName)
-  assert.deepEqual(resolveCard(items, { title: " The Lighthouse\n Keeper's  Promise ", index: 2 }), { kind: "found", item: items[2], index: 2 });
-  // two DIFFERENT dramas of that title: shared, at the card's position or not — the position cannot
-  // tell them apart once the grid has moved; both, in the list's order
-  for (const index of [0, 1, 2, 3, 4, 40]) {
-    assert.deepEqual(resolveCard(items, { title: "Snowfall in Two Cities", index }), { kind: "shared", items: [items[1], items[3]] }, String(index));
-  }
-  // the same drama listed twice is one series: found, at the card's position when it is there
-  const twice = [item(SNOW_A, "Snowfall in Two Cities"), item(LIGHTHOUSE, "The Lighthouse Keeper's Promise"), item(SNOW_A, "Snowfall in Two Cities")];
-  assert.deepEqual(resolveCard(twice, { title: "Snowfall in Two Cities", index: 2 }), { kind: "found", item: twice[2], index: 2 });
-  assert.deepEqual(resolveCard(twice, { title: "Snowfall in Two Cities", index: 1 }), { kind: "found", item: twice[0], index: 0 });
-  // three dramas of a title: all of them
-  const three = [...items, item("7700000000000000006", "Snowfall in Two Cities")];
-  assert.deepEqual(resolveCard(three, { title: "Snowfall in Two Cities", index: 5 }), { kind: "shared", items: [items[1], items[3], three[5]] });
-  // no item of that title: missing (the list changed); letter case counts; an empty title is none
-  assert.deepEqual(resolveCard(items, { title: "Snowfall In Two Cities", index: 1 }), { kind: "missing" });
-  assert.deepEqual(resolveCard(items, { title: "A Drama Not Listed", index: 0 }), { kind: "missing" });
-  assert.deepEqual(resolveCard(items, { title: "   ", index: 0 }), { kind: "missing" });
-  assert.deepEqual(resolveCard([], { title: "Paper Crowns", index: 0 }), { kind: "missing" });
-  assert.deepEqual(resolveCard([item(SNOW_A, null)], { title: SNOW_A, index: 0 }), { kind: "missing" });
-});
-
-test("how far a card's listing reads: past the card's position, its title in view, one drama after the last of that title — a twin may begin the next page —, and a page past the card's position when its drama is not where the card sits", () => {
-  const page1 = [item(LIGHTHOUSE, "The Lighthouse Keeper's Promise"), item(SNOW_A, "Snowfall in Two Cities"), item("7700000000000000003", "Paper Crowns")];
-  const per = page1.length; // three dramas a page
-  // the card's position covered and its title in view there, a drama after it: far enough
-  assert.equal(coversCard(page1, { title: "Snowfall in Two Cities", index: 1 }, per), true);
-  // the title further down than the card's position (a drama that moved down — or another drama of
-  // that title): a page past the card's position, then far enough
-  assert.equal(coversCard(page1, { title: "Snowfall in Two Cities", index: 0 }, per), false);
-  assert.equal(coversCard([...page1, item("7700000000000000004", "Tea House Vows")], { title: "Snowfall in Two Cities", index: 0 }, per), true);
-  // not past the card's position yet: read on (the grid holds more cards than read so far)
-  assert.equal(coversCard(page1, { title: "Snowfall in Two Cities", index: 3 }, per), false);
-  assert.equal(coversCard(page1, { title: "Paper Crowns", index: 2 }, per), false); // the last one read: a twin may follow
-  // the title not in view yet: read on (a drama that moved down)
-  assert.equal(coversCard(page1, { title: "Moonlight Over the Harbor", index: 0 }, per), false);
-  // the last drama of that title is the last one read: one page more, so that its twin, first on
-  // the next page, is seen — then both are, and the card is shared
-  const page2 = [...page1, item(SNOW_B, "Snowfall in Two Cities"), item("7700000000000000005", "Tea House Vows")];
-  assert.equal(coversCard([...page1, item(SNOW_B, "Snowfall in Two Cities")], { title: "Snowfall in Two Cities", index: 1 }, per), false);
-  assert.equal(coversCard(page2, { title: "Snowfall in Two Cities", index: 1 }, per), true);
-  assert.equal(resolveCard(page2, { title: "Snowfall in Two Cities", index: 1 }).kind, "shared");
-  // the title compared on one line, NFC; an empty title never covers
-  assert.equal(coversCard(page1, { title: " Snowfall  in\nTwo Cities ", index: 1 }, per), true);
-  assert.equal(coversCard(page1, { title: "  ", index: 0 }, per), false);
-  assert.equal(coversCard([], { title: "Paper Crowns", index: 0 }, per), false);
-});
-
-test("a card whose drama is not where the card sits — the grid moved since it loaded, a favorite added elsewhere — is read a page past its position: a drama of its title pushed down, the card's own, is then seen too and the card shared, never the other one picked", () => {
-  const per = 19; // the owner's capture: 19 dramas a page
-  /** @param {number} n */
-  const drama = (n) => item(String(7700000000000001000n + BigInt(n)), `Drama ${n}`);
-  const snowfall = (/** @type {number} */ n) => item(String(7700000000000002000n + BigInt(n)), "Snowfall in Two Cities");
-  /** @param {number[]} twins the grid's positions of two different dramas called "Snowfall in Two Cities" */
-  const gridOf = (twins) => Array.from({ length: 40 }, (_, n) => (twins.includes(n) ? snowfall(n) : drama(n)));
-  const added = item("7700000000000003000", "A New Favorite");
-  const card = { title: "Snowfall in Two Cities", index: 18 }; // the lower one right-clicked
-  for (const twins of [
-    [2, 18], // far apart
-    [16, 18], // one drama between them
-  ]) {
-    const grid = gridOf(twins);
-    // one favorite added on the phone since the grid loaded — the list TikTok sends now has it on
-    // top: every card one place further down, the right-clicked one first on page 2
-    const fresh = [added, ...grid];
-    const page1 = fresh.slice(0, per);
-    // page 1 holds the card's position and the other drama of that title with a drama after it, and
-    // the card's position another drama: not far enough (stopping there would pick the other one)
-    assert.deepEqual(resolveCard(page1, card), { kind: "found", item: snowfall(twins[0]), index: twins[0] + 1 }, String(twins));
-    assert.equal(coversShift(page1, card, per), false, String(twins));
-    assert.equal(coversCard(page1, card, per), false, String(twins));
-    // a page past it: both in view — shared, nothing picked
-    const page2 = fresh.slice(0, 2 * per);
-    assert.equal(coversCard(page2, card, per), true, String(twins));
-    assert.deepEqual(resolveCard(page2, card), { kind: "shared", items: twins.map(snowfall) }, String(twins));
-  }
-  // a title one drama bears, moved down one place since the grid loaded: found a page past the
-  // card's position — one request more, only when the grid has moved
-  const grid = gridOf([]);
-  const fresh = [added, ...grid];
-  const five = { title: "Drama 5", index: 5 };
-  assert.equal(coversCard(fresh.slice(0, per), five, per), false);
-  assert.equal(coversCard(fresh.slice(0, 2 * per), five, per), true);
-  assert.deepEqual(resolveCard(fresh.slice(0, 2 * per), five), { kind: "found", item: drama(5), index: 6 });
-  // the grid as the list: the card's drama at the card's position — the first page is enough
-  assert.equal(coversCard(grid.slice(0, per), five, per), true);
-  // coversShift itself: the card's position bearing the title, or more than a page past it read
-  assert.equal(coversShift(grid.slice(0, per), five, per), true);
-  assert.equal(coversShift(fresh.slice(0, 24), five, per), false); // 24 dramas: not more than 5 + 19
-  assert.equal(coversShift(fresh.slice(0, 25), five, per), true);
-  assert.equal(coversShift(fresh.slice(0, 3), five, per), false); // the card's position not even read
-});
-
 test("the filter: the title holds the text, letter case and blanks aside", () => {
   assert.equal(titleMatches("Snowfall in Two Cities", "snowfall"), true);
   assert.equal(titleMatches("Snowfall in Two Cities", "TWO  cities"), true);
@@ -351,61 +241,28 @@ test("the filter: the title holds the text, letter case and blanks aside", () =>
   assert.equal(cleanTitle("  a \n\t b  "), "a b");
 });
 
-test("what a TikTok tab's content script answers is checked: a title on one line and a whole position, else no card", () => {
-  assert.deepEqual(cardOf({ title: " Snowfall in\nTwo Cities ", index: 1, at: 1794351572000 }), { title: "Snowfall in Two Cities", index: 1 });
-  assert.deepEqual(cardOf({ title: "Paper Crowns", index: 0 }), { title: "Paper Crowns", index: 0 });
-  for (const junk of [
-    null,
-    "Paper Crowns",
-    [],
-    { title: "", index: 0 },
-    { title: "  \n ", index: 0 },
-    { title: 5, index: 0 },
-    { title: "Paper Crowns", index: -1 },
-    { title: "Paper Crowns", index: 1.5 },
-    { title: "Paper Crowns", index: "1" },
-    { title: "Paper Crowns" },
-    { title: "x".repeat(MAX_CARD_TITLE_LENGTH + 1), index: 0 },
-  ]) {
-    assert.equal(cardOf(junk), null, JSON.stringify(junk));
-  }
-  // a hand-over: a tab, the card (checked), whether it came from the menu and whether the tab's
-  // content script answered — true unless the message says false
-  assert.deepEqual(handoverOf({ type: "dramafetch:favorites", tabId: 7, card: { title: "Paper Crowns", index: 2 }, menu: true, script: true }), {
-    tabId: 7,
-    card: { title: "Paper Crowns", index: 2 },
-    menu: true,
-    script: true,
-  });
-  assert.deepEqual(handoverOf({ tabId: 7, card: { title: 9 }, menu: "yes" }), { tabId: 7, card: null, menu: false, script: true });
-  assert.deepEqual(handoverOf({ tabId: 7, card: null, menu: true, script: false }), { tabId: 7, card: null, menu: true, script: false });
-  assert.deepEqual(handoverOf({ tabId: 7, card: null, menu: true, script: 0 }), { tabId: 7, card: null, menu: true, script: true }); // only false says no script
-  for (const junk of [null, { tabId: -1 }, { tabId: "7" }, { tabId: 1.5 }, {}]) assert.equal(handoverOf(junk), null);
+test("a favorites hand-over as a message carries it is checked: the TikTok tab alone — a whole number from 0 —, nothing else of the message read (2.0.0: no card, no menu, no script)", () => {
+  assert.deepEqual(handoverOf({ type: "dramafetch:favorites", tabId: 7 }), { tabId: 7 });
+  assert.deepEqual(handoverOf({ tabId: 0 }), { tabId: 0 });
+  // what 1.x's right-click added to it is no part of it any more: never read, never kept
+  assert.deepEqual(handoverOf({ type: "dramafetch:favorites", tabId: 7, card: { title: "Paper Crowns", index: 2 }, menu: true, script: false }), { tabId: 7 });
+  for (const junk of [null, "7", [], { tabId: -1 }, { tabId: "7" }, { tabId: 1.5 }, { tabId: Number.NaN }, {}]) assert.equal(handoverOf(junk), null, JSON.stringify(junk));
 });
 
-test("a hand-over no running page took travels in the DramaFetch tab's address and comes back the same", () => {
-  const card = { title: "Snowfall in Two Cities & more", index: 12 };
-  for (const handover of [
-    { tabId: 7, card: null, menu: false, script: true },
-    { tabId: 7, card: null, menu: true, script: true },
-    { tabId: 7, card: null, menu: true, script: false },
-    { tabId: 1234567, card, menu: true, script: true },
-  ]) {
-    const query = favoritesQuery(handover);
-    assert.deepEqual(favoritesOfQuery(`?${query}`), handover, query);
+test("a hand-over no running page took travels in the DramaFetch tab's address and comes back the same: `favorites=<tab>`, nothing else", () => {
+  for (const tabId of [0, 7, 1234567]) {
+    const query = favoritesQuery({ tabId });
+    assert.equal(query, `favorites=${tabId}`);
+    assert.deepEqual(favoritesOfQuery(`?${query}`), { tabId }, query);
   }
-  assert.equal(favoritesQuery({ tabId: 7, card: null, menu: false, script: true }), "favorites=7");
-  assert.equal(favoritesQuery({ tabId: 7, card: null, menu: true, script: true }), "favorites=7&menu=1");
-  // `script=0` only when the tab's content script did not answer
-  assert.equal(favoritesQuery({ tabId: 7, card: null, menu: true, script: false }), "favorites=7&menu=1&script=0");
-  assert.equal(favoritesOfQuery("?favorites=7&menu=1&script=1")?.script, true);
-  assert.equal(favoritesOfQuery("?favorites=7&menu=1&script=no")?.script, true);
   assert.equal(favoritesOfQuery(""), null);
   assert.equal(favoritesOfQuery("?load=7699393770256782354"), null);
   assert.equal(favoritesOfQuery("?favorites=-1"), null);
   assert.equal(favoritesOfQuery("?favorites=x"), null);
-  assert.deepEqual(favoritesOfQuery("?favorites=7&card=%7Bnot+json"), { tabId: 7, card: null, menu: false, script: true });
-  assert.deepEqual(favoritesOfQuery(`?favorites=7&card=${encodeURIComponent(JSON.stringify({ title: "", index: 1 }))}`), { tabId: 7, card: null, menu: false, script: true });
+  assert.equal(favoritesOfQuery("?favorites="), null);
+  // a 1.x right-click's address (`menu`, `script`, `card`): the tab alone is read
+  const card = encodeURIComponent(JSON.stringify({ title: "Snowfall in Two Cities", index: 12 }));
+  assert.deepEqual(favoritesOfQuery(`?favorites=7&menu=1&script=0&card=${card}`), { tabId: 7 });
 });
 
 test("a profile page: TikTok's /@<user> pages, or the fake's in test mode", () => {

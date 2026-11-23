@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { NO_PLAY_ADDRESS, SHORT_HEADER_HINT_PREFIX, catalogWarnings, makeEpisode } from "../src/lib/catalog.js";
 import { EXTENSION_LIFT_TEXT, cooldownMessage, cooldownStopReason, cooldownSummary, makeCooldown } from "../src/lib/cooldown.js";
-import { DEFAULT_LABELS, STATUS_LABELS, displayLanguageOf, displayText, statusLabel } from "../src/lib/display.js";
+import { DEFAULT_LABELS, STATUS_LABELS, displayLanguageOf, displayText, formatDuration, pauseLine, statusLabel } from "../src/lib/display.js";
 import * as messages from "../src/lib/messages.js";
 import { nameFormatProblem } from "../src/lib/naming.js";
 import {
@@ -671,7 +671,7 @@ async function discoveryTexts() {
   );
   texts.push(await failure(resolve(engine, ref)));
   texts.push(LOGIN_REDIRECT_MESSAGE, CHALLENGE_MESSAGE, EMPTY_LIST_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE, FAVORITES_CHALLENGE_MESSAGE);
-  // Remove from Favorites: its refusals and every reason it removed nothing (the history keeps them)
+  // Remove from Favorites: its refusals and every reason it removed nothing (the job's record keeps them)
   texts.push(BOOKMARK_RATE_LIMIT_MESSAGE, BOOKMARK_CHALLENGE_MESSAGE, ...Object.values(BOOKMARK_MESSAGES));
   return texts;
 }
@@ -1017,4 +1017,58 @@ test("a report line's details on their own — the words a drama's alert names i
   assert.ok(es("complete: 60 of 62 (60 downloaded) — 2 locked (61, 62)").endsWith(" — 2 bloqueados (61, 62)"));
   assert.equal(en("2 locked (61, 62)"), "2 locked (61, 62)");
   for (const text of ["2 locked things", "3 lockers (1)", "2 locked (61, 62) and more"]) assert.equal(es(text), text);
+});
+
+test("the countdown's time (2.0.0): below a minute in seconds, from 60 s up in minutes and two-digit seconds — no hours —, a fraction of a second a whole one (Math.ceil, as the countdown always rounded), never below 0 s", () => {
+  /** @type {[number, string][]} */
+  const exact = [
+    [0, "0 s"],
+    [1, "1 s"],
+    [59, "59 s"],
+    [60, "1 min 00 s"],
+    [61, "1 min 01 s"],
+    [119, "1 min 59 s"],
+    [3599, "59 min 59 s"],
+    [3600, "60 min 00 s"],
+    [5000, "83 min 20 s"],
+  ];
+  for (const [seconds, text] of exact) assert.equal(formatDuration(seconds), text, String(seconds));
+  // a fraction left counts as a whole second: the line never reads 0 s while time is left
+  for (const [seconds, text] of /** @type {[number, string][]} */ ([[0.01, "1 s"], [44.2, "45 s"], [59.001, "1 min 00 s"], [60.5, "1 min 01 s"], [1359.3, "22 min 40 s"]])) {
+    assert.equal(formatDuration(seconds), text, String(seconds));
+  }
+  for (const seconds of [-0.4, -3, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) assert.equal(formatDuration(seconds), "0 s", String(seconds));
+});
+
+test("the pause line (2.0.0): its message from the pause's kind — one per kind, a singular for a rest after one —, its length and the time left as formatDuration writes them, a rest's count the engine's own text carries; nothing for a kind it does not know or a rest whose text carries no count; the engine's texts unchanged", () => {
+  /** @param {string} kind @param {number} seconds @param {number} left @param {Record<string, number>} [counts] */
+  const line = (kind, seconds, left, counts = {}) => pauseLine(kind, seconds, pauseMessage(kind, seconds, counts), left);
+  assert.deepEqual(line(PACE, 7, 4), { key: "pausePace", substitutions: ["7 s", "4 s"] });
+  assert.deepEqual(line(REST, 95, 67, { downloads: 10 }), { key: "pauseRest", substitutions: ["1 min 35 s", "10", "1 min 07 s"] });
+  assert.deepEqual(line(REST, 61, 59, { downloads: 1 }), { key: "pauseRestOne", substitutions: ["1 min 01 s", "59 s"] });
+  assert.deepEqual(line(LONG_REST, 1360, 1263, { runAttempts: 100 }), { key: "pauseLongRest", substitutions: ["22 min 40 s", "100", "21 min 03 s"] });
+  assert.deepEqual(line(LONG_REST, 900, 900, { runAttempts: 1 }), { key: "pauseLongRestOne", substitutions: ["15 min 00 s", "15 min 00 s"] });
+  assert.deepEqual(line(SERIES_REST, 72, 58), { key: "pauseSeriesRest", substitutions: ["1 min 12 s", "58 s"] });
+  assert.deepEqual(line(JOB_REST, 72, 58), { key: "pauseJobRest", substitutions: ["1 min 12 s", "58 s"] });
+  // a fraction rounded up, in the length and in the time left
+  assert.deepEqual(line(PACE, 6.2, 0.3), { key: "pausePace", substitutions: ["7 s", "1 s"] });
+  // nothing for what the line does not know: the page shows the engine's text with the time left
+  assert.equal(pauseLine("nap", 45, "pausing 45 s", 45), null);
+  assert.equal(pauseLine(REST, 95, "resting a while", 60), null);
+  assert.equal(pauseLine(LONG_REST, 900, "long break", 60), null);
+  // the engine's own texts — what the job keeps for its report, the Python tool's — are as they were
+  assert.equal(pauseMessage(REST, 95, { downloads: 10 }), "resting 95 s after 10 downloads");
+  assert.equal(pauseMessage(PACE, 7), "pausing 7 s");
+  assert.equal(pauseMessage(SERIES_REST, 72), "resting 72 s before the next series");
+  // every message the line picks exists in both languages, with the placeholders it fills
+  for (const language of ["en", "es"]) {
+    /** @type {Record<string, {message: string, placeholders?: Record<string, {content: string}>}>} */
+    const catalog = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
+    for (const key of ["pausePace", "pauseRest", "pauseRestOne", "pauseLongRest", "pauseLongRestOne", "pauseSeriesRest", "pauseJobRest"]) {
+      const entry = catalog[key];
+      assert.ok(entry !== undefined, `${language}: ${key}`);
+      const filled = key === "pauseRest" || key === "pauseLongRest" ? 3 : 2;
+      assert.equal(Object.keys(entry.placeholders ?? {}).length, filled, `${language}: ${key}`);
+    }
+  }
 });

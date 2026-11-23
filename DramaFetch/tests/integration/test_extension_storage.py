@@ -135,8 +135,8 @@ async ({ untilBytes, pad }) => {
 """
 
 #: From the moment the page has made `acceptStateWrites` writes of a series' state, every write
-#: of `chrome.storage.local` rejects as on a full disk — the state's, the pacing's, the cooldown's
-#: and the history's alike. `globalThis.__refused()` counts them.
+#: of `chrome.storage.local` rejects as on a full disk — the state's, the pacing's and the
+#: cooldown's alike. `globalThis.__refused()` counts them.
 FULL_DISK_JS = r"""
 ({ acceptStateWrites, message }) => {
   const local = chrome.storage.local;
@@ -179,8 +179,8 @@ def _watch_errors(ext: ExtensionHarness) -> list[str]:
 
 def _paste_and_finish(ext: ExtensionHarness, links: str, finished: int) -> None:
     """A real paste of `links` into the box (`ExtensionHarness.paste`), then wait until `finished`
-    jobs have ended, nothing runs and nothing waits. (The harness' own `paste_and_wait` reads the
-    job's history entry: a storage that refuses has none.)"""
+    jobs have ended, nothing runs and nothing waits. (The harness' own `paste_and_wait` waits for
+    one job and returns its journal entry.)"""
     ext.paste(links)
     _wait_finished(ext, finished)
 
@@ -377,7 +377,15 @@ def test_b_a_write_refused_mid_series_stops_the_run_and_the_next_run_resumes(
         state = ext.series_state(SERIES_ID)
         assert state is not None and sorted(state["episodes"]) == ["1", "2"]  # E03's write: refused
         assert state.get("complete_at") is None
-        assert ext.history() == []  # refused too: the history gives way, the job's end does not
+        # the job's end ran whole all the same — its journal entry (in the page's memory: nothing
+        # of it is stored), and the job waiting behind it never started
+        ran, waiting = ext.journal()
+        assert (ran["kind"], ran["label"]) == ("batch", f"Series {SERIES_ID}")
+        assert reason in str(ran["stopped"]), ran["stopped"]
+        assert waiting["label"] == f"Series {THIRD_SERIES_ID}"
+        assert str(waiting["error"]).startswith("not started: batch stopped in "), waiting["error"]
+        assert waiting["series"] == []
+        assert "history" not in ext.storage()
         assert ext.cooldown() is None
         assert page.locator("#cooldown-banner").is_hidden()
 
@@ -481,7 +489,7 @@ def test_c_a_429_while_the_storage_refuses_still_starts_the_cooldown(tmp_path: P
         assert stored is not None and MEDIA_RATE_LIMIT in str(stored["reason"])
         _popup_load(ext, None)  # accepted by this fresh page, then refused by the cooldown's gate
         ext.wait_for(lambda: ext.finished_jobs() >= 1 and ext.idle(), 20)
-        assert str(ext.history()[0]["error"]).startswith("TikTok refused a request at ")
+        assert str(ext.journal()[0]["error"]).startswith("TikTok refused a request at ")
         assert len(server.requests) == requests
 
 
@@ -624,3 +632,32 @@ def test_e_a_series_whose_memory_is_gone_is_found_on_disk_and_not_downloaded_aga
         state = ext.series_state(SERIES_ID)
         assert state is not None and state["complete_at"] is not None
         assert _on_disk(state) == dict.fromkeys((1, 2, 3, 4), "skipped-exists")
+
+
+def test_f_the_history_1x_kept_is_removed_at_the_page_s_start_and_nothing_records_jobs_on_disk(
+    tmp_path: Path,
+) -> None:
+    """DramaFetch 2.0.0 keeps no history of past runs: a job run leaves nothing of itself in
+    `chrome.storage.local` — the test copy's journal of finished jobs lives in the page's memory
+    only —, and what a 1.x install stored under `history` (put back here as a 1.x tab would have
+    left it) goes when the page starts, once, that key alone: the series' records, the pacing and
+    the test settings a first run left stay as they were. A reopened page starts an empty
+    journal, and shows no Past runs."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
+        first = ext.paste_and_wait(MAIN_LINK)
+        assert first["series"][0]["line"] == MAIN_LINE
+        stored = ext.storage()
+        assert "history" not in stored  # the job ended: nothing of it stored
+        assert [entry["label"] for entry in ext.journal()] == [f"Series {SERIES_ID}"]
+        # a 1.x tab's history, put back where 1.x kept it, next to what 2.0.0 keeps
+        legacy = [{"id": 1, "kind": "batch", "label": f"Series {SERIES_ID}", "series": []}]
+        ext.page.evaluate("(history) => chrome.storage.local.set({history})", legacy)
+        assert ext.storage("history") == {"history": legacy}
+        ext.page.close()
+        ext.reopen_app()
+        after = ext.storage()
+        assert "history" not in after
+        assert set(after) == set(stored)  # every other key as it was
+        assert after[f"series:{SERIES_ID}"] == stored[f"series:{SERIES_ID}"]
+        assert ext.journal() == []  # a new page: an empty journal
+        assert ext.page.locator("#history-card").count() == 0  # no Past runs on the page
