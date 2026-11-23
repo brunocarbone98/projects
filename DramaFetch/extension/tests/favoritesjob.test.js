@@ -5,16 +5,16 @@
 // for real), the first page as the template itself — replayed byte for byte, never rewritten — and
 // the later pages as the template with only `cursor` changed, one request at a time, every stop
 // (hasMore false, a cursor repeated or unchanged, a page that brings nothing new, two empty pages,
-// the page cap, a card's listing far enough, Stop) and `cutShort`, the refusals (429 and 403 with
+// the page cap, the caller's `until` — the smart refresh's —, Stop) and `cutShort`, the refusals (429 and 403 with
 // the cooldown recorded, the login page, a captcha read in the ISOLATED world — also behind an
 // answer that brings no list) and no request at all when the tab is gone, left TikTok (before any
 // page, the first or a later one) or a cooldown is in force. tests/app.test.js drives the job
-// inside the page (the panel, the card).
+// inside the page (the library).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { FAVORITES_MAX_PAGES, NOT_A_LIST_MESSAGE, coversCard, resolveCard } from "../src/lib/favorites.js";
+import { FAVORITES_MAX_PAGES, NOT_A_LIST_MESSAGE } from "../src/lib/favorites.js";
 import { BLOCKED_MESSAGE, LIST_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
 import { PacingState, pacingOptions } from "../src/lib/pacing.js";
 import {
@@ -218,7 +218,7 @@ test("every page from inside the tab — the first the template itself, the late
   }
 });
 
-test("the listing stops at a cursor that repeats or does not change, at two empty pages in a row, at the page cap, and once a card's position is covered", async () => {
+test("the listing stops at a cursor that repeats or does not change, at two empty pages in a row, at the page cap, and once the caller's `until` holds", async () => {
   /** @param {string} cursor @param {boolean} hasMore @param {unknown[]} list */
   const pageOf = (cursor, hasMore, list) => ({ ...CAPTURE, cursor, hasMore, dramaList: list });
   const one = [favorite("7712345678901234569", "One More")];
@@ -256,17 +256,17 @@ test("the listing stops at a cursor that repeats or does not change, at two empt
   } finally {
     fake.restore();
   }
-  // a right-clicked card's listing: the pages until it reaches the card (`until`, asked after every
-  // page that does not end the list), no further
+  // the caller's `until` (the smart refresh's: its first page found the library unchanged): the
+  // pages until it holds — asked after every page that does not end the list —, no further
   fake = fakeChrome();
   try {
-    const paper = { title: "Paper Crowns", index: 3 }; // the first drama of the second page
-    const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: (items, perPage) => coversCard(items, paper, perPage) });
+    /** @param {string} title @returns {(items: readonly import("../src/lib/favorites.js").FavoriteItem[]) => boolean} */
+    const listed = (title) => (items) => items.some((item) => item.title === title);
+    const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: listed("Paper Crowns") }); // the first drama of the second page
     assert.equal(fake.fetched.length, 2);
     assert.equal(listing.items.length, 6);
     assert.equal(listing.ended, "until");
-    const lighthouse = { title: "The Lighthouse Keeper's Promise", index: 0 };
-    const first = await listFavorites(fakeEngine([]).engine, TAB, TEMPLATE, { until: (items, perPage) => coversCard(items, lighthouse, perPage) });
+    const first = await listFavorites(fakeEngine([]).engine, TAB, TEMPLATE, { until: listed("The Lighthouse Keeper's Promise") });
     assert.equal(first.pages, 1);
     // the stop condition sees every item listed so far, in the list's order
     /** @type {number[]} */
@@ -318,65 +318,6 @@ test("the first page is the page's own request replayed byte for byte — nothin
     assert.equal(listing.ended, "cursor");
   } finally {
     back.restore();
-  }
-});
-
-test("a right-clicked card's listing reads on until it reaches the card: past a drama that moved down the list, and one page past a last drama of the card's title — its twin may begin the next page", async () => {
-  for (const [card, pages] of /** @type {[import("../src/lib/favorites.js").Card, number][]} */ ([
-    [{ title: "The Lighthouse Keeper's Promise", index: 0 }, 1], // at its position: the first page only
-    [{ title: "Moonlight Over the Harbor", index: 1 }, 2], // moved down since the grid loaded: read on to it
-    [{ title: "Paper Crowns", index: 0 }, 2],
-    [{ title: "Glass Slipper Contract", index: 5 }, 3], // the last drama of page 2: one page more (here, the list's end)
-    [{ title: "Snowfall in Two Cities", index: 1 }, 2], // two of that title end page 1: one page more
-    [{ title: "A Drama Not Listed", index: 0 }, 3], // never in view: to the list's end
-    // moved down one place, another drama at the card's position: a page past it (here, the list's end)
-    [{ title: "Moonlight Over the Harbor", index: 3 }, 3],
-  ])) {
-    const fake = fakeChrome();
-    try {
-      const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: (items, perPage) => coversCard(items, card, perPage) });
-      assert.equal(listing.pages, pages, card.title);
-      assert.equal(fake.fetched.length, pages, card.title);
-      assert.equal(listing.ended, pages === 3 ? null : "until", card.title);
-      assert.equal(listing.perPage, 3, card.title); // three dramas a page
-    } finally {
-      fake.restore();
-    }
-  }
-});
-
-test("a right-clicked card whose drama is not where the card sits — a favorite added elsewhere since the grid loaded moved every card — is read a page past its position: two different dramas of its title then both in view, none picked", async () => {
-  // 19 dramas a page, as in the owner's capture: two different "Snowfall in Two Cities" at 2 and 18
-  // in the grid, one favorite added on the phone since — on top of the list TikTok sends now, so
-  // the right-clicked one (the card at 18) is the first drama of page 2, the other one at 3
-  const twins = [favorite("7712345678901240002", "Snowfall in Two Cities"), favorite("7712345678901240018", "Snowfall in Two Cities")];
-  const grid = Array.from({ length: 40 }, (_, n) => (n === 2 ? twins[0] : n === 18 ? twins[1] : favorite(String(7712345678901241000n + BigInt(n)), `Drama ${n}`)));
-  const fresh = [favorite("7712345678901242000", "A New Favorite"), ...grid];
-  const cursors = ["0", "1794351568", "1794350100"];
-  /** @type {Record<string, unknown>} */
-  const pages = {};
-  cursors.forEach((cursor, page) => {
-    pages[cursor] = { ...CAPTURE, total: String(fresh.length), cursor: cursors[page + 1] ?? "1794349000", hasMore: page < 2, dramaList: fresh.slice(page * 19, page * 19 + 19) };
-  });
-  const card = { title: "Snowfall in Two Cities", index: 18 };
-  const fake = fakeChrome({ pages });
-  try {
-    const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: (items, perPage) => coversCard(items, card, perPage) });
-    assert.equal(listing.perPage, 19);
-    assert.equal(fake.fetched.length, 2); // page 1 held the card's position and the other one: one page more
-    assert.equal(listing.ended, "until");
-    assert.deepEqual(
-      resolveCard(listing.items, card),
-      {
-        kind: "shared",
-        items: [
-          { seriesId: "7712345678901240002", title: "Snowfall in Two Cities", episodes: 40, durationS: 3000, coverUrl: COVER_240 },
-          { seriesId: "7712345678901240018", title: "Snowfall in Two Cities", episodes: 40, durationS: 3000, coverUrl: COVER_240 },
-        ],
-      },
-    );
-  } finally {
-    fake.restore();
   }
 });
 
@@ -653,10 +594,12 @@ test("TikTok stopping before the list's end: a page that brings nothing new ends
   /** @type {Record<string, unknown>} */
   const again = { "0": CAPTURE };
   for (let page = 1; page < 150; page += 1) again[String(1794351567 + page)] = { ...CAPTURE, cursor: String(1794351568 + page) };
+  /** @param {readonly unknown[]} items @returns {boolean} a caller's `until` that never holds here: past what TikTok sends */
+  const beyond = (items) => items.length > 3;
   let fake = fakeChrome({ pages: again });
   try {
-    // a card's listing: the card (index 4) lies past what TikTok sends
-    const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: (items, perPage) => coversCard(items, { title: "Tea House Vows", index: 4 }, perPage) });
+    // with a caller's `until` that never holds (TikTok sends less than it asks for)
+    const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: beyond });
     assert.equal(fake.fetched.length, 2);
     assert.equal(listing.items.length, 3);
     assert.equal(listing.ended, "cursor");
@@ -675,11 +618,10 @@ test("TikTok stopping before the list's end: a page that brings nothing new ends
   for (let page = 1; page < 150; page += 1) againUnreadable[String(1794351567 + page)] = { ...unreadable, cursor: String(1794351568 + page) };
   fake = fakeChrome({ pages: againUnreadable });
   try {
-    const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: (items, perPage) => coversCard(items, { title: "Tea House Vows", index: 4 }, perPage) });
+    const listing = await listFavorites(fakeEngine(fake.log).engine, TAB, TEMPLATE, { until: beyond });
     assert.equal(fake.fetched.length, 2);
     assert.equal(listing.items.length, 3);
     assert.equal(listing.skipped, 1);
-    assert.equal(listing.perPage, 4); // a page's dramas, the one without a readable id included
     assert.equal(listing.ended, "cursor");
     assert.equal(listing.complete, false);
     assert.equal(cutShort(listing), true);
@@ -721,7 +663,7 @@ test("TikTok stopping before the list's end: a page that brings nothing new ends
   } finally {
     fake.restore();
   }
-  // every favorite TikTok counts sent though the cursor stuck, a card's position reached, the cap: not cut short
+  // every favorite TikTok counts sent though the cursor stuck, the caller's `until`, the cap: not cut short
   assert.equal(cutShort({ ended: "cursor", total: 3, items: [], skipped: 3 }), false);
   assert.equal(cutShort({ ended: "until", total: 946, items: [], skipped: 0 }), false);
   assert.equal(cutShort({ ended: "cap", total: 946, items: [], skipped: 0 }), false);

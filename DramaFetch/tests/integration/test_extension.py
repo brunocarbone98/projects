@@ -440,7 +440,7 @@ def test_d2_a_job_stopped_by_hand_leaves_see_episodes_as_the_owner_left_it(tmp_p
         ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 10, "no pause")
         page.click("#stop-button")
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30, "not stopped")
-        entry = ext.history()[0]
+        entry = ext.journal()[0]
         assert (entry["kind"], entry["stopped"]) == ("selection", "stopped by you")
         assert ticked() == ["1", "2", "4"]  # E3 never ticked again
         assert len(_media_of(server, MAIN_ITEMS[3])) == 0
@@ -536,7 +536,7 @@ def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
             "(id) => chrome.runtime.sendMessage({type: 'dramafetch:open', load: id})", SERIES_ID
         )
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30)
-        refused = ext.history()[0]
+        refused = ext.journal()[0]
         assert (refused["kind"], refused["label"]) == ("batch", f"Series {SERIES_ID}")
         assert str(refused["error"]).startswith("TikTok refused a request at ")
         assert len(server.requests) == requests
@@ -758,7 +758,10 @@ def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
 ) -> None:
     """The rest between two jobs that contact TikTok counts from the last contact, whatever ended
     the job — a listing (**See episodes**), a run the user stopped, a run whose tab was closed (the
-    contact is stored as it happens) — so the next job rests before its first request."""
+    contact is stored as it happens) — so the next job rests before its first request. The second
+    drama, held by the library, is downloaded whole here: the automatic removal from the Favorites
+    (2.0.0, on by default) is turned off first, or its removal would be a job of its own between
+    these (`test_extension_autoremove.py`)."""
     settings = {"delayMinS": 1, "delayMaxS": 1, "restMinS": 0.5, "restMaxS": 6}
     with (
         FakeTikTok() as server,
@@ -770,6 +773,7 @@ def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
             assert isinstance(stored, (int, float))
             return float(stored)
 
+        ext.turn_off_auto_remove()  # the rest between the jobs below is what this scenario proves
         ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))
         started = time.time()
         ext.see_episodes(SECOND_SERIES_ID)
@@ -784,7 +788,7 @@ def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
         ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 30, "no pause")
         page.click("#stop-button")
         ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30, "not stopped")
-        assert ext.history()[0]["stopped"] is not None
+        assert ext.journal()[0]["stopped"] is not None
         assert contact() >= seen  # the stopped run's end
         assert len(_job_rests(ext.paste_and_wait(THIRD_LINK))) == 1
 
@@ -906,8 +910,8 @@ def _table_rows(page: Page, table: str) -> list[tuple[str, str]]:
 def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_path: Path) -> None:
     """A run whose downloads fail — transfers cut short (`download looks incomplete or wrong`), an
     encrypted episode, then the stop after three failures in a row — shows the episodes that did
-    not download apart from the ones that completed, with their count and a retry button, and so
-    does its history entry. The retry is one selection job over exactly those episodes (never the
+    not download apart from the ones that completed, with their count and a retry button. The
+    retry is one selection job over exactly those episodes (never the
     locked one): a fresh resolve, the state's DRM memory respected (episode 2 skipped without a
     request), the others requested once more and failing again; nothing saved; the block then
     shows what failed again, the result table keeping only the skip. With the settings' defaults:
@@ -919,7 +923,7 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         first = ext.paste_and_wait(MAIN_LINK)
-        assert [entry["label"] for entry in ext.history()] == [first["label"]]  # nothing queued
+        assert [entry["label"] for entry in ext.journal()] == [first["label"]]  # nothing queued
         (series,) = first["series"]
         assert _statuses(series) == [
             "failed",
@@ -956,14 +960,6 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
         retry = page.locator("#retry-button")
         assert retry.is_visible() and retry.is_enabled()
         assert retry.text_content() == "Retry the episodes that did not download (4)"
-        history = page.locator("#history-list li")
-        ext.wait_for(lambda: history.count() == 1, 10, "the run is not in the history yet")
-        assert history.first.locator(".retry-line span").text_content() == (
-            "Did not download: E01, E02, E03, E04"
-        )
-        assert history.first.locator("button.retry").text_content() == (
-            "Retry the episodes that did not download (4)"
-        )
 
         pages = len(server.series_page_requests)
         entry = ext._run("#retry-button", 90)
@@ -991,10 +987,6 @@ def test_p_the_episodes_that_did_not_download_are_shown_apart_and_retried(tmp_pa
         assert page.locator("#failed-heading").text_content() == "Did not download (3)"
         assert retry.is_enabled()
         assert retry.text_content() == "Retry the episodes that did not download (3)"
-        ext.wait_for(lambda: history.count() == 2, 10, "the retry is not in the history yet")
-        assert history.first.locator(".retry-line span").text_content() == (
-            "Did not download: E01, E03, E04"
-        )
 
 
 def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Path) -> None:
@@ -1282,7 +1274,7 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         assert report["summary"] == [f"E03 failed-unavailable — {served} — probable cause: {cause}"]
 
 
-def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_history_complete(
+def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_journal_complete(
     tmp_path: Path,
 ) -> None:
     """A batch of three series with the result table held to 5 rows (the test setting
@@ -1292,7 +1284,7 @@ def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_history_c
     recent rows are shown; every series keeps its report line and its row of the batch table. What
     the run kept of a finished series is released then, and the report built at the end is whole
     all the same: the failed episode with its attempt and its list item, the locked ones, a
-    reference row and the digest of every listed episode of all three series. The history entry
+    reference row and the digest of every listed episode of all three series. Its journal entry
     has every row. The next job starts with a clean table and no notice."""
     drm = frozenset({(SERIES_ID, 2)})
     with (
@@ -1309,7 +1301,7 @@ def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_history_c
             5,
             3,
             4,
-        ]  # the history: whole
+        ]  # the journal entry: whole
         assert "rows_omitted" not in main and "pauses_omitted" not in entry
         assert len(_videos(ext)) == 3 + 3 + 2
 

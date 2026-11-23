@@ -120,8 +120,9 @@ export const BOOKMARK_CHALLENGE_MESSAGE =
   "after the cooldown, solve it in a normal tab of this Chrome, then try again";
 
 /**
- * Why a removal ended without removing anything, in the engine's English (the history keeps it;
- * `lib/display.js` shows it in Spanish; the page shows its own words from `_locales`).
+ * Why a removal ended without removing anything, in the engine's English (the job's record keeps
+ * it — the test journal in the harness' copy —; `lib/display.js` shows it in Spanish; the page shows
+ * its own words from `_locales`).
  * @type {Readonly<Record<BookmarkErrorKind, string>>}
  */
 export const BOOKMARK_MESSAGES = Object.freeze({

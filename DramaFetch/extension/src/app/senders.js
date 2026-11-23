@@ -1,13 +1,17 @@
 // @ts-check
 /**
  * Who may message DramaFetch's worker (`background.js`: `dramafetch:open`) and the DramaFetch tab
- * (`app.js`: `dramafetch:load`, `dramafetch:favorites`): the extension's own pages — the popup, the
- * DramaFetch tab — and its service worker, never a web page. The manifest has no
- * `externally_connectable`, so no other extension or site can reach them at all; but the one
- * content script (`src/content/cards.js`) runs with this extension's id inside every
- * `www.tiktok.com` page, so a TikTok renderer that went wrong could send a runtime message that
- * carries the right `sender.id`. The content script itself never sends one: it only answers the
- * worker's `chrome.tabs.sendMessage` (and keeps its own check, `sender.id`).
+ * (`app.js`: `dramafetch:load`, `dramafetch:favorites`, `dramafetch:library`, `dramafetch:retry`):
+ * the extension's own pages — the popup, the DramaFetch tab — and its service worker, never a web
+ * page. The manifest has no `externally_connectable`, so no other extension or site can reach them
+ * at all. Until 2.0.0 a declared content script ran with this extension's id inside every
+ * `www.tiktok.com` page (the favorites card reader of the right-click, gone since). DramaFetch
+ * declares none any more, but it still injects functions into the TikTok tabs it works in, in the
+ * ISOLATED world, where a runtime message carries this extension's id: the Bookmark reader
+ * (`bookmark.bookmarkInPage`) and the discovery's scroll and page-text reads (`discovery.scrollInPage`,
+ * `pageTextInPage` — the latter in the user's own TikTok tab too, during a favorites listing). None of
+ * them sends a message; this check keeps any sender in a web page's frame out all the same — a real
+ * guard, as defence in depth against a TikTok renderer gone wrong.
  */
 
 /**

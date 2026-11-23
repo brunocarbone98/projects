@@ -40,10 +40,10 @@
     "description": "Cooldown banner title."
   },
   "cooldownLeft": {
-    "message": "$minutes$ min left — nothing contacts TikTok until then.",
-    "description": "Cooldown countdown.",
+    "message": "$left$ left — nothing contacts TikTok until then.",
+    "description": "Cooldown countdown: the time left as 45 s or 29 min 07 s (DramaFetch 2.0.0: minutes and seconds).",
     "placeholders": {
-      "minutes": {
+      "left": {
         "content": "$1"
       }
     }
@@ -178,13 +178,103 @@
     }
   },
   "pauseInForce": {
-    "message": "$text$ — $seconds$ s left",
-    "description": "The pause in force (the text is the engine's).",
+    "message": "$text$ — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): a pause the line has no text of its own for (the text is the engine's; the time left as 45 s or 1 min 07 s).",
     "placeholders": {
       "text": {
         "content": "$1"
       },
-      "seconds": {
+      "left": {
+        "content": "$2"
+      }
+    }
+  },
+  "pausePace": {
+    "message": "Pausing $length$ before the next episode — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): the pause between two episodes; its length and the time left as 45 s or 1 min 07 s.",
+    "placeholders": {
+      "length": {
+        "content": "$1"
+      },
+      "left": {
+        "content": "$2"
+      }
+    }
+  },
+  "pauseRest": {
+    "message": "Resting $length$ after $count$ downloads — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): the rest every N downloads.",
+    "placeholders": {
+      "length": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      },
+      "left": {
+        "content": "$3"
+      }
+    }
+  },
+  "pauseRestOne": {
+    "message": "Resting $length$ after 1 download — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): the rest after one download (a rest every 1).",
+    "placeholders": {
+      "length": {
+        "content": "$1"
+      },
+      "left": {
+        "content": "$2"
+      }
+    }
+  },
+  "pauseLongRest": {
+    "message": "Long break of $length$ after $count$ episodes — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): the long break every 100 episodes.",
+    "placeholders": {
+      "length": {
+        "content": "$1"
+      },
+      "count": {
+        "content": "$2"
+      },
+      "left": {
+        "content": "$3"
+      }
+    }
+  },
+  "pauseLongRestOne": {
+    "message": "Long break of $length$ after 1 episode — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): the long break after one episode (test settings only).",
+    "placeholders": {
+      "length": {
+        "content": "$1"
+      },
+      "left": {
+        "content": "$2"
+      }
+    }
+  },
+  "pauseSeriesRest": {
+    "message": "Resting $length$ before the next drama — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): the rest between two dramas of a batch.",
+    "placeholders": {
+      "length": {
+        "content": "$1"
+      },
+      "left": {
+        "content": "$2"
+      }
+    }
+  },
+  "pauseJobRest": {
+    "message": "Resting $length$ before contacting TikTok again — $left$ left",
+    "description": "The progress card's pause line (DramaFetch 2.0.0: the countdown in minutes and seconds): the rest between jobs, before a job's first request (a download, a listing, a removal from the Favorites).",
+    "placeholders": {
+      "length": {
+        "content": "$1"
+      },
+      "left": {
         "content": "$2"
       }
     }
@@ -226,7 +316,7 @@
   },
   "retryAlreadyQueued": {
     "message": "Already queued — not queued twice.",
-    "description": "Status line after a Retry button (the progress card's, a past run's) whose episodes a selection job of the same series already holds — a waiting one (a retry, Download selected, Download all available) or the running one not yet done with that drama: nothing queued twice."
+    "description": "Status line after a Retry button (the progress card's, a notification's) whose episodes a selection job of the same series already holds — a waiting one (a retry, Download selected, Download all available) or the running one not yet done with that drama: nothing queued twice."
   },
   "reportButton": {
     "message": "Save the report",
@@ -291,6 +381,61 @@
     "message": "Waiting",
     "description": "Heading of the queue card."
   },
+  "queueRetry": {
+    "message": "Retry $episodes$",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): a Retry (the progress card's, an alert's) of these episodes (E02, E07 — at most ten, then “and N more”).",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "queueAutoRetry": {
+    "message": "Automatic retry $episodes$",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): the one automatic retry of these episodes (DramaFetch 1.8.0).",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "queueSelected": {
+    "message": "Download selected $episodes$",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): See episodes' Download selected, of these episodes.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "queueAvailable": {
+    "message": "Download all available",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): See episodes' Download all available."
+  },
+  "queueSeeEpisodes": {
+    "message": "See episodes",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): a library card's See episodes (the drama's list, no download)."
+  },
+  "queueRemove": {
+    "message": "Remove from Favorites",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): the user's own Remove from Favorites."
+  },
+  "queueAutoRemove": {
+    "message": "Remove from Favorites (automatic)",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): DramaFetch's own removal of a drama whose every episode is on disk (DramaFetch 2.0.0)."
+  },
+  "queueFavorites": {
+    "message": "Update from TikTok",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): the listing of the user's TikTok favorites into the library (no drama)."
+  },
+  "queueNameUnknown": {
+    "message": "name shown once its list is read",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): after a drama's ID, while DramaFetch does not know its name (it never asks TikTok for one)."
+  },
+  "queueIdTitle": {
+    "message": "The drama's whole ID: a click selects it, Ctrl+C copies it.",
+    "description": "A row of the Waiting card (DramaFetch 2.0.0: each drama still to run with its name and whole ID): the tooltip of a drama's ID."
+  },
   "loading": {
     "message": "Listing the series in a background tab… this usually takes 10–40 s.",
     "description": "Status while listing."
@@ -319,7 +464,7 @@
   },
   "alreadyDownloading": {
     "message": "Already being downloaded, or waiting to be — not queued twice: $names$.",
-    "description": "A series (or several, by id or title) already in a download job: nothing queued for it.",
+    "description": "A series (or several, by id) already in a download job: nothing queued for it.",
     "placeholders": {
       "names": {
         "content": "$1"
@@ -329,15 +474,6 @@
   "linksKept": {
     "message": "What the box held before stays there: press Enter to download it.",
     "description": "After a paste was taken: the box still holds lines it held before the paste (a refused paste's, typed ids), which Enter downloads."
-  },
-  "cardQueued": {
-    "message": "$name$ found in your favorites: it downloads next, with the usual pauses.",
-    "description": "A right-clicked favorites card resolved to its drama, whose download was queued.",
-    "placeholders": {
-      "name": {
-        "content": "$1"
-      }
-    }
   },
   "loadAlreadyQueued": {
     "message": "That series is already being listed; wait for the running job.",
@@ -526,7 +662,7 @@
   },
   "favoritesListed": {
     "message": "$count$ favorite dramas listed.",
-    "description": "Favorites count line once the whole list is read (also a past run's line).",
+    "description": "Favorites count line once the whole list is read.",
     "placeholders": {
       "count": {
         "content": "$1"
@@ -560,7 +696,7 @@
   },
   "favoritesSkipped": {
     "message": "$count$ left out: TikTok sent them without a readable series id.",
-    "description": "Added to the favorites count line (and to the listing's history entry) when items of the list came without a readable series id (dramaID).",
+    "description": "Added to the favorites count line when items of the list came without a readable series id (dramaID).",
     "placeholders": {
       "count": {
         "content": "$1"
@@ -578,7 +714,7 @@
   },
   "favoritesCutShort": {
     "message": "TikTok stopped sending your favorites after $count$ (a page came back empty, or with nothing new): the rest of the list is not shown. For a drama not listed, open it on TikTok and use DramaFetch's toolbar button → Download this series.",
-    "description": "Status (and history) when TikTok stopped sending the favorites list before its end: it refused nothing, so no cooldown.",
+    "description": "Status when TikTok stopped sending the favorites list before its end: it refused nothing, so no cooldown.",
     "placeholders": {
       "count": {
         "content": "$1"
@@ -632,14 +768,6 @@
     "message": "Your favorites are being listed below: press Download on a drama, or tick several and press Download selected dramas.",
     "description": "Status when a TikTok profile's favorites are handed over: the popup's Open my library there, or Update from TikTok."
   },
-  "favoritesNoCard": {
-    "message": "That right-click was not on a drama of your favorites: right-click the drama's title or its cover — or use DramaFetch's toolbar button → Open my library.",
-    "description": "Status when the right-click on a TikTok profile was on no favorites card (the tab's content script said so): nothing is queued."
-  },
-  "favoritesNoScript": {
-    "message": "DramaFetch could not ask your TikTok tab which drama you right-clicked (the tab was open before DramaFetch was loaded or updated): press F5 on your TikTok profile, open Favorites → Drama, then right-click the drama again.",
-    "description": "Status when the right-click on a TikTok profile reached no content script in that tab (a tab loaded before DramaFetch was loaded or updated): nothing is queued."
-  },
   "favoritesAlreadyQueued": {
     "message": "Your favorites are already being listed; wait for the running job.",
     "description": "Input error: a second listing of the same tab's favorites."
@@ -651,45 +779,6 @@
   "favoritesTabGone": {
     "message": "The TikTok tab with your favorites is closed or shows another site: open your profile → Favorites → Drama again, then try again.",
     "description": "No request made: the TikTok tab is gone."
-  },
-  "favoritesNotFound": {
-    "message": "“$title$” not found in your favorites list — it may have changed; press F5 on the TikTok page and try again.",
-    "description": "A right-clicked card's drama is not in the favorites list: nothing queued.",
-    "placeholders": {
-      "title": {
-        "content": "$1"
-      }
-    }
-  },
-  "favoritesCardCutShort": {
-    "message": "“$title$” is further down your favorites than TikTok sent (it stopped after $count$): open the drama on TikTok and use DramaFetch's toolbar button → Download this series.",
-    "description": "A right-clicked card lies beyond the part of the favorites list TikTok sent: nothing queued.",
-    "placeholders": {
-      "title": {
-        "content": "$1"
-      },
-      "count": {
-        "content": "$2"
-      }
-    }
-  },
-  "favoritesShared": {
-    "message": "Several of your favorites are called “$title$”: they are shown below with their episodes and length — press Download on the one you right-clicked (its card shows the same).",
-    "description": "Several different dramas of the favorites list bear a right-clicked card's title: none is picked, the library shows them (filtered to that title), each with its Download button, for the user to pick; nothing queued.",
-    "placeholders": {
-      "title": {
-        "content": "$1"
-      }
-    }
-  },
-  "favoritesSharedElsewhere": {
-    "message": "Several dramas in this TikTok profile's favorites are called “$title$”, and DramaFetch never guesses which one you meant: open the one you want on TikTok and use DramaFetch's toolbar button → Download this series.",
-    "description": "A right-clicked card's title is shared by several dramas of a TikTok profile other than the library's: the library is left as it was, none is picked, nothing queued.",
-    "placeholders": {
-      "title": {
-        "content": "$1"
-      }
-    }
   },
   "favoritesStatusError": {
     "message": "TikTok did not send your favorites list ($reason$): press F5 on your TikTok profile, open Favorites → Drama again, then try again.",
@@ -724,10 +813,6 @@
   "navLibrary": {
     "message": "Library",
     "description": "Header link to the library section."
-  },
-  "navHistory": {
-    "message": "History",
-    "description": "Header link to Past runs."
   },
   "navSettings": {
     "message": "Settings",
@@ -906,6 +991,10 @@
         "content": "$1"
       }
     }
+  },
+  "libraryRemovedLineOne": {
+    "message": "1 removed from your Favorites by DramaFetch since the last read: it leaves the library when you update it.",
+    "description": "The removed dramas' own line, for one drama (2.0.0: an automatic removal shows it after every drama it removes)."
   },
   "librarySelection": {
     "message": "$count$ selected · $episodes$ episodes",
@@ -1138,6 +1227,15 @@
       }
     }
   },
+  "jobAutoUnbookmark": {
+    "message": "Remove “$title$” from your Favorites (automatic)",
+    "description": "Job label of a removal from the Favorites DramaFetch queued on its own once every episode of the drama was on disk (DramaFetch 2.0.0).",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
   "bookmarkWorking": {
     "message": "Removing “$title$” from your Favorites: a background tab opens on TikTok…",
     "description": "While the removal runs.",
@@ -1169,6 +1267,23 @@
     "message": "TikTok's count is not confirmed: open your profile → Favorites → Drama and press Update from TikTok.",
     "description": "After a removal with no TikTok tab to read the count from."
   },
+  "autoRemovalsDropped": {
+    "message": "$count$ automatic removals from your Favorites taken out of the queue: their cards keep Remove from Favorites.",
+    "description": "Library status line: Stop (or the automatic removal unticked in Settings) took DramaFetch's own removals out of the queue before they ran (DramaFetch 2.0.0).",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "autoRemovalsDroppedOne": {
+    "message": "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.",
+    "description": "The same, for one removal."
+  },
+  "autoRemoveHalted": {
+    "message": "TikTok did not keep a removal, or refused one: DramaFetch removes no more dramas from your Favorites on its own until you reload this tab. Remove from Favorites on a card still works.",
+    "description": "Library status line, after the removal's own outcome: a removal TikTok did not keep or confirm, or refused, halts the automatic removals until the DramaFetch tab is reloaded (DramaFetch 2.0.0)."
+  },
   "bookmarkNotOnDisk": {
     "message": "“$title$” was not removed: DramaFetch's records do not show every episode of it on disk. Nothing was asked of TikTok.",
     "description": "Removal refused at the gate.",
@@ -1199,6 +1314,24 @@
   "bookmarkGone": {
     "message": "“$title$” was not removed: it is no longer in your library — TikTok's list, read after you confirmed, no longer holds it, or DramaFetch already removed it. Nothing was asked of TikTok.",
     "description": "Removal refused at the gate: the drama is no longer in the library, or is marked removed already.",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "bookmarkGoneAuto": {
+    "message": "“$title$” was not removed: it is no longer in your library — TikTok's list, read after DramaFetch queued its removal, no longer holds it, or it was removed already. Nothing was asked of TikTok.",
+    "description": "DramaFetch's own removal (2.0.0) refused at the gate: the drama is no longer in the library, or is marked removed already (nobody confirmed anything).",
+    "placeholders": {
+      "title": {
+        "content": "$1"
+      }
+    }
+  },
+  "autoRemoveTurnedOff": {
+    "message": "“$title$” stays in your Favorites: the automatic removal was turned off before DramaFetch asked TikTok anything.",
+    "description": "DramaFetch's own removal (2.0.0) ended because the setting was saved unticked after it was queued, while it waited or rested before its first request: nothing was asked of TikTok.",
     "placeholders": {
       "title": {
         "content": "$1"
@@ -1250,14 +1383,6 @@
       }
     }
   },
-  "historyBookmarkRemoved": {
-    "message": "Removed from your Favorites: TikTok kept the change",
-    "description": "Past runs: a removal's outcome."
-  },
-  "historyBookmarkAlready": {
-    "message": "Its page already showed the Bookmark as off: nothing was pressed, nothing changed",
-    "description": "Past runs: the drama's page showed the Bookmark off before anything was pressed; nothing changed."
-  },
   "popupLibrary": {
     "message": "Open my library · $count$ dramas",
     "description": "Popup button; $count$ is TikTok's count the library kept.",
@@ -1274,15 +1399,6 @@
   "jobFavorites": {
     "message": "List your favorites",
     "description": "Queue label: the favorites list job."
-  },
-  "jobCard": {
-    "message": "Find “$title$” in your favorites",
-    "description": "Queue label: a right-click on a favorites card finds that drama, whose download is queued right after.",
-    "placeholders": {
-      "title": {
-        "content": "$1"
-      }
-    }
   },
   "settingsHeading": {
     "message": "Settings",
@@ -1369,7 +1485,7 @@
     "description": "Setting label (a checkbox): a notification from Chrome as each drama a download job finishes."
   },
   "settingAlertsHint": {
-    "message": "A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.",
+    "message": "A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button; and, when DramaFetch removes a drama from your Favorites on its own, whether it did. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.",
     "description": "Hint under the alert setting."
   },
   "settingAutoRetry": {
@@ -1379,6 +1495,14 @@
   "settingAutoRetryHint": {
     "message": "When a drama's download ends with episodes that did not download for a reason a retry can change — a cut transfer, a file that failed its check, a network error —, DramaFetch queues one retry of them, the same as pressing Retry: the rest between downloads, a fresh list, the usual pauses. Never after TikTok refused a request, during the 30-minute cooldown or after a stop, and never for locked, DRM-protected or short-served episodes.",
     "description": "Hint under the automatic retry setting."
+  },
+  "settingAutoRemove": {
+    "message": "Remove a drama from my Favorites once all its episodes are downloaded",
+    "description": "Setting label (a checkbox): a drama of the library leaves the user's TikTok Favorites on its own once every episode is on disk, after its automatic retry when one was needed (DramaFetch 2.0.0)."
+  },
+  "settingAutoRemoveHint": {
+    "message": "Only a drama your library holds, once every episode of its list is on disk — none locked, protected by DRM, served short or missing —, after its automatic retry when it needed one: DramaFetch presses TikTok's own Bookmark button once in a background tab and checks it after a reload, exactly as Remove from Favorites does. Never after a stop or during the 30-minute wait. Untick it to keep your Favorites as they are.",
+    "description": "Hint under the automatic removal setting."
   },
   "settingsHint": {
     "message": "File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.",
@@ -1401,19 +1525,6 @@
     "description": "Status.",
     "placeholders": {
       "reason": {
-        "content": "$1"
-      }
-    }
-  },
-  "historyHeading": {
-    "message": "Past runs",
-    "description": "Heading of the history card."
-  },
-  "historyFailed": {
-    "message": "Did not download: $episodes$",
-    "description": "History line: a past run's episodes that did not download (E02, E07; per series when the run had several).",
-    "placeholders": {
-      "episodes": {
         "content": "$1"
       }
     }
@@ -1604,11 +1715,24 @@
       }
     }
   },
-  "historySeriesOmitted": {
-    "message": "Series of this run not kept here: $count$.",
-    "description": "History line under a past run too large for its share of the history (a batch of more than about 200 series, about 120-190 when a stop left most of them not started): how many of its series are not listed (any count: the wording does not depend on it). The ones with an episode to retry are kept first.",
+  "alertRemovedTitle": {
+    "message": "✓ $name$ — removed from your Favorites",
+    "description": "Notification title when DramaFetch's own removal of a drama whose every episode is on disk ended with the drama removed from the user's TikTok Favorites (DramaFetch 2.0.0).",
     "placeholders": {
-      "count": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertRemovedMessage": {
+    "message": "Every episode is on disk.",
+    "description": "Notification message under alertRemovedTitle."
+  },
+  "alertNotRemovedTitle": {
+    "message": "⚠ $name$ — still in your Favorites",
+    "description": "Notification title when DramaFetch's own removal of a drama removed nothing (the reason, as the library's status line shows it, is the message); no button (DramaFetch 2.0.0).",
+    "placeholders": {
+      "name": {
         "content": "$1"
       }
     }
@@ -1628,18 +1752,6 @@
   "popupDownload": {
     "message": "Download this series",
     "description": "Popup button: the DramaFetch tab downloads this tab's whole series (the job a paste of it queues)."
-  },
-  "contextDownload": {
-    "message": "Download this drama",
-    "description": "Right-click menu item on a link to a TikTok short-drama series: the DramaFetch tab downloads the whole series (the job a paste of it queues)."
-  },
-  "contextDownloadPage": {
-    "message": "Download this page's drama",
-    "description": "Right-click menu item on a TikTok short-drama series page (not on a link): the DramaFetch tab downloads the page's whole series (the job a paste of it queues)."
-  },
-  "contextDownloadFavorite": {
-    "message": "Download this favorite drama",
-    "description": "Right-click menu item on a drama card of the user's TikTok profile (Favorites → Drama): the DramaFetch tab finds that drama in the favorites and downloads its whole series."
   },
   "popupOpen": {
     "message": "Open DramaFetch",

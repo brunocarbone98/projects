@@ -1,8 +1,10 @@
 // Hand-written declarations of exactly the chrome.* APIs DramaFetch for Chrome uses — there is no
 // @types/chrome because the extension has no dependencies at all. Only what src/app/* calls is
 // declared, with the shapes Chrome documents (Manifest V3, Chrome 116+). Add a member here when the
-// extension starts to use one; never declare an API the extension must not use (cookies,
-// debugger, webRequestBlocking, proxy, …): their absence is part of the contract.
+// extension starts to use one, and take it out when the extension stops (DramaFetch 2.0.0 took out
+// the context-menu API, with the right-click items, and the content-script messaging of their card item);
+// never declare an API the extension must not use (cookies, debugger, webRequestBlocking, proxy,
+// …): their absence is part of the contract.
 
 declare namespace chrome {
   // ------------------------------------------------------------------------------- events
@@ -36,42 +38,6 @@ declare namespace chrome {
     const onMessage: ChromeEvent<
       (message: unknown, sender: MessageSender, sendResponse: (response?: unknown) => void) => boolean | void
     >;
-    const onInstalled: ChromeEvent<(details: { reason: string; previousVersion?: string }) => void>;
-    const onStartup: ChromeEvent<() => void>;
-    /** Set while a callback of a callback-style API (contextMenus) runs after a failure. */
-    const lastError: { message?: string } | undefined;
-  }
-
-  // ------------------------------------------------------------------------- contextMenus
-  /** The right-click menu ("Download this drama"): its items and their clicks, never the page's content. */
-  namespace contextMenus {
-    type ContextType = "page" | "link" | "image";
-    interface CreateProperties {
-      id: string;
-      title: string;
-      contexts: ContextType[];
-      /** Where the item shows: the right-clicked page's (or frame's) URL must match (match patterns). */
-      documentUrlPatterns?: string[];
-      /** For a link: its `href` must match (match patterns). */
-      targetUrlPatterns?: string[];
-    }
-    interface OnClickData {
-      menuItemId: string | number;
-      linkUrl?: string;
-      /** The tab's top page. */
-      pageUrl?: string;
-      /** The right-clicked frame's address (Chrome 116 sends it only from inside a frame). */
-      frameUrl?: string;
-      /** The right-clicked frame's id in its tab (0: the top frame). */
-      frameId?: number;
-      /** The selected text, when there is one (never read). */
-      selectionText?: string;
-    }
-    // callback forms only: removeAll returns a promise only from Chrome 123 on; create never does
-    // (it returns the item's id at once and reports its outcome only to the callback)
-    function create(properties: CreateProperties, callback: () => void): string | number;
-    function removeAll(callback: () => void): void;
-    const onClicked: ChromeEvent<(info: OnClickData, tab?: tabs.Tab) => void>;
   }
 
   // ------------------------------------------------------------------------ notifications
@@ -160,11 +126,6 @@ declare namespace chrome {
     function getCurrent(): Promise<Tab | undefined>;
     function remove(tabIds: number | number[]): Promise<void>;
     function query(queryInfo: QueryInfo): Promise<Tab[]>;
-    /**
-     * A message to the extension's own content script in a tab (one frame of it with `frameId`):
-     * the worker asks `src/content/cards.js` for the right-clicked favorites card.
-     */
-    function sendMessage(tabId: number, message: unknown, options?: { frameId?: number }): Promise<unknown>;
     const onRemoved: ChromeEvent<(tabId: number, removeInfo: { windowId: number; isWindowClosing: boolean }) => void>;
     const onUpdated: ChromeEvent<(tabId: number, changeInfo: TabChangeInfo, tab: Tab) => void>;
   }

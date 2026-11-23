@@ -22,9 +22,9 @@
  * - one request at a time, each after the list-page pause (`pacing.pagePause`, 0.8–1.6 s) and the
  *   cooldown asked right before it; the listing stops when `hasMore` is false, the cursor does not
  *   change or comes again, a page brings no drama not listed already (TikTok served a page again)
- *   or no item twice in a row, {@link FAVORITES_MAX_PAGES} pages were read, a right-clicked card's
- *   listing reached far enough (`until`: `lib/favorites.coversCard`), the job is stopped, or TikTok
- *   refuses; an empty last page while TikTok counts more than it sent is no end of the list
+ *   or no item twice in a row, {@link FAVORITES_MAX_PAGES} pages were read, the caller's `until`
+ *   holds (the smart refresh: its first page found the library unchanged), the job is stopped, or
+ *   TikTok refuses; an empty last page while TikTok counts more than it sent is no end of the list
  *   ({@link cutShort});
  * - refusals as the discovery and the engine treat a list page: HTTP 429 → {@link RateLimitedError}
  *   and HTTP 403 → {@link FavoritesRefusedError} (a stop and the 30-minute cooldown, recorded with
@@ -75,24 +75,19 @@ import { DISCOVERY_SOURCE, StopRequested, checkCooldown } from "./engine.js";
  * @property {number | null} total how many favorites TikTok counts (the last page that said so)
  * @property {number} pages the pages read
  * @property {number} skipped items left out for want of a valid `dramaID`
- * @property {number} perPage how many dramas a page of the list holds: the most a page read held,
- *   items without a valid `dramaID` included (0 before the first page) — how far past a card's
- *   position its listing reads when the grid has moved (`lib/favorites.coversShift`)
  * @property {boolean} complete the list's end was reached (`hasMore` false)
  * @property {"cap" | "until" | "empty" | "cursor" | null} ended why the listing ended before the
- *   list's end: {@link FAVORITES_MAX_PAGES} pages, far enough for a card (`until`), two empty pages
- *   in a row or an empty last page while TikTok counts more than it sent, a cursor that did not
- *   change or came again or a page that brought no drama not listed already; null when complete (or
- *   not ended yet)
+ *   list's end: {@link FAVORITES_MAX_PAGES} pages, the caller's `until`, two empty pages in a row or
+ *   an empty last page while TikTok counts more than it sent, a cursor that did not change or came
+ *   again or a page that brought no drama not listed already; null when complete (or not ended yet)
  *
  * @typedef {object} FavoritesOptions
  * @property {number} [pageDelayS] the minimum pause before a page (0.8 s outside test mode)
  * @property {number} [timeoutS] how long one page may take (the discovery's 45 s)
  * @property {number} [maxPages] {@link FAVORITES_MAX_PAGES}
- * @property {(items: readonly FavoriteItem[], perPage: number) => boolean} [until] stop once this
- *   holds of the items listed so far, given how many dramas a page holds (`FavoritesListing.perPage`)
- *   — a right-clicked card's listing: `lib/favorites.coversCard` —, asked after every page that does
- *   not end the list
+ * @property {(items: readonly FavoriteItem[]) => boolean} [until] stop once this holds of the
+ *   items listed so far — the smart refresh: its first page found the library unchanged —, asked
+ *   after every page that does not end the list
  * @property {(listing: FavoritesListing, page: FavoritesPage) => void} [onPage] after every page
  * @property {FavoritesBrowser} [browser] `discovery.chromeBrowser()` by default
  */
@@ -145,7 +140,7 @@ export class FavoritesError extends DiscoveryError {
   }
 }
 
-/** The hosts of TikTok's own pages, where a profile's favorites list is shown (`menus.js` matches the same three). */
+/** The hosts of TikTok's own pages, where a profile's favorites list is shown (the box's parser reads the same three). */
 const TIKTOK_PAGE_HOSTS = ["www.tiktok.com", "m.tiktok.com", "tiktok.com"];
 
 /**
@@ -270,7 +265,7 @@ export async function listFavorites(engine, tabId, template, options = {}) {
   const pageDelayS = options.pageDelayS ?? PAGE_DELAY_S;
   const timeoutMs = Math.max(1, Math.trunc((options.timeoutS ?? DISCOVERY_TIMEOUT_S) * 1000));
   /** @type {FavoritesListing} */
-  const listing = { items: [], total: null, pages: 0, skipped: 0, perPage: 0, complete: false, ended: null };
+  const listing = { items: [], total: null, pages: 0, skipped: 0, complete: false, ended: null };
   /** @type {Set<string>} the series listed so far: a page that brings none new is no progress */
   const listedIds = new Set();
   const own = queryParam(template, "cursor");
@@ -316,7 +311,6 @@ export async function listFavorites(engine, tabId, template, options = {}) {
       listing.items.push(...page.items);
       for (const item of page.items) listedIds.add(item.seriesId);
       listing.skipped += page.skipped;
-      listing.perPage = Math.max(listing.perPage, page.items.length + page.skipped);
       if (page.total !== null) listing.total = page.total;
       options.onPage?.(listing, page);
       if (!page.hasMore) {
@@ -327,7 +321,7 @@ export async function listFavorites(engine, tabId, template, options = {}) {
         else listing.complete = true;
         break;
       }
-      if (options.until?.(listing.items, listing.perPage)) {
+      if (options.until?.(listing.items)) {
         listing.ended = "until";
         break;
       }

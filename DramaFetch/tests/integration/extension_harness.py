@@ -3,9 +3,7 @@
 `ExtensionHarness` copies the extension's runtime files (`manifest.json`, `_locales`, `icons`,
 `src`) to a temporary directory and adds, to that COPY's manifest only, the two things the shipped
 manifest must never have: `"dramafetch_test": true` (test overrides are honoured only then) and
-the host permission `http://127.0.0.1/*` (the fake server) — added to the content script's
-`matches` too, so that the favorites card reader runs on the fake's profile page as it runs on
-TikTok's. It writes `Default/Preferences` with
+the host permission `http://127.0.0.1/*` (the fake server). It writes `Default/Preferences` with
 the download directory (and any `preferences` a scenario passes: third-party cookies blocked, say)
 before launch, launches Chromium (`DRAMAFETCH_CHROMIUM` or
 `/opt/pw-browsers/chromium`) headless with `--disable-extensions-except` / `--load-extension`,
@@ -33,18 +31,21 @@ Element ids it relies on: `#links`, `#download-available-button`, `#download-sel
 `#result-trimmed`, `#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`,
 `#failed-table` (rows with `data-number`, `data-status`, a `.badge` and a `td.message`),
 `#failed-auto`, `#retry-button`, `#report-button`,
-`#failed-report`, `#settings-card`, `#setting-report`, `#setting-auto-retry`, `#settings-save`,
-`#settings-status`, `#history-list`, the library
+`#failed-report`, `#settings-card`, `#setting-report`, `#setting-auto-retry`,
+`#setting-auto-remove`, `#settings-save`,
+`#settings-status`, the library
 (`#favorites-card`, `#favorites-count`, `#favorites-filter`, `#favorites-select-all`,
 `#favorites-status`, `#favorites-grid` with one `article[data-series-id]` per drama — its
 `.favorite-title`, `.favorite-meta`, `.favorite-status[data-status]`, its tick and its
 `[data-action]` buttons: `download`, `browse` (**See episodes**), `remove`, `open` —,
 `#library-chip-<filter>`, `#library-total`, `#library-download`,
 `#library-refresh`, and the confirmation `#bookmark-dialog` with `#bookmark-confirm`) and the
-popup's `#popup-favorites` / `#popup-favorites-hint` / `#popup-library`. Storage keys it reads:
-`history` (most recent run first), `cooldown`, `series:<id>`, `pacing`, `favoritesLibrary`, and in
-`chrome.storage.session` `favoritesTemplate:<tab id>`. A cookie value is never printed, logged or
-asserted on.
+popup's `#popup-favorites` / `#popup-favorites-hint` / `#popup-library`. The finished jobs it reads
+from the app page's test-mode journal (`globalThis.dramafetchJournal`, most recent first: DramaFetch
+2.0.0 stores no history, and the journal lives in that page's memory only — a reloaded or reopened
+page starts an empty one); storage keys it reads: `cooldown`, `series:<id>`, `pacing`,
+`favoritesLibrary`, and in `chrome.storage.session` `favoritesTemplate:<tab id>`. A cookie value is
+never printed, logged or asserted on.
 """
 
 from __future__ import annotations
@@ -118,8 +119,6 @@ def make_test_copy(target: Path, *, drop_permissions: tuple[str, ...] = ()) -> P
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["dramafetch_test"] = True
     manifest["host_permissions"] = [*manifest["host_permissions"], TEST_HOST_PERMISSION]
-    for script in manifest.get("content_scripts", []):
-        script["matches"] = [*script["matches"], TEST_HOST_PERMISSION]
     missing = [name for name in drop_permissions if name not in manifest["permissions"]]
     assert not missing, f"the manifest has no permission {missing} to leave out"
     manifest["permissions"] = [
@@ -315,8 +314,15 @@ class ExtensionHarness:
         )
         return result
 
-    def history(self) -> list[dict[str, Any]]:
-        found = self.storage("history").get("history") or []
+    def journal(self, page: Page | None = None) -> list[dict[str, Any]]:
+        """The finished jobs of the app page (`page`, else the harness's own), the most recent
+        first: its test-mode journal (`globalThis.dramafetchJournal` — DramaFetch 2.0.0 took the
+        stored history away), each entry in the shape the history's had (`kind`, `label`,
+        `started_at`, `finished_at`, `error`, `stopped`, `refreshes`, `pauses`, `series` with each
+        series' rows, a removal's `bookmark`, a listing's `favorites`), the jobs a stop took out of
+        the queue included (`not started: …`). In that page's memory only: a reloaded or reopened
+        page starts with an empty one."""
+        found = (page or self.page).evaluate("() => globalThis.dramafetchJournal ?? []")
         assert isinstance(found, list)
         return found
 
@@ -373,24 +379,43 @@ class ExtensionHarness:
             "the test settings were not saved",
         )
 
+    def _turn_off(self, checkbox: str, key: str) -> None:
+        """**Settings** → untick the checkbox `checkbox` (on by default) → **Save settings**, waited
+        for until the stored settings hold `key` false and the page says so; the card is folded
+        again."""
+        page = self.page
+        page.click("#settings-card > summary")
+        assert page.locator(checkbox).is_checked()  # on by default
+        page.uncheck(checkbox)
+        page.click("#settings-save")
+
+        def saved() -> bool:
+            stored = self.storage("settings").get("settings")
+            return (
+                isinstance(stored, dict)
+                and stored.get(key) is False
+                and page.locator("#settings-status").text_content() == "Settings saved."
+            )
+
+        self.wait_for(saved, 10, f"the settings were not saved with {key} off")
+        page.click("#settings-card > summary")
+
     def turn_off_auto_retry(self) -> None:
         """**Settings** → untick **Retry on its own what did not download** (on by default since
         DramaFetch 1.8.0) → **Save settings**, waited for until the page says so and the stored
         settings hold it; the card is folded again. A scenario that proves the manual **Retry**
         after a plain failure does this first: with the setting on, DramaFetch would queue that
         retry itself."""
-        page = self.page
-        page.click("#settings-card > summary")
-        assert page.locator("#setting-auto-retry").is_checked()  # on by default
-        page.uncheck("#setting-auto-retry")
-        page.click("#settings-save")
-        self.wait_for(
-            lambda: page.locator("#settings-status").text_content() == "Settings saved.",
-            10,
-            "the settings were not saved",
-        )
-        assert self.storage("settings")["settings"]["autoRetry"] is False
-        page.click("#settings-card > summary")
+        self._turn_off("#setting-auto-retry", "autoRetry")
+
+    def turn_off_auto_remove(self) -> None:
+        """**Settings** → untick **Remove a drama from my Favorites once all its episodes are
+        downloaded** (on by default since DramaFetch 2.0.0) → **Save settings**, waited for until
+        the page says so and the stored settings hold it; the card is folded again. A scenario that
+        downloads a drama of the library whole and proves something else — the user's own **Remove
+        from Favorites**, a manual **Retry**, the rest between jobs — does this first: with the
+        setting on, DramaFetch would queue that drama's removal itself, a job of its own."""
+        self._turn_off("#setting-auto-remove", "autoRemove")
 
     def reopen_app(self) -> Page:
         """Open the app page in a new tab (the test closed the old one) and make it `page`, once
@@ -425,7 +450,7 @@ class ExtensionHarness:
 
     def _after(self, start: Callable[[], None], what: str, timeout_s: float) -> dict[str, Any]:
         """`start()` — a click, a paste —, then wait until the job it queued has ended and nothing
-        runs; that job's history entry."""
+        runs; that job's journal entry."""
         before = self.finished_jobs()
         start()
         self.wait_for(
@@ -433,9 +458,9 @@ class ExtensionHarness:
             timeout_s,
             f"the job of {what} did not finish",
         )
-        history = self.history()
-        assert history, "the finished job left no history entry"
-        return history[0]
+        journal = self.journal()
+        assert journal, "the finished job left no journal entry"
+        return journal[0]
 
     def _run(self, click: str, timeout_s: float) -> dict[str, Any]:
         return self._after(lambda: self.page.click(click), click, timeout_s)
@@ -462,7 +487,7 @@ class ExtensionHarness:
     ) -> dict[str, Any]:
         """The box's checkboxes ticked first when asked (they count for that paste, then clear),
         then `links` pasted (`paste`): the download of every series they name — ONE batch job,
-        what **Download all** made until 1.7.0, no button pressed —, waited for; its history
+        what **Download all** made until 1.7.0, no button pressed —, waited for; its journal
         entry."""
         page = self.page
         if include_locked:
@@ -471,8 +496,9 @@ class ExtensionHarness:
             page.check("#recheck")
         return self._after(lambda: self.paste(links), "a paste", timeout_s)
 
-    def keep_library(self, *dramas: tuple[str, str, int]) -> None:
-        """Put `dramas` — `(series id, title, episode count)` — in the library as a listing of the
+    def keep_library(self, *dramas: tuple[str, str, int | None]) -> None:
+        """Put `dramas` — `(series id, title, episode count)`, the count None for a drama TikTok's
+        list gives none for — in the library as a listing of the
         user's TikTok favorites would have kept it (`favoritesLibrary` in `chrome.storage.local`:
         ids, titles and counts only — no cover, no address, nothing signed), then reload the app
         page, which shows it at its start with no request: each drama's card with its **See
@@ -512,17 +538,17 @@ class ExtensionHarness:
 
     def see_episodes(self, series_id: str, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
         """**See episodes** on the drama's library card (`keep_library` puts it there): its episode
-        list with the covers, as **Load list** showed it until 1.7.0; the listing job's history
+        list with the covers, as **Load list** showed it until 1.7.0; the listing job's journal
         entry."""
         return self._run(self.card_button(series_id, "browse"), timeout_s)
 
     def download_card(self, series_id: str, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
         """**Download** on the drama's library card: the whole drama, the job **Download selected
-        dramas** queues for it alone; its history entry."""
+        dramas** queues for it alone; its journal entry."""
         return self._run(self.card_button(series_id, "download"), timeout_s)
 
     def download_available(self, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
-        """**Download all available** of the loaded series; its history entry."""
+        """**Download all available** of the loaded series; its journal entry."""
         return self._run("#download-available-button", timeout_s)
 
     def saved_files(self) -> list[Path]:

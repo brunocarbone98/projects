@@ -26,12 +26,14 @@ Chrome for recorded on its way (`extension_alerts.RECORD_ALERTS_JS`):
   **Retry** and the stop's reason;
 - (d) a batch whose first drama queued its automatic retry and whose second drama's list TikTok
   refuses (HTTP 429 on a later list page, `rate_limit_pagination`): the stop takes the automatic
-  retry out of the queue — `not started: …` in the history —, its drama's notification turns into
+  retry out of the queue — `not started: …` in the journal —, its drama's notification turns into
   the ⚠ alert with **Retry** and `Not retried automatically: rate limited (HTTP 429)`, and no
   `DramaFetch stopped` alert counts it as a drama never started;
 - (e) a `selection` job the user asked for — **See episodes**, then **Download all available** —
   whose E02 transfer is cut short once: its drama, done where the job ends, queues the same ONE
-  automatic retry, which saves E02; `↻`, then `✓ … — downloaded` with `After an automatic retry.`;
+  automatic retry, which saves E02; `↻`, then `✓ … — downloaded` with `After an automatic retry.`
+  (the drama is the library's: the automatic removal from the Favorites of 2.0.0 is turned off
+  first, `test_extension_autoremove.py` proves it);
 - (f) **Stop** pressed the instant the page asks for a batch's last episode (cut short too) — the
   engine past its last look at Stop, so the batch runs its course —: still a stop. The automatic
   retry the batch's first drama queued comes out of the queue at once (at the batch's end `not
@@ -42,7 +44,7 @@ Chrome for recorded on its way (`extension_alerts.RECORD_ALERTS_JS`):
   notification is the ⚠ alert of E03 alone with **Retry**, `stopped by you` its context — never
   `Not retried automatically`, it ran —, and that **Retry** saves E03;
 - (h) **Stop** pressed at the very end of a job — as it saves its report of what did not download,
-  its automatic retry waiting —: that retry never starts; once the job is over its history entry
+  its automatic retry waiting —: that retry never starts; once the job is over its journal entry
   says `not started: … (stopped by you)` and its notification is the ⚠ alert with **Retry** and
   `Not retried automatically: stopped by you`;
 - (i) two pastes, the second while the first downloads, each drama with one transfer cut short
@@ -116,7 +118,7 @@ STOP_ON_FETCH_JS = """(itemId) => {
 }"""
 #: In the DramaFetch tab: **Stop** — the page's own button, clicked — the instant the page asks
 #: Chrome to save a report of what did not download (`DramaFetch/reports/…`): the very end of a
-#: job, its history entry and its **Did not download** block drawn already. The save goes on as
+#: job, its journal entry and its **Did not download** block drawn already. The save goes on as
 #: asked; nothing else changes.
 STOP_ON_REPORT_JS = """() => {
   if (globalThis.__stopOnReport !== undefined) return;
@@ -177,7 +179,7 @@ def _cdn_asked(server: FakeTikTok, series_id: str) -> dict[int, int]:
 
 
 def _rows(entry: dict[str, Any]) -> list[tuple[str, list[tuple[int, str, str]]]]:
-    """A history entry's series and rows: `(series id, [(number, status, message)])`."""
+    """A journal entry's series and rows: `(series id, [(number, status, message)])`."""
     return [
         (
             series["series_id"],
@@ -253,9 +255,9 @@ def test_a_an_episode_cut_short_is_retried_on_its_own_and_saved_whole(tmp_path: 
         assert retry.is_disabled()  # spent, as any pressed Retry until the next job ends
 
         _until_jobs(ext, jobs + 2, 90, "the automatic retry did not end")
-        history = ext.history()
-        assert len(history) == 2  # the paste's job and its automatic retry, nothing more
-        automatic, pasted = history
+        journal = ext.journal()
+        assert len(journal) == 2  # the paste's job and its automatic retry, nothing more
+        automatic, pasted = journal
         assert pasted["kind"] == "batch"
         ((series_id, rows),) = _rows(pasted)
         assert series_id == SECOND_SERIES_ID
@@ -326,9 +328,9 @@ def test_b_an_episode_cut_short_twice_is_retried_once_then_left_to_the_alert_s_r
         jobs = ext.finished_jobs()
         ext.paste(SECOND_LINK)
         _until_jobs(ext, jobs + 2, 120, "the paste and its automatic retry did not end")
-        history = ext.history()
-        assert len(history) == 2  # no second automatic retry
-        automatic, pasted = history
+        journal = ext.journal()
+        assert len(journal) == 2  # no second automatic retry
+        automatic, pasted = journal
         assert pasted["kind"] == "batch"
         assert [(n, status) for n, status, _ in _rows(pasted)[0][1]] == [
             (1, "done"),
@@ -372,7 +374,7 @@ def test_b_an_episode_cut_short_twice_is_retried_once_then_left_to_the_alert_s_r
         in_worker(ext, RETRY_CLICK_JS, alert["id"])
         _until_jobs(ext, jobs + 3, 90, "the alert's retry did not end")
         assert page.evaluate(CLEARED_JS) == [alert["id"]]
-        entry = ext.history()[0]
+        entry = ext.journal()[0]
         assert entry["kind"] == "selection"
         assert entry["label"] == f"Retry 1 of {SECOND_SERIES_NAME}"
         ((series_id, rows),) = _rows(entry)
@@ -409,7 +411,7 @@ def test_c_a_run_stopped_by_a_429_queues_no_automatic_retry(tmp_path: Path) -> N
         jobs = ext.finished_jobs()
         entry = ext.paste_and_wait(MAIN_LINK)
         assert ext.finished_jobs() == jobs + 1
-        assert [item["label"] for item in ext.history()] == [entry["label"]]  # nothing more
+        assert [item["label"] for item in ext.journal()] == [entry["label"]]  # nothing more
         assert entry["kind"] == "batch"
         assert entry["stopped"] == "episode 2 failed-rate-limited"
         ((series_id, rows),) = _rows(entry)
@@ -453,7 +455,7 @@ def test_d_an_automatic_retry_a_later_stop_takes_out_of_the_queue_is_said_not_re
 ) -> None:
     """(d) A paste of two dramas: the first's E02 cut short queues its automatic retry (`↻`); the
     second's list is refused (HTTP 429 on a later page): the stop and the cooldown take the
-    automatic retry out of the queue before it asks anything — `not started: …` in the history —,
+    automatic retry out of the queue before it asks anything — `not started: …` in the journal —,
     and the first drama's notification, under the same id, becomes the ⚠ alert with **Retry** and
     `Not retried automatically: rate limited (HTTP 429)`; no `DramaFetch stopped` alert counts it
     among dramas never started (the batch started both)."""
@@ -477,11 +479,11 @@ def test_d_an_automatic_retry_a_later_stop_takes_out_of_the_queue_is_said_not_re
             (3, "done"),
         ]
         assert refused == (SERIES_ID, [])  # its list refused: no row
-        cancelled = ext.history()[1]
+        cancelled = ext.journal()[1]
         assert cancelled["label"] == f"Automatic retry: 1 of {SECOND_SERIES_NAME}"
         assert str(cancelled["error"]).startswith("not started: ")
         assert cancelled["series"] == []
-        assert len(ext.history()) == 2
+        assert len(ext.journal()) == 2
         assert _cdn_asked(server, SECOND_SERIES_ID) == {1: 1, 2: 1, 3: 1}  # never asked again
         cooldown = ext.cooldown()
         assert cooldown is not None and cooldown["source"] == "discovery"
@@ -515,22 +517,25 @@ def test_e_a_selection_job_s_plain_failure_gets_its_one_automatic_retry(tmp_path
     job ends, queues ONE `Automatic retry: 1 of <drama>` behind it — a `selection` too, after the
     rest between jobs —, which saves E02 whole; the CDN asked twice for E02 in all. Notifications:
     `↻ … — retrying 1 episode` with no button, then — the same id — `✓ … — downloaded`, `After an
-    automatic retry.`."""
+    automatic retry.`. The drama, whole after its automatic retry, is held by the library: the
+    automatic removal from the Favorites (2.0.0, on by default) is turned off first, or it would
+    follow as a job of its own (`test_extension_autoremove.py` proves that path)."""
     second = (SECOND_SERIES_ID, 2)
     with (
         FakeTikTok(truncate_once=frozenset({second})) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         page = ext.page
+        ext.turn_off_auto_remove()  # the automatic retry is what this scenario proves
         ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))
         ext.see_episodes(SECOND_SERIES_ID)
         page.evaluate(RECORD_ALERTS_JS)
         jobs = ext.finished_jobs()
         ext.download_available()
         _until_jobs(ext, jobs + 2, 90, "the download and its automatic retry did not end")
-        history = ext.history()
-        assert len(history) == 3  # the listing, the download, its automatic retry: nothing more
-        automatic, selected, listed = history
+        journal = ext.journal()
+        assert len(journal) == 3  # the listing, the download, its automatic retry: nothing more
+        automatic, selected, listed = journal
         assert listed["kind"] == "load"
         assert (selected["kind"], selected["label"]) == (
             "selection",
@@ -583,7 +588,7 @@ def test_f_stop_while_the_last_episode_downloads_leaves_no_automatic_retry(
     transfer under way, the engine past its last look at Stop, so the batch runs its course and
     ends unstopped —: a stop all the same. A paste of two dramas: the first's E02, cut short,
     queued its automatic retry (`↻`); the Stop takes it out of the queue at once — at the batch's
-    end, `not started: … (stopped by you)` in the history and its notification the ⚠ alert with
+    end, `not started: … (stopped by you)` in the journal and its notification the ⚠ alert with
     **Retry** and `Not retried automatically: stopped by you` —, and the second drama, whose E03
     (that last episode) is cut short too, queues none: its plain ⚠ alert with **Retry**. Nothing
     more is asked of TikTok: every episode asked for once, no other job."""
@@ -601,9 +606,9 @@ def test_f_stop_while_the_last_episode_downloads_leaves_no_automatic_retry(
         probe = page.evaluate("() => globalThis.__stopOnFetch")
         assert probe == {"pressed": True, "enabled": True}  # pressed while the batch ran
         assert ext.finished_jobs() == jobs + 1  # no job after it
-        history = ext.history()
-        assert len(history) == 2
-        batch, cancelled = history
+        journal = ext.journal()
+        assert len(journal) == 2
+        batch, cancelled = journal
         assert batch["kind"] == "batch"
         assert batch["stopped"] is None  # the engine never met the Stop
         first, last = _rows(batch)
@@ -686,9 +691,9 @@ def test_g_stop_during_an_automatic_retry_names_only_what_it_did_not_save(tmp_pa
         )
         page.click("#stop-button")  # in its pause before E03
         _until_jobs(ext, jobs + 2, 60, "the Stop did not end the automatic retry")
-        history = ext.history()
-        assert len(history) == 2
-        automatic, pasted = history
+        journal = ext.journal()
+        assert len(journal) == 2
+        automatic, pasted = journal
         assert [(number, status) for number, status, _ in _rows(pasted)[0][1]] == [
             (1, "done"),
             (2, "failed"),
@@ -722,7 +727,7 @@ def test_g_stop_during_an_automatic_retry_names_only_what_it_did_not_save(tmp_pa
         in_worker(ext, RETRY_CLICK_JS, alert["id"])
         _until_jobs(ext, jobs + 3, 90, "the alert's retry did not end")
         assert page.evaluate(CLEARED_JS) == [alert["id"]]
-        entry = ext.history()[0]
+        entry = ext.journal()[0]
         assert entry["label"] == f"Retry 1 of {SECOND_SERIES_NAME}"
         assert [(number, status) for number, status, _ in _rows(entry)[0][1]] == [(3, "done")]
         assert _cdn_asked(server, SECOND_SERIES_ID) == {1: 1, 2: 2, 3: 2}
@@ -733,9 +738,9 @@ def test_g_stop_during_an_automatic_retry_names_only_what_it_did_not_save(tmp_pa
 
 def test_h_stop_at_a_job_s_very_end_leaves_no_automatic_retry(tmp_path: Path) -> None:
     """(h) **Stop** pressed at the very end of a job — as it saves its report of what did not
-    download, its history entry and **Did not download** block drawn, the automatic retry of its
+    download, its journal entry and **Did not download** block drawn, the automatic retry of its
     drama waiting (`#failed-auto` said so) —: that retry leaves the queue at once and never
-    starts; once the job is over, its history entry says `not started: … (stopped by you)` and its
+    starts; once the job is over, its journal entry says `not started: … (stopped by you)` and its
     notification, in the place of `↻`, is the ⚠ alert with **Retry** and `Not retried
     automatically: stopped by you`. E02 asked for once; no job after the paste's."""
     second = (SECOND_SERIES_ID, 2)
@@ -752,9 +757,9 @@ def test_h_stop_at_a_job_s_very_end_leaves_no_automatic_retry(tmp_path: Path) ->
         probe = page.evaluate("() => globalThis.__stopOnReport")
         assert probe == {"pressed": True, "enabled": True}  # pressed while the job ended
         assert ext.finished_jobs() == jobs + 1  # no job after it
-        history = ext.history()
-        assert len(history) == 2
-        cancelled, pasted = history
+        journal = ext.journal()
+        assert len(journal) == 2
+        cancelled, pasted = journal
         assert pasted["kind"] == "batch"
         assert pasted["stopped"] is None  # the job had run its course
         assert [(number, status) for number, status, _ in _rows(pasted)[0][1]] == [
@@ -815,14 +820,14 @@ def test_i_a_job_s_block_counts_and_stays_for_its_own_automatic_retry_only(
         _until_jobs(ext, jobs + 4, 180, "the downloads and their automatic retries did not end")
         first_retry = f"Automatic retry: 1 of {SECOND_SERIES_NAME}"
         second_retry = f"Automatic retry: 1 of {SERIES_NAME}"
-        history = ext.history()
-        assert [entry["label"] for entry in history] == [
+        journal = ext.journal()
+        assert [entry["label"] for entry in journal] == [
             second_retry,
             first_retry,
             f"Series {SERIES_ID}",
             f"Series {SECOND_SERIES_ID}",
         ]
-        pasted_second = history[2]
+        pasted_second = journal[2]
         assert [(number, status) for number, status, _ in _rows(pasted_second)[0][1]] == [
             (1, "done"),
             (2, "done"),
@@ -830,7 +835,7 @@ def test_i_a_job_s_block_counts_and_stays_for_its_own_automatic_retry_only(
             (4, "done"),
             (5, "skipped-locked"),
         ]
-        assert all(entry["stopped"] is None for entry in history)
+        assert all(entry["stopped"] is None for entry in journal)
         assert _cdn_asked(server, SECOND_SERIES_ID) == {1: 1, 2: 2, 3: 1}
         assert _cdn_asked(server, SERIES_ID) == {1: 1, 2: 1, 3: 2, 4: 1}
 
