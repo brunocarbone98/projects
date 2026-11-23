@@ -2,10 +2,10 @@
 /**
  * The user's TikTok favorites list — the **Drama** sub-tab of **Favorites** on their own profile —
  * as DramaFetch for Chrome reads it. Pure: no `chrome.*`, no DOM (`src/app/favorites.js` fetches the
- * pages from inside the user's TikTok tab, `src/content/cards.js` reads a right-clicked card,
- * `src/app/app.js` shows the panel). An extension-only feature: the Python tool has no favorites
- * list, and nothing here decides anything about a download — a favorite becomes a series id the
- * DramaFetch tab hands to its engine, which downloads it exactly like a pasted link.
+ * pages from inside the user's TikTok tab, `src/app/app.js` shows the library). An extension-only
+ * feature: the Python tool has no favorites list, and nothing here decides anything about a
+ * download — a favorite becomes a series id the DramaFetch tab hands to its engine, which downloads
+ * it exactly like a pasted link.
  *
  * Facts from the owner's captures (Chrome DevTools, 2026-11-15; the sandbox cannot reach TikTok):
  * - the list is on the user's profile, `https://www.tiktok.com/@<uniqueId>` → **Favorites** →
@@ -26,11 +26,9 @@
  *   is seconds (4743 → the card's "1h 19m"), `zoomCover` maps sizes (`"240"`, `"480"`, …) to
  *   signed https URLs of the drama's cover (`.avif` in the capture) and `cover.urlList` holds more
  *   of them ({@link coverUrlOf}: the library's thumbnail — a signed URL, kept in the page's memory
- *   and `chrome.storage.session` only, never in `chrome.storage.local`, a log, a report or the
- *   history). Two different dramas may share a title and a cover:
- *   a card of such a title is never resolved by guessing between them ({@link resolveCard}), and
- *   its listing reads on until both are in view — a page past the card's position when its drama
- *   is not where the card sits ({@link coversCard}, {@link coversShift}, which names the limit).
+ *   and `chrome.storage.session` only, never in `chrome.storage.local`, a log or a report). Two
+ *   different dramas may share a title and a cover: the library shows both, each with its own
+ *   series id.
  */
 
 import { isDict } from "./catalog.js";
@@ -50,15 +48,6 @@ export const DRAMA_LIST_MARKER = "/drama_list";
  * another list, never the favorites.
  */
 export const FAVORITES_URL_WORD = "favorite";
-/**
- * A favorites card of the profile's grid (`src/content/cards.js` uses the same text): a button with
- * an `aria-label` (the drama's name) whose class names the emotion label `…FavoriteDramaCard`.
- */
-export const FAVORITES_CARD_SELECTOR = "button[aria-label][class*=FavoriteDramaCard]";
-/** How long a right-clicked card is remembered by the content script (`src/content/cards.js`). */
-export const CARD_MAX_AGE_S = 30;
-/** A card's title longer than this is no drama's name (`cardOf`). */
-export const MAX_CARD_TITLE_LENGTH = 500;
 /** What a payload that holds no favorites list is called (an error's message). */
 export const NOT_A_LIST_MESSAGE = "not a favorites list";
 
@@ -86,22 +75,10 @@ const PROFILE_RE = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@[^/?#\s]/i;
  * @property {number | null} total how many favorites TikTok counts, null when missing
  * @property {number} skipped the page's items without a valid `dramaID` (left out)
  *
- * @typedef {object} Card A right-clicked favorites card (`src/content/cards.js`).
- * @property {string} title its `aria-label`: the drama's name
- * @property {number} index its position among the page's favorites cards, in document order (0-based)
- *
  * @typedef {object} FavoritesHandover What the DramaFetch tab is handed: list the favorites of a
- *   TikTok tab — the popup's **Choose from your favorites** —, or the right-click **Download this
- *   favorite drama** on a profile page, with the card it was on (null when it was on none).
+ *   TikTok tab — the popup's **Open my library** on a profile (1.5.0's **Choose from your
+ *   favorites**) —, and **Update from TikTok** the same way.
  * @property {number} tabId the user's TikTok tab that showed the list
- * @property {Card | null} card
- * @property {boolean} menu whether it came from the right-click (else from the popup)
- * @property {boolean} script whether the tab's content script answered the worker (false: no script
- *   in that tab — loaded before DramaFetch was —, so nothing could tell which card was right-clicked)
- *
- * @typedef {{kind: "found", item: FavoriteItem, index: number} | {kind: "shared", items: FavoriteItem[]} | {kind: "missing"}} CardResolution
- *   What a list says of a right-clicked card ({@link resolveCard}): the one series that bears the
- *   card's title (and where), the different series that all bear it, or none.
  */
 
 /** TikTok's own error in a favorites answer (`statusCode` / `status_code` not 0), or no list at all. */
@@ -349,96 +326,7 @@ export function parseDramaListPayload(payload) {
 }
 
 /**
- * Whether `item` bears the title `wanted` (already on one line, {@link cleanTitle}).
- * @param {FavoriteItem} item
- * @param {string} wanted
- * @returns {boolean}
- */
-function bearsTitle(item, wanted) {
-  return item.title !== null && cleanTitle(item.title) === wanted;
-}
-
-/**
- * What a list, read from its top, says of a right-clicked card — never a guess between dramas of
- * the same title: `shared` when two or more DIFFERENT series bear the card's title (on one line,
- * NFC: {@link cleanTitle}) — the card's position cannot tell them apart, since a favorite added or
- * removed elsewhere since the grid loaded moves every card —, with those series in the list's order
- * (a drama listed twice once); `found` when exactly one series bears it, at the card's position or
- * elsewhere (`index`: the card's position when that series is there, else its first one); `missing`
- * when none does (or the card has no title).
- * @param {readonly FavoriteItem[]} items the list in the page's order
- * @param {Card} card
- * @returns {CardResolution}
- */
-export function resolveCard(items, card) {
-  const wanted = cleanTitle(card.title);
-  if (wanted === "") return { kind: "missing" };
-  /** @type {Map<string, {item: FavoriteItem, index: number}>} each series of that title: its first place */
-  const bearing = new Map();
-  items.forEach((item, index) => {
-    if (bearsTitle(item, wanted) && !bearing.has(item.seriesId)) bearing.set(item.seriesId, { item, index });
-  });
-  const found = [...bearing.values()];
-  const [only] = found;
-  if (only === undefined) return { kind: "missing" };
-  if (found.length > 1) return { kind: "shared", items: found.map(({ item }) => item) };
-  const at = items[card.index];
-  return { kind: "found", item: only.item, index: at !== undefined && at.seriesId === only.item.seriesId ? card.index : only.index };
-}
-
-/**
- * Whether a list read from its top so far, `items`, reaches far enough to resolve a right-clicked
- * card — where the card's listing stops reading (`src/app/favorites.js`, `until`): it holds more
- * dramas than the card's position, the card's title appears in it, at least one drama follows the
- * last one of that title (a drama of the same title may begin the next page: only both in view tell
- * them apart, {@link resolveCard}), and — when one series alone bears the title in it — that
- * drama can be told to be the card's ({@link coversShift}: at the card's position, or a page past
- * it read). A list that ended — complete, cut short, capped — is resolved as far as it got.
- * @param {readonly FavoriteItem[]} items
- * @param {Card} card
- * @param {number} perPage how many dramas a page of the list holds ({@link coversShift})
- * @returns {boolean}
- */
-export function coversCard(items, card, perPage) {
-  if (items.length <= card.index) return false;
-  const wanted = cleanTitle(card.title);
-  if (wanted === "") return false;
-  /** @type {Set<string>} the series of that title in view */
-  const bearing = new Set();
-  let last = -1;
-  items.forEach((item, index) => {
-    if (!bearsTitle(item, wanted)) return;
-    bearing.add(item.seriesId);
-    last = index;
-  });
-  if (last < 0 || last >= items.length - 1) return false;
-  return bearing.size > 1 || coversShift(items, card, perPage); // two of that title in view: shared whatever follows
-}
-
-/**
- * Whether the one drama of a right-clicked card's title that a list read from its top, `items`,
- * holds can be told to be the card's own: it sits at the card's position — the grid as the list —,
- * or `items` hold a page more than that position. When it sits elsewhere the grid has moved since
- * it loaded (a favorite added or removed elsewhere), and the drama found may be another one of that
- * title: favorites added above the card push the card's own drama down — by fewer than a page
- * holds, it is then in view too, and the card {@link resolveCard} `shared`. The limit: with a page
- * of favorites or more added elsewhere since the grid loaded — or exactly as many as put the other
- * drama of that title at the card's position — the card's own may lie further down unseen (a
- * profile page reloaded since, with F5, shows every card where the list puts it).
- * @param {readonly FavoriteItem[]} items
- * @param {Card} card
- * @param {number} perPage how many dramas a page of the list holds (the most a page of the listing
- *   held, dramas without a readable series id included)
- * @returns {boolean}
- */
-export function coversShift(items, card, perPage) {
-  const at = items[card.index];
-  if (at !== undefined && bearsTitle(at, cleanTitle(card.title))) return true;
-  return items.length > card.index + perPage;
-}
-
-/**
- * Whether a drama's title holds the filter's text, letter case aside (the panel's filter box).
+ * Whether a drama's title holds the filter's text, letter case aside (the library's search box).
  * @param {string | null} title
  * @param {string} filter
  * @returns {boolean}
@@ -449,24 +337,8 @@ export function titleMatches(title, filter) {
 }
 
 /**
- * A card as the content script answers it (data from a TikTok tab: checked), or null: a title of at
- * most {@link MAX_CARD_TITLE_LENGTH} characters once on one line, a whole position from 0.
- * @param {unknown} value
- * @returns {Card | null}
- */
-export function cardOf(value) {
-  if (!isDict(value)) return null;
-  const title = value["title"];
-  const index = value["index"];
-  if (typeof title !== "string" || typeof index !== "number" || !Number.isSafeInteger(index) || index < 0) return null;
-  const clean = cleanTitle(title);
-  if (clean === "" || clean.length > MAX_CARD_TITLE_LENGTH) return null;
-  return { title: clean, index };
-}
-
-/**
- * A favorites hand-over as a message carries it (`{tabId, card, menu, script}`), checked; null when
- * it names no tab. `script` is true unless the message says false.
+ * A favorites hand-over as a message carries it (`{tabId}`), checked; null when it names no tab.
+ * Nothing else of the message is read.
  * @param {unknown} value
  * @returns {FavoritesHandover | null}
  */
@@ -474,45 +346,29 @@ export function handoverOf(value) {
   if (!isDict(value)) return null;
   const tabId = value["tabId"];
   if (typeof tabId !== "number" || !Number.isSafeInteger(tabId) || tabId < 0) return null;
-  return { tabId, card: cardOf(value["card"]), menu: value["menu"] === true, script: value["script"] !== false };
+  return { tabId };
 }
 
 /**
  * The DramaFetch tab's address query for a favorites hand-over no running page took (the worker's
- * `openApp` reloads or opens the tab with it): `favorites=<tab id>`, `menu=1` from the right-click,
- * `script=0` when the tab's content script did not answer, and the card as JSON when the
- * right-click was on one.
+ * `openApp` reloads or opens the tab with it): `favorites=<tab id>`.
  * @param {FavoritesHandover} handover
  * @returns {string}
  */
 export function favoritesQuery(handover) {
-  const params = new URLSearchParams({ favorites: String(handover.tabId) });
-  if (handover.menu) params.set("menu", "1");
-  if (!handover.script) params.set("script", "0");
-  if (handover.card !== null) params.set("card", JSON.stringify({ title: handover.card.title, index: handover.card.index }));
-  return params.toString();
+  return new URLSearchParams({ favorites: String(handover.tabId) }).toString();
 }
 
 /**
- * The favorites hand-over an address query carries ({@link favoritesQuery}), or null.
+ * The favorites hand-over an address query carries ({@link favoritesQuery}), or null. Nothing else
+ * of the query is read.
  * @param {string} search `location.search`
  * @returns {FavoritesHandover | null}
  */
 export function favoritesOfQuery(search) {
-  const params = new URLSearchParams(search);
-  const tab = params.get("favorites");
+  const tab = new URLSearchParams(search).get("favorites");
   if (tab === null || !COUNT_RE.test(tab)) return null;
-  /** @type {Card | null} */
-  let card = null;
-  const raw = params.get("card");
-  if (raw !== null) {
-    try {
-      card = cardOf(JSON.parse(raw));
-    } catch {
-      card = null;
-    }
-  }
-  return { tabId: Number(tab), card, menu: params.get("menu") === "1", script: params.get("script") !== "0" };
+  return { tabId: Number(tab) };
 }
 
 /**

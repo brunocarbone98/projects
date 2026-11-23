@@ -64,8 +64,9 @@
  * reload never counts): `unsaved` → `removed`; `saved` → `not-kept`; a reload that fails or a page
  * that cannot be read → `not-confirmed`. A 429 on the page's own episode list after the click leaves
  * that outcome as it is and records the cooldown: `removed` then carries it as the job's stop. The
- * tab is closed on every path. **Stop** is honoured between the steps (the sleeps); after the click,
- * the caller says the outcome is unknown.
+ * tab is closed on every path. **Stop** is honoured before the tab opens and before the drama's page
+ * is asked for (2.0.0: a Stop pressed until then asks TikTok nothing), then between the steps (the
+ * sleeps); after the click, the caller says the outcome is unknown.
  */
 
 import { cooldownMessage, recordBlock } from "../lib/cooldown.js";
@@ -120,8 +121,9 @@ export const BOOKMARK_CHALLENGE_MESSAGE =
   "after the cooldown, solve it in a normal tab of this Chrome, then try again";
 
 /**
- * Why a removal ended without removing anything, in the engine's English (the history keeps it;
- * `lib/display.js` shows it in Spanish; the page shows its own words from `_locales`).
+ * Why a removal ended without removing anything, in the engine's English (the job's record keeps
+ * it — the test journal in the harness' copy —; `lib/display.js` shows it in Spanish; the page shows
+ * its own words from `_locales`).
  * @type {Readonly<Record<BookmarkErrorKind, string>>}
  */
 export const BOOKMARK_MESSAGES = Object.freeze({
@@ -174,6 +176,9 @@ export const BOOKMARK_MESSAGES = Object.freeze({
  * @property {number} [pageDelayS] the minimum pause before the click and the reload (0.8 s)
  * @property {() => void} [onPressed] right after the one click (the page notes it: a Stop after it
  *   leaves the outcome unknown)
+ * @property {() => void} [onRequest] right before the drama's page is first asked for — the
+ *   removal's first request to TikTok (DramaFetch 2.0.0: the page notes it; a removal that ended
+ *   before it, a **Stop** say, asked TikTok nothing)
  * @property {BookmarkBrowser} [browser] {@link bookmarkBrowser} by default
  *
  * @typedef {object} BookmarkResult
@@ -540,6 +545,8 @@ export async function removeFromBookmark(engine, seriesId, options = {}) {
     if (listRefused) throw new RateLimitedError(LIST_RATE_LIMIT_MESSAGE);
   };
   try {
+    // **Stop** pressed before the tab opens (2.0.0): no tab, nothing asked of TikTok
+    if (engine.stopRequested?.()) throw new StopRequested();
     tabId = await browser.openTab(options.windowId);
     const tab = tabId;
     stopObserving = browser.observe(tab, observedUrlPatterns(base), {
@@ -549,6 +556,9 @@ export async function removeFromBookmark(engine, seriesId, options = {}) {
         if (listening && isCollectUrl(request.url)) collects.push(request.status);
       },
     });
+    // … or while it opened (2.0.0): the tab closed (finally), the drama's page never asked for
+    if (engine.stopRequested?.()) throw new StopRequested();
+    options.onRequest?.(); // the removal's first request to TikTok, next
     try {
       await browser.navigate(tab, page);
     } catch {

@@ -543,7 +543,7 @@ function fakeEngine(log) {
 /**
  * Remove `SERIES` against `site` with the real browser seam (`bookmarkBrowser` over the fake chrome).
  * @param {Site} site
- * @param {{timeoutS?: number, waitS?: number, onPressed?: () => void, engineSetup?: (fake: ReturnType<typeof fakeEngine>, chrome: ReturnType<typeof fakeChrome>) => void}} [options]
+ * @param {{timeoutS?: number, waitS?: number, onPressed?: () => void, onRequest?: () => void, engineSetup?: (fake: ReturnType<typeof fakeEngine>, chrome: ReturnType<typeof fakeChrome>) => void}} [options]
  */
 async function remove(site, options = {}) {
   const chrome = fakeChrome(site);
@@ -554,6 +554,7 @@ async function remove(site, options = {}) {
   if (options.timeoutS !== undefined) given.timeoutS = options.timeoutS;
   if (options.waitS !== undefined) given.waitS = options.waitS;
   if (options.onPressed !== undefined) given.onPressed = options.onPressed;
+  if (options.onRequest !== undefined) given.onRequest = options.onRequest;
   try {
     const outcome = await removeFromBookmark(fake.engine, SERIES, given).then(
       (value) => ({ value, error: null }),
@@ -924,6 +925,56 @@ test("Stop between two steps: before the click nothing is pressed; after it the 
   assert.equal(pressed, true);
   assert.equal(after.chrome.state.clicks, 1);
   assert.equal(after.chrome.log.at(-1), "close");
+});
+
+test("Stop before the drama's page is asked for (2.0.0): pressed before the removal starts — no tab at all; pressed while Chrome opens its tab — that tab closed again, the drama's page never asked for, nothing pressed; `onRequest` called once, right before the page is first asked for, and never after such a Stop", async () => {
+  let requests = 0;
+  // Stop pressed before the removal starts
+  const early = await remove({ saved: true }, { onRequest: () => void (requests += 1), engineSetup: (fake) => fake.stop() });
+  assert.ok(early.error instanceof StopRequested);
+  assert.deepEqual(steps(early.chrome.log), []);
+  assert.equal(requests, 0);
+  // Stop pressed while Chrome opens the tab
+  const opening = await remove(
+    { saved: true },
+    {
+      onRequest: () => void (requests += 1),
+      engineSetup: (fake) => {
+        const tabs = /** @type {{create: (properties: unknown) => Promise<unknown>}} */ (/** @type {unknown} */ (globalThis.chrome.tabs));
+        const create = tabs.create;
+        tabs.create = async (properties) => {
+          const tab = await create(properties);
+          fake.stop();
+          return tab;
+        };
+      },
+    },
+  );
+  assert.ok(opening.error instanceof StopRequested);
+  assert.equal(opening.chrome.log.some((entry) => entry.startsWith("navigate ")), false);
+  assert.equal(opening.chrome.log.at(-1), "close");
+  assert.equal(opening.chrome.state.clicks, 0);
+  assert.equal(requests, 0);
+  // no Stop: once, right before the drama's page is first asked for
+  /** @type {string[]} */
+  let log = [];
+  const removed = await remove(
+    { saved: true },
+    {
+      onRequest: () => {
+        requests += 1;
+        log.push("request");
+      },
+      engineSetup: (_fake, chromeTab) => {
+        log = chromeTab.log;
+      },
+    },
+  );
+  assert.equal(removed.error, null);
+  assert.equal(requests, 1);
+  const first = steps(removed.chrome.log);
+  assert.equal(first.indexOf("request"), first.indexOf(`navigate ${PAGE}`) - 1);
+  assert.equal(first.filter((entry) => entry === "request").length, 1);
 });
 
 test("the tab DramaFetch opened, closed by hand before anything was pressed: tab-gone", async () => {

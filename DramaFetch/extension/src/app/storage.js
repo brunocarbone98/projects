@@ -3,15 +3,16 @@
  * `chrome.storage.local` wrappers: the settings (validated: the pauses never below the Python
  * defaults), the cooldown record, the per-series state (`series:<id>`, the `dramafetch.json`
  * format of `lib/state.js`), the run's pacing (persisted, so reopening the tab never resets the
- * long break or the rest between jobs), the history of the last 20 runs — and the test settings,
- * honoured ONLY when the manifest says `dramafetch_test` (the test harness' temporary copy).
+ * long break or the rest between jobs) — and the test settings, honoured ONLY when the manifest
+ * says `dramafetch_test` (the test harness' temporary copy). DramaFetch 2.0.0 (the owner's decision
+ * of 2026-11-22) keeps no history of past runs: what 1.x kept of it is removed at the page's start
+ * ({@link removeStoredHistory}).
  *
  * The manifest's `unlimitedStorage` lifts the area's 10 MB quota: a series' state is about 350–400
  * bytes per episode and is never pruned (it is the resume memory), so the quota was full near
  * 27 000 episodes. A write can still be refused — the disk that holds the Chrome profile is full
- * or failing: the callers stop the run (`engine.storageRefusedReason`), the history gives way
- * ({@link appendHistory}) and a refusal's cooldown stays in force from this browser session's
- * memory ({@link cooldownStore}).
+ * or failing: the callers stop the run (`engine.storageRefusedReason`) and a refusal's cooldown
+ * stays in force from this browser session's memory ({@link cooldownStore}).
  *
  * `chrome.storage.session` (in memory for the browser session, never on disk) holds, besides the
  * discovery tab's record and a cooldown the local storage refused, the favorites list's address per
@@ -39,7 +40,6 @@ import { PACES, PACING_DEFAULTS, PacingState, pacingOptions, pacingProblem } fro
 /** The keys of `chrome.storage.local` (the test harness reads some of them). */
 export const SETTINGS_KEY = "settings";
 export const TEST_SETTINGS_KEY = "testSettings";
-export const HISTORY_KEY = "history";
 export const PACING_KEY = "pacing";
 export const SERIES_KEY_PREFIX = "series:";
 /** The library kept across sessions (`lib/library.StoredLibrary`): nothing signed in it. */
@@ -51,17 +51,12 @@ export const LIBRARY_SORT_KEY = "librarySort";
  * listing gave (signed: in the browser session's memory only, never on disk).
  */
 export const LIBRARY_COVERS_KEY = "favoritesCovers";
-/** How many past runs the history keeps. */
-export const HISTORY_LIMIT = 20;
-/** At most this much UTF-8 JSON of history ({@link trimHistory}): 1 MiB. */
-export const HISTORY_MAX_BYTES = 1024 * 1024;
 /**
- * One run's share of the history, about 51 KiB: {@link HISTORY_LIMIT} runs of this size — each
- * with its comma, and the array's brackets — fit {@link HISTORY_MAX_BYTES}. A larger run is stored
- * compact and held to it ({@link historyEntry}), so that the last 20 runs stay together however
- * large one of them was.
+ * The `chrome.storage.local` key under which DramaFetch 1.x kept the history of the last 20 runs
+ * (**Past runs**). DramaFetch 2.0.0 writes nothing there and removes it at the page's start
+ * ({@link removeStoredHistory}).
  */
-export const HISTORY_ENTRY_MAX_BYTES = Math.floor((HISTORY_MAX_BYTES - 2) / HISTORY_LIMIT) - 1;
+export const RETIRED_HISTORY_KEY = "history";
 
 /**
  * @typedef {object} Settings What the user may set (Settings panel); the pauses only upwards.
@@ -79,6 +74,11 @@ export const HISTORY_ENTRY_MAX_BYTES = Math.floor((HISTORY_MAX_BYTES - 2) / HIST
  *   (`alerts.js`, DramaFetch 1.7.0)
  * @property {boolean} autoRetry one automatic retry of a drama's episodes that did not download for a
  *   reason a retry can change — never after a stop (`app.js`, DramaFetch 1.8.0)
+ * @property {boolean} autoRemove a drama of the library leaves the user's TikTok Favorites on its own
+ *   once every episode of it is on disk — none locked, protected by DRM, served short or missing —,
+ *   after its automatic retry when it needed one: TikTok's own Bookmark pressed once, as **Remove
+ *   from Favorites** presses it; never after a stop or during the cooldown (`app.js`
+ *   `queueAutoRemoval`, DramaFetch 2.0.0, the owner's decision of 2026-11-22)
  *
  * @typedef {object} TestSettings Overrides honoured only in test mode (`dramafetch_test`).
  * @property {string} [baseUrl] another origin than TikTok's (the fake TikTok server)
@@ -124,6 +124,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   report: true,
   alerts: true,
   autoRetry: true,
+  autoRemove: true,
 });
 
 /** The numeric test settings and nothing else; anything outside test mode is ignored. */
@@ -167,8 +168,8 @@ function isRecord(value) {
 
 /**
  * Why `settings` cannot be saved, or null: an unknown quality, cover mode or pace, a name format
- * `lib/naming` refuses, a report, alert or automatic retry switch that is not a boolean, pauses
- * below the Python defaults (outside test mode) or inverted.
+ * `lib/naming` refuses, a report, alert, automatic retry or automatic removal switch that is not a
+ * boolean, pauses below the Python defaults (outside test mode) or inverted.
  * @param {Settings} settings
  * @param {boolean} testMode
  * @returns {string | null}
@@ -183,6 +184,7 @@ export function settingsProblem(settings, testMode) {
   if (typeof settings.report !== "boolean") return "the report switch must be on or off";
   if (typeof settings.alerts !== "boolean") return "the alert switch must be on or off";
   if (typeof settings.autoRetry !== "boolean") return "the automatic retry switch must be on or off";
+  if (typeof settings.autoRemove !== "boolean") return "the automatic removal switch must be on or off";
   return pacingProblem(pacingOptions(pickPacing(settings)), { testMode });
 }
 
@@ -399,7 +401,7 @@ export const FAVORITES_TEMPLATE_PREFIX = "favoritesTemplate:";
  * (its URL and status only): the address the favorites list is read with — its first page
  * replayed unchanged, the later pages with only `cursor` changed.
  * @property {string} url carries TikTok's signature parameters: kept in the browser session's
- *   memory only — never in `chrome.storage.local`, a log, a report or the history
+ *   memory only — never in `chrome.storage.local`, a log or a report
  * @property {number} at when it completed, seconds since the epoch
  * @property {string | null} profile whose favorites that address reads: the `@handle` of the profile
  *   page that asked for it — the tab's address as that first page completed
@@ -562,7 +564,7 @@ export async function readSeriesState(seriesId) {
 
 /**
  * The stored states of several series at once, raw, by series id (one read for a whole list: the
- * favorites panel's statuses).
+ * library's statuses).
  * @param {readonly string[]} seriesIds
  * @returns {Promise<Map<string, unknown>>}
  */
@@ -612,131 +614,21 @@ export async function savePacing(pacing, lastContactAt) {
   });
 }
 
-/** @returns {Promise<Record<string, unknown>[]>} the past runs, most recent first */
-export async function readHistory() {
-  const raw = (await chrome.storage.local.get(HISTORY_KEY))[HISTORY_KEY];
-  return Array.isArray(raw) ? raw.filter(isRecord) : [];
-}
-
 /**
- * The history to store: `entries` (most recent first) cut to the last {@link HISTORY_LIMIT} runs
- * and to {@link HISTORY_MAX_BYTES} of UTF-8 JSON, the oldest runs dropped first; the most recent
- * run is always kept. The history is read whole at every page start and after every job, so it
- * stays small whatever the storage could hold.
- * @param {readonly Record<string, unknown>[]} entries
- * @param {number} [limit]
- * @param {number} [maxBytes]
- * @returns {Record<string, unknown>[]}
+ * Remove the history 1.x kept of its past runs ({@link RETIRED_HISTORY_KEY}) from
+ * `chrome.storage.local` — the page calls it once at its start (DramaFetch 2.0.0 keeps none: the
+ * stored history is deleted on the first start after the update; a key no longer there costs
+ * nothing). Best effort: a removal the storage refuses (a full or failing disk) is ignored — never a
+ * stop, never the page's refused write (`app.unsaved`), and the next start tries again. Nothing
+ * else is removed: the settings, the series' records, the pacing, the cooldown and the library
+ * stay. Never throws; returns whether the storage took it.
+ * @returns {Promise<boolean>}
  */
-export function trimHistory(entries, limit = HISTORY_LIMIT, maxBytes = HISTORY_MAX_BYTES) {
-  const encoder = new TextEncoder();
-  /** @type {Record<string, unknown>[]} */
-  const kept = [];
-  let bytes = 2; // the brackets of the array
-  for (const entry of entries.slice(0, limit)) {
-    const size = encoder.encode(JSON.stringify(entry)).length + 1; // and its comma
-    if (kept.length > 0 && bytes + size > maxBytes) break;
-    kept.push(entry);
-    bytes += size;
-  }
-  return kept;
-}
-
-/**
- * @param {unknown} value
- * @returns {number} its size as UTF-8 JSON
- */
-function jsonBytes(value) {
-  return new TextEncoder().encode(JSON.stringify(value)).length;
-}
-
-/**
- * A run as the history stores it, within its share ({@link HISTORY_ENTRY_MAX_BYTES}, about 51 KiB:
- * a couple of 60-episode series stored whole). A run that fits is stored as it is. A larger one —
- * a row per episode and a record per pause — is stored compact, so that it neither pushes the
- * earlier runs out nor makes the history a value of megabytes read at every page start. Compact
- * keeps what **Past runs** reads: no pauses (`pauses_omitted` says how many), and of each series
- * its name, line and error and only the rows whose episode did not download (status `failed…`:
- * what the retry line and button read; `rows_omitted` says how many others), without the series'
- * report (the page and the run's report file had it). Should even that pass the share — a batch of
- * more than about 200 series, about 120–190 when a stop left most of them `not started` —, those rows keep only their number and status, and the series are kept
- * in batch order as long as they fit, the ones with an episode to retry first; `series_omitted`
- * says how many more the run had, and **Past runs** says so.
- * @param {Record<string, unknown>} entry
- * @param {number} [maxBytes]
- * @returns {Record<string, unknown>}
- */
-export function historyEntry(entry, maxBytes = HISTORY_ENTRY_MAX_BYTES) {
-  if (jsonBytes(entry) <= maxBytes) return entry;
-  const series = Array.isArray(entry["series"]) ? entry["series"] : [];
-  const pauses = Array.isArray(entry["pauses"]) ? entry["pauses"] : [];
-  const compact = { ...entry, pauses: [], pauses_omitted: pauses.length, series: series.map((record) => compactRecord(record, false)) };
-  if (jsonBytes(compact) <= maxBytes) return compact;
-  const records = series.map((record) => compactRecord(record, true));
-  // the count written can only be shorter than the one measured here, and each record is counted
-  // with a comma: the entry ends within the share — unless the run's own fields (a label, an error:
-  // a few hundred bytes) pass it, which no series left out would change
-  let bytes = jsonBytes({ ...compact, series: [], series_omitted: records.length });
-  if (bytes > maxBytes) return compact;
-  /** @type {Set<number>} */
-  const kept = new Set();
-  for (const retryFirst of [true, false]) {
-    for (const [index, record] of records.entries()) {
-      if (kept.has(index) || hasRows(record) !== retryFirst) continue;
-      const size = jsonBytes(record) + 1;
-      if (bytes + size > maxBytes) continue; // a smaller series further on may still fit
-      kept.add(index);
-      bytes += size;
-    }
-  }
-  return { ...compact, series: records.filter((_, index) => kept.has(index)), series_omitted: records.length - kept.size };
-}
-
-/**
- * A series record of a run as a compact history entry keeps it ({@link historyEntry}).
- * @param {unknown} record
- * @param {boolean} bare the rows of the episodes that did not download with their number and status only
- * @returns {unknown}
- */
-function compactRecord(record, bare) {
-  if (!isRecord(record)) return record;
-  /** @type {Record<string, unknown>} */
-  const kept = { ...record };
-  delete kept["report"];
-  const rows = record["rows"];
-  if (!Array.isArray(rows)) return kept;
-  const failed = rows.filter((row) => isRecord(row) && typeof row["status"] === "string" && row["status"].startsWith("failed"));
-  kept["rows"] = bare ? failed.map((row) => ({ number: row["number"], status: row["status"] })) : failed;
-  kept["rows_omitted"] = rows.length - failed.length;
-  return kept;
-}
-
-/**
- * @param {unknown} record a compact series record
- * @returns {boolean} whether it has an episode the retry would queue
- */
-function hasRows(record) {
-  return isRecord(record) && Array.isArray(record["rows"]) && record["rows"].length > 0;
-}
-
-/**
- * Put a finished run first in the history ({@link historyEntry}, {@link trimHistory}). Should the
- * storage refuse it (a full disk), the history gives way — the run alone, else no history at all —
- * and never the series states; a history that cannot be read gives way too. Never throws: a job's
- * end must not break on its history.
- * @param {Record<string, unknown>} run
- * @returns {Promise<void>}
- */
-export async function appendHistory(run) {
-  const entry = historyEntry(run);
-  const history = trimHistory([entry, ...(await readHistory().catch(() => []))]);
+export async function removeStoredHistory() {
   try {
-    await chrome.storage.local.set({ [HISTORY_KEY]: history });
+    await chrome.storage.local.remove(RETIRED_HISTORY_KEY);
+    return true;
   } catch {
-    try {
-      await chrome.storage.local.set({ [HISTORY_KEY]: [entry] });
-    } catch {
-      await chrome.storage.local.remove(HISTORY_KEY).catch(() => undefined);
-    }
+    return false;
   }
 }

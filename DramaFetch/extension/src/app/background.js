@@ -1,14 +1,16 @@
 // @ts-check
 /**
  * The service worker: opens the DramaFetch tab — or re-focuses the one already open (one per
- * browser) — when the popup asks or a right-click item is clicked (`menus.js`: **Download this
- * drama**, **Download this page's drama**, **Download this favorite drama**), and hands it a series
- * to download (DramaFetch 1.7.0: the job a paste of it queues), or the favorites of a TikTok tab to
- * show — with the right-clicked card whose drama to download. It holds no long-running work: the
- * engine runs in the DramaFetch tab while that tab is open. When that tab goes away in the middle of
- * a listing — closed, navigated elsewhere or discarded, so its own clean-up never runs — the worker
- * closes the muted TikTok tab the listing had open (`discovery.DISCOVERY_TAB_KEY`). It answers only
- * the extension's own pages (`senders.isOwnSender`: never a content script).
+ * browser) — when the popup asks, and hands it a series to download (the popup's **Download this
+ * series**; DramaFetch 1.7.0: the job a paste of it queues), the favorites of a TikTok tab to show
+ * (the popup's **Open my library** on a profile) or the library as it is kept. It holds no
+ * long-running work: the engine runs in the DramaFetch tab while that tab is open. When that tab
+ * goes away in the middle of a listing — closed, navigated elsewhere or discarded, so its own
+ * clean-up never runs — the worker closes the muted TikTok tab the listing had open
+ * (`discovery.DISCOVERY_TAB_KEY`). It answers only the extension's own pages and worker
+ * (`senders.isOwnSender`). DramaFetch 2.0.0 (the owner's decision of 2026-11-22) took the
+ * right-click items and the favorites card reader they asked away: the worker puts no menu in place
+ * and the manifest grants no context-menu permission.
  *
  * It also OBSERVES — URLs and status codes only, never a body, never blocking, never changing
  * anything — the `drama_list` requests the user's own TikTok tabs make when their profile's
@@ -18,7 +20,7 @@
  * `lib/favorites.isFavoritesFirstPageUrl`: its address holds `favorite` and its `cursor` is absent,
  * empty or `0`; a later page, the page's own as its grid scrolls or one the DramaFetch tab asked
  * for, never replaces it — is kept in `chrome.storage.session` (`storage.rememberFavoritesTemplate`;
- * in memory for the browser session, never logged, never in a report or the history: it carries
+ * in memory for the browser session, never logged, never in a report: it carries
  * TikTok's signature parameters) with whose list it reads — the `@handle` of the profile page that
  * asked for it ({@link keepFavoritesTemplate}) — and forgotten when the tab closes. That URL is the
  * template the DramaFetch tab reads the list with (`favorites.js`): its first page replayed
@@ -29,32 +31,27 @@
  * ({@link openApp}, no hand-over) and takes the notification away; its **Retry** button is handed
  * to the page that made it (`dramafetch:retry`), which queues the retry as the tab's own **Retry**
  * does — when no running page holds it (the tab was closed or reloaded since), the button only
- * opens or focuses the DramaFetch tab, whose **Past runs** keep their own **Retry**. The worker
- * itself never makes a request.
+ * opens or focuses the DramaFetch tab. The worker itself never makes a request.
  */
 
-import { cardOf, favoritesQuery, isFavoritesFirstPageUrl } from "../lib/favorites.js";
+import { favoritesQuery, isFavoritesFirstPageUrl } from "../lib/favorites.js";
 import { profileHandleOf } from "../lib/library.js";
 import { TIKTOK_BASE_URL } from "../lib/messages.js";
 import { isAlertId } from "./alerts.js";
 import { closeLeftoverDiscoveryTab, observedUrlPatterns } from "./discovery.js";
-import { t } from "./i18n.js";
-import { MENU_CARD, loadOfClick, menuItems } from "./menus.js";
 import { isOwnSender } from "./senders.js";
-import { forgetFavoritesTemplate, loadTestSettings, readFavoritesTemplate, rememberFavoritesTemplate } from "./storage.js";
+import { forgetFavoritesTemplate, readFavoritesTemplate, rememberFavoritesTemplate } from "./storage.js";
 
 const APP_PATH = "src/app/app.html";
 
 /**
- * @typedef {import("../lib/favorites.js").Card} Card
  * @typedef {import("../lib/favorites.js").FavoritesHandover} FavoritesHandover
  *
  * @typedef {{load: string} | {favorites: FavoritesHandover} | {library: true}} Handover What the
  *   DramaFetch tab is handed: a series to download (an address or an id, as the box reads it), the
- *   favorites of a TikTok tab to show — with the right-clicked card whose drama to download, when
- *   there is one —,
- *   or the library to show as it is kept (the popup's **Open my library** away from a TikTok
- *   profile: no job, no request).
+ *   favorites of a TikTok tab to show (the popup's **Open my library** on a profile), or the library
+ *   to show as it is kept (the popup's **Open my library** away from a TikTok profile: no job, no
+ *   request).
  */
 
 /**
@@ -183,15 +180,18 @@ async function openApp(handover) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Only this extension's own pages may ask (web pages cannot reach it: no externally_connectable;
-  // the content script, which runs in TikTok's pages with this extension's id, never passes)
+  // Only this extension's own pages may ask (web pages cannot reach it: no externally_connectable);
+  // a sender in a web page's frame never passes — DramaFetch declares no content script since 2.0.0,
+  // but the functions it injects into the TikTok tabs it works in run in the ISOLATED world, where a
+  // message carries this extension's id (the Bookmark reader, the discovery's scroll and page-text
+  // reads): this check keeps every such sender out, a guard against a TikTok renderer gone wrong
   if (!isOwnSender(sender)) return false;
   if (!isRecord(message) || message["type"] !== "dramafetch:open") return false;
   const load = typeof message["load"] === "string" && message["load"] ? message["load"] : null;
   const favorites = message["favorites"];
   /** @type {Handover | null} the popup's Open my library on a profile (that tab), its Download this series, or its Open my library elsewhere */
   const handover = isTabId(favorites)
-    ? { favorites: { tabId: favorites, card: null, menu: false, script: true } }
+    ? { favorites: { tabId: favorites } }
     : load !== null
       ? { load }
       : message["library"] === true
@@ -218,8 +218,8 @@ async function clearAlert(notificationId) {
  * made it queues the retry — the tab's own **Retry** for that drama — and takes the notification
  * away; when its gate refuses (a cooldown in force), that page comes to the front, where the
  * banner says until when. When no running page holds it (the tab was closed or reloaded since),
- * the button only opens or focuses the DramaFetch tab: nothing is queued, the worker asks TikTok
- * for nothing, and **Past runs** keeps its own **Retry**.
+ * the button only opens or focuses the DramaFetch tab: nothing is queued, and the worker asks
+ * TikTok for nothing.
  * @param {string} notificationId
  * @returns {Promise<void>}
  */
@@ -245,81 +245,4 @@ chrome.notifications?.onClicked.addListener((notificationId) => {
 chrome.notifications?.onButtonClicked.addListener((notificationId, buttonIndex) => {
   if (!isAlertId(notificationId) || buttonIndex !== 0) return;
   void retryFromAlert(notificationId).catch(() => undefined);
-});
-
-/**
- * A contextMenus call as a promise: Chrome reports the call's outcome to its callback, a failure in
- * `chrome.runtime.lastError` (`removeAll` returns a promise only from Chrome 123 on; `create` never
- * does: it returns the item's id at once, and only the callback learns whether Chrome took it).
- * @param {(done: () => void) => void} call
- * @returns {Promise<void>}
- */
-function menuCall(call) {
-  return new Promise((resolve, reject) => {
-    call(() => {
-      const error = chrome.runtime.lastError;
-      if (error === undefined) resolve();
-      else reject(new Error(error.message ?? "the menu could not be changed"));
-    });
-  });
-}
-
-/** The latest putting in place of the menu: one at a time, never two at once. */
-let menusInPlace = Promise.resolve();
-
-/**
- * Put the right-click items in place again, titled in Chrome's language: at install, at every
- * update (a reload of the unpacked folder too) and at every start of Chrome.
- * @returns {Promise<void>}
- */
-function installMenus() {
-  const install = async () => {
-    await menuCall((done) => chrome.contextMenus.removeAll(done));
-    for (const item of menuItems(t("contextDownload"), t("contextDownloadPage"), t("contextDownloadFavorite"))) {
-      await menuCall((done) => void chrome.contextMenus.create(item, done));
-    }
-  };
-  menusInPlace = menusInPlace.then(install, install);
-  return menusInPlace;
-}
-
-/**
- * The favorites card the right-click of the card item was on: the content script of that tab's
- * frame remembers it (`src/content/cards.js`) and answers the extension's own message, checked
- * (`lib/favorites.cardOf`). `script` tells the two ways of having no card apart: true when the
- * script answered — `card` null then means the right-click was on no card —, false when no content
- * script answered at all (`chrome.tabs.sendMessage` rejects: a tab loaded before this version of
- * DramaFetch was, a frame without one), so nothing could say which drama was right-clicked.
- * @param {number} tabId
- * @param {number} frameId
- * @returns {Promise<{card: Card | null, script: boolean}>}
- */
-async function rightClickedCard(tabId, frameId) {
-  let answer;
-  try {
-    answer = await chrome.tabs.sendMessage(tabId, { type: "dramafetch:card" }, { frameId });
-  } catch {
-    return { card: null, script: false };
-  }
-  return { card: cardOf(answer), script: true };
-}
-
-chrome.runtime.onInstalled.addListener(() => void installMenus().catch(() => undefined));
-chrome.runtime.onStartup.addListener(() => void installMenus().catch(() => undefined));
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  const answer = async () => {
-    if (info.menuItemId === MENU_CARD) {
-      // a drama of the profile's favorites: its card, from the tab's frame — without one (no card
-      // right-clicked, no script to ask) the DramaFetch tab queues nothing and says why
-      const tabId = tab?.id;
-      if (!isTabId(tabId)) return;
-      const { card, script } = await rightClickedCard(tabId, info.frameId ?? 0);
-      await openApp({ favorites: { tabId, card, menu: true, script } });
-      return;
-    }
-    const test = await loadTestSettings();
-    const load = loadOfClick(info, test.baseUrl ?? TIKTOK_BASE_URL);
-    if (load !== null) await openApp({ load });
-  };
-  void answer().catch(() => undefined);
 });

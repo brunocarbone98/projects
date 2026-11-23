@@ -1,9 +1,11 @@
 // @ts-check
 // Who may message DramaFetch's worker and the DramaFetch tab (src/app/senders.js `isOwnSender`,
 // used by both `runtime.onMessage` handlers): the extension's own pages and its service worker —
-// never a web page, although the content script runs in every www.tiktok.com page with the
-// extension's id. Over a fake `chrome.runtime` (its id and `getURL`); the handlers themselves are
-// driven in tests/menus.test.js (the worker) and tests/app.test.js (the page).
+// never a web page, not even one that carries the extension's id (until 2.0.0 a declared content
+// script ran in every www.tiktok.com page; none is declared since, but the functions DramaFetch
+// injects into the TikTok tabs it works in run in the ISOLATED world with its id all the same). Over
+// a fake `chrome.runtime` (its id and `getURL`); the handlers themselves are driven in
+// tests/worker.test.js (the worker) and tests/app.test.js (the page).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -26,7 +28,7 @@ test("the extension's own pages and worker are its own senders; a TikTok page wi
       assert.equal(isOwnSender(sender), true, JSON.stringify(sender));
     }
     for (const sender of /** @type {chrome.runtime.MessageSender[]} */ ([
-      { id: ID, url: "https://www.tiktok.com/@invented_viewer", tab: tiktokTab }, // the content script's page
+      { id: ID, url: "https://www.tiktok.com/@invented_viewer", tab: tiktokTab }, // a TikTok page with the extension's id
       { id: ID, url: "https://www.tiktok.com/@invented_viewer" },
       { id: ID, url: "http://127.0.0.1:8123/@invented_viewer", tab: tiktokTab }, // the fake TikTok's page (test mode)
       { id: ID, tab: tiktokTab }, // a tab but no address: no worker sends from a tab
