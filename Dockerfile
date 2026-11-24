@@ -36,10 +36,12 @@ RUN python3 -m venv /opt/venv \
        -r services/labels/requirements.txt
 
 # Internal wiring: every process shares the container's network over localhost,
-# so these never need to be set in Railway.
+# so these never need to be set in Railway. API_HOST keeps the API on loopback,
+# like the Python services in start.sh: only the web inside the container reaches it.
 ENV NODE_ENV=production \
     PORT=8080 \
     API_PORT=4000 \
+    API_HOST=127.0.0.1 \
     API_INTERNAL_URL=http://127.0.0.1:4000 \
     PRICING_SERVICE_URL=http://127.0.0.1:8001 \
     LABELS_SERVICE_URL=http://127.0.0.1:8002

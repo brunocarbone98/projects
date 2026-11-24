@@ -54,8 +54,10 @@ JWT_ACCESS_SECRET  = <a long random string, at least 32 characters>
 > the literal `${{…}}` text. (If it's empty, the boot log now says exactly this.)
 
 That's all — the internal URLs (web→api, api→pricing/labels) are hard-wired to
-`localhost` inside the image. (Optional: `PUBLIC_WEB_URL` / `CORS_ORIGINS` = your
-public domain, used for tracking links / CORS.) Generate the secret with e.g.
+`localhost` inside the image, and the Dockerfile sets `API_HOST=127.0.0.1`, so the API
+listens on loopback only, like the Python services: nothing outside the container, Railway's
+private network included, reaches it except through the web. (Optional: `PUBLIC_WEB_URL` /
+`CORS_ORIGINS` = your public domain, used for tracking links / CORS.) Generate the secret with e.g.
 `openssl rand -hex 32` (64 characters): the API refuses to start with a secret shorter than 32
 characters, and its boot log names the variable.
 

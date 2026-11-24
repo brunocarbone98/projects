@@ -129,7 +129,8 @@ curl http://localhost:4000/api/v1/tracking/PTY-2026-001001-0   # public, no auth
 ```
 
 API reference: <http://localhost:4000/api/v1/docs> (local only: in production the API listens
-inside the container). The page runs one pinned file of the Scalar reference from jsDelivr, checked
+on 127.0.0.1 inside the container, `API_HOST` in the root Dockerfile; unset, as here, it listens on
+every interface). The page runs one pinned file of the Scalar reference from jsDelivr, checked
 by the browser against its SHA-384 (`SCALAR_SCRIPT_URL` and `SCALAR_SCRIPT_INTEGRITY` in
 `apps/api/src/openapi.ts`, with the steps to move to another release).
 
