@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { EnvSchema } from "../src/env.js";
 
-// The two variables without a default; nothing here connects to the database. Where the API then
-// listens, set or unset, is test/listen.test.ts: it starts the API's own entry.
+// The two variables without a default; the DATABASE_URL here is only parsed, never connected to (the
+// api harness still migrates shipping_hub_test and truncates it before each test, as in every api
+// file). Where the API then listens, set or unset, is test/listen.test.ts: it starts the API's own
+// entry.
 const required = {
   DATABASE_URL: "postgresql://shipping:shipping@localhost:5432/shipping_hub_test?schema=public",
   JWT_ACCESS_SECRET: "x".repeat(32),
@@ -21,8 +24,17 @@ describe("environment: API_HOST", () => {
     expect(parsed.PORT).toBe(4000);
   });
 
-  it("takes the address the root Dockerfile sets", () => {
-    expect(EnvSchema.parse({ ...required, API_HOST: "127.0.0.1" }).API_HOST).toBe("127.0.0.1");
+  it("takes the address the root Dockerfile sets, its only API_HOST", () => {
+    // every API_HOST the root Dockerfile assigns, comments aside: exactly one, 127.0.0.1, so nothing
+    // later in the file widens it and the API in the container accepts it at start
+    const dockerfile = readFileSync(new URL("../../../../Dockerfile", import.meta.url), "utf8");
+    const code = dockerfile
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    const values = [...code.matchAll(/(?:^|\s)API_HOST=(\S+)/g)].map((match) => match[1]);
+    expect(values).toEqual(["127.0.0.1"]);
+    expect(EnvSchema.parse({ ...required, API_HOST: values[0] }).API_HOST).toBe("127.0.0.1");
     expect(EnvSchema.parse({ ...required, API_HOST: "::1" }).API_HOST).toBe("::1");
   });
 

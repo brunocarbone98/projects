@@ -1,7 +1,10 @@
 // The API's own entry, src/index.ts, started as the container's `pnpm start` starts it (`tsx
 // src/index.ts`) with apps/api/.env.test and a free port: where it listens with API_HOST set (the
 // root Dockerfile's 127.0.0.1) and unset (local runs, CI), and what it does when it cannot listen.
-// Nothing here reaches the database.
+// Neither this file nor the API it starts queries the database (/health does not), but it runs under
+// the api harness like every other file: vitest.config.ts's globalSetup migrates shipping_hub_test
+// and test/setup.ts truncates it before each test, so it needs PostgreSQL and never runs beside
+// another api run.
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { get } from "node:http";
@@ -171,6 +174,9 @@ describe("the API's own entry (src/index.ts, as `pnpm start` runs it)", () => {
 
     expect((await health("127.0.0.1", port)).status).toBe(200);
     expect((await health(other, port)).status).toBe(200);
+    // IPv6 too where the machine has it (CI's runners; the cloud sandbox has none): every interface
+    // is ::, both families, never 0.0.0.0 alone
+    if (localAddresses().includes("::1")) expect((await health("::1", port)).status).toBe(200);
   });
 
   it("with an address this machine does not have, says why and exits 1, never 'listening'", async () => {
