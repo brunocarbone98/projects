@@ -8,7 +8,9 @@
 // away: the fake chrome has no `contextMenus`, no `runtime.onInstalled` / `onStartup` and no
 // `tabs.sendMessage`, so a worker that reached for any of them would throw at its start. Ported
 // from 1.x's tests/menus.test.js (its worker tests, the menus taken out); the notifications' clicks
-// are driven in tests/alerts.test.js.
+// are driven in tests/alerts.test.js. DramaFetch 2.0.1 (issue #112): at its start the worker keeps
+// `chrome.storage.local` to the extension's own pages and itself (`setAccessLevel`), and starts all
+// the same where Chrome lacks that method, throws or refuses it.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -19,15 +21,30 @@ const APP = `${ROOT}src/app/app.html`;
 /** How many workers the tests have loaded: each gets a module URL of its own. */
 let workers = 0;
 
+/** What Chrome 116–139 reject `chrome.storage.local.setAccessLevel` with (Chromium's `storage_api.cc`). */
+const AREA_REFUSED = "This StorageArea is not available for setting access level";
+/** The one access level DramaFetch asks for, on `chrome.storage.local` only (2.0.1). */
+const TRUSTED = [["local", { accessLevel: "TRUSTED_CONTEXTS" }]];
+
+/**
+ * @typedef {"resolve" | "missing" | "throw" | "reject"} AccessLevelMode How the fake Chrome meets
+ *   `setAccessLevel` on its storage areas: `resolve` as Chrome 140 and later do, `missing` (no such
+ *   method), `throw` (a synchronous throw) or `reject` (Chrome 116–139's refusal for `local`).
+ */
+
 /**
  * A fresh worker (`background.js` loaded again under a URL of its own, so its listeners are
- * registered again) over a fake chrome: `calls` is what it asked of Chrome, `state.pages` what the
- * DramaFetch pages answer a message (an Error: no page is running), `state.tabs` the open tabs,
- * `session` the browser session's memory, `shows` the address each TikTok tab shows
- * (`chrome.tabs.get`; none: the tab is gone), `filter` the request filter of the favorites
- * observer, `on` its listeners.
+ * registered again) over a fake chrome: `calls` is what it asked of Chrome, `levels` the access
+ * levels it asked for, one `[area, options]` per call of `setAccessLevel` on `local` or `session`
+ * (`options.setAccessLevel` says how Chrome meets it; by default it resolves, as from Chrome 140
+ * on), `state.pages` what the DramaFetch pages answer a message (an Error: no page is running),
+ * `state.tabs` the open tabs, `session` the browser session's memory, `shows` the address each
+ * TikTok tab shows (`chrome.tabs.get`; none: the tab is gone), `filter` the request filter of the
+ * favorites observer, `on` its listeners.
+ * @param {{setAccessLevel?: AccessLevelMode}} [options]
  * @returns {Promise<{
  *   calls: unknown[][],
+ *   levels: unknown[][],
  *   state: {pages: unknown, tabs: {id: number, windowId: number, url: string}[]},
  *   session: Map<string, unknown>,
  *   shows: Map<number, string>,
@@ -37,9 +54,28 @@ let workers = 0;
  *   settle: () => Promise<void>,
  * }>}
  */
-async function fakeWorker() {
+async function fakeWorker(options = {}) {
   /** @type {unknown[][]} */
   const calls = [];
+  /** @type {unknown[][]} */
+  const levels = [];
+  const mode = options.setAccessLevel ?? "resolve";
+  /**
+   * `setAccessLevel` of storage area `area` as the fake Chrome meets it — none for `missing`.
+   * @param {string} area
+   * @returns {{setAccessLevel?: (accessOptions: unknown) => Promise<void>}}
+   */
+  const accessLevelOf = (area) => {
+    if (mode === "missing") return {};
+    return {
+      setAccessLevel: (accessOptions) => {
+        levels.push([area, accessOptions]);
+        if (mode === "throw") throw new TypeError("Error in invocation of storage.StorageArea.setAccessLevel");
+        if (mode === "reject") return Promise.reject(new Error(AREA_REFUSED));
+        return Promise.resolve();
+      },
+    };
+  };
   /** @type {{message?: (message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => boolean, completed?: (details: chrome.webRequest.CompletedDetails) => void, removed?: (tabId: number) => void}} */
   const on = {};
   /** @type {chrome.webRequest.RequestFilter | undefined} */
@@ -86,13 +122,14 @@ async function fakeWorker() {
       },
       windows: { update: async (/** @type {number} */ id, /** @type {unknown} */ info) => void calls.push(["focus", id, info]) },
       storage: {
-        local: { get: async () => ({}) },
+        local: { get: async () => ({}), ...accessLevelOf("local") },
         session: {
           get: async (/** @type {string} */ key) => (session.has(key) ? { [key]: session.get(key) } : {}),
           set: async (/** @type {Record<string, unknown>} */ items) => {
             for (const [key, value] of Object.entries(items)) session.set(key, value);
           },
           remove: async (/** @type {string} */ key) => void session.delete(key),
+          ...accessLevelOf("session"),
         },
       },
       webRequest: {
@@ -113,17 +150,70 @@ async function fakeWorker() {
     for (let round = 0; round < 30; round += 1) await new Promise((resolve) => setTimeout(resolve, 0));
   };
   await settle();
-  return { calls, state, session, shows, filter: () => filter, on, worker, settle };
+  return { calls, levels, state, session, shows, filter: () => filter, on, worker, settle };
 }
 
-test("the worker starts with no right-click menu (DramaFetch 2.0.0): no contextMenus, no install or start-up hook, no message to a tab — it asks nothing of Chrome at its start but its listeners", async () => {
+test("the worker starts with no right-click menu (DramaFetch 2.0.0): no contextMenus, no install or start-up hook, no message to a tab — it asks nothing of Chrome at its start but its listeners and, since 2.0.1, the storage's access level", async () => {
   try {
     // the fake chrome has none of those APIs: a worker reaching for one would have thrown here
-    const { calls, on } = await fakeWorker();
+    const { calls, levels, on } = await fakeWorker();
     assert.deepEqual(calls, []);
+    assert.deepEqual(levels, TRUSTED);
     assert.ok(on.message && on.completed && on.removed, "the worker listens to the popup, completed requests and closed tabs");
   } finally {
     Reflect.deleteProperty(globalThis, "chrome");
+  }
+});
+
+test("DramaFetch 2.0.1 (issue #112): at its start the worker keeps chrome.storage.local to the extension's own pages and itself — setAccessLevel called ONCE, at load, on `local` only (session is Chrome's trusted-only already), with exactly {accessLevel: TRUSTED_CONTEXTS} — and its listeners are registered all the same", async () => {
+  try {
+    const { calls, levels, on, settle } = await fakeWorker();
+    // at load: one call, on `local`, exactly that level — nothing asked of `session`, nothing else
+    assert.deepEqual(levels, TRUSTED);
+    assert.deepEqual(calls, []);
+    // the worker works as before: the popup's Open DramaFetch opens the tab — and asks for no level again
+    const { message, completed, removed } = on;
+    assert.ok(message && completed && removed, "the worker listens to the popup, completed requests and closed tabs");
+    /** @type {unknown[]} */
+    const answers = [];
+    assert.equal(message({ type: "dramafetch:open", load: null }, { id: "dramafetch-test-id", url: `${ROOT}src/app/popup.html` }, (response) => void answers.push(response)), true);
+    removed(5);
+    await settle();
+    assert.deepEqual(calls, [["create", { url: APP }]]);
+    assert.deepEqual(answers, [{ ok: true }]);
+    assert.deepEqual(levels, TRUSTED, "asked once, at the worker's start, never again");
+  } finally {
+    Reflect.deleteProperty(globalThis, "chrome");
+  }
+});
+
+test("DramaFetch 2.0.1: a Chrome without setAccessLevel, one that throws it and one that refuses it for `local` (Chrome 116–139) — the worker loads all the same, its listeners registered and answering, no unhandled rejection, and restrictStorageToTrustedContexts never throws or rejects", async () => {
+  // node:test fails the test during which a promise rejects unhandled (`failureType:
+  // 'unhandledRejection'`): the promise of the worker's own top-level call is checked that way
+  for (const mode of /** @type {AccessLevelMode[]} */ (["missing", "throw", "reject"])) {
+    try {
+      const { calls, levels, on, worker, settle } = await fakeWorker({ setAccessLevel: mode });
+      // asked for (where Chrome has the method), and nothing came of its failure
+      assert.deepEqual(levels, mode === "missing" ? [] : TRUSTED, mode);
+      const { message, completed, removed } = on;
+      assert.ok(message && completed && removed, `${mode}: the worker listens to the popup, completed requests and closed tabs`);
+      /** @type {unknown[]} */
+      const answers = [];
+      assert.equal(message({ type: "dramafetch:open", load: null }, { id: "dramafetch-test-id", url: `${ROOT}src/app/popup.html` }, (response) => void answers.push(response)), true, mode);
+      await settle();
+      assert.deepEqual(calls, [["create", { url: APP }]], mode);
+      assert.deepEqual(answers, [{ ok: true }], mode);
+      // the function itself, called again: no throw, and a promise that resolves whatever Chrome did
+      /** @type {Promise<void> | undefined} */
+      let again;
+      assert.doesNotThrow(() => void (again = worker.restrictStorageToTrustedContexts()), mode);
+      assert.ok(again instanceof Promise, mode);
+      assert.equal(await again, undefined, mode);
+      await settle();
+      assert.deepEqual(levels, mode === "missing" ? [] : [...TRUSTED, ...TRUSTED], mode);
+    } finally {
+      Reflect.deleteProperty(globalThis, "chrome");
+    }
   }
 });
 

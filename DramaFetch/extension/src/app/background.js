@@ -32,6 +32,9 @@
  * to the page that made it (`dramafetch:retry`), which queues the retry as the tab's own **Retry**
  * does — when no running page holds it (the tab was closed or reloaded since), the button only
  * opens or focuses the DramaFetch tab. The worker itself never makes a request.
+ *
+ * At every start (DramaFetch 2.0.1) it first keeps `chrome.storage.local` to the extension's own
+ * pages and itself ({@link restrictStorageToTrustedContexts}).
  */
 
 import { favoritesQuery, isFavoritesFirstPageUrl } from "../lib/favorites.js";
@@ -43,6 +46,30 @@ import { isOwnSender } from "./senders.js";
 import { forgetFavoritesTemplate, readFavoritesTemplate, rememberFavoritesTemplate } from "./storage.js";
 
 const APP_PATH = "src/app/app.html";
+
+/**
+ * Keep what DramaFetch stores in `chrome.storage.local` — each series' progress, the library, the
+ * settings, the pacing, the cooldown — to its own pages and this worker (DramaFetch 2.0.1, issue
+ * #112): `TRUSTED_CONTEXTS`, so that no script running in a web page under the extension's id can
+ * read or change it, nor hear its changes. DramaFetch declares no content script; the functions it
+ * injects into TikTok tabs in the ISOLATED world (the Bookmark reader, the discovery's scroll and
+ * page-text reads) use no storage. `chrome.storage.session` is kept so by Chrome already. Chrome
+ * honours the level for `local` from Chrome 140 on and keeps it in the profile; Chrome 116–139
+ * refuse it (`This StorageArea is not available for setting access level`), and the area stays as
+ * it was, as in 2.0.0. Called once, at the top level: at every start of the worker, before its
+ * listeners. It never throws and never rejects — a missing method, a synchronous throw and a
+ * refusal all leave the worker as it is.
+ * @returns {Promise<void>}
+ */
+export async function restrictStorageToTrustedContexts() {
+  try {
+    await chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+  } catch {
+    // refused (Chrome 116–139 for `local`) or not there: the area keeps Chrome's default
+  }
+}
+
+void restrictStorageToTrustedContexts();
 
 /**
  * @typedef {import("../lib/favorites.js").FavoritesHandover} FavoritesHandover

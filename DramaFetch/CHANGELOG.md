@@ -2,6 +2,13 @@
 
 One version for the whole of DramaFetch — the Python tool (`pyproject.toml`, `dramafetch --version`) and the Chrome extension (`extension/manifest.json`, shown in `chrome://extensions` and next to the title of the DramaFetch tab and the popup). Every change users can see ships with a new number: a new feature raises the middle number (1.2.0 → 1.3.0), a fix the last one (1.2.0 → 1.2.1), and a release that removes features you had raises the first number (1.8.0 → 2.0.0). Dates are the day the version was finished.
 
+## 2.0.1 — 2026-11-23
+
+- **What DramaFetch keeps in Chrome is DramaFetch's alone** (the weekly security review of 2026-11-23, issue #112). What the extension remembers — each series' progress (what is on disk), your library, your settings, the pauses and the 30-minute cooldown — can now be read or changed only by DramaFetch's own pages (its tab and the toolbar popup) and its background code, never by a script running in a TikTok page. Until now the small steps DramaFetch runs in a TikTok tab beside the page's own scripts (scrolling the episode list, reading the page's text, the Bookmark button) could reach that memory too. They never used it, but a TikTok page that first broke through Chrome's own protections (a flaw in Chrome) could have used that opening to read it, rewrite it or end the cooldown early; without such a flaw, no script of TikTok's could ever reach it. Those steps work as before. Chrome applies this from Chrome 140 on and keeps it in your profile; an older Chrome refuses it and everything works as in 2.0.0.
+- Nothing else changes: downloads, your library, **See episodes**, **Remove from Favorites** (yours and the automatic one), the automatic retry, the alerts and the pauses are as in 2.0.0. No new permission, so Chrome shows no new warning.
+- To update, replace the files in the SAME folder and press the reload arrow on DramaFetch's card in `chrome://extensions` while the DramaFetch tab shows **idle**.
+- The Python tool is unchanged and carries the same version number.
+
 ## 2.0.0 — 2026-11-22
 
 The owner's redesign of 2026-11-22. It removes two things you had — the right-click items and **Past runs** —, hence the new first number. Your library, **See episodes**, **Remove from Favorites**, a paste that downloads at once (1.7.0) and the automatic retry (1.8.0) stay as they were.
