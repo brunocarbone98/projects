@@ -1,6 +1,6 @@
 {
   "name": "dramafetch-extension",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "DramaFetch for Chrome: the extension's sources and tests. No dependencies; Node built-ins only in the tests.",
   "type": "module",

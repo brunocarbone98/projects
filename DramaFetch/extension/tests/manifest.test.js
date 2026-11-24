@@ -4,11 +4,14 @@
 // right-click items and their favorites card reader away), no test key and no localhost in the
 // shipped file (the test harness adds both to a temporary COPY), no remote code — and the sources
 // never reach for an API the extension must not use (cookies, debugger, blocking webRequest) or no
-// longer uses (contextMenus, a message to a content script).
+// longer uses (contextMenus, a message to a content script), nor does a function it injects into a
+// TikTok tab reach for an extension API or a storage (2.0.1).
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 
+import { bookmarkInPage } from "../src/app/bookmark.js";
+import { fetchInPage, pageTextInPage, scrollInPage } from "../src/app/discovery.js";
 import { TIKTOK_DOMAINS, hostCovered } from "../src/app/downloader.js";
 
 /** @param {string} relative @returns {URL} */
@@ -101,6 +104,18 @@ test("no content script and no right-click menu (DramaFetch 2.0.0, the owner's d
   // the type declarations follow: no API the extension stopped using
   const declared = readFileSync(file("types/chrome.d.ts"), "utf8");
   assert.doesNotMatch(declared, /namespace contextMenus|function sendMessage\(tabId|onInstalled|onStartup|lastError/);
+});
+
+test("what DramaFetch injects into a TikTok tab uses no extension API and no storage (2.0.1: from Chrome 140 on, chrome.storage.local refuses a script run there)", () => {
+  /** @type {Record<string, Function>} */
+  const injected = { fetchInPage, scrollInPage, pageTextInPage, bookmarkInPage };
+  // every function a chrome.scripting.executeScript call of the sources injects (`func: <name>`) is one of these
+  const sources = [...walk("src/app"), ...walk("src/lib")].filter((path) => path.endsWith(".js"));
+  const named = new Set(sources.flatMap((path) => [...readFileSync(file(path), "utf8").matchAll(/\bfunc:\s*([A-Za-z_$][\w$]*)/g)].map((match) => match[1])));
+  assert.deepEqual([...named].sort(), Object.keys(injected).sort());
+  for (const [name, inject] of Object.entries(injected)) {
+    assert.doesNotMatch(String(inject), /\bchrome\b|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b|\bcaches\b|\bcookie/, `${name}: no extension API or storage in a TikTok tab`);
+  }
 });
 
 test("host access to TikTok and its media and image CDNs only, https, never localhost", () => {

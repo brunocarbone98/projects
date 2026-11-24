@@ -312,10 +312,20 @@ declare namespace chrome {
       oldValue?: unknown;
       newValue?: unknown;
     }
+    /** Who may use a storage area: the extension's own pages and worker only, or web pages' scripts under its id too. */
+    type AccessLevel = "TRUSTED_CONTEXTS" | "TRUSTED_AND_UNTRUSTED_CONTEXTS";
     interface StorageArea {
       get(keys?: string | string[] | null): Promise<Record<string, unknown>>;
       set(items: Record<string, unknown>): Promise<void>;
       remove(keys: string | string[]): Promise<void>;
+      /**
+       * Set who may use the area; only an extension page or the worker may call it. Chrome accepts
+       * it for `local` from Chrome 140 on and rejects it there before (for `session` only until
+       * then). The worker asks it of `local` once at each start
+       * (`background.restrictStorageToTrustedContexts`, DramaFetch 2.0.1) and only when it is there:
+       * hence optional here.
+       */
+      setAccessLevel?(accessOptions: { accessLevel: AccessLevel }): Promise<void>;
     }
     const local: StorageArea;
     /** In memory for the browser session, extension pages and the worker only (the `storage` permission). */
