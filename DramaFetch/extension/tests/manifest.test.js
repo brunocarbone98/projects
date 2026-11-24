@@ -109,10 +109,14 @@ test("no content script and no right-click menu (DramaFetch 2.0.0, the owner's d
 test("what DramaFetch injects into a TikTok tab uses no extension API and no storage (2.0.1: from Chrome 140 on, chrome.storage.local refuses a script run there)", () => {
   /** @type {Record<string, Function>} */
   const injected = { fetchInPage, scrollInPage, pageTextInPage, bookmarkInPage };
-  // every function a chrome.scripting.executeScript call of the sources injects (`func: <name>`) is one of these
-  const sources = [...walk("src/app"), ...walk("src/lib")].filter((path) => path.endsWith(".js"));
-  const named = new Set(sources.flatMap((path) => [...readFileSync(file(path), "utf8").matchAll(/\bfunc:\s*([A-Za-z_$][\w$]*)/g)].map((match) => match[1])));
+  // every `func` of the sources reads `func: <one of these four>` — an inline, shorthand, quoted or spaced one reads
+  // "not a plain name" and fails —, and no file is injected nor a content script registered
+  const sources = walk("src").filter((path) => path.endsWith(".js"));
+  const named = new Set(sources.flatMap((path) => [...readFileSync(file(path), "utf8").matchAll(/\bfunc\b(?::\s*([A-Za-z_$][\w$]*))?/g)].map((match) => match[1] ?? `${path}: not a plain name`)));
   assert.deepEqual([...named].sort(), Object.keys(injected).sort());
+  for (const path of sources) {
+    assert.doesNotMatch(readFileSync(file(path), "utf8"), /\bfiles\b["']?\s*:|\bregisterContentScripts\b/, `${path}: no injected file and no registered content script`);
+  }
   for (const [name, inject] of Object.entries(injected)) {
     assert.doesNotMatch(String(inject), /\bchrome\b|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b|\bcaches\b|\bcookie/, `${name}: no extension API or storage in a TikTok tab`);
   }
