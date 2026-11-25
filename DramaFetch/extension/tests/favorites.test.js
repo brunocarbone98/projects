@@ -3,8 +3,9 @@
 // request is the list's first page (the only one the worker keeps), one page of TikTok's
 // `drama_list` answer — the anonymized capture of 2026-11-15, tests/fixtures/drama_list_page.json,
 // with two DIFFERENT dramas of the same title, as in the owner's list —, the hand-over (a message's,
-// an address's: the TikTok tab alone since 2.0.0, which took the right-clicked card away) and the
-// status DramaFetch's own records give a favorite. No browser, no network.
+// an address's: the TikTok tab alone since 2.0.0, which took the right-clicked card away) and how
+// many episodes DramaFetch's own records say a favorite has (3.0.0: no status from the records any
+// more). No browser, no network.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -25,9 +26,9 @@ import {
   isProfilePageUrl,
   parseDramaListPayload,
   knownEpisodes,
-  progressStatus,
   titleMatches,
 } from "../src/lib/favorites.js";
+import * as favoritesModule from "../src/lib/favorites.js";
 import { completeSince, markComplete, newState, record } from "../src/lib/state.js";
 
 /** @type {Record<string, unknown>} the anonymized capture of one page of the owner's list */
@@ -277,7 +278,8 @@ test("a profile page: TikTok's /@<user> pages, or the fake's in test mode", () =
   assert.equal(isProfilePageUrl("https://www.tiktok.com/@invented_viewer", "http://127.0.0.1:8123"), true);
 });
 
-test("the status from DramaFetch's own records: on disk when complete and the list has not grown since (or every listed episode saved or locked), partly when some are saved, else none", () => {
+test("how many episodes a drama has as far as DramaFetch knows — its card's count: the list's count, raised to the highest episode number the records hold, for an episode not saved too (TikTok added it after the list was read, and a run failed to save it or stopped before it); never raised by the records alone (3.0.0: no status from the records — `progressStatus` is gone)", () => {
+  assert.equal(Object.hasOwn(favoritesModule, "progressStatus"), false);
   const exists = () => true;
   /** @param {number} number @param {string} status */
   const result = (number, status) => ({
@@ -288,68 +290,36 @@ test("the status from DramaFetch's own records: on disk when complete and the li
     downloadId: status === "done" ? number : null,
   });
   const state = newState(SNOW_A, "Snowfall in Two Cities");
-  assert.equal(progressStatus(state, SNOW_A, 3), null); // nothing saved yet
-  record(state, result(1, "done"), { exists, now: 1_800_000_000 });
-  assert.equal(progressStatus(state, SNOW_A, 3), "partly");
-  record(state, result(2, "done"), { exists, now: 1_800_000_000 });
-  record(state, result(3, "skipped-locked"), { exists, now: 1_800_000_000 });
-  assert.equal(progressStatus(state, SNOW_A, 3), "on-disk"); // every episode saved or locked
-  assert.equal(progressStatus(state, SNOW_A, 60), "partly");
-  assert.equal(progressStatus(state, SNOW_A, null), "partly");
-  markComplete(state, 1_800_000_100, 2); // a whole-series run found it complete: 2 saved, 1 locked
-  const stored = JSON.parse(JSON.stringify(state));
-  assert.equal(progressStatus(stored, SNOW_A, 3), "on-disk");
-  assert.equal(progressStatus(stored, SNOW_A, null), "on-disk"); // no count in the list: the complete mark decides
-  assert.equal(progressStatus(stored, SNOW_A, 60), "partly"); // the list has grown since that run: new episodes
-  // another series' record, a record of nothing saved, junk: none
-  assert.equal(progressStatus(state, SNOW_B, 60), null);
-  assert.equal(progressStatus(undefined, SNOW_A, 60), null);
-  assert.equal(progressStatus({ version: 9 }, SNOW_A, 60), null);
-  const locked = newState(SNOW_B);
-  record(locked, result(1, "skipped-locked"), { exists, now: 1_800_000_000 });
-  markComplete(locked, 1_800_000_100, 0);
-  assert.equal(progressStatus(locked, SNOW_B, 1), null);
-});
-
-test("the status never says on disk while the records hold an episode beyond the list's count that is not saved (TikTok added it after the list was read, and a run failed to save it or stopped before it): the count is raised to the records' highest number", () => {
-  const exists = () => true;
-  /** @param {number} number @param {string} status */
-  const result = (number, status) => ({
-    episode: { number, itemId: `i${number}` },
-    status,
-    path: status === "done" ? `/dl/S/E${number}.mp4` : null,
-    message: status,
-    downloadId: status === "done" ? number : null,
-  });
-  const state = newState(SNOW_A, "Snowfall in Two Cities");
+  assert.equal(knownEpisodes(state, 3), 3); // nothing recorded yet: the list's count
   for (const number of [1, 2, 3]) record(state, result(number, "done"), { exists, now: 1_800_000_000 });
-  assert.equal(progressStatus(state, SNOW_A, 3), "on-disk");
   assert.equal(knownEpisodes(state, 3), 3);
+  assert.equal(knownEpisodes(state, 60), 60); // the list's larger count stays
   record(state, result(4, "failed"), { exists, now: 1_800_000_000 });
   record(state, result(5, "failed-unavailable"), { exists, now: 1_800_000_000 });
-  assert.equal(knownEpisodes(state, 3), 5);
-  assert.equal(progressStatus(state, SNOW_A, 3), "partly"); // the list said 3: the records know 5
-  // a stopped run, or a whole-series run's complete mark from before the new episodes, alike
+  assert.equal(knownEpisodes(state, 3), 5); // the list said 3: the records know 5
+  // the records alone never raise an unknown count (a selection may have saved only some), nor a
+  // count that is no count
+  assert.equal(knownEpisodes(state, null), null);
+  assert.equal(knownEpisodes(state, 0), null);
+  // a stopped run after a whole-series run's complete mark: every attempt clears the mark, so its
+  // failed episode beyond the count raises it
   const stopped = newState(SNOW_B);
   for (const number of [1, 2]) record(stopped, result(number, "done"), { exists, now: 1_800_000_000 });
   markComplete(stopped, 1_800_000_100, 2);
-  assert.equal(progressStatus(stopped, SNOW_B, 2), "on-disk");
+  assert.equal(knownEpisodes(stopped, 2), 2);
   // the failed attempt recorded as a run records it — after the mark, which every attempt clears
   // (written straight under the mark before 1.6.0's review: a state the records never hold)
   record(stopped, { ...result(3, "failed"), message: "stopped: 3 consecutive failures" }, { exists, now: 1_800_000_200 });
   assert.equal(stopped.complete_at, null);
-  assert.equal(progressStatus(stopped, SNOW_B, 2), "partly");
-  // the records alone never raise an unknown count: a selection may have saved only some
-  assert.equal(knownEpisodes(state, null), null);
-  assert.equal(progressStatus(state, SNOW_A, null), "partly");
-  // a locked episode beyond the count still counts as accounted for (saved or locked), as before
+  assert.equal(knownEpisodes(stopped, 2), 3);
+  // a locked episode beyond the count counts too, as one saved does
   const paid = newState(SNOW_B);
   for (const number of [1, 2]) record(paid, result(number, "done"), { exists, now: 1_800_000_000 });
   record(paid, result(3, "skipped-locked"), { exists, now: 1_800_000_000 });
-  assert.equal(progressStatus(paid, SNOW_B, 2), "on-disk");
+  assert.equal(knownEpisodes(paid, 2), 3);
 });
 
-test("the status of a drama whose list shrank: TikTok withdrew its last episodes after a run failed on them, and a later whole-series run found the 60 it lists now complete — On disk, 60/60, removable; the old failed entries under that complete mark never raise the count (every attempt clears the mark, so they predate the run that set it and lie past every episode it listed); while the library still says 62, Partly", () => {
+test("the count of a drama whose list shrank: TikTok withdrew its last episodes after a run failed on them, and a later whole-series run found the 60 it lists now complete — 60; the old failed entries under that complete mark never raise the count (every attempt clears the mark, so they predate the run that set it and lie past every episode it listed); while the library still says 62, 62", () => {
   const exists = () => true;
   /** @param {number} number @param {string} status */
   const result = (number, status) => ({
@@ -360,27 +330,25 @@ test("the status of a drama whose list shrank: TikTok withdrew its last episodes
     downloadId: status === "done" ? number : null,
   });
   const shrunk = newState(SNOW_A, "Snowfall in Two Cities");
-  // run 1: TikTok listed 62; 1–60 saved, 61 and 62 failed — no complete mark
+  // run 1: TikTok listed 62; 1–60 saved, 61 and 62 failed — no complete mark: they count
   for (let number = 1; number <= 60; number += 1) record(shrunk, result(number, "done"), { exists, now: 1_800_000_000 });
   for (const number of [61, 62]) record(shrunk, result(number, "failed-unavailable"), { exists, now: 1_800_000_000 });
   assert.equal(completeSince(shrunk), null);
-  assert.equal(progressStatus(shrunk, SNOW_A, 62), "partly");
+  assert.equal(knownEpisodes(shrunk, 60), 62);
+  assert.equal(knownEpisodes(shrunk, 62), 62);
   // run 2: TikTok lists 60; every one found on disk (no attempt), the series complete with 60
   for (let number = 1; number <= 60; number += 1) record(shrunk, result(number, "skipped-exists"), { exists, now: 1_800_100_000 });
   markComplete(shrunk, 1_800_100_100, 60);
   assert.equal(shrunk.episodes["62"]?.status, "failed-unavailable"); // left as it was: that run never listed it
   assert.equal(knownEpisodes(shrunk, 60), 60);
-  assert.equal(progressStatus(shrunk, SNOW_A, 60), "on-disk");
-  // the library not updated yet (TikTok's list read when it named 62): still Partly
+  // the library not updated yet (TikTok's list read when it named 62): its 62 stays
   assert.equal(knownEpisodes(shrunk, 62), 62);
-  assert.equal(progressStatus(shrunk, SNOW_A, 62), "partly");
   // a locked episode beyond the count under a complete mark still raises it, as before
   const paid = newState(SNOW_B);
   for (const number of [1, 2]) record(paid, result(number, "done"), { exists, now: 1_800_000_000 });
   record(paid, result(3, "skipped-locked"), { exists, now: 1_800_000_000 });
   markComplete(paid, 1_800_000_100, 2);
   assert.equal(knownEpisodes(paid, 2), 3);
-  assert.equal(progressStatus(paid, SNOW_B, 2), "on-disk");
 });
 
 test("a drama's length: whole hours and minutes, as the card shows it", () => {

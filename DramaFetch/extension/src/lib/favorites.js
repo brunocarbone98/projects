@@ -33,7 +33,7 @@
 
 import { isDict } from "./catalog.js";
 import { DONE, SKIPPED_EXISTS, SKIPPED_LOCKED, TIKTOK_BASE_URL, pyStrip } from "./messages.js";
-import { completeSince, doneEntries, lockedNumbers, readState } from "./state.js";
+import { completeSince } from "./state.js";
 
 /** The records' statuses of an episode on disk or locked: under a complete mark, only these raise a drama's episode count ({@link knownEpisodes}). */
 const ACCOUNTED_STATUSES = new Set([DONE, SKIPPED_EXISTS, SKIPPED_LOCKED]);
@@ -372,14 +372,15 @@ export function favoritesOfQuery(search) {
 }
 
 /**
- * How many episodes a drama has as far as DramaFetch knows: the list's `episodes`, raised to the
+ * How many episodes a drama has as far as DramaFetch knows — the number its library card shows,
+ * and what **Downloading · saved/total** counts against: the list's `episodes`, raised to the
  * highest episode number its own records hold — a run may have listed episodes TikTok added after
- * the list was read and failed to save them (or stopped before them): they count, so such a drama
- * is never `on-disk`. Under a complete mark only an entry on disk or locked raises it: every attempt
- * clears the mark (`state.record`), so a failed or stopped entry under one predates the run that
- * found the series complete and lies past every episode that run listed — TikTok no longer lists it
- * (episodes withdrawn). Null without the list's count: the records alone never tell how many
- * episodes a series has (a selection may have saved only some).
+ * the list was read and failed to save them (or stopped before them): they count. Under a complete
+ * mark only an entry on disk or locked raises it: every attempt clears the mark (`state.record`),
+ * so a failed or stopped entry under one predates the run that found the series complete and lies
+ * past every episode that run listed — TikTok no longer lists it (episodes withdrawn). Null without
+ * the list's count: the records alone never tell how many episodes a series has (a selection may
+ * have saved only some).
  * @param {import("./state.js").SeriesState} state
  * @param {number | null} episodes the list's episode count
  * @returns {number | null}
@@ -393,31 +394,6 @@ export function knownEpisodes(state, episodes) {
     if (entry.number > known) known = entry.number;
   }
   return known;
-}
-
-/**
- * What DramaFetch's own records say of a favorite (read-only, no request): `on-disk` when a run
- * found the series complete — every episode the account may play saved — and the list names no
- * more `episodes` than that run saw (saved, plus the ones recorded locked), or the records hold
- * every one of its `episodes` saved or locked; `partly` when some are saved — also for a series
- * found complete whose list has grown since, and for one whose records hold an episode beyond the
- * list's count that is not saved while no complete mark covers it ({@link knownEpisodes}); null when
- * none is (or the series was never run).
- * @param {unknown} raw the stored state (`series:<id>`)
- * @param {string} seriesId
- * @param {number | null} episodes the list's episode count
- * @returns {"on-disk" | "partly" | null}
- */
-export function progressStatus(raw, seriesId, episodes) {
-  const state = readState(raw, seriesId);
-  if (state === null) return null;
-  const saved = doneEntries(state, () => true).length;
-  if (saved === 0) return null;
-  const locked = lockedNumbers(state).length;
-  const listed = knownEpisodes(state, episodes);
-  if (completeSince(state) !== null && (listed === null || (state.complete_episodes ?? 0) + locked >= listed)) return "on-disk";
-  if (listed !== null && saved + locked >= listed) return "on-disk";
-  return "partly";
 }
 
 /**

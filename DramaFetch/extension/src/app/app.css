@@ -21,11 +21,11 @@
   --field-border: #8b7ab2;
   --placeholder: #6b6185;
   --focus: #7c3aed;
-  /* the accent: Download, Retry, Save settings, a pressed chip, a ticked card */
+  /* the accent: Download, Retry, Save settings, a ticked card, a downloading card's bar */
   --accent: #db0f5c;
   --accent-hover: #b30b4b;
   --accent-text: #ffffff;
-  /* the other buttons; Stop and the confirmation of Remove from Favorites */
+  /* the other buttons; Stop */
   --btn: #f1eaff;
   --btn-hover: #e2d4ff;
   --btn-border: #cdbbf0;
@@ -72,13 +72,11 @@
   --pause-bg: #f3e8ff;
   --pause-fg: #6b21a8;
   --pause-edge: #a855f7;
-  /* the Waiting card's rows: a drama to download, a retry or a pick, a removal, a listing */
+  /* the Waiting card's rows: a drama to download, a retry or a pick, a listing */
   --queue-bg: #ecfeff;
   --queue-edge: #06b6d4;
   --queue-retry-bg: #f5f3ff;
   --queue-retry-edge: #8b5cf6;
-  --queue-remove-bg: #fff1f3;
-  --queue-remove-edge: #f43f5e;
   --queue-list-bg: #fffbeb;
   --queue-list-edge: #f59e0b;
   --id-ink: #0e6a80;
@@ -97,7 +95,6 @@
   --ph-text: #ffffff;
   --pick-bg: #ffffff;
   --pick-text: #1d1433;
-  --backdrop: rgba(29, 20, 51, 0.6);
   /* the header, both schemes */
   --hero-1: #c2185b;
   --hero-2: #7c3aed;
@@ -170,8 +167,6 @@
     --queue-edge: #22d3ee;
     --queue-retry-bg: #251b42;
     --queue-retry-edge: #a78bfa;
-    --queue-remove-bg: #3a1022;
-    --queue-remove-edge: #fb7185;
     --queue-list-bg: #33260a;
     --queue-list-edge: #fbbf24;
     --id-ink: #67e8f9;
@@ -188,7 +183,6 @@
     --ph-text: #ffffff;
     --pick-bg: #1c1530;
     --pick-text: #f4efff;
-    --backdrop: rgba(0, 0, 0, 0.65);
   }
 }
 * { box-sizing: border-box; }
@@ -261,15 +255,14 @@ tr.series-row td { font-weight: 600; color: var(--row-head-fg); background: var(
 /* a thumbnail, or the empty frame it fills once its row has been in view (so no row ever jumps) */
 .cover { width: 40px; height: 54px; object-fit: cover; border-radius: 4px; background: var(--chip); display: block; /* no text */ }
 .badge { display: inline-block; padding: 1px 9px; border-radius: 999px; background: var(--btn); color: var(--btn-text); font-size: 0.8rem; font-weight: 600; white-space: nowrap; margin-right: 4px; }
-.badge.free, .badge.done, .badge.complete, .badge.ondisk, .badge.on-disk { color: var(--ok-fg); background: var(--ok-bg); }
+.badge.free, .badge.done, .badge.complete, .badge.ondisk { color: var(--ok-fg); background: var(--ok-bg); }
 .badge.unlocked { color: var(--pink-fg); background: var(--pink-bg); }
-.badge.locked, .badge.none, .badge.twin { color: var(--gone-fg); background: var(--gone-bg); }
-.badge.skipped, .badge.partly { color: var(--warn-fg); background: var(--warn-bg); }
+.badge.locked, .badge.twin { color: var(--gone-fg); background: var(--gone-bg); }
+.badge.skipped { color: var(--warn-fg); background: var(--warn-bg); }
 .badge.skipped[data-status="skipped-exists"], .badge.queued { color: var(--wait-fg); background: var(--wait-bg); } /* already on disk; waiting in the queue */
 .badge.skipped[data-status="skipped-locked"] { color: var(--gone-fg); background: var(--gone-bg); }
 .badge.failed, .badge.incomplete { color: var(--bad-fg); background: var(--bad-bg); }
 .badge.running { color: var(--run-fg); background: var(--run-bg); }
-.badge.removed { color: var(--pink-fg); background: var(--pink-bg); }
 .badge.idle { color: var(--wait-fg); background: var(--wait-bg); }
 .hints { display: block; color: var(--muted); font-size: 0.78rem; /* on: --card */ }
 
@@ -281,7 +274,7 @@ nav.sections a:hover, nav.sections a:focus-visible { background: var(--hero-badg
 .top .badge.idle { color: var(--hero-idle); background: var(--hero-badge); font-weight: 700; }
 .top .badge.running { color: var(--hero-ink); background: var(--hero-badge); font-weight: 700; }
 
-/* the library: the user's TikTok Bookmark as cards */
+/* the library: the user's TikTok Bookmark as cards — Queued / Downloading while a job holds a drama, no other status (3.0.0) */
 .library { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 .connection { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--conn-bg); /* text: --text */ }
 .connection .dot { width: 10px; height: 10px; border-radius: 999px; background: var(--muted); flex: none; /* no text */ }
@@ -294,10 +287,6 @@ button.refresh, #library-download { display: inline-flex; align-items: center; g
 .library-tools { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin: 12px 0 0; }
 .library-tools input[type="search"] { flex: 1 1 220px; width: auto; }
 .library-tools select { width: auto; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { border-radius: 999px; padding: 6px 12px; background: var(--chip); color: var(--text); font-size: 0.9rem; }
-.chip.pressed { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
-.chip.pressed:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-text); }
 .select-shown { display: flex; gap: 6px; align-items: baseline; margin: 0; font-size: 0.92rem; }
 .selection-bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 12px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--bar-bg); color: var(--bar-text); }
 .selection-bar .selection-count { font-weight: 600; }
@@ -309,8 +298,7 @@ button.refresh, #library-download { display: inline-flex; align-items: center; g
 .drama-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; margin-top: 12px; }
 .drama-card { display: flex; flex-direction: column; border: 2px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--card); box-shadow: 0 8px 20px -16px var(--shadow); /* text: --text */ }
 .drama-card.running { border-color: var(--edge-violet); }
-.drama-card.removed { border-style: dashed; }
-/* a ticked card: framed in the accent, as in the approved sketch (only a card that can be ticked has a .pick) */
+/* a ticked card: framed in the accent, as in the approved sketch (every card has its .pick) */
 .drama-card:has(.pick input:checked) { border-color: var(--accent); }
 .drama-cover { position: relative; height: 150px; background: linear-gradient(135deg, var(--ph-1), var(--ph-2)); display: flex; align-items: flex-end; /* text: --ph-text */ }
 .drama-img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -321,29 +309,13 @@ button.refresh, #library-download { display: inline-flex; align-items: center; g
 .drama-body p { margin: 0; }
 .favorite-meta { color: var(--muted); font-size: 0.86rem; /* on: --card */ }
 .drama-badges { display: flex; flex-wrap: wrap; gap: 4px; }
-.drama-progress { width: 100%; height: 6px; accent-color: var(--warn); }
-.drama-card.running .drama-progress { accent-color: var(--accent); }
+.drama-progress { width: 100%; height: 6px; accent-color: var(--accent); } /* only while its drama downloads */
 .drama-actions { margin-top: auto; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding-top: 4px; }
 button.link { background: none; border: none; padding: 4px 2px; color: var(--link); text-decoration: underline; font-size: 0.88rem; /* on: --card */ }
 button.link:hover:not(:disabled) { background: none; color: var(--link-hover); /* on: --card */ }
 /* a card's own Download: the accent, at the size of the card's other buttons */
 .drama-actions button.primary { font-size: 0.86rem; padding: 6px 12px; }
-button.danger-outline { background: var(--card); border-color: var(--danger); color: var(--bad); font-weight: 600; font-size: 0.86rem; padding: 6px 10px; }
-button.danger-outline:hover:not(:disabled) { background: var(--bad-bg); color: var(--bad-fg); }
-button.danger { background: var(--danger); border-color: var(--danger); color: var(--danger-text); font-weight: 600; }
-button.danger:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); color: var(--danger-text); }
 .library-foot { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 12px; }
-/* the confirmation of Remove from Favorites */
-#bookmark-dialog { max-width: min(520px, calc(100vw - 32px)); border: none; border-top: 5px solid var(--danger); border-radius: 16px; padding: 20px 22px; background: var(--card); color: var(--text); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28); }
-#bookmark-dialog::backdrop { background: var(--backdrop); /* no text */ }
-#bookmark-dialog h2 { font-size: 1.15rem; color: var(--bad); /* on: --card */ }
-.dialog-drama { display: flex; gap: 12px; align-items: center; margin: 10px 0; }
-.dialog-cover { width: 54px; height: 72px; border-radius: 6px; overflow: hidden; background: linear-gradient(135deg, var(--ph-1), var(--ph-2)); flex: none; display: block; /* no text */ }
-.dialog-name { font-weight: 600; overflow-wrap: anywhere; }
-.facts { margin: 6px 0; padding-left: 22px; font-size: 0.92rem; }
-.facts li { margin: 2px 0; }
-.facts li::marker { content: "✓  "; color: var(--ok); /* on: --card */ }
-.dialog-buttons { justify-content: flex-end; }
 .report { padding-left: 18px; }
 /* the episodes a job did not download, apart from the ones that completed, with their retry */
 #failed-block { margin-top: 14px; }
@@ -353,18 +325,16 @@ button.danger:hover:not(:disabled) { background: var(--danger-hover); border-col
 
 /* the Waiting card (2.0.0): one row per drama still to run — what the row is, the drama's name, its
    whole id (never cut; one click selects it all, to copy), or the muted note while its name is not
-   known —, tinted by kind: a drama to download, a retry or a pick of See episodes, a removal from
-   the Favorites (the re-listing of an automatic one with it), a listing */
+   known —, tinted by kind: a drama to download, a retry or a pick of See episodes, a listing */
 #queue-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .queue-row { padding: 7px 12px; border-radius: 10px; color: var(--text); background: var(--queue-bg); border-left: 4px solid var(--queue-edge); overflow-wrap: anywhere; }
 .queue-row.retry, .queue-row.autoretry, .queue-row.selected, .queue-row.available { color: var(--text); background: var(--queue-retry-bg); border-left-color: var(--queue-retry-edge); }
-.queue-row.unbookmark, .queue-row.autounbookmark, .queue-row.autorelist { color: var(--text); background: var(--queue-remove-bg); border-left-color: var(--queue-remove-edge); }
 .queue-row.load, .queue-row.favorites { color: var(--text); background: var(--queue-list-bg); border-left-color: var(--queue-list-edge); }
-.queue-what { color: var(--run-fg); font-weight: 700; /* on: --queue-bg --queue-retry-bg --queue-remove-bg --queue-list-bg */ }
+.queue-what { color: var(--run-fg); font-weight: 700; /* on: --queue-bg --queue-retry-bg --queue-list-bg */ }
 .queue-name { font-weight: 600; }
-.queue-sep, .queue-note { color: var(--muted); /* on: --queue-bg --queue-retry-bg --queue-remove-bg --queue-list-bg */ }
+.queue-sep, .queue-note { color: var(--muted); /* on: --queue-bg --queue-retry-bg --queue-list-bg */ }
 .queue-note { font-style: italic; }
-.queue-id { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.9em; font-weight: 600; color: var(--id-ink); white-space: nowrap; user-select: all; cursor: text; /* on: --queue-bg --queue-retry-bg --queue-remove-bg --queue-list-bg */ }
+.queue-id { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.9em; font-weight: 600; color: var(--id-ink); white-space: nowrap; user-select: all; cursor: text; /* on: --queue-bg --queue-retry-bg --queue-list-bg */ }
 
 /* the toolbar popup: its title on the header's gradient */
 .popup .title-line { margin: -14px -16px 2px; padding: 12px 16px; color: var(--hero-text); background: linear-gradient(120deg, var(--hero-1) 0%, var(--hero-2) 55%, var(--hero-3) 100%); }

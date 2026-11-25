@@ -645,18 +645,28 @@ function waitForDownload(id, api) {
 }
 
 /**
+ * What Chrome does when a file is already at the target: `uniquify` never overwrites it (the new
+ * file gets ` (1)` before its extension); `overwrite` replaces it under the same name — only a
+ * download that is meant to replace it (DramaFetch 3.0.0: **See episodes**' downloads again in
+ * full, {@link DownloaderConfig}.overwrite), and only once its body passed every check in memory.
+ * @typedef {"uniquify" | "overwrite"} ConflictAction
+ */
+
+/**
  * Save bytes through `chrome.downloads` at `filename` (relative to the Downloads folder;
- * `uniquify`: never overwrite a file), wait for it to complete, and return what Chrome saved.
+ * `conflictAction` `uniquify` by default: never overwrite a file), wait for it to complete, and
+ * return what Chrome saved.
  * @param {Uint8Array} bytes
  * @param {string} mime
  * @param {string} filename
+ * @param {ConflictAction} [conflictAction]
  * @param {typeof chrome.downloads} [api]
  * @returns {Promise<chrome.downloads.DownloadItem>}
  */
-export async function saveFile(bytes, mime, filename, api = chrome.downloads) {
+export async function saveFile(bytes, mime, filename, conflictAction = "uniquify", api = chrome.downloads) {
   const url = URL.createObjectURL(new Blob([/** @type {Uint8Array<ArrayBuffer>} */ (bytes)], { type: mime }));
   try {
-    const id = await api.download({ url, filename, conflictAction: "uniquify", saveAs: false });
+    const id = await api.download({ url, filename, conflictAction, saveAs: false });
     const item = await waitForDownload(id, api);
     if (item.state !== "complete") throw new SaveError(item.error || "INTERRUPTED");
     return item;
@@ -674,12 +684,16 @@ export async function saveFile(bytes, mime, filename, api = chrome.downloads) {
  * @property {string} thumbnail `embed`, `both`, `file` or `none`
  * @property {string} nameFormat
  * @property {boolean} includeLocked
+ * @property {boolean} [overwrite] download an episode again in full even when Chrome's history
+ *   shows it saved at its target (`DownloadOptions.overwrite`; DramaFetch 3.0.0: **See episodes**'
+ *   jobs and their retries): no existing-file skip, and its files are saved with `conflictAction`
+ *   `overwrite` — the old file replaced under the same name, never a ` (1)` copy
  * @property {readonly string[]} hostPatterns the manifest's host permissions
  * @property {DownloadsView} view
  * @property {(ref: SeriesRef) => Promise<Series>} rediscover the in-run re-discovery
  * @property {() => number} [now] wall-clock seconds (play URL expiry)
  * @property {typeof fetch} [fetch]
- * @property {(bytes: Uint8Array, mime: string, filename: string) => Promise<chrome.downloads.DownloadItem>} [save]
+ * @property {(bytes: Uint8Array, mime: string, filename: string, conflictAction: ConflictAction) => Promise<chrome.downloads.DownloadItem>} [save]
  * @property {(text: string) => void} [onStatus] what the downloader is doing (for the UI)
  * @property {number} [idleMs]
  * @property {import("./redirects.js").RedirectTracker | null} [redirects] where the redirects of its
@@ -693,7 +707,7 @@ export class Downloader {
     this.config = config;
     this.now = config.now ?? (() => Date.now() / 1000);
     this.fetch = config.fetch ?? ((input, init) => fetch(input, init));
-    this.save = config.save ?? ((bytes, mime, filename) => saveFile(bytes, mime, filename));
+    this.save = config.save ?? ((bytes, mime, filename, conflictAction) => saveFile(bytes, mime, filename, conflictAction));
     this.redirects = config.redirects === undefined ? pageRedirects() : config.redirects;
     /** @type {Map<string, Map<string, Record<string, unknown>>>} series id → item id → its newest fresh item */
     this.freshItems = new Map();
@@ -766,12 +780,14 @@ export class Downloader {
 
   /**
    * The SKIPPED_EXISTS result of an episode whose video Chrome's history shows completed at
-   * exactly its target path and still there (`existing_file_result`), or null. No request.
+   * exactly its target path and still there (`existing_file_result`), or null. No request. Always
+   * null with `overwrite`: the episode is downloaded again in full, whatever is on disk.
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @returns {DownloadResult | null}
    */
   existingResult(episode, context) {
+    if (this.config.overwrite === true) return null;
     const item = this.config.view.completedAt(this.target(episode, context));
     if (item === null) return null;
     return {
@@ -785,7 +801,8 @@ export class Downloader {
 
   /**
    * Whether the episode needs the network (`engine._needs_network`): not locked (unless
-   * includeLocked) and not already saved.
+   * includeLocked) and not already saved — with `overwrite`, every episode the session may play
+   * ({@link existingResult} is null then).
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @returns {boolean}
@@ -1001,7 +1018,10 @@ export class Downloader {
 
   /**
    * The verified video: the cover (one GET, unless `none`), embedded and/or kept as a file per
-   * the cover mode, then the save; DONE with `saved <name> (<n> MiB)` and the cover note.
+   * the cover mode, then the save; DONE with `saved <name> (<n> MiB)` and the cover note. With
+   * `overwrite` both files are saved with `conflictAction` `overwrite`: an earlier download's file
+   * at the same name is replaced — never a ` (1)` copy next to it —, and only by a body that passed
+   * every check (a failed download never gets here, so the old file stays as it is).
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @param {Uint8Array} body
@@ -1009,6 +1029,8 @@ export class Downloader {
    */
   async keep(episode, context, body) {
     const stem = this.stem(episode, context);
+    /** @type {ConflictAction} */
+    const conflictAction = this.config.overwrite === true ? "overwrite" : "uniquify";
     let video = body;
     let note = "";
     /** @type {{data: Uint8Array, kind: import("../lib/mp4.js").ImageKind} | null} */
@@ -1047,7 +1069,7 @@ export class Downloader {
     /** @type {chrome.downloads.DownloadItem} */
     let saved;
     try {
-      saved = await this.save(video, "video/mp4", downloadFilename(context.folder, stem, "mp4"));
+      saved = await this.save(video, "video/mp4", downloadFilename(context.folder, stem, "mp4"), conflictAction);
     } catch (error) {
       return failure(episode, FAILED, `could not save ${stem}.mp4: ${oneLine(error)}`);
     }
@@ -1059,6 +1081,7 @@ export class Downloader {
           coverFile.data,
           mimeTypeFor(coverFile.kind),
           downloadFilename(context.folder, stem, extension),
+          conflictAction,
         );
         this.config.view.remember(coverSaved);
       } catch (error) {

@@ -52,9 +52,9 @@ const APP_PATH = "src/app/app.html";
  * settings, the pacing, the cooldown — to its own pages and this worker (DramaFetch 2.0.1, issue
  * #112): `TRUSTED_CONTEXTS`, so that no script running in a web page under the extension's id can
  * read or change it, nor hear its changes. DramaFetch declares no content script; the functions it
- * injects into TikTok tabs in the ISOLATED world (the Bookmark reader, the discovery's scroll and
- * page-text reads) use no storage. `chrome.storage.session` is kept so by Chrome already. Chrome
- * honours the level for `local` from Chrome 140 on and keeps it in the profile; Chrome 116–139
+ * injects into TikTok tabs in the ISOLATED world (the discovery's scroll and page-text reads) use
+ * no storage. `chrome.storage.session` is kept so by Chrome already. Chrome honours the level for
+ * `local` from Chrome 140 on and keeps it in the profile; Chrome 116–139
  * refuse it (`This StorageArea is not available for setting access level`), and the area stays as
  * it was, as in 2.0.0. Called once, at the top level: at every start of the worker, before its
  * listeners. It never throws and never rejects — a missing method, a synchronous throw and a
@@ -113,8 +113,8 @@ chrome.webRequest.onCompleted.addListener(
  * `@handle` of the profile page that asked for it — the tab's address as it completed
  * (`lib/library.profileHandleOf`; null on no profile page, or the tab gone) —, unless it is the
  * address kept for that tab already, byte for byte: DramaFetch's own replay of it (a listing's first
- * page, the count after a removal), made from wherever the tab is by then, keeps the handle kept
- * with it. The tab's address is read with the `tabs` permission DramaFetch holds; nothing else.
+ * page), made from wherever the tab is by then, keeps the handle kept with it. The tab's address is
+ * read with the `tabs` permission DramaFetch holds; nothing else.
  * @param {number} tabId
  * @param {string} url
  * @param {number} at seconds since the epoch
@@ -210,8 +210,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Only this extension's own pages may ask (web pages cannot reach it: no externally_connectable);
   // a sender in a web page's frame never passes — DramaFetch declares no content script since 2.0.0,
   // but the functions it injects into the TikTok tabs it works in run in the ISOLATED world, where a
-  // message carries this extension's id (the Bookmark reader, the discovery's scroll and page-text
-  // reads): this check keeps every such sender out, a guard against a TikTok renderer gone wrong
+  // message carries this extension's id (the discovery's scroll and page-text reads): this check
+  // keeps every such sender out, a guard against a TikTok renderer gone wrong
   if (!isOwnSender(sender)) return false;
   if (!isRecord(message) || message["type"] !== "dramafetch:open") return false;
   const load = typeof message["load"] === "string" && message["load"] ? message["load"] : null;

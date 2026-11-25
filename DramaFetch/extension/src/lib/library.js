@@ -3,62 +3,52 @@
  * The library: the user's TikTok Bookmark (**Favorites** → **Drama** on their own profile) as the
  * DramaFetch tab shows it — DramaFetch 1.6.0, the owner's request of 2026-11-19. Pure: no
  * `chrome.*`, no DOM (`src/app/app.js` reads the list with `src/app/favorites.js`, shows the cards
- * and keeps the library in `chrome.storage.local`; `src/app/bookmark.js` removes a drama from the
- * Bookmark). An extension-only feature, like the favorites list: the Python tool has none, and
- * nothing here decides anything about a download — the library only puts series ids into the
- * existing engine (a `batch` job, the same as a paste of their ids into the box).
+ * and keeps the library in `chrome.storage.local`). An extension-only feature, like the favorites
+ * list: the Python tool has none, and nothing here decides anything about a download — the library
+ * only puts series ids into the existing engine (a `batch` job, the same as a paste of their ids
+ * into the box). DramaFetch never changes the list: since 3.0.0 (the owner's decision of
+ * 2026-11-25) nothing removes a drama from the user's Favorites.
  *
  * What it decides:
- * - each drama's status from DramaFetch's OWN records ({@link progressOf}: `on-disk`, `partly`,
- *   `none` — `lib/favorites.progressStatus` —, with the episodes saved, the episodes it has — the
- *   list's count raised to what the records hold: the number its card shows, its status fraction,
- *   **Most episodes** and the selection's sum alike, so a card never disagrees with itself — and
- *   the locked ones the records hold (DramaFetch 1.7.0: no request, nothing unlocked)) and from the
- *   jobs: `queued` (in a waiting `batch` / `selection` job), `running` (the series the running job
- *   is downloading), `removed` (removed from the Bookmark by DramaFetch since the last listing) —
- *   {@link libraryStatus};
- * - the filters' counts ({@link chipCounts}: every drama not removed counted once, under its
- *   STORED status — a queued or running drama under the status its records give), the twins
- *   ({@link twinIds}: different series of the same title), the sort orders ({@link sortedItems};
- *   the one picked last kept across sessions, read back with {@link librarySortOf}) and the search
- *   ({@link titleMatches} of `lib/favorites.js`);
+ * - what DramaFetch's OWN records say of each drama ({@link progressOf}, no request): the episodes
+ *   saved and how many it has — the list's count raised to what the records hold: the number its
+ *   card shows, **Downloading · saved/total**'s fraction, **Most episodes** and the selection's sum
+ *   alike, so a card never disagrees with itself;
+ * - a card's state, from the jobs alone ({@link libraryStatus}): `queued` (in a waiting `batch` /
+ *   `selection` job), `running` (the series the running job is downloading), else `idle` — since
+ *   3.0.0 (the owner's decision of 2026-11-25) a card shows no lasting status (no **On disk**,
+ *   **Partly** or **Not downloaded**, no locked count) and the library has no status filters;
+ * - the twins ({@link twinIds}: different series of the same title), the sort orders
+ *   ({@link sortedItems}; the one picked last kept across sessions, read back with
+ *   {@link librarySortOf}) and the search ({@link titleMatches} of `lib/favorites.js`);
  * - the smart refresh's question ({@link unchangedSince}): is TikTok's list still the library's —
- *   TikTok's `total` equal to the library's dramas not removed AND the first page's series ids,
- *   in order, the library's first ones? Then one request was enough — while the library's episode
- *   counts are fresh ({@link countsFresh}: its whole list read less than `RECHECK_AFTER_S`, 24 h,
- *   ago — the engine's own trust in a complete series —: a series that gained episodes moves
- *   neither TikTok's total nor its first page, so only a whole read sees it);
+ *   TikTok's `total` equal to the library's dramas AND the first page's series ids, in order, the
+ *   library's first ones? Then one request was enough — while the library's episode counts, the
+ *   numbers its cards show, are fresh ({@link countsFresh}: its whole list read less than
+ *   `RECHECK_AFTER_S`, 24 h, ago — the engine's own trust in a complete series —: a series that
+ *   gained episodes moves neither TikTok's total nor its first page, so only a whole read sees it);
  * - which cover addresses are still signed ({@link coverExpired}: TikTok's `x-expires`);
  * - what the library keeps across sessions ({@link libraryRecord} / {@link libraryOf}): the list's
- *   dramas (`seriesId`, `title`, `episodes`, `durationS`), TikTok's count, when it was read, the
- *   profile it was read from and the dramas DramaFetch removed since — NO cover URL, no address,
- *   nothing signed (those live in the page's memory and `chrome.storage.session` only);
- * - the facts the removal's confirmation shows ({@link removalFacts}): never a claim the records do
- *   not support (the cover line only when every saved episode's stored message says its cover was
- *   embedded).
+ *   dramas (`seriesId`, `title`, `episodes`, `durationS`), TikTok's count, when it was read and the
+ *   profile it was read from — NO cover URL, no address, nothing signed (those live in the page's
+ *   memory and `chrome.storage.session` only). A library DramaFetch 2.x kept may still name the
+ *   dramas it had removed from the Favorites: those leave the library as it is read back, a count
+ *   2.x had not confirmed reads as unknown, and nothing writes either again.
  */
 
 import { isDict } from "./catalog.js";
-import { cleanTitle, knownEpisodes, progressStatus } from "./favorites.js";
-import { DONE, RECHECK_AFTER_S } from "./messages.js";
-import { completeSince, doneEntries, entryOf, lockedNumbers, readState, sortedEntries } from "./state.js";
+import { cleanTitle, knownEpisodes } from "./favorites.js";
+import { RECHECK_AFTER_S } from "./messages.js";
+import { completeSince, doneEntries, lockedNumbers, readState, sortedEntries } from "./state.js";
 
 /** The version of the stored library (`favoritesLibrary`): another one is no library. */
 export const LIBRARY_VERSION = 1;
 /** How many cards the grid adds at a time (the first ones shown, then **Show 60 more**). */
 export const LIBRARY_PIECE = 60;
-/** The status filters of the toolbar (`all` shows the removed dramas too, dashed). */
-export const LIBRARY_FILTERS = Object.freeze(/** @type {const} */ (["all", "none", "partly", "on-disk"]));
 /** The sort orders: the list's own (newest favorite first), title A–Z, most episodes first. */
 export const LIBRARY_SORTS = Object.freeze(/** @type {const} */ (["recent", "title", "episodes"]));
 /** The sort order of a library nobody sorted yet: the list's own. */
 export const DEFAULT_LIBRARY_SORT = "recent";
-/**
- * What a saved episode's stored message carries when its cover went into the MP4: the note of
- * `src/app/downloader.js` `Downloader.keep` (` + cover embedded`, ` + cover embedded + file`) —
- * `tests/library.test.js` keeps the two equal.
- */
-export const COVER_EMBEDDED_NOTE = " + cover embedded";
 /** A profile's handle as TikTok's addresses carry it (`/@<handle>`). */
 const HANDLE_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const ID_RE = /^[0-9]{15,22}$/;
@@ -66,33 +56,19 @@ const ENDED = /** @type {const} */ (["cap", "until", "empty", "cursor"]);
 
 /**
  * @typedef {import("./favorites.js").FavoriteItem} FavoriteItem
- * @typedef {"on-disk" | "partly" | "none"} StoredStatus
- * @typedef {"on-disk" | "partly" | "none" | "queued" | "running" | "removed"} LibraryStatus
- * @typedef {typeof LIBRARY_FILTERS[number]} LibraryFilter
+ * @typedef {"queued" | "running" | "idle"} LibraryStatus a card's state, from the jobs alone
+ *   ({@link libraryStatus})
  * @typedef {typeof LIBRARY_SORTS[number]} LibrarySort
  *
  * @typedef {object} Progress What DramaFetch's own records say of a drama ({@link progressOf}).
- * @property {StoredStatus} status
  * @property {number} saved the episodes saved (a `done` entry, or one a run found on disk)
  * @property {number | null} total how many episodes it has: the list's count raised to the highest
  *   episode number the records hold, else what the records know, else null — the number its card
- *   shows and its status fraction counts against
- * @property {number} locked the episodes the records hold as locked (`skipped-locked`: a run listed
- *   them as episodes the account may not play — paid ones it has not unlocked, or one whose DRM a
- *   download found — and skipped them; `lib/state.lockedNumbers`), 0 for a drama never run
+ *   shows and **Downloading · saved/total** counts against
  *
- * @typedef {object} LibraryEntry One drama as the grid and the filters see it.
+ * @typedef {object} LibraryEntry One drama as the grid sees it.
  * @property {FavoriteItem} item
  * @property {Progress} progress
- * @property {boolean} removed removed from the Bookmark by DramaFetch since the last listing
- *
- * @typedef {object} ChipCounts The filters' counts: every drama not removed once, under its stored
- *   status (`none + partly + onDisk === all`), and the removed ones apart.
- * @property {number} all
- * @property {number} none
- * @property {number} partly
- * @property {number} onDisk
- * @property {number} removed
  *
  * @typedef {object} StoredItem A drama as the library keeps it: no cover URL, nothing signed.
  * @property {string} seriesId
@@ -105,30 +81,16 @@ const ENDED = /** @type {const} */ (["cap", "until", "empty", "cursor"]);
  * @property {typeof LIBRARY_VERSION} v
  * @property {number} listedAt when the list was read, seconds since the epoch
  * @property {number | null} total how many dramas TikTok counts, as last read
- * @property {number | null} countedAt when that count was read (a removal's first page reads it
- *   again), seconds since the epoch
+ * @property {number | null} countedAt when that count was read (the smart refresh's first page
+ *   reads it again), seconds since the epoch
  * @property {number | null} fullReadAt when a listing last read the WHOLE list — every drama's
  *   episode count with it —, seconds since the epoch; null when the list was not read to its end
  *   (the smart refresh's first page never changes it)
- * @property {boolean} unconfirmed the count is the last one minus the dramas DramaFetch removed
- *   since, not read from TikTok (no TikTok tab with the list was open)
  * @property {boolean} complete the list's end was reached
  * @property {boolean} short TikTok stopped sending the list before its end
  * @property {"cap" | "until" | "empty" | "cursor" | null} ended why the listing ended early
  * @property {string | null} profile the `@handle` of the TikTok tab the list was read from
  * @property {StoredItem[]} items the list's dramas, in its order, each once
- * @property {{seriesId: string, at: number}[]} removed the dramas DramaFetch removed from the
- *   Bookmark since the list was read
- *
- * @typedef {object} RemovalFacts What DramaFetch's records say of a drama it may remove from the
- *   Bookmark ({@link removalFacts}).
- * @property {number} saved episodes on disk per the records
- * @property {number | null} total the list's episodes, else what the records know
- * @property {boolean} verified every saved episode was downloaded by DramaFetch (`done`): each one
- *   passed its checks before it was saved
- * @property {boolean} coverEmbedded every saved episode's stored message says its cover was
- *   embedded ({@link COVER_EMBEDDED_NOTE})
- * @property {number | null} completeAt when a run found the series complete (seconds), else null
  */
 
 /**
@@ -147,39 +109,39 @@ function recordedTotal(state) {
 }
 
 /**
- * What DramaFetch's own records say of a drama — read-only, no request: its stored status
- * (`lib/favorites.progressStatus`: `on-disk`, `partly`, or `none` when nothing is saved or the
- * series was never run), the episodes saved, how many it has (the list's `episodes` raised to the
- * highest episode number the records hold — under a complete mark, one on disk or locked only:
- * `lib/favorites.knownEpisodes` —, else what the records know) and how many the records hold as
- * locked (none for a drama never run: nothing is asked of TikTok to learn it).
+ * What DramaFetch's own records say of a drama — read-only, no request: the episodes saved and how
+ * many it has (the list's `episodes` raised to the highest episode number the records hold — under
+ * a complete mark, one on disk or locked only: `lib/favorites.knownEpisodes` —, else what the
+ * records know: a complete run's count plus the episodes it recorded locked, else the highest
+ * episode number recorded). Nothing else: since 3.0.0 a card shows no status from the records and
+ * no locked count. `again` names the episodes a download in full of the drama (**See episodes**'
+ * `overwrite` job, 3.0.0) has still to save anew while it runs: their earlier downloads, which the
+ * records still hold, are not counted as saved — so **Downloading · saved/total** follows that job,
+ * against the drama's own count.
  * @param {unknown} raw the stored state (`series:<id>`)
  * @param {string} seriesId
  * @param {number | null} episodes the list's episode count
+ * @param {ReadonlySet<number> | null} [again] episodes not counted as saved (none by default)
  * @returns {Progress}
  */
-export function progressOf(raw, seriesId, episodes) {
-  const status = progressStatus(raw, seriesId, episodes) ?? "none";
+export function progressOf(raw, seriesId, episodes, again = null) {
   const state = readState(raw, seriesId);
-  const saved = state === null ? 0 : doneEntries(state, () => true).length;
+  const saved = state === null ? 0 : doneEntries(state, () => true).filter(([number]) => again === null || !again.has(number)).length;
   const listed = state === null ? (episodes !== null && episodes > 0 ? episodes : null) : knownEpisodes(state, episodes);
-  const locked = state === null ? 0 : lockedNumbers(state).length;
-  return { status, saved, total: listed ?? (state === null ? null : recordedTotal(state)), locked };
+  return { saved, total: listed ?? (state === null ? null : recordedTotal(state)) };
 }
 
 /**
- * A drama's status on its card: `removed` before anything (the Bookmark no longer holds it), then
- * `running` (the running job downloads it now), `queued` (a waiting job will), else what the
- * records say.
- * @param {Progress} progress
- * @param {{queued: boolean, running: boolean, removed: boolean}} jobs
+ * A card's state, from the jobs alone: `running` while the running job downloads its drama, else
+ * `queued` while a download job of it waits, else `idle` — the card then shows no status at all
+ * (3.0.0: nothing from the records).
+ * @param {{queued: boolean, running: boolean}} jobs
  * @returns {LibraryStatus}
  */
-export function libraryStatus(progress, jobs) {
-  if (jobs.removed) return "removed";
+export function libraryStatus(jobs) {
   if (jobs.running) return "running";
   if (jobs.queued) return "queued";
-  return progress.status;
+  return "idle";
 }
 
 /**
@@ -197,40 +159,6 @@ export function distinctItems(items) {
     seen.add(item.seriesId);
     return true;
   });
-}
-
-/**
- * The filters' counts: every drama not removed once, under its stored status — a queued or running
- * drama counts where its records put it —, so `none + partly + onDisk === all`; the removed ones
- * apart (their own line), in no other count.
- * @param {readonly LibraryEntry[]} entries
- * @returns {ChipCounts}
- */
-export function chipCounts(entries) {
-  const counts = { all: 0, none: 0, partly: 0, onDisk: 0, removed: 0 };
-  for (const entry of entries) {
-    if (entry.removed) {
-      counts.removed += 1;
-      continue;
-    }
-    counts.all += 1;
-    if (entry.progress.status === "on-disk") counts.onDisk += 1;
-    else if (entry.progress.status === "partly") counts.partly += 1;
-    else counts.none += 1;
-  }
-  return counts;
-}
-
-/**
- * Whether a drama is shown under a status filter: `all` shows every drama (the removed ones as
- * dashed cards); `none`, `partly` and `on-disk` the dramas not removed whose records say so.
- * @param {LibraryFilter} filter
- * @param {LibraryEntry} entry
- * @returns {boolean}
- */
-export function inFilter(filter, entry) {
-  if (filter === "all") return true;
-  return !entry.removed && entry.progress.status === filter;
 }
 
 /**
@@ -324,11 +252,11 @@ export function selectionEpisodes(entries, selected) {
 
 /**
  * The smart refresh's question, asked of the first page of TikTok's list: is the library still
- * TikTok's list? Yes when TikTok's `total` equals the library's dramas not removed AND the first
- * page's series ids are, in order, the library's first ones (not removed) — a favorite added sits
- * at the top (newest first) and changes that page, one removed changes the total. Anything else —
- * no total, a page longer than the library, an id out of place — reads the list on.
- * @param {readonly string[]} kept the library's series ids not removed, in its order
+ * TikTok's list? Yes when TikTok's `total` equals the library's dramas AND the first page's series
+ * ids are, in order, the library's first ones — a favorite added sits at the top (newest first) and
+ * changes that page, one the user took out changes the total. Anything else — no total, a page
+ * longer than the library, an id out of place — reads the list on.
+ * @param {readonly string[]} kept the library's series ids, in its order
  * @param {readonly string[]} firstPage the series ids of TikTok's first page, in order
  * @param {number | null} total TikTok's count on that page
  * @returns {boolean}
@@ -456,9 +384,9 @@ function storedItemOf(raw) {
 
 /**
  * What the library keeps of a listing (`favoritesLibrary`): the dramas each once, in the list's
- * order, stripped to their id, title, episodes and length — no cover URL, nothing signed —, the
- * removed ones that are still in it, and the rest as given.
- * @param {{listedAt: number, total: number | null, countedAt?: number | null, fullReadAt?: number | null, unconfirmed?: boolean, complete: boolean, short: boolean, ended: StoredLibrary["ended"], profile: string | null, items: readonly FavoriteItem[] | readonly StoredItem[], removed: ReadonlyMap<string, number>}} library
+ * order, stripped to their id, title, episodes and length — no cover URL, nothing signed —, and
+ * the rest as given.
+ * @param {{listedAt: number, total: number | null, countedAt?: number | null, fullReadAt?: number | null, complete: boolean, short: boolean, ended: StoredLibrary["ended"], profile: string | null, items: readonly FavoriteItem[] | readonly StoredItem[]}} library
  * @returns {StoredLibrary}
  */
 export function libraryRecord(library) {
@@ -468,26 +396,30 @@ export function libraryRecord(library) {
     const stored = storedItemOf(item);
     if (stored !== null) items.push(stored);
   }
-  const listed = new Set(items.map((item) => item.seriesId));
   return {
     v: LIBRARY_VERSION,
     listedAt: library.listedAt,
     total: library.total,
     countedAt: library.countedAt ?? null,
     fullReadAt: library.fullReadAt ?? null,
-    unconfirmed: library.unconfirmed === true,
     complete: library.complete,
     short: library.short,
     ended: library.ended,
     profile: library.profile,
     items,
-    removed: [...library.removed].filter(([seriesId]) => listed.has(seriesId)).map(([seriesId, at]) => ({ seriesId, at })),
   };
 }
 
 /**
  * The library as `chrome.storage.local` holds it, checked (a cache: anything malformed is no
- * library, a drama without a valid series id is left out), or null.
+ * library, a drama without a valid series id is left out), or null. A library DramaFetch 2.x kept
+ * may name, in `removed`, the dramas it had removed from the user's Favorites since the list was
+ * read (each `{seriesId, at}`, as 2.x wrote them): those are no favorites any more — the next
+ * listing would not hold them either —, so they leave the library here. A count 2.x marked
+ * `unconfirmed` was its own estimate — the last count read minus its removals, never read from
+ * TikTok —, so it is read as unknown (`total` null) until the next read of the list. Neither is
+ * read any further, and {@link libraryRecord} never writes them again (DramaFetch 3.0.0, the
+ * owner's decision of 2026-11-25: DramaFetch removes nothing from the Favorites).
  * @param {unknown} raw
  * @returns {StoredLibrary | null}
  */
@@ -495,65 +427,29 @@ export function libraryOf(raw) {
   if (!isDict(raw) || raw["v"] !== LIBRARY_VERSION || !Array.isArray(raw["items"])) return null;
   const listedAt = finite(raw["listedAt"]);
   if (listedAt === null) return null;
+  /** @type {Set<string>} the dramas DramaFetch 2.x had removed from the Favorites */
+  const removed = new Set();
+  for (const entry of Array.isArray(raw["removed"]) ? /** @type {unknown[]} */ (raw["removed"]) : []) {
+    if (isDict(entry) && typeof entry["seriesId"] === "string" && finite(entry["at"]) !== null) removed.add(entry["seriesId"]);
+  }
   /** @type {StoredItem[]} */
   const items = [];
   for (const entry of /** @type {unknown[]} */ (raw["items"])) {
     const item = storedItemOf(entry);
-    if (item !== null) items.push(item);
-  }
-  const listed = new Set(items.map((item) => item.seriesId));
-  /** @type {{seriesId: string, at: number}[]} */
-  const removed = [];
-  for (const entry of Array.isArray(raw["removed"]) ? /** @type {unknown[]} */ (raw["removed"]) : []) {
-    if (!isDict(entry)) continue;
-    const seriesId = entry["seriesId"];
-    const at = finite(entry["at"]);
-    if (typeof seriesId === "string" && listed.has(seriesId) && at !== null) removed.push({ seriesId, at });
+    if (item !== null && !removed.has(item.seriesId)) items.push(item);
   }
   const profile = raw["profile"];
   const ended = raw["ended"];
   return {
     v: LIBRARY_VERSION,
     listedAt,
-    total: count(raw["total"]),
+    total: raw["unconfirmed"] === true ? null : count(raw["total"]),
     countedAt: finite(raw["countedAt"]),
     fullReadAt: finite(raw["fullReadAt"]),
-    unconfirmed: raw["unconfirmed"] === true,
     complete: raw["complete"] === true,
     short: raw["short"] === true,
     ended: typeof ended === "string" && /** @type {readonly string[]} */ (ENDED).includes(ended) ? /** @type {StoredLibrary["ended"]} */ (ended) : null,
     profile: storedHandle(profile),
     items: distinctItems(items),
-    removed,
-  };
-}
-
-/**
- * What the confirmation of **Remove from Favorites** says of a drama — only what DramaFetch's own
- * records support: the episodes on disk and how many it has, whether every one of them was
- * downloaded by DramaFetch (checked before it was saved), whether every one's stored message says
- * its cover was embedded, and when a run found the series complete.
- * @param {unknown} raw the stored state (`series:<id>`)
- * @param {string} seriesId
- * @param {number | null} episodes the list's episode count
- * @returns {RemovalFacts}
- */
-export function removalFacts(raw, seriesId, episodes) {
-  const progress = progressOf(raw, seriesId, episodes);
-  const state = readState(raw, seriesId);
-  /** @type {import("./state.js").StateEntry[]} the entries of the episodes on disk */
-  const saved = [];
-  if (state !== null) {
-    for (const [number] of doneEntries(state, () => true)) {
-      const entry = entryOf(state, number);
-      if (entry !== null) saved.push(entry);
-    }
-  }
-  return {
-    saved: progress.saved,
-    total: progress.total,
-    verified: saved.length > 0 && saved.every((entry) => entry.status === DONE),
-    coverEmbedded: saved.length > 0 && saved.every((entry) => entry.status === DONE && entry.message.includes(COVER_EMBEDDED_NOTE)),
-    completeAt: state === null ? null : completeSince(state),
   };
 }

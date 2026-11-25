@@ -754,7 +754,10 @@ def test_the_favorites_list_is_observed_listed_paced_and_ticked(tmp_path: Path) 
         page.fill("#favorites-filter", "SNOWFALL")
         shown = [rows.nth(n).get_attribute("data-series-id") for n in range(rows.count())]
         assert shown == list(SNOWFALL_IDS)  # only the dramas the search matches are drawn
-        assert page.locator("#library-chip-all").inner_text() == f"All · {len(FAVORITES)}"
+        assert page.locator("#library-shown").inner_text() == "Showing 2 of 2"
+        assert (
+            page.locator("#library-total").inner_text() == f"TikTok counts {len(FAVORITES)} dramas"
+        )
         page.check("#favorites-select-all")
         assert page.locator("#favorites-selection").inner_text() == "2 selected · 120 episodes"
         assert page.locator("#library-download").is_enabled()
@@ -767,6 +770,15 @@ def test_the_favorites_list_is_observed_listed_paced_and_ticked(tmp_path: Path) 
         assert ext.idle()
         assert not server.item_list_requests and not server.media_requests
         assert ext.saved_files() == []
+        # the search narrows what is shown, never the library: emptied, every drama is back, the
+        # two ticked still ticked
+        page.fill("#favorites-filter", "")
+        ext.wait_for(lambda: rows.count() == len(FAVORITES), 10, "the search did not clear")
+        everything = len(FAVORITES)
+        assert (
+            page.locator("#library-shown").inner_text() == f"Showing {everything} of {everything}"
+        )
+        assert page.locator("#favorites-selection").inner_text() == "2 selected · 120 episodes"
 
 
 def test_h_the_waiting_card_names_each_drama_still_to_run_by_its_name_and_whole_id(

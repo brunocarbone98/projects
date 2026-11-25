@@ -2,9 +2,10 @@
 // @types/chrome because the extension has no dependencies at all. Only what src/app/* calls is
 // declared, with the shapes Chrome documents (Manifest V3, Chrome 116+). Add a member here when the
 // extension starts to use one, and take it out when the extension stops (DramaFetch 2.0.0 took out
-// the context-menu API, with the right-click items, and the content-script messaging of their card item);
-// never declare an API the extension must not use (cookies, debugger, webRequestBlocking, proxy,
-// …): their absence is part of the contract.
+// the context-menu API, with the right-click items, and the content-script messaging of their card
+// item; 3.0.0 an injection's `documentId`, which only the removal from the Favorites read); never
+// declare an API the extension must not use (cookies, debugger, webRequestBlocking, proxy, …):
+// their absence is part of the contract.
 
 declare namespace chrome {
   // ------------------------------------------------------------------------------- events
@@ -156,7 +157,6 @@ declare namespace chrome {
     }
     interface InjectionResult<Result> {
       frameId: number;
-      documentId?: string;
       result?: Result;
     }
     function executeScript<Args extends unknown[], Result>(

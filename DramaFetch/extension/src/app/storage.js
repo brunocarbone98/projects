@@ -22,9 +22,9 @@
  *
  * The library (DramaFetch 1.6.0: the user's TikTok Bookmark as the DramaFetch tab shows it) is kept
  * in `chrome.storage.local` as {@link LIBRARY_KEY} — a cache, best effort: the dramas' ids, titles,
- * episodes and lengths, TikTok's count, when and from which profile the list was read and the
- * dramas DramaFetch removed since (`lib/library.libraryRecord`); no cover URL, no address, nothing
- * signed. A refused write of it never stops anything. Its sort order, the one picked last, is kept
+ * episodes and lengths, TikTok's count, when and from which profile the list was read
+ * (`lib/library.libraryRecord`); no cover URL, no address, nothing signed. A refused write of it
+ * never stops anything. Its sort order, the one picked last, is kept
  * apart ({@link LIBRARY_SORT_KEY}, DramaFetch 1.7.0), best effort the same way.
  *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
@@ -74,11 +74,6 @@ export const RETIRED_HISTORY_KEY = "history";
  *   (`alerts.js`, DramaFetch 1.7.0)
  * @property {boolean} autoRetry one automatic retry of a drama's episodes that did not download for a
  *   reason a retry can change — never after a stop (`app.js`, DramaFetch 1.8.0)
- * @property {boolean} autoRemove a drama of the library leaves the user's TikTok Favorites on its own
- *   once every episode of it is on disk — none locked, protected by DRM, served short or missing —,
- *   after its automatic retry when it needed one: TikTok's own Bookmark pressed once, as **Remove
- *   from Favorites** presses it; never after a stop or during the cooldown (`app.js`
- *   `queueAutoRemoval`, DramaFetch 2.0.0, the owner's decision of 2026-11-22)
  *
  * @typedef {object} TestSettings Overrides honoured only in test mode (`dramafetch_test`).
  * @property {string} [baseUrl] another origin than TikTok's (the fake TikTok server)
@@ -100,10 +95,6 @@ export const RETIRED_HISTORY_KEY = "history";
  *   first look at the downloads waits out; 0: never wait (tests that delete no file)
  * @property {number} [maxResultRows] how many rows the result table keeps while a job runs (2000
  *   outside test mode: `app.MAX_RESULT_ROWS`)
- * @property {number} [bookmarkWaitS] how long **Remove from Favorites** waits for the Bookmark
- *   button to turn off after its one click (15 s outside test mode: `bookmark.CHANGE_WAIT_S`)
- * @property {number} [bookmarkPollS] how often the drama's page is looked at while it loads and
- *   after the click (1 s outside test mode: `bookmark.POLL_S`)
  *
  * @typedef {object} StoredPacing The run's pacing as stored (wall-clock seconds).
  * @property {PacingState} pacing
@@ -124,7 +115,6 @@ export const DEFAULT_SETTINGS = Object.freeze({
   report: true,
   alerts: true,
   autoRetry: true,
-  autoRemove: true,
 });
 
 /** The numeric test settings and nothing else; anything outside test mode is ignored. */
@@ -145,8 +135,6 @@ const TEST_NUMBER_KEYS = /** @type {const} */ ([
   "existenceDelayMs",
   "existenceRateLimitS",
   "maxResultRows",
-  "bookmarkWaitS",
-  "bookmarkPollS",
 ]);
 
 /**
@@ -168,8 +156,8 @@ function isRecord(value) {
 
 /**
  * Why `settings` cannot be saved, or null: an unknown quality, cover mode or pace, a name format
- * `lib/naming` refuses, a report, alert, automatic retry or automatic removal switch that is not a
- * boolean, pauses below the Python defaults (outside test mode) or inverted.
+ * `lib/naming` refuses, a report, alert or automatic retry switch that is not a boolean, pauses
+ * below the Python defaults (outside test mode) or inverted.
  * @param {Settings} settings
  * @param {boolean} testMode
  * @returns {string | null}
@@ -184,7 +172,6 @@ export function settingsProblem(settings, testMode) {
   if (typeof settings.report !== "boolean") return "the report switch must be on or off";
   if (typeof settings.alerts !== "boolean") return "the alert switch must be on or off";
   if (typeof settings.autoRetry !== "boolean") return "the automatic retry switch must be on or off";
-  if (typeof settings.autoRemove !== "boolean") return "the automatic removal switch must be on or off";
   return pacingProblem(pacingOptions(pickPacing(settings)), { testMode });
 }
 
@@ -205,7 +192,10 @@ function pickPacing(settings) {
 
 /**
  * The stored settings over the defaults; a stored value that does not validate is dropped (the
- * default stays), so nothing stored can make the pauses lighter.
+ * default stays), so nothing stored can make the pauses lighter. A key the settings no longer have
+ * — the `autoRemove` switch DramaFetch 2.x stored (3.0.0 removes nothing from the Favorites) — is
+ * read as if it were absent: never an error, and never written back ({@link saveSettings} writes
+ * the settings as they are now).
  * @param {unknown} raw
  * @param {boolean} testMode
  * @returns {Settings}

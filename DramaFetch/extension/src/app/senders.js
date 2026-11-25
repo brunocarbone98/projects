@@ -7,11 +7,11 @@
  * at all. Until 2.0.0 a declared content script ran with this extension's id inside every
  * `www.tiktok.com` page (the favorites card reader of the right-click, gone since). DramaFetch
  * declares none any more, but it still injects functions into the TikTok tabs it works in, in the
- * ISOLATED world, where a runtime message carries this extension's id: the Bookmark reader
- * (`bookmark.bookmarkInPage`) and the discovery's scroll and page-text reads (`discovery.scrollInPage`,
- * `pageTextInPage` — the latter in the user's own TikTok tab too, during a favorites listing). None of
- * them sends a message; this check keeps any sender in a web page's frame out all the same — a real
- * guard, as defence in depth against a TikTok renderer gone wrong.
+ * ISOLATED world, where a runtime message carries this extension's id: the discovery's scroll and
+ * page-text reads (`discovery.scrollInPage`, `pageTextInPage` — the latter in the user's own TikTok
+ * tab too, during a favorites listing). Neither sends a message; this check keeps any sender in a
+ * web page's frame out all the same — a real guard, as defence in depth against a TikTok renderer
+ * gone wrong.
  */
 
 /**
