@@ -230,7 +230,7 @@ test("the library's covers: signed addresses kept in the browser session's memor
   session["favoritesCovers"] = "junk";
   assert.deepEqual(await readLibraryCovers(), new Map());
   // the library: on disk, read back checked; a write the storage refuses is thrown — a cache, the caller says so once
-  const record = libraryRecord({ listedAt: 1_800_000_000, total: 1, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A drama", episodes: 3, durationS: 237, coverUrl: signed }], removed: new Map() });
+  const record = libraryRecord({ listedAt: 1_800_000_000, total: 1, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A drama", episodes: 3, durationS: 237, coverUrl: signed }] });
   await writeLibrary(record);
   assert.doesNotMatch(JSON.stringify(stored["favoritesLibrary"]), /https?:|x-signature/);
   assert.deepEqual(await readLibrary(), record);
@@ -277,31 +277,22 @@ test("the automatic retry switch (1.8.0): on by default — a 1.7.0 install's se
   assert.equal((await loadSettings()).alerts, true); // the rest as stored
 });
 
-test("the automatic removal switch (2.0.0): on by default — a 1.8.0 install's settings too —, a stored non-boolean reads as on, it must be a boolean to save; saved and read back", async () => {
-  assert.equal(DEFAULT_SETTINGS.autoRemove, true);
-  assert.equal(normalizeSettings({}, false).autoRemove, true);
-  assert.equal(normalizeSettings({ report: true, alerts: true, autoRetry: true }, false).autoRemove, true); // stored by 1.8.0: no such key
-  assert.equal(normalizeSettings({ autoRemove: false }, false).autoRemove, false);
-  for (const odd of ["no", 0, 1, null, [], {}]) assert.equal(normalizeSettings({ autoRemove: odd }, false).autoRemove, true, JSON.stringify(odd)); // dropped: the default stays
-  assert.equal(normalizeSettings({ autoRemove: false, autoRetry: true }, false).autoRetry, true); // each switch its own
-  assert.equal(normalizeSettings({ autoRemove: true, autoRetry: false }, false).autoRemove, true);
-  assert.equal(normalizeSettings({ autoRemove: false, delayMinS: 0 }, false).autoRemove, false); // a bad pause never takes the switch with it
-  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRemove: false }, false), null);
-  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRemove: /** @type {never} */ ("x") }, false), "the automatic removal switch must be on or off");
-  // checked before the pacing: a bad switch is named even when the pauses are bad too
-  assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, autoRemove: /** @type {never} */ (1), delayMinS: 0 }, false), "the automatic removal switch must be on or off");
-  // saved with the settings and read back; refused, nothing is saved
-  const { stored } = fakeLocal();
-  Object.assign(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis.chrome)), { runtime: { getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "2.0.0" }) } });
-  assert.equal((await loadSettings()).autoRemove, true); // nothing stored yet: the default
-  await saveSettings({ ...DEFAULT_SETTINGS, autoRemove: false });
-  assert.deepEqual(stored["settings"], { ...DEFAULT_SETTINGS, autoRemove: false });
-  assert.equal((await loadSettings()).autoRemove, false);
-  await assert.rejects(saveSettings({ ...DEFAULT_SETTINGS, autoRemove: /** @type {never} */ ("off") }), /the automatic removal switch must be on or off/);
-  assert.equal(/** @type {Record<string, unknown>} */ (stored["settings"])["autoRemove"], false);
-  stored["settings"] = { ...(/** @type {Record<string, unknown>} */ (stored["settings"])), autoRemove: "off" }; // written by something else
-  assert.equal((await loadSettings()).autoRemove, true);
-  assert.equal((await loadSettings()).autoRetry, true); // the rest as stored
+test("a 2.x install's settings that still carry the automatic removal switch (3.0.0: DramaFetch removes nothing from the Favorites): read as if the key were absent — never an error, every other setting as stored —, and never written back", async () => {
+  assert.equal(Object.hasOwn(DEFAULT_SETTINGS, "autoRemove"), false);
+  // as 2.x stored it — on, off or anything else —: the key gone, the rest as stored
+  for (const autoRemove of [true, false, "off", 1, null]) {
+    const read = normalizeSettings({ ...DEFAULT_SETTINGS, alerts: false, autoRetry: false, autoRemove }, false);
+    assert.deepEqual(read, { ...DEFAULT_SETTINGS, alerts: false, autoRetry: false }, JSON.stringify(autoRemove));
+    assert.equal(Object.hasOwn(read, "autoRemove"), false, JSON.stringify(autoRemove));
+  }
+  // loaded from the storage and saved again (Save settings, Defaults): the key is not written back
+  const { stored } = fakeLocal({ settings: { ...DEFAULT_SETTINGS, report: false, autoRemove: false } });
+  Object.assign(/** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis.chrome)), { runtime: { getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "3.0.0" }) } });
+  const loaded = await loadSettings();
+  assert.deepEqual(loaded, { ...DEFAULT_SETTINGS, report: false });
+  await saveSettings(loaded);
+  assert.deepEqual(stored["settings"], { ...DEFAULT_SETTINGS, report: false });
+  assert.equal(Object.hasOwn(/** @type {Record<string, unknown>} */ (stored["settings"]), "autoRemove"), false);
 });
 
 test("the library's sort order: kept in chrome.storage.local under its own key and read back checked; best effort — a refused write or read never throws (the list's own order then)", async () => {

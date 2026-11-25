@@ -1,35 +1,32 @@
 // @ts-check
-// The library (src/lib/library.js, pure): each drama's status from DramaFetch's own records and from
-// the jobs (on disk, partly, none, queued, running, removed), the filters' counts, the twins, the
-// sort orders, the search, the smart refresh's "unchanged" question and how long the episode counts
-// are trusted, which signed cover addresses have expired, the selection's episodes, what the library
-// keeps across sessions (never a URL), the profile's handle and the facts the removal's confirmation
-// may claim. No browser, no network.
+// The library (src/lib/library.js, pure): what DramaFetch's own records say of each drama (the
+// episodes saved, how many it has), a card's state from the jobs alone (queued, running, idle —
+// 3.0.0: no lasting status, no status filters, no locked count), the twins, the sort orders, the
+// search, the smart refresh's "unchanged" question and how long the episode counts are trusted,
+// which signed cover addresses have expired, the selection's episodes, what the library keeps
+// across sessions (never a URL; a 2.x library's dramas DramaFetch had removed from the Favorites
+// leave it) and the profile's handle. No browser, no network.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { titleMatches } from "../src/lib/favorites.js";
+import * as libraryModule from "../src/lib/library.js";
 import {
-  COVER_EMBEDDED_NOTE,
-  LIBRARY_FILTERS,
   LIBRARY_PIECE,
   LIBRARY_SORTS,
   LIBRARY_VERSION,
   DEFAULT_LIBRARY_SORT,
   ageOf,
-  chipCounts,
   countsFresh,
   coverExpired,
   distinctItems,
-  inFilter,
   libraryOf,
   libraryRecord,
   librarySortOf,
   libraryStatus,
   profileHandleOf,
   progressOf,
-  removalFacts,
   selectionEpisodes,
   sortedItems,
   twinIds,
@@ -56,16 +53,16 @@ const COVER = "https://p16-common-sign.tiktokcdn.com/tos/aaaa~tplv-photomode-zoo
 const item = (seriesId, title, episodes = 60) => ({ seriesId, title, episodes, durationS: 4743, coverUrl: COVER });
 
 /**
- * A series' stored state with `numbers` saved (`done`, the given message), optionally found complete.
+ * A series' stored state with `numbers` saved (`done`, the downloader's message) and `locked` ones
+ * skipped as locked, optionally found complete.
  * @param {string} seriesId
  * @param {number[]} numbers
- * @param {{message?: string, complete?: number, status?: string, locked?: number[]}} [options]
+ * @param {{complete?: number, locked?: number[]}} [options]
  */
 function stored(seriesId, numbers, options = {}) {
   const state = newState(seriesId, "A drama");
   for (const number of numbers) {
-    const status = options.status ?? "done";
-    record(state, { episode: { number, itemId: `i${number}` }, status, path: `/dl/E${number}.mp4`, message: options.message ?? `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: 1_800_000_000 });
+    record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: 1_800_000_000 });
   }
   for (const number of options.locked ?? []) {
     record(state, { episode: { number, itemId: `i${number}` }, status: "skipped-locked", path: null, message: "looks locked" }, { exists: () => true, now: 1_800_000_000 });
@@ -74,82 +71,72 @@ function stored(seriesId, numbers, options = {}) {
   return JSON.parse(JSON.stringify(state));
 }
 
-test("the constants: pieces of 60 cards, the filters and sorts of the sketch, version 1, the downloader's cover note", () => {
+test("the constants: pieces of 60 cards, the sorts of the sketch, version 1 — and no status filters any more (3.0.0)", () => {
   assert.equal(LIBRARY_PIECE, 60);
-  assert.deepEqual([...LIBRARY_FILTERS], ["all", "none", "partly", "on-disk"]);
   assert.deepEqual([...LIBRARY_SORTS], ["recent", "title", "episodes"]);
   assert.equal(LIBRARY_VERSION, 1);
-  // the note a saved episode's message carries when its cover went into the MP4: the downloader's own
-  const downloader = readFileSync(new URL("../src/app/downloader.js", import.meta.url), "utf8");
-  assert.ok(downloader.includes(`note = "${COVER_EMBEDDED_NOTE}";`), "the downloader writes the cover note the library reads");
-  assert.ok(downloader.includes(`note = "${COVER_EMBEDDED_NOTE} + file";`));
+  // the filter chips (All / Not downloaded / Partly / On disk) went with the lasting statuses
+  for (const removed of ["LIBRARY_FILTERS", "chipCounts", "inFilter"]) assert.equal(Object.hasOwn(libraryModule, removed), false, removed);
 });
 
-test("a drama's progress from the records: on disk, partly or none, the episodes saved, how many it has and how many the records hold locked", () => {
-  // nothing stored, or nothing saved: none, 0 of the list's count
-  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, 60), { status: "none", saved: 0, total: 60, locked: 0 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [], { locked: [3] }), LIGHTHOUSE, 60), { status: "none", saved: 0, total: 60, locked: 1 });
-  // some saved: partly; all the list names saved (or a complete run's count): on disk
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3]), LIGHTHOUSE, 60), { status: "partly", saved: 3, total: 60, locked: 0 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3), { status: "on-disk", saved: 3, total: 3, locked: 0 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { locked: [3] }), LIGHTHOUSE, 3), { status: "on-disk", saved: 2, total: 3, locked: 1 });
-  // found complete, the list grown since: partly
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 5), { status: "partly", saved: 3, total: 5, locked: 0 });
+test("a drama's progress from the records: the episodes saved and how many it has — the list's count raised to what the records hold —, nothing else (3.0.0: no status, no locked count)", () => {
+  // nothing stored, or nothing saved: 0 of the list's count
+  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, 60), { saved: 0, total: 60 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [], { locked: [3] }), LIGHTHOUSE, 60), { saved: 0, total: 60 });
+  // some saved, or every one the list names (a complete run's count too)
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3]), LIGHTHOUSE, 60), { saved: 3, total: 60 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3), { saved: 3, total: 3 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { locked: [3] }), LIGHTHOUSE, 3), { saved: 2, total: 3 });
+  // found complete, the list grown since: the list's larger count
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 5), { saved: 3, total: 5 });
   // the list names no count: what the records know — a complete run's count plus the locked ones, else the highest number recorded
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { complete: 2, locked: [3] }), LIGHTHOUSE, null), { status: "on-disk", saved: 2, total: 3, locked: 1 });
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 4]), LIGHTHOUSE, null), { status: "partly", saved: 2, total: 4, locked: 0 });
-  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, null), { status: "none", saved: 0, total: null, locked: 0 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { complete: 2, locked: [3] }), LIGHTHOUSE, null), { saved: 2, total: 3 });
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 4]), LIGHTHOUSE, null), { saved: 2, total: 4 });
+  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, null), { saved: 0, total: null });
   // another series' state is no record of this one
-  assert.equal(progressOf(stored(PAPER, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3).status, "none");
+  assert.deepEqual(progressOf(stored(PAPER, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3), { saved: 0, total: 3 });
+  assert.deepEqual(progressOf(stored(PAPER, [1], { locked: [2, 3, 4, 5] }), LIGHTHOUSE, 3), { saved: 0, total: 3 });
   // a list that shrank: an episode failed by a run that listed 4, then a run found the 3 TikTok lists
-  // now complete — the old failed entry under that mark raises nothing: on disk, 3 of 3, and the
-  // confirmation says so (`removalFacts`); while the library still says 4, partly
+  // now complete — the old failed entry under that mark raises nothing: 3 of 3; while the library
+  // still says 4, 3 of 4
   const shrunk = newState(LIGHTHOUSE, "A drama");
   record(shrunk, { episode: { number: 4, itemId: "i4" }, status: "failed-unavailable", path: null, message: "unavailable" }, { exists: () => true, now: 1_800_000_000 });
   for (const number of [1, 2, 3]) record(shrunk, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: 1_800_000_050 });
   markComplete(shrunk, 1_800_000_100, 3);
   const raw = JSON.parse(JSON.stringify(shrunk));
-  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 3), { status: "on-disk", saved: 3, total: 3, locked: 0 });
-  assert.equal(removalFacts(raw, LIGHTHOUSE, 3).total, 3);
-  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 4), { status: "partly", saved: 3, total: 4, locked: 0 });
-  // the locked ones: what the records hold `skipped-locked` (paid episodes a run listed and skipped;
-  // a DRM verdict it remembers), none for a drama never run — nothing is asked of TikTok to learn it
+  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 3), { saved: 3, total: 3 });
+  assert.deepEqual(progressOf(raw, LIGHTHOUSE, 4), { saved: 3, total: 4 });
+  // a paywalled drama: 5 saved, 45 recorded locked — TikTok's 60 the count, no locked count kept
   const paywalled = stored(LIGHTHOUSE, [1, 2, 3, 4, 5], { locked: Array.from({ length: 45 }, (_, index) => index + 16), complete: 5 });
-  assert.deepEqual(progressOf(paywalled, LIGHTHOUSE, 60), { status: "partly", saved: 5, total: 60, locked: 45 });
-  assert.equal(progressOf(stored(LIGHTHOUSE, [1, 2, 3]), LIGHTHOUSE, 3).locked, 0);
-  assert.equal(progressOf(undefined, LIGHTHOUSE, 60).locked, 0);
-  assert.equal(progressOf(stored(PAPER, [1], { locked: [2, 3] }), LIGHTHOUSE, 3).locked, 0); // another series' records
+  assert.deepEqual(progressOf(paywalled, LIGHTHOUSE, 60), { saved: 5, total: 60 });
   // a run that listed more episodes than TikTok's favorites entry says: the larger number, the one
-  // the card's count, its status fraction, Most episodes and the selection's sum all use
-  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { locked: [3, 4] }), LIGHTHOUSE, 3), { status: "on-disk", saved: 2, total: 4, locked: 2 });
+  // the card's count, Downloading · saved/total, Most episodes and the selection's sum all use
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, [1, 2], { locked: [3, 4] }), LIGHTHOUSE, 3), { saved: 2, total: 4 });
+  // the two numbers only: no status from the records, no locked count
+  assert.deepEqual(Object.keys(progressOf(paywalled, LIGHTHOUSE, 60)).sort(), ["saved", "total"]);
 });
 
-test("a card's status: removed first, then running, then queued, else what the records say", () => {
-  const onDisk = { status: /** @type {const} */ ("on-disk"), saved: 3, total: 3, locked: 0 };
-  const none = { status: /** @type {const} */ ("none"), saved: 0, total: 3, locked: 0 };
-  const jobs = { queued: false, running: false, removed: false };
-  assert.equal(libraryStatus(onDisk, jobs), "on-disk");
-  assert.equal(libraryStatus(none, jobs), "none");
-  assert.equal(libraryStatus({ ...none, status: "partly" }, jobs), "partly");
-  assert.equal(libraryStatus(none, { ...jobs, queued: true }), "queued");
-  assert.equal(libraryStatus(none, { ...jobs, queued: true, running: true }), "running");
-  assert.equal(libraryStatus(onDisk, { queued: true, running: true, removed: true }), "removed");
+test("a drama's progress while See episodes downloads it again in full (3.0.0): the episodes that download has still to save anew are not counted as saved — their earlier downloads still in the records —, against the drama's own count; an episode it saved again, or one it does not take, counts as before", () => {
+  const thirty = Array.from({ length: 30 }, (_, index) => index + 1);
+  const onDisk = stored(LIGHTHOUSE, thirty, { complete: 30 });
+  // Download all available over 30 on disk: 0 of 30 at its start, then one more for each saved anew
+  assert.deepEqual(progressOf(onDisk, LIGHTHOUSE, 30, new Set(thirty)), { saved: 0, total: 30 });
+  assert.deepEqual(progressOf(onDisk, LIGHTHOUSE, 30, new Set(thirty.slice(2))), { saved: 2, total: 30 });
+  // Download selected of E01 and E03, both on disk: 28 of 30, never 28 of 2
+  assert.deepEqual(progressOf(onDisk, LIGHTHOUSE, 30, new Set([1, 3])), { saved: 28, total: 30 });
+  // its retry of E05 and E07, which failed (not on disk): what the records say, as before
+  assert.deepEqual(progressOf(stored(LIGHTHOUSE, thirty.filter((number) => number !== 5 && number !== 7)), LIGHTHOUSE, 30, new Set([5, 7])), { saved: 28, total: 30 });
+  // none to leave out: the records alone
+  assert.deepEqual(progressOf(onDisk, LIGHTHOUSE, 30, new Set()), { saved: 30, total: 30 });
+  assert.deepEqual(progressOf(onDisk, LIGHTHOUSE, 30, null), progressOf(onDisk, LIGHTHOUSE, 30));
+  assert.deepEqual(progressOf(undefined, LIGHTHOUSE, 30, new Set([1])), { saved: 0, total: 30 });
 });
 
-test("the filters' counts: every drama not removed once, under its stored status — queued and running ones where their records put them —, the removed apart; the filters show what they count, All the removed too", () => {
-  /** @param {string} seriesId @param {"on-disk" | "partly" | "none"} status @param {boolean} [removed] */
-  const entry = (seriesId, status, removed = false) => ({ item: item(seriesId, seriesId), progress: { status, saved: status === "none" ? 0 : 3, total: 60, locked: 0 }, removed });
-  const entries = [entry(LIGHTHOUSE, "on-disk"), entry(SNOW_A, "none"), entry(SNOW_B, "partly"), entry(PAPER, "none"), entry(MOON, "on-disk", true), entry(LANTERN, "partly")];
-  const counts = chipCounts(entries);
-  assert.deepEqual(counts, { all: 5, none: 2, partly: 2, onDisk: 1, removed: 1 });
-  assert.equal(counts.none + counts.partly + counts.onDisk, counts.all);
-  /** @param {import("../src/lib/library.js").LibraryFilter} filter */
-  const shown = (filter) => entries.filter((candidate) => inFilter(filter, candidate)).map((candidate) => candidate.item.seriesId);
-  assert.deepEqual(shown("all"), [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER, MOON, LANTERN]); // the removed one dashed among them
-  assert.deepEqual(shown("none"), [SNOW_A, PAPER]);
-  assert.deepEqual(shown("partly"), [SNOW_B, LANTERN]);
-  assert.deepEqual(shown("on-disk"), [LIGHTHOUSE]); // never the removed one, whatever its records say
-  assert.deepEqual(chipCounts([]), { all: 0, none: 0, partly: 0, onDisk: 0, removed: 0 });
+test("a card's state, from the jobs alone: running, then queued, else idle — never a status from the records (3.0.0)", () => {
+  assert.equal(libraryStatus({ queued: false, running: false }), "idle");
+  assert.equal(libraryStatus({ queued: true, running: false }), "queued");
+  assert.equal(libraryStatus({ queued: true, running: true }), "running");
+  assert.equal(libraryStatus({ queued: false, running: true }), "running");
 });
 
 test("twins: DIFFERENT series of the same title (on one line, NFC) — never one drama listed twice, never an untitled one", () => {
@@ -172,7 +159,7 @@ test("the sort orders: the list's own, title A–Z (letter case and accents asid
    * @param {import("../src/lib/favorites.js").FavoriteItem} favorite
    * @param {number | null} [total] how many episodes its card shows: TikTok's count unless the records raised it
    */
-  const entry = (favorite, total = favorite.episodes) => ({ item: favorite, progress: { status: /** @type {const} */ ("none"), saved: 0, total, locked: 0 } });
+  const entry = (favorite, total = favorite.episodes) => ({ item: favorite, progress: { saved: 0, total } });
   const entries = [
     entry(item(LIGHTHOUSE, "the lighthouse keeper's promise", 60)),
     entry(item(SNOW_A, "Snowfall in Two Cities", 44)),
@@ -217,7 +204,7 @@ test("the sort order kept across sessions, read back checked: one of the three, 
 
 test("the selection's episodes: the sum of the ticked dramas' counts as their cards show them, each once; an unknown count adds none", () => {
   /** @param {import("../src/lib/favorites.js").FavoriteItem} favorite @param {number | null} total */
-  const entry = (favorite, total) => ({ item: favorite, progress: { status: /** @type {const} */ ("partly"), saved: 1, total, locked: 0 } });
+  const entry = (favorite, total) => ({ item: favorite, progress: { saved: 1, total } });
   const items = [item(LIGHTHOUSE, "a", 60), item(SNOW_A, "b", 44), item(PAPER, "c", null), item(LIGHTHOUSE, "a", 60)];
   const entries = items.map((favorite) => entry(favorite, favorite.episodes));
   assert.equal(selectionEpisodes(entries, new Set([LIGHTHOUSE, SNOW_A, PAPER])), 104);
@@ -228,13 +215,13 @@ test("the selection's episodes: the sum of the ticked dramas' counts as their ca
   assert.deepEqual(distinctItems(items).map((distinct) => distinct.seriesId), [LIGHTHOUSE, SNOW_A, PAPER]);
 });
 
-test("the smart refresh's question: TikTok's total equals the dramas not removed AND the first page's ids are the library's first ones, in order", () => {
+test("the smart refresh's question: TikTok's total equals the library's dramas AND the first page's ids are the library's first ones, in order", () => {
   const kept = [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER, MOON];
   assert.equal(unchangedSince(kept, [LIGHTHOUSE, SNOW_A, SNOW_B], 5), true);
   assert.equal(unchangedSince(kept, kept, 5), true); // a first page that is the whole list
   assert.equal(unchangedSince(kept, [LIGHTHOUSE, SNOW_A, SNOW_B], 6), false); // one added somewhere: the count says so
-  assert.equal(unchangedSince(kept, [LIGHTHOUSE, SNOW_A, SNOW_B], 4), false); // one removed elsewhere
-  assert.equal(unchangedSince(kept, [PAPER, LIGHTHOUSE, SNOW_A], 5), false); // one favorited again (newest first) and one removed: the page says so
+  assert.equal(unchangedSince(kept, [LIGHTHOUSE, SNOW_A, SNOW_B], 4), false); // one taken out on TikTok
+  assert.equal(unchangedSince(kept, [PAPER, LIGHTHOUSE, SNOW_A], 5), false); // one favorited again (newest first) and one taken out: the page says so
   assert.equal(unchangedSince(kept, [SNOW_A, LIGHTHOUSE, SNOW_B], 5), false); // the order differs
   assert.equal(unchangedSince(kept, [LIGHTHOUSE, SNOW_A, SNOW_B], null), false); // no total: read on
   assert.equal(unchangedSince([LIGHTHOUSE], [LIGHTHOUSE, SNOW_A], 1), false); // a page longer than the library
@@ -242,23 +229,18 @@ test("the smart refresh's question: TikTok's total equals the dramas not removed
   assert.equal(unchangedSince(kept, [], 5), false);
 });
 
-test("what the library keeps: the dramas each once, id, title, episodes and length only — no cover URL, nothing signed —, the removed ones still in it; read back checked", () => {
+test("what the library keeps: the dramas each once, id, title, episodes and length only — no cover URL, nothing signed —; read back checked", () => {
   const items = [item(LIGHTHOUSE, "The Lighthouse Keeper's Promise"), item(SNOW_A, "Snowfall in Two Cities", null), item(LIGHTHOUSE, "dup"), { ...item(PAPER, "  Paper\nCrowns "), durationS: null }];
   const kept = libraryRecord({
     listedAt: 1_800_000_000,
     total: 946,
     countedAt: 1_800_000_050,
     fullReadAt: 1_799_990_000,
-    unconfirmed: false,
     complete: false,
     short: false,
     ended: "cap",
     profile: "@invented_viewer",
     items,
-    removed: new Map([
-      [SNOW_A, 1_800_000_040],
-      [MOON, 1_800_000_041], // no longer in the list: not kept
-    ]),
   });
   assert.deepEqual(kept, {
     v: 1,
@@ -266,7 +248,6 @@ test("what the library keeps: the dramas each once, id, title, episodes and leng
     total: 946,
     countedAt: 1_800_000_050,
     fullReadAt: 1_799_990_000,
-    unconfirmed: false,
     complete: false,
     short: false,
     ended: "cap",
@@ -276,7 +257,6 @@ test("what the library keeps: the dramas each once, id, title, episodes and leng
       { seriesId: SNOW_A, title: "Snowfall in Two Cities", episodes: null, durationS: 4743 },
       { seriesId: PAPER, title: "Paper Crowns", episodes: 60, durationS: null },
     ],
-    removed: [{ seriesId: SNOW_A, at: 1_800_000_040 }],
   });
   assert.doesNotMatch(JSON.stringify(kept), /http|tiktokcdn|signature/i); // nothing signed, no address at all
   // back from storage, checked: the same; junk is no library, a drama without a valid id is left out
@@ -292,12 +272,10 @@ test("what the library keeps: the dramas each once, id, title, episodes and leng
     ended: "whatever",
     profile: "invented_viewer", // not a handle as kept
     items: [...kept.items, { seriesId: "123", title: "short id" }, { seriesId: 7712345678901234000 }, null, { seriesId: MOON, title: 5, episodes: 1.5, durationS: -3, coverUrl: COVER }],
-    removed: [{ seriesId: SNOW_A, at: 1 }, { seriesId: LANTERN, at: 2 }, "x", { seriesId: PAPER }],
   });
   assert.ok(odd !== null);
   assert.deepEqual(odd.items.map((entry) => entry.seriesId), [LIGHTHOUSE, SNOW_A, PAPER, MOON]);
   assert.deepEqual(odd.items[3], { seriesId: MOON, title: null, episodes: null, durationS: null }); // the cover URL dropped
-  assert.deepEqual(odd.removed, [{ seriesId: SNOW_A, at: 1 }]);
   assert.equal(odd.total, null);
   assert.equal(odd.fullReadAt, null);
   assert.equal(odd.ended, null);
@@ -305,7 +283,46 @@ test("what the library keeps: the dramas each once, id, title, episodes and leng
   // a library kept before the whole read was remembered: none known
   const { fullReadAt: _never, ...older } = kept;
   assert.equal(libraryOf(older)?.fullReadAt, null);
-  assert.equal(libraryRecord({ ...older, removed: new Map() }).fullReadAt, null);
+  assert.equal(libraryRecord(older).fullReadAt, null);
+});
+
+test("a library DramaFetch 2.x kept (3.0.0: DramaFetch removes nothing from the Favorites): the dramas it had removed from the Favorites leave it as it is read back — no card, no count —, a count it had not confirmed (its own estimate, never TikTok's) reads as unknown, and its `removed` and `unconfirmed` are read no further and never written again", () => {
+  const items = [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER].map((seriesId) => ({ seriesId, title: `Drama ${seriesId.slice(-1)}`, episodes: 3, durationS: 237 }));
+  const stored2x = {
+    v: 1,
+    listedAt: 1_800_000_000,
+    total: 945, // TikTok's count as 2.x left it: the last one minus its removal, not confirmed
+    countedAt: 1_800_000_050,
+    fullReadAt: 1_799_990_000,
+    unconfirmed: true,
+    complete: true,
+    short: false,
+    ended: null,
+    profile: "@invented_viewer",
+    items,
+    // as 2.x wrote them: removed since the list was read; one no longer listed, entries it never wrote
+    removed: [{ seriesId: SNOW_A, at: 1_800_000_040 }, { seriesId: PAPER, at: 1_800_000_041 }, { seriesId: MOON, at: 1 }, { seriesId: LANTERN }, "x", null],
+  };
+  const read = libraryOf(JSON.parse(JSON.stringify(stored2x)));
+  assert.ok(read !== null);
+  assert.deepEqual(read.items.map((entry) => entry.seriesId), [LIGHTHOUSE, SNOW_B]); // the two it removed gone, nothing else
+  assert.equal(read.total, null); // 2.x's estimate is not TikTok's count: unknown until the next read
+  assert.equal(read.countedAt, 1_800_000_050);
+  assert.equal(Object.hasOwn(read, "removed"), false);
+  assert.equal(Object.hasOwn(read, "unconfirmed"), false);
+  // kept again: nothing of 2.x's removal written back
+  const again = libraryRecord(read);
+  assert.deepEqual(again, read);
+  assert.doesNotMatch(JSON.stringify(again), /removed|unconfirmed/);
+  // a count 2.x read from TikTok (confirmed, or no mark at all) stays TikTok's count
+  assert.equal(libraryOf({ ...stored2x, unconfirmed: false })?.total, 945);
+  assert.equal(libraryOf({ ...stored2x, unconfirmed: undefined })?.total, 945);
+  assert.equal(libraryOf({ ...stored2x, unconfirmed: "yes" })?.total, 945);
+  // an entry without a time is no removal 2.x made: that drama stays
+  assert.deepEqual(libraryOf({ ...stored2x, removed: [{ seriesId: SNOW_A }] })?.items.map((entry) => entry.seriesId), [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER]);
+  // no `removed` at all, or anything but a list: every drama stays
+  assert.equal(libraryOf({ ...stored2x, removed: undefined })?.items.length, 4);
+  assert.equal(libraryOf({ ...stored2x, removed: "x" })?.items.length, 4);
 });
 
 test("how long the library's episode counts are trusted: less than 24 hours after its whole list was read (the engine's own window for a complete series) — never in the future, never without a read", () => {
@@ -354,19 +371,4 @@ test("how long ago: now under a minute, then whole minutes, hours, days", () => 
   assert.deepEqual(ageOf(now, now - 125), { unit: "minutes", count: 2 });
   assert.deepEqual(ageOf(now, now - 3 * 3600 - 5), { unit: "hours", count: 3 });
   assert.deepEqual(ageOf(now, now - 2 * 86_400), { unit: "days", count: 2 });
-});
-
-test("the removal's facts: only what the records support — the episodes on disk, each DramaFetch's own checked download, when found complete, and the cover line only when every saved episode's message says it was embedded", () => {
-  const all = removalFacts(stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 }), LIGHTHOUSE, 3);
-  assert.deepEqual(all, { saved: 3, total: 3, verified: true, coverEmbedded: true, completeAt: 1_800_000_100 });
-  // one episode's cover only kept as a file (or not fetched): no cover line, never a claim the records do not make
-  const state = stored(LIGHTHOUSE, [1, 2, 3], { complete: 3 });
-  state.episodes["2"].message = "saved E02.mp4 (0.1 MiB); cover: HTTP 404 from p16.tiktokcdn.com";
-  assert.deepEqual(removalFacts(state, LIGHTHOUSE, 3), { saved: 3, total: 3, verified: true, coverEmbedded: false, completeAt: 1_800_000_100 });
-  // episodes found on disk by an earlier run (not downloaded by DramaFetch then): not called checked
-  const found = stored(LIGHTHOUSE, [1, 2], { status: "skipped-exists", message: "already exists: E01.mp4 + cover embedded" });
-  assert.deepEqual(removalFacts(found, LIGHTHOUSE, 2), { saved: 2, total: 2, verified: false, coverEmbedded: false, completeAt: null });
-  // the both-files note counts as embedded; nothing stored: nothing claimed
-  assert.equal(removalFacts(stored(LIGHTHOUSE, [1], { message: "saved E01.mp4 (0.1 MiB) + cover embedded + file" }), LIGHTHOUSE, 1).coverEmbedded, true);
-  assert.deepEqual(removalFacts(undefined, LIGHTHOUSE, 60), { saved: 0, total: 60, verified: false, coverEmbedded: false, completeAt: null });
 });

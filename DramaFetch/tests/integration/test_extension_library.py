@@ -1,47 +1,48 @@
-"""The library of DramaFetch 1.6.0 for Chrome, end to end (`pytest -m integration`; skipped without
-a browser): the user's TikTok Bookmark (**Favorites** → **Drama**) as cards in the DramaFetch tab.
+"""The library of DramaFetch for Chrome (1.6.0), end to end (`pytest -m integration`; skipped
+without a browser): the user's TikTok Bookmark (**Favorites** → **Drama**) as cards in the
+DramaFetch tab. Since DramaFetch 3.0.0 (the owner's decision of 2026-11-25) a card shows no lasting
+status — no **On disk**, **Partly** or **Not downloaded**, no locked count, no filter chips — and
+nothing removes a drama from the Favorites: a card says **Queued** while a download job of its drama
+waits and **Downloading · saved/total** with a progress bar while one runs, nothing otherwise (its
+`data-status` `queued`, `running` or `idle`); what a download did lives in DramaFetch's records
+(`series:<id>`), which every scenario here waits for once its job has ended.
 
 A real headless Chromium loads the extension's TEST copy (`extension_harness.ExtensionHarness`)
-against the fake TikTok server, whose favorites are the server's own list
-(`FakeTikTok.favorite_ids`) and whose series pages carry a Bookmark button shaped like TikTok's:
+against the fake TikTok server, whose favorites are `FAVORITES`:
 
 - (a) the popup's **Open my library** on the fake profile lists every favorite into the library —
   cards with their covers from the fake's image CDN (each asked for once, none while the listing
-  job runs; their addresses in the browser session's memory only), the filters' counts, TikTok's
+  job runs; their addresses in the browser session's memory only), no status on any card, TikTok's
   count —, keeps it with nothing signed in `chrome.storage.local`, and a second **Open my library**
   with nothing changed costs ONE `drama_list` request, and so does the page's own **Update from
   TikTok**;
 - (b) two dramas ticked — each card framed in the accent while ticked — and **Download selected
   dramas** download exactly as a paste of their ids does in another profile (the same files,
-  names, embedded covers and rows), and the cards end **On disk** — the one with a locked episode
-  saying so (1.7.0: `5 episodes · 1 locked`, from DramaFetch's own records, its tooltip saying
-  why; before the run, TikTok's count alone) —; each drama, as it is done,
-  gets its notification (1.7.0) — `✓ <drama> — downloaded`, its episodes on disk, its locked one in
-  the report line's words —, shown by Chrome (`chrome.notifications.getAll()` lists it), none for
-  the listing before; a click on one's body, dispatched to the service worker's own listener,
-  brings the DramaFetch tab to the front — no job, no reload, no request — and takes it away;
+  names, embedded covers and rows); while the job runs each card says **Queued** — the second one
+  while the first downloads — then **Downloading · saved/total** with its bar, counted from the
+  records, its **Download** disabled meanwhile, and once the job has ended and its records are
+  written no card says anything (the main series' meta line `5 episodes · 1m`, its locked episode
+  counted nowhere); each drama, as it is done, gets its notification (1.7.0) — `✓ <drama> —
+  downloaded`, its episodes on disk, its locked one in the report line's words —, shown by Chrome
+  (`chrome.notifications.getAll()` lists it), none for the listing before; a click on one's body,
+  dispatched to the service worker's own listener, brings the DramaFetch tab to the front — no
+  job, no reload, no request — and takes it away;
 - (c) a card's own **Download** (1.7.0) downloads that drama — the batch job **Download selected
-  dramas** queues for it alone —; then **Remove from Favorites** on it, on disk, presses the drama
-  page's own Bookmark once (one
-  `collect` request, the page's own `action`), the fake's list loses it, the card says so, the count
-  is the fake's new total (one first-page request of the profile tab), the background tab is closed
-  and nothing else is asked — no cover while the job runs;
-- (d) a fake that answers the click but keeps the drama (`collect_ignored`): `not-kept`, the drama
-  still in the library and on the fake, never a second click;
-- (e) a `collect` answered HTTP 429 (`collect_rate_limit`): a stop with the 30-minute cooldown;
-- (f) **Retry** after **Download selected dramas**: an episode whose first transfer the fake cuts
-  short (`truncate_once`) is shown apart with its **Retry** button, the card says **Partly**, and
-  the drama's notification says `⚠ <drama> — 1 episode to retry` / `E02 did not download.` with a
-  **Retry** button; that button, clicked as Chrome hands it to the service worker (its own
-  `onButtonClicked` listener, `chrome.notifications.onButtonClicked.dispatch` in the worker), goes
-  to the page, which queues one selection job over that episode — the tab's own **Retry** — and
-  takes the notification away: the episode saved byte for byte as a clean paste of its id saves
-  it, the card ends **On disk** and the drama's notification says it is downloaded — with the
-  automatic retry (1.8.0) turned off first: the path this scenario proves is the user's own.
-
-(b), (c) and (f) download a drama of the library whole: the automatic removal from the Favorites
-(2.0.0, on by default) is turned off first in each, or that drama would leave the Favorites in a
-job of its own — `test_extension_autoremove.py` proves it.
+  dramas** queues for it alone —: the card **Queued**, then **Downloading** with its **Download**
+  disabled, its records written, the card idle again with its **Download** enabled; nothing asked
+  of TikTok but that drama's own page, list, media and covers — and no library cover while the job
+  runs; pressed again, it skips what is on disk as a paste does — the drama found complete, not one
+  request (only **See episodes** downloads again in full, 3.0.0);
+- (d) **Retry** after **Download selected dramas**: an episode whose first transfer the fake cuts
+  short (`truncate_once`) is shown apart with its **Retry** button, the records say it failed (the
+  card says nothing), and the drama's notification says `⚠ <drama> — 1 episode to retry` / `E02
+  did not download.` with a **Retry** button; that button, clicked as Chrome hands it to the
+  service worker (its own `onButtonClicked` listener,
+  `chrome.notifications.onButtonClicked.dispatch` in the worker), goes to the page, which queues
+  one selection job over that episode — the tab's own **Retry** — and takes the notification away:
+  the episode saved byte for byte as a clean paste of its id saves it, the records whole and the
+  drama's notification saying it is downloaded — with the automatic retry (1.8.0) turned off
+  first: the path this scenario proves is the user's own.
 
 No cookie value is set, printed or asserted on; nothing reaches TikTok.
 """
@@ -49,7 +50,7 @@ No cookie value is set, printed or asserted on; nothing reaches TikTok.
 from __future__ import annotations
 
 import json
-import time
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -68,19 +69,16 @@ from .extension_alerts import (
 from .extension_harness import CHROMIUM, ExtensionHarness
 from .fake_tiktok import (
     CDN_PATH_RE,
-    COLLECT_PATH,
     COVER_PATH_RE,
     DRAMA_LIST_PATH,
     EPISODE_OF_ITEM,
     FAVORITES,
     LIGHTHOUSE_ID,
     PROFILE_PATH,
-    SECOND_ITEMS,
     SECOND_SERIES_ID,
     SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
-    SERIES_PATH_RE,
     FakeTikTok,
 )
 
@@ -94,8 +92,6 @@ pytestmark = [
     ),
 ]
 
-#: Looking at the drama's page often, and waiting a short while for the Bookmark to turn off.
-SETTINGS: dict[str, Any] = {"bookmarkPollS": 0.1, "bookmarkWaitS": 3}
 #: What the worker kept of a TikTok tab's favorites list (`chrome.storage.session`), or null.
 TEMPLATE_JS = "async (key) => (await chrome.storage.session.get(key))[key] ?? null"
 TAB_IDS_JS = (
@@ -104,6 +100,8 @@ TAB_IDS_JS = (
 )
 #: The English of the fake's favorites list: every drama's id, newest first.
 FAVORITE_IDS = [series_id for series_id, _, _, _ in FAVORITES]
+#: The library's covers on the fake image CDN (one per drama; an episode's cover is its item's).
+LIBRARY_COVERS = {f"/cover/{series_id}.jpg" for series_id in FAVORITE_IDS}
 #: The page's accent colour as the browser computes it (a ticked card's frame is drawn in it).
 ACCENT_JS = (
     "() => { const probe = document.createElement('div'); probe.style.color = 'var(--accent)';"
@@ -115,6 +113,40 @@ ACTIVE_TAB_JS = (
     "async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))"
     ".map((tab) => tab.url)"
 )
+#: In the DramaFetch tab: what each library card says each time it changes — `[series id,
+#: data-status, its status badge's text or null, its progress bar's [value, max] or null, whether
+#: its Download is disabled]` — in `globalThis.__cardLog`: a `MutationObserver` on the grid, whose
+#: callback runs right after each redraw, before the page goes on (no read timed against a job).
+#: Nothing else changes.
+RECORD_CARDS_JS = """() => {
+  if (globalThis.__cardLog !== undefined) return;
+  const log = [];
+  globalThis.__cardLog = log;
+  const grid = document.getElementById("favorites-grid");
+  const note = () => {
+    for (const card of grid.querySelectorAll("article[data-series-id]")) {
+      const badge = card.querySelector(".favorite-status");
+      const bar = card.querySelector("progress.drama-progress");
+      const download = card.querySelector("[data-action='download']");
+      const now = [
+        card.getAttribute("data-series-id"),
+        card.getAttribute("data-status"),
+        badge === null ? null : badge.textContent,
+        bar === null ? null : [Number(bar.getAttribute("value")), Number(bar.getAttribute("max"))],
+        download === null ? null : download.disabled,
+      ];
+      const last = log.findLast((seen) => seen[0] === now[0]);
+      if (last === undefined || JSON.stringify(last) !== JSON.stringify(now)) log.push(now);
+    }
+  };
+  note();
+  new MutationObserver(note).observe(grid, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    characterData: true,
+  });
+}"""
 
 
 def _profile_and_popup(ext: ExtensionHarness, base_url: str) -> tuple[Page, Page, int]:
@@ -171,13 +203,6 @@ def _border(card: Locator) -> str:
     return color
 
 
-def _chips(page: Page) -> list[str]:
-    return [
-        page.locator(f"#library-chip-{name}").inner_text()
-        for name in ("all", "none", "partly", "on-disk")
-    ]
-
-
 def _saved(ext: ExtensionHarness) -> dict[str, bytes]:
     """Every file saved under the download directory: its path there and its bytes."""
     return {str(path): (ext.downloads / path).read_bytes() for path in ext.saved_files()}
@@ -194,77 +219,54 @@ def _rows(entry: dict[str, Any]) -> list[tuple[str, list[tuple[int, str, str]]]]
     ]
 
 
-def _remove(ext: ExtensionHarness, series_id: str) -> dict[str, Any]:
-    """**Remove from Favorites** on the drama's card, confirmed; the job's journal entry."""
-    page = ext.page
-    page.locator("#library").scroll_into_view_if_needed()
-    _card(page, series_id).locator("[data-action='remove']").click()
-    ext.wait_for(page.locator("#bookmark-dialog").is_visible, 10, "no confirmation")
-    jobs = ext.finished_jobs()
-    page.click("#bookmark-confirm")
-    ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "the removal did not end")
-    journal = ext.journal()
-    assert journal
-    return journal[0]
-
-
-def _seed(ext: ExtensionHarness, series_id: str, episodes: int) -> None:
-    """The library as an earlier session kept it (the fake's favorites, its whole list read a minute
-    ago) and DramaFetch's records of `series_id`: all its `episodes` saved, the series found
-    complete — then the tab reloaded, so that it shows them (no request)."""
-    items = [
-        {"seriesId": drama, "title": title, "episodes": count, "durationS": seconds}
-        for drama, title, count, seconds in FAVORITES
+def _card_states(page: Page, series_id: str) -> list[tuple[str, str | None, Any, bool]]:
+    """What the card of `series_id` said, change by change, since `RECORD_CARDS_JS`: `(status,
+    badge text, bar [value, max], Download disabled)`."""
+    log: list[list[Any]] = page.evaluate("() => globalThis.__cardLog ?? []")
+    return [
+        (status, badge, bar, disabled)
+        for seen, status, badge, bar, disabled in log
+        if seen == series_id
     ]
-    read_at = time.time() - 60
-    library = {
-        "v": 1,
-        "listedAt": read_at,
-        "total": len(items),
-        "countedAt": None,
-        "fullReadAt": read_at,  # the whole list read: its episode counts trusted for 24 h
-        "unconfirmed": False,
-        "complete": True,
-        "short": False,
-        "ended": None,
-        "profile": "@invented_viewer",
-        "items": items,
-        "removed": [],
-    }
-    stamp = "2026-11-19T10:00:00Z"
-    state = {
-        "version": 1,
-        "series_id": series_id,
-        "series_name": SECOND_SERIES_NAME,
-        "episodes": {
-            str(n): {
-                "number": n,
-                "item_id": SECOND_ITEMS[n - 1],
-                "status": "done",
-                "path": f"/dl/{SECOND_SERIES_NAME} - Episode {n:02d}.mp4",
-                "message": (
-                    f"saved {SECOND_SERIES_NAME} - Episode {n:02d}.mp4 (0.1 MiB) + cover embedded"
-                ),
-                "updated_at": stamp,
-                "download_id": n,
-            }
-            for n in range(1, episodes + 1)
-        },
-        "complete_at": stamp,
-        "complete_episodes": episodes,
-    }
-    seeded = {"favoritesLibrary": library, f"series:{series_id}": state}
-    ext.page.evaluate("(items) => chrome.storage.local.set(items)", seeded)
-    ext.page.reload()
-    ext.wait_for(ext.idle, 20, "the reloaded tab did not start")
-    # the page draws the kept library first, then the records' statuses once it has read them:
-    # waited for, so that the scenario starts from what the tab shows of them
-    card = _card(ext.page, series_id)
-    ext.wait_for(
-        lambda: card.count() == 1 and card.get_attribute("data-status") == "on-disk",
-        20,
-        "the tab did not show the seeded drama on disk",
-    )
+
+
+def _phases(states: list[tuple[str, str | None, Any, bool]]) -> list[str]:
+    """The card's statuses in order, each run of the same one counted once."""
+    phases: list[str] = []
+    for status, *_ in states:
+        if not phases or phases[-1] != status:
+            phases.append(status)
+    return phases
+
+
+def _assert_job_shown(page: Page, series_id: str, total: int) -> None:
+    """The card of `series_id` went `idle` → `queued` → `running` → `idle` over a job that
+    downloaded its drama: **Queued** with its **Download** disabled; **Downloading · saved/total**
+    with its bar at `saved` of `total` — counted from the records, so at least one episode saved
+    was shown, and never counting down —, its **Download** disabled; and nothing at all, its
+    **Download** enabled, before and after."""
+    states = _card_states(page, series_id)
+    assert _phases(states) == ["idle", "queued", "running", "idle"], states
+    saved: list[int] = []
+    for status, badge, bar, disabled in states:
+        if status == "queued":
+            assert (badge, bar, disabled) == ("Queued", None, True), states
+        elif status == "running":
+            match = re.fullmatch(rf"Downloading · (\d+)/{total}", badge or "")
+            assert match is not None, states
+            assert bar == [int(match.group(1)), total] and disabled is True, states
+            saved.append(int(match.group(1)))
+        else:
+            assert (status, badge, bar, disabled) == ("idle", None, None, False), states
+    assert saved == sorted(saved) and saved[-1] >= 1, states
+
+
+def _assert_nothing_shown(card: Locator) -> None:
+    """A card no job holds: `idle`, no status badge, no bar, its **Download** enabled."""
+    assert card.get_attribute("data-status") == "idle"
+    assert card.locator(".favorite-status").count() == 0
+    assert card.locator("progress").count() == 0
+    assert card.locator("[data-action='download']").is_enabled()
 
 
 def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_one_request(
@@ -272,14 +274,11 @@ def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_o
 ) -> None:
     """(a) The popup's **Open my library** on the profile: every favorite as a card, in the list's
     order, with its cover from the fake's image CDN (each once, none while the listing job runs,
-    the addresses in the browser session's memory and never on disk), the filters' counts and
-    TikTok's count; the library kept with nothing signed; a second **Open my library** with nothing
-    changed: ONE `drama_list` request, `No changes` — and the same from the page's own **Update
-    from TikTok**."""
-    with (
-        FakeTikTok() as server,
-        ExtensionHarness(tmp_path, server.base_url, test_settings=SETTINGS) as ext,
-    ):
+    the addresses in the browser session's memory and never on disk), no status on any card and no
+    filter chips (3.0.0), TikTok's count; the library kept with nothing signed; a second **Open my
+    library** with nothing changed: ONE `drama_list` request, `No changes` — and the same from the
+    page's own **Update from TikTok**."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         profile, popup, _tab = _profile_and_popup(ext, server.base_url)
         assert popup.locator("#popup-favorites").inner_text() == "Open my library"
         own = len(server.drama_list_requests)
@@ -291,12 +290,13 @@ def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_o
         assert len(server.drama_list_requests) == own + 3  # the whole list: three pages
         total = len(FAVORITES)
         assert page.locator("#library-total").inner_text() == f"TikTok counts {total} dramas"
-        assert _chips(page) == [
-            f"All · {total}",
-            f"Not downloaded · {total}",
-            "Partly · 0",
-            "On disk · 0",
-        ]
+        assert page.locator("#library-shown").inner_text() == f"Showing {total} of {total}"
+        # no lasting status on a card (3.0.0): every one `idle`, no badge, no bar, no chips
+        statuses = [cards.nth(n).get_attribute("data-status") for n in range(cards.count())]
+        assert statuses == ["idle"] * total
+        assert page.locator("#favorites-grid .favorite-status").count() == 0
+        assert page.locator("#favorites-grid progress").count() == 0
+        assert page.locator("[id^='library-chip-']").count() == 0
         assert page.locator("#library-stale").is_hidden()
         # the covers of the cards in view: the fake's image CDN, each asked for once
         ext.wait_for(
@@ -324,11 +324,13 @@ def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_o
         assert all(
             COVER_PATH_RE.match(url.removeprefix(server.base_url)) for url in in_session.values()
         )
-        # kept across sessions: the dramas and TikTok's count — no address, no cover, nothing signed
+        # kept across sessions: the dramas and TikTok's count — no address, no cover, nothing
+        # signed, and nothing 2.x kept of the removals from the Favorites
         stored = ext.storage("favoritesLibrary")["favoritesLibrary"]
         assert [item["seriesId"] for item in stored["items"]] == FAVORITE_IDS
         assert stored["total"] == total
         assert stored["profile"] == "@invented_viewer"
+        assert "removed" not in stored
         assert "http" not in json.dumps(stored)
         entry = ext.journal()[0]
         assert (entry["kind"], entry["favorites"]) == ("favorites", total)
@@ -364,19 +366,17 @@ def test_a_open_my_library_lists_every_favorite_and_an_unchanged_refresh_costs_o
 def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: Path) -> None:
     """(b) The main series and the second one ticked in the library — each framed in the accent
     while ticked, as the approved sketch draws it —, **Download selected dramas**: ONE batch job,
-    the same files (names and bytes: the covers embedded), the same rows and the same label as
-    a paste of their ids in another profile; the cards end **On disk** — the main series' card,
-    whose fifth episode is locked, `5 episodes · 1 locked` (DramaFetch's own records: before the
-    run, TikTok's count alone) —; each drama's
-    notification says it is downloaded — none for the listing before —, and a click on one's body,
-    as Chrome hands it to the service worker, brings the DramaFetch tab to the front (no job, no
-    reload, no request) and takes that notification away. **Remove a drama from my Favorites once
-    all its episodes are downloaded** (2.0.0, on by default) is unticked first: the second drama,
-    downloaded whole, would leave the Favorites on its own — a job of its own, which
-    `test_extension_autoremove.py` proves."""
+    the same files (names and bytes: the covers embedded), the same rows and the same label as a
+    paste of their ids in another profile. While it runs, each card says **Queued** (the second
+    one while the first downloads), then **Downloading · saved/total** with its bar, its
+    **Download** disabled; once the job has ended and the records hold every episode, no card says
+    anything — the main series' meta line stays `5 episodes · 1m`, its locked episode counted
+    nowhere (3.0.0). Each drama's notification says it is downloaded — none for the listing
+    before —, and a click on one's body, as Chrome hands it to the service worker, brings the
+    DramaFetch tab to the front (no job, no reload, no request) and takes that notification
+    away."""
     with FakeTikTok() as server:
-        with ExtensionHarness(tmp_path / "library", server.base_url, test_settings=SETTINGS) as ext:
-            ext.turn_off_auto_remove()  # the download is what this scenario proves
+        with ExtensionHarness(tmp_path / "library", server.base_url) as ext:
             ext.page.evaluate(RECORD_ALERTS_JS)
             profile, popup, _tab = _profile_and_popup(ext, server.base_url)
             _open_library(ext, popup)
@@ -391,8 +391,9 @@ def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: 
             assert _border(_card(page, LIGHTHOUSE_ID)) == plain  # not ticked: as it was
             assert page.locator("#favorites-selection").inner_text() == "2 selected · 8 episodes"
             main_meta = _card(page, SERIES_ID).locator(".favorite-meta")
-            assert main_meta.inner_text() == "5 episodes · 1m"  # never run: TikTok's count alone
+            assert main_meta.inner_text() == "5 episodes · 1m"  # TikTok's count and length
             assert main_meta.get_attribute("data-locked") is None
+            page.evaluate(RECORD_CARDS_JS)
             jobs = ext.finished_jobs()
             page.click("#library-download")
             ext.wait_for(
@@ -401,39 +402,17 @@ def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: 
             library_entry = ext.journal()[0]
             library_files = _saved(ext)
             assert page.input_value("#links") == ""  # the box untouched
+            # what the job did lives in the records: waited for, every episode of both dramas
+            ext.wait_for_records(
+                SERIES_ID, {1: "done", 2: "done", 3: "done", 4: "done", 5: "skipped-locked"}
+            )
+            ext.wait_for_records(SECOND_SERIES_ID, {1: "done", 2: "done", 3: "done"})
+            # what the cards said meanwhile, as each change was drawn, and nothing now
+            _assert_job_shown(page, SERIES_ID, 5)
+            _assert_job_shown(page, SECOND_SERIES_ID, 3)
             for series_id in (SERIES_ID, SECOND_SERIES_ID):
-                card = _card(page, series_id)
-                ext.wait_for(
-                    lambda card=card: card.get_attribute("data-status") == "on-disk",
-                    10,
-                    f"{series_id} is not on disk",
-                )
-            assert _card(page, SECOND_SERIES_ID).locator(".favorite-status").inner_text() == (
-                "On disk · 3/3"
-            )
-            # the main series' card: the locked episode its run listed and skipped, counted, with
-            # why on hover — and its fraction of the same five
-            assert _card(page, SERIES_ID).locator(".favorite-status").inner_text() == (
-                "On disk · 4/5"
-            )
-            ext.wait_for(
-                lambda: main_meta.inner_text() == "5 episodes · 1 locked · 1m",
-                10,
-                "the locked episode is not counted on the card",
-            )
-            assert main_meta.get_attribute("data-locked") == "1"
-            tooltip = main_meta.get_attribute("title") or ""
-            # every reason a run records an episode locked, not only a paid one — in the singular
-            # for its one episode
-            assert tooltip.startswith(
-                "Locked episode: the downloads of this drama skipped it without asking TikTok for"
-                " it — a paid one this account has not unlocked, one TikTok lists as playing short"
-            )
-            assert "or one protected by DRM or with no play address" in tooltip
-            assert "Unlocking in TikTok helps only a paid one; See episodes shows its reason." in (
-                tooltip
-            )
-            assert tooltip.endswith("DramaFetch never unlocks or decrypts anything.")
+                _assert_nothing_shown(_card(page, series_id))
+            assert _phases(_card_states(page, LIGHTHOUSE_ID)) == ["idle"]  # never held
             assert _border(_card(page, SECOND_SERIES_ID)) == plain  # the ticks cleared with the job
             # each drama, as it was done, got its notification, which Chrome showed
             alerts = recorded_alerts(ext, 2)
@@ -474,7 +453,12 @@ def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: 
             assert len(page.evaluate(ALERTS_JS)) == 2  # the same page: not reloaded
             assert (ext.finished_jobs(), ext.idle(), len(ext.tab_urls())) == (jobs, True, tabs)
             assert requests() == before  # nothing asked of the fake TikTok
-        with ExtensionHarness(tmp_path / "box", server.base_url, test_settings=SETTINGS) as box:
+            # the records read again since the job's end: the main series' card counts no locked
+            # episode, and says why nowhere (1.7.0's count and tooltip are gone)
+            assert main_meta.inner_text() == "5 episodes · 1m"
+            assert main_meta.get_attribute("data-locked") is None
+            assert main_meta.get_attribute("title") is None
+        with ExtensionHarness(tmp_path / "box", server.base_url) as box:
             box_entry = box.paste_and_wait(f"{SERIES_ID}\n{SECOND_SERIES_ID}", timeout_s=120)
             box_files = _saved(box)
     assert (library_entry["kind"], library_entry["label"]) == ("batch", "2 series")
@@ -488,163 +472,67 @@ def test_b_download_selected_dramas_downloads_exactly_as_a_paste_does(tmp_path: 
     assert all(message.endswith(" + cover embedded") for _, _, message in done)
 
 
-def test_c_remove_from_favorites_presses_the_bookmark_once_and_the_count_follows(
-    tmp_path: Path,
-) -> None:
+def test_c_a_card_s_own_download_downloads_that_drama_alone(tmp_path: Path) -> None:
     """(c) A card's own **Download** downloads that drama — ONE batch job, `Series <id>`, what
-    **Download selected dramas** queues for it alone (1.7.0) —; then **Remove from Favorites** on
-    it, downloaded whole: the confirmation shows what the
-    records say; confirmed, the drama's page opens in a background tab, its own Bookmark is pressed
-    once (one `collect` request with the page's own `action`), the reload shows it off, the tab is
-    closed; the fake's list loses it, the card says **Removed from your Favorites**, the count is
-    the fake's new total from ONE first-page request of the profile tab; nothing else is asked. The
-    user's own removal: the automatic one (2.0.0, on by default) is unticked first, or the download
-    would take the drama out of the Favorites itself (`test_extension_autoremove.py`)."""
-    with (
-        FakeTikTok() as server,
-        ExtensionHarness(tmp_path, server.base_url, test_settings=SETTINGS) as ext,
-    ):
-        ext.turn_off_auto_remove()  # the user's own Remove from Favorites: what this proves
+    **Download selected dramas** queues for it alone (1.7.0) —: its card **Queued**, then
+    **Downloading · saved/3** with its bar, its **Download** disabled while the job holds it; the
+    records then hold every episode, and the card says nothing again, its **Download** enabled;
+    the other cards never move. Nothing is asked of TikTok but that drama's own page, list, media
+    and covers — and no library cover while the job runs (one in flight before it may end first).
+    Pressed again, the card's **Download** downloads as a paste does: it skips what is on disk —
+    the drama found complete, not one request, the records as they were (only **See episodes**
+    downloads again in full, 3.0.0)."""
+    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         _profile, popup, _tab = _profile_and_popup(ext, server.base_url)
         _open_library(ext, popup)
+        page = ext.page
+        page.evaluate(RECORD_CARDS_JS)
+        before = len(server.requests)
         entry = ext.download_card(SECOND_SERIES_ID)
         assert (entry["kind"], entry["label"]) == ("batch", f"Series {SECOND_SERIES_ID}")
         assert entry["series"][0]["line"] == "complete: 3 of 3 (3 downloaded)"
-        page = ext.page
-        card = _card(page, SECOND_SERIES_ID)
-        ext.wait_for(lambda: card.get_attribute("data-status") == "on-disk", 10, "not on disk")
-        files = _saved(ext)
-        before = len(server.requests)
-        lists = len(server.drama_list_requests)
-        page.locator("#library").scroll_into_view_if_needed()
-        card.locator("[data-action='remove']").click()
-        ext.wait_for(page.locator("#bookmark-dialog").is_visible, 10, "no confirmation")
-        facts = page.locator("#bookmark-dialog-facts li")
-        assert [facts.nth(n).get_attribute("data-fact") for n in range(facts.count())] == [
-            "saved",
-            "verified",
-            "complete",
-            "cover",
+        records = ext.wait_for_records(SECOND_SERIES_ID, {1: "done", 2: "done", 3: "done"})
+        assert all(isinstance(records[n]["download_id"], int) for n in (1, 2, 3))
+        assert sorted(Path(path).name for path in _saved(ext) if path.endswith(".mp4")) == [
+            f"{SECOND_SERIES_NAME} - Episode {number:02d}.mp4" for number in (1, 2, 3)
         ]
-        assert facts.nth(0).inner_text() == "3 of 3 episodes on disk"
-        jobs = ext.finished_jobs()
-        page.click("#bookmark-confirm")
-        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "no removal")
-        assert server.collect_requests == [(COLLECT_PATH, "0")]  # one click, the page's own action
-        assert SECOND_SERIES_ID not in server.favorite_ids
-        assert card.get_attribute("data-status") == "removed"
-        assert card.locator(".favorite-status").inner_text() == "Removed from your Favorites"
-        total = len(FAVORITES) - 1
-        assert page.locator("#library-total").inner_text() == f"TikTok counts {total} dramas"
-        assert page.locator("#library-chip-all").inner_text() == f"All · {total}"
-        assert len(server.drama_list_requests) == lists + 1  # the profile's first page, once
-        assert not [url for url in ext.tab_urls() if "/shortdrama/" in url]  # the tab closed
-        # nothing else: the drama's page twice (its own list requests), the click, the count
+        _assert_job_shown(page, SECOND_SERIES_ID, 3)
+        _assert_nothing_shown(_card(page, SECOND_SERIES_ID))
+        for series_id in FAVORITE_IDS:
+            if series_id != SECOND_SERIES_ID:
+                assert _phases(_card_states(page, series_id)) == ["idle"], series_id
+        # nothing but the drama's own requests; the library's covers never while the job ran
         asked = server.requests[before:]
-        pages = [r for r in asked if SERIES_PATH_RE.match(r.path)]
-        assert [r.path for r in pages] == [f"/shortdrama/episode/{SECOND_SERIES_ID}/1"] * 2
-        others = {r.path for r in asked} - {
-            f"/shortdrama/episode/{SECOND_SERIES_ID}/1",
-            "/api/drama/detail/",
-            "/api/drama/episode/item_list/",
-            COLLECT_PATH,
-            "/api/user/favorite/drama_list/",
-        }
-        assert {path for path in others if not COVER_PATH_RE.match(path)} == set()
-        # a cover may go out before the job starts (it waits for one in flight), never while it runs
-        job = [n for n, r in enumerate(asked) if not COVER_PATH_RE.match(r.path)]
-        assert not [r for r in asked[job[0] : job[-1] + 1] if COVER_PATH_RE.match(r.path)]
-        assert not [r for r in asked if CDN_PATH_RE.match(r.path)]  # no media asked for
-        assert _saved(ext) == files  # no file changed
-        entry = ext.journal()[0]
-        assert entry["kind"] == "unbookmark"
-        assert entry["bookmark"] == {
-            "series_id": SECOND_SERIES_ID,
-            "title": SECOND_SERIES_NAME,
-            "outcome": "removed",
-        }
-        assert "http" not in json.dumps(entry)
-        stored = ext.storage("favoritesLibrary")["favoritesLibrary"]
-        assert stored["total"] == total
-        assert stored["removed"][0]["seriesId"] == SECOND_SERIES_ID
+        own = server.series_requests(SECOND_SERIES_ID)
+        assert [r for r in asked if r.path not in LIBRARY_COVERS and r not in own] == []
+        assert any(CDN_PATH_RE.match(r.path) for r in asked)
+        job = [n for n, r in enumerate(asked) if r.path not in LIBRARY_COVERS]
+        assert not [r for r in asked[job[0] : job[-1] + 1] if r.path in LIBRARY_COVERS]
+        # the card's Download again: the resume rules of a paste — complete, nothing asked
+        before = len(server.requests)
+        again = ext.download_card(SECOND_SERIES_ID)
+        (series,) = again["series"]
+        assert series["status"] == "skipped (complete)"
+        assert [r for r in server.requests[before:] if r.path not in LIBRARY_COVERS] == []
+        assert ext.episode_records(SECOND_SERIES_ID) == records
+        _assert_nothing_shown(_card(page, SECOND_SERIES_ID))
 
 
-def test_d_tiktok_not_keeping_the_change_is_not_kept_and_never_clicked_twice(
+def test_d_an_episode_a_library_download_could_not_save_is_retried_and_saved_whole(
     tmp_path: Path,
 ) -> None:
-    """(d) A fake that answers the click like TikTok but keeps the drama (`collect_ignored`): the
-    button turns off, the reload shows it saved — `not-kept`: the drama stays in the library (on
-    disk) and on the fake, one `collect` request, a stop without a cooldown; and (2.0.0) the
-    status line adds that DramaFetch removes no more dramas on its own until the tab is reloaded."""
-    with (
-        FakeTikTok(collect_ignored=True) as server,
-        ExtensionHarness(tmp_path, server.base_url, test_settings=SETTINGS) as ext,
-    ):
-        _seed(ext, SECOND_SERIES_ID, 3)
-        page = ext.page
-        card = _card(page, SECOND_SERIES_ID)
-        assert card.get_attribute("data-status") == "on-disk"
-        entry = _remove(ext, SECOND_SERIES_ID)
-        assert server.collect_requests == [(COLLECT_PATH, "0")]
-        assert SECOND_SERIES_ID in server.favorite_ids
-        assert card.get_attribute("data-status") == "on-disk"
-        # the user's own removal TikTok did not keep halts the automatic ones (2.0.0, on by default)
-        assert page.locator("#favorites-status").inner_text() == (
-            f"TikTok did not keep the change: “{SECOND_SERIES_NAME}” is still in your Favorites. "
-            "Remove it yourself: Open on TikTok. TikTok did not keep a removal, or refused one: "
-            "DramaFetch removes no more dramas from your Favorites on its own until you reload "
-            "this tab. Remove from Favorites on a card still works."
-        )
-        assert entry["error"] == (
-            "TikTok did not keep the change: the drama is still in your Favorites — remove it on "
-            "TikTok yourself"
-        )
-        assert entry["stopped"] == entry["error"]
-        assert ext.cooldown() is None
-        assert not [url for url in ext.tab_urls() if "/shortdrama/" in url]  # the tab closed
-
-
-def test_e_a_collect_answered_429_is_a_stop_with_the_cooldown(tmp_path: Path) -> None:
-    """(e) The page's own `collect` answered HTTP 429 (`collect_rate_limit`): a stop, the 30-minute
-    cooldown recorded with its reason and shown in the banner; the drama stays in the library."""
-    with (
-        FakeTikTok(collect_rate_limit=True) as server,
-        ExtensionHarness(tmp_path, server.base_url, test_settings=SETTINGS) as ext,
-    ):
-        _seed(ext, SECOND_SERIES_ID, 3)
-        page = ext.page
-        entry = _remove(ext, SECOND_SERIES_ID)
-        assert server.collect_requests == [(COLLECT_PATH, "0")]
-        cooldown = ext.cooldown()
-        assert cooldown is not None
-        assert cooldown["reason"].startswith(
-            "TikTok is rate-limiting this address (HTTP 429 on the Bookmark"
-        )
-        assert cooldown["source"] == "discovery"
-        ext.wait_for(page.locator("#cooldown-banner").is_visible, 10, "no cooldown banner")
-        assert entry["stopped"] == cooldown["reason"]
-        assert _card(page, SECOND_SERIES_ID).get_attribute("data-status") == "on-disk"
-        assert SECOND_SERIES_ID in server.favorite_ids
-        assert not [url for url in ext.tab_urls() if "/shortdrama/" in url]
-
-
-def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_whole(
-    tmp_path: Path,
-) -> None:
-    """(f) The second drama ticked and **Download selected dramas**, the fake cutting the first
+    """(d) The second drama ticked and **Download selected dramas**, the fake cutting the first
     transfer of its episode 2 short (`truncate_once`): episodes 1 and 3 saved, episode 2 shown apart
-    — **Did not download (1)** with its **Retry** button — and the card
-    **Partly · 2/3** — and its notification `⚠ … — 1 episode to retry` / `E02 did not download.`
+    — **Did not download (1)** with its **Retry** button —, the records saying so (the card says
+    nothing: 3.0.0) — and its notification `⚠ … — 1 episode to retry` / `E02 did not download.`
     with ONE button, **Retry**. That button, clicked as Chrome hands the click to the service
     worker (its own `onButtonClicked` listener), is handed to the DramaFetch tab, which queues one
     selection job over that episode alone — the tab's own **Retry** — and takes the notification
     away: the episode requested once more, saved whole with its cover embedded — byte for byte what
-    a clean paste of its id saves in another profile —, the block gone, the card **On disk · 3/3**
-    and the drama's notification `✓ … — downloaded`. The manual path: **Retry on its own what did
-    not download** (1.8.0, on by default) is unticked first, or DramaFetch would queue that retry
-    itself (`test_extension_autoretry.py`) — and so is the automatic removal from the Favorites
-    (2.0.0, on by default), or the drama, whole after the retry, would leave the Favorites in a job
-    of its own (`test_extension_autoremove.py`)."""
+    a clean paste of its id saves in another profile —, the block gone, the records whole and the
+    drama's notification `✓ … — downloaded`. The manual path: **Retry on its own what did not
+    download** (1.8.0, on by default) is unticked first, or DramaFetch would queue that retry
+    itself (`test_extension_autoretry.py`)."""
     second = (SECOND_SERIES_ID, 2)
 
     def media_requests(server: FakeTikTok) -> int:
@@ -658,10 +546,9 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
 
     with (
         FakeTikTok(truncate_once=frozenset({second})) as server,
-        ExtensionHarness(tmp_path / "library", server.base_url, test_settings=SETTINGS) as ext,
+        ExtensionHarness(tmp_path / "library", server.base_url) as ext,
     ):
         ext.turn_off_auto_retry()  # the manual Retry is what this scenario proves
-        ext.turn_off_auto_remove()
         ext.page.evaluate(RECORD_ALERTS_JS)
         _profile, popup, _tab = _profile_and_popup(ext, server.base_url)
         _open_library(ext, popup)
@@ -689,10 +576,9 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         retry = page.locator("#retry-button")
         assert retry.is_visible() and retry.is_enabled()
         assert retry.text_content() == "Retry the episodes that did not download (1)"
-        ext.wait_for(
-            lambda: card.get_attribute("data-status") == "partly", 10, "the card is not partly"
-        )
-        assert card.locator(".favorite-status").inner_text() == "Partly · 2/3"
+        records = ext.wait_for_records(SECOND_SERIES_ID, {1: "done", 2: "failed", 3: "done"})
+        assert records[2]["message"] == rows[1][2] and records[2]["download_id"] is None
+        _assert_nothing_shown(card)  # no Partly any more: the block and the records say it
         (alert,) = recorded_alerts(ext, 1)
         assert alert["id"].endswith(f":{SECOND_SERIES_ID}:retry")
         assert alert["listed"] is True
@@ -719,12 +605,12 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         assert rows[0][2].endswith(" + cover embedded")
         assert media_requests(server) == 2  # requested once more, now whole
         assert page.locator("#failed-block").is_hidden()
-        ext.wait_for(
-            lambda: card.get_attribute("data-status") == "on-disk",
-            10,
-            "not on disk after the retry",
-        )
-        assert card.locator(".favorite-status").inner_text() == "On disk · 3/3"
+        healed = ext.wait_for_records(SECOND_SERIES_ID, {1: "done", 2: "done", 3: "done"})
+        assert healed[2]["message"] == rows[0][2] and isinstance(healed[2]["download_id"], int)
+        assert [healed[n]["download_id"] for n in (1, 3)] == [
+            records[n]["download_id"] for n in (1, 3)
+        ]
+        _assert_nothing_shown(card)
         _first, done = recorded_alerts(ext, 2)  # the retry's own drama, now whole
         assert done["id"].endswith(f":{SECOND_SERIES_ID}:complete")
         assert (done["options"]["title"], done["options"]["message"]) == (
@@ -734,7 +620,7 @@ def test_f_an_episode_a_library_download_could_not_save_is_retried_and_saved_who
         retried = _saved(ext)
     with (
         FakeTikTok() as clean,
-        ExtensionHarness(tmp_path / "clean", clean.base_url, test_settings=SETTINGS) as box,
+        ExtensionHarness(tmp_path / "clean", clean.base_url) as box,
     ):
         box.paste_and_wait(SECOND_SERIES_ID, timeout_s=120)
         whole = _saved(box)

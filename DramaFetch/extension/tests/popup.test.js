@@ -109,7 +109,7 @@ async function popup(options) {
 }
 
 /** A library as `chrome.storage.local` keeps it, TikTok counting `total`. @param {number} total */
-const library = (total) => ({ v: 1, listedAt: 1_800_000_000, total, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A", episodes: 3, durationS: 9 }], removed: [] });
+const library = (total) => ({ v: 1, listedAt: 1_800_000_000, total, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A", episodes: 3, durationS: 9 }] });
 
 test("on a TikTok profile whose favorites list the worker saw: Open my library · N dramas hands that tab over — the message 1.5.0's Choose from your favorites sent", async () => {
   const shown = await popup({ url: PROFILE, template: true, library: library(946) });

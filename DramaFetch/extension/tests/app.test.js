@@ -11,11 +11,11 @@ import { makeEpisode } from "../src/lib/catalog.js";
 import { clearCooldown, recordBlock } from "../src/lib/cooldown.js";
 import { CUT_SHORT_CAUSE_PREFIX, DRM_CAUSE, LOCKED_CAUSE_PREFIX, NOT_ATTEMPTED_CAUSE } from "../src/lib/diagnosis.js";
 import { displayText } from "../src/lib/display.js";
-import { BLOCKED_MESSAGE, DRM_MESSAGE, LIST_RATE_LIMIT_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE, shortServedMessage } from "../src/lib/messages.js";
+import { DRM_MESSAGE, DRM_REMEMBERED_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE, shortServedMessage } from "../src/lib/messages.js";
 import { JOB_REST, LONG_REST, PACE, PacingState, REST, SERIES_REST, pacingOptions, pauseMessage } from "../src/lib/pacing.js";
 import { profileHandleOf } from "../src/lib/library.js";
-import { completeSkip, drmMemorySkip, seriesReport } from "../src/lib/report.js";
-import { donePath, markComplete, missingFiles, newState, record } from "../src/lib/state.js";
+import { completeSkip, seriesReport } from "../src/lib/report.js";
+import { doneEntries, donePath, markComplete, missingFiles, newState, record } from "../src/lib/state.js";
 import {
   ChallengeError,
   DISCOVERY_TAB_KEY,
@@ -40,11 +40,10 @@ import {
   ATTEMPT_SHORT_HEADER_PREFIX,
   contentLength,
   sanitizeError,
+  saveFile,
   servedShort,
 } from "../src/app/downloader.js";
 import { STORAGE_REFUSED_PREFIX, StopRequested, StorageRefusedError, downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
-import { plainText } from "../src/app/alerts.js";
-import { BOOKMARK_CHALLENGE_MESSAGE, BOOKMARK_MESSAGES, BOOKMARK_RATE_LIMIT_MESSAGE } from "../src/app/bookmark.js";
 import { FAVORITES_RATE_LIMIT_MESSAGE } from "../src/app/favorites.js";
 import { DEFAULT_SETTINGS, cooldownStore as pageCooldownStore } from "../src/app/storage.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
@@ -221,6 +220,141 @@ test("skips never pause, count or reset anything", async () => {
   assert.deepEqual(results.map((r) => r.status), ["done", "skipped-locked", "skipped-locked", "done"]);
   assert.deepEqual(fake.pauses.map((p) => p.kind), ["pace"]);
   assert.deepEqual(fake.downloads, [1, 4]);
+});
+
+/**
+ * A series' state as a run left it: `done` episodes saved (`/dl/old/E<n>.mp4`, Chrome's download
+ * id `100 + n`, the file still there), `drm` episodes an earlier download found encrypted.
+ * @param {number[]} done
+ * @param {number[]} [drm]
+ */
+function stateWith(done, drm = []) {
+  const state = newState(SERIES_ID, "Test Series");
+  const context = { exists: () => true, now: 1_800_000_000 };
+  for (const number of done) {
+    record(state, { episode: episode(number), status: "done", path: `/dl/old/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB)`, downloadId: 100 + number }, context);
+  }
+  for (const number of drm) {
+    record(state, { episode: episode(number), status: "failed-unavailable", path: null, message: DRM_MESSAGE }, context);
+  }
+  return state;
+}
+
+test("overwrite (3.0.0, See episodes' downloads): an episode the records say is on disk is downloaded again in full — a request like any other, paced, its new download in the records —; one an earlier download found encrypted is still skipped with no request unless includeLocked, and a locked one stays skipped; without overwrite both on-disk episodes are skipped", async () => {
+  const episodes = [episode(1), episode(2), episode(3, { locked: true }), episode(4), episode(5)];
+  // E01 and E04 on disk, E02 remembered as DRM-protected, E03 locked, E05 never downloaded
+  const resume = fakeEngine();
+  const kept = await downloadSeries(resume.engine, series(episodes), episodes, stateWith([1, 4], [2]));
+  assert.deepEqual(kept.results.map((r) => [r.episode.number, r.status, r.message]), [
+    [1, "skipped-exists", "already downloaded (manifest): E1.mp4"],
+    [2, "skipped-locked", DRM_REMEMBERED_MESSAGE],
+    [3, "skipped-locked", "looks locked"], // the fake downloader's own skip
+    [4, "skipped-exists", "already downloaded (manifest): E4.mp4"],
+    [5, "done", "done 5"],
+  ]);
+  assert.deepEqual(resume.downloads, [5]);
+
+  const again = fakeEngine();
+  again.engine.overwrite = true;
+  const state = stateWith([1, 4], [2]);
+  const { results, stopped } = await downloadSeries(again.engine, series(episodes), episodes, state);
+  assert.equal(stopped, null);
+  assert.deepEqual(results.map((r) => [r.episode.number, r.status, r.message]), [
+    [1, "done", "done 1"],
+    [2, "skipped-locked", DRM_REMEMBERED_MESSAGE], // retrying cannot change that verdict: no request
+    [3, "skipped-locked", "looks locked"],
+    [4, "done", "done 4"],
+    [5, "done", "done 5"],
+  ]);
+  assert.deepEqual(again.downloads, [1, 4, 5]); // the two on disk asked for again, in order
+  assert.deepEqual(again.pauses.map((p) => p.kind), ["pace", "pace"]); // paced like any request (none before the first)
+  // the records hold the new downloads: their path and Chrome's id
+  assert.deepEqual(
+    [1, 4].map((number) => [state.episodes[String(number)]?.status, state.episodes[String(number)]?.path, state.episodes[String(number)]?.download_id]),
+    [["done", "/dl/E1.mp4", 1], ["done", "/dl/E4.mp4", 4]],
+  );
+  // a ticked locked or DRM row (includeLocked): the DRM memory no longer holds it back
+  const asked = fakeEngine();
+  asked.engine.overwrite = true;
+  asked.engine.includeLocked = true;
+  await downloadSeries(asked.engine, series(episodes), episodes, stateWith([1, 4], [2]));
+  assert.deepEqual(asked.downloads, [1, 2, 4, 5]);
+});
+
+test("overwrite (3.0.0): a stop marks the rest `stopped: …` — never the skip an episode on disk (in the records, or in Chrome's history at its target) has without overwrite —; the DRM memory and a locked episode keep theirs; the records then hold the stop's rows, as Python's `Manifest.record` does: an episode on disk the download in full did not get back is recorded as not downloaded (its old file untouched)", async () => {
+  const episodes = [episode(1), episode(2), episode(3), episode(4), episode(5), episode(6, { locked: true })];
+  /**
+   * A 429 on E02; E03 on disk in the records, E04 in Chrome's history at its target, E05 found
+   * encrypted, E06 locked: the rows after the stop, and the records it leaves.
+   * @param {boolean} overwrite
+   */
+  const rest = async (overwrite) => {
+    const fake = fakeEngine({ results: { 2: "failed-rate-limited" } });
+    fake.engine.overwrite = overwrite;
+    fake.engine.downloader.existingResult = (ep) =>
+      ep.number === 4 ? { episode: ep, status: "skipped-exists", path: "/dl/old/E4.mp4", message: "already exists: E4.mp4", downloadId: 104 } : null;
+    const state = stateWith([3], [5]);
+    const { results, stopped } = await downloadSeries(fake.engine, series(episodes), episodes, state);
+    assert.equal(stopped, "episode 2 failed-rate-limited");
+    assert.deepEqual(fake.downloads, [1, 2]); // nothing after the stop
+    const onDisk = new Map(doneEntries(state, () => true)); // what See episodes calls on disk
+    /** @param {number} number */
+    const kept = (number) => {
+      const entry = state.episodes[String(number)];
+      return [number, entry?.status, entry?.path ?? null, entry?.download_id ?? null, onDisk.get(number) ?? null];
+    };
+    return { rows: results.slice(2).map((r) => [r.episode.number, r.status, r.message]), records: [3, 4].map(kept) };
+  };
+  const stoppedBy429 = `stopped: episode 2 failed-rate-limited: ${MEDIA_RATE_LIMIT_MESSAGE}`;
+  const resume = await rest(false);
+  assert.deepEqual(resume.rows, [
+    [3, "skipped-exists", "already downloaded (manifest): E3.mp4"],
+    [4, "skipped-exists", "already exists: E4.mp4"],
+    [5, "skipped-locked", DRM_REMEMBERED_MESSAGE],
+    [6, "skipped-locked", "looks locked: no play address"],
+  ]);
+  // a skip never downgrades an entry on disk: E03 keeps its download, E04's found file is noted
+  assert.deepEqual(resume.records, [
+    [3, "done", "/dl/old/E3.mp4", 103, "/dl/old/E3.mp4"],
+    [4, "skipped-exists", "/dl/old/E4.mp4", 104, "/dl/old/E4.mp4"],
+  ]);
+  const again = await rest(true);
+  assert.deepEqual(again.rows, [
+    [3, "failed-rate-limited", stoppedBy429], // not downloaded again: its retry takes it
+    [4, "failed-rate-limited", stoppedBy429],
+    [5, "skipped-locked", DRM_REMEMBERED_MESSAGE],
+    [6, "skipped-locked", "looks locked: no play address"],
+  ]);
+  // a stop's row is an attempt (`Manifest.record`): E03's download gives way to it, so See episodes
+  // shows it not on disk — ticked — until it is downloaded again, or a paste finds its file, which
+  // nothing touched, in Chrome's history
+  assert.deepEqual(again.records, [
+    [3, "failed-rate-limited", null, null, null],
+    [4, "failed-rate-limited", null, null, null],
+  ]);
+});
+
+test("overwrite (3.0.0): never the complete skip — a series found complete an hour ago, every file still there, is listed and downloaded again in full (Python's `_complete_skip_allowed`); without overwrite it costs no request", async () => {
+  const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
+  /** @param {boolean} overwrite */
+  const run = async (overwrite) => {
+    /** @type {string[]} */
+    const listed = [];
+    const fake = fakeEngine({
+      discover: async (asked) => {
+        listed.push(asked.seriesId);
+        return series([episode(1), episode(2)]);
+      },
+    });
+    fake.engine.overwrite = overwrite;
+    const state = stateWith([1, 2]);
+    markComplete(state, fake.engine.wallClock() - 3600, 2);
+    fake.states.set(SERIES_ID, JSON.parse(JSON.stringify(state)));
+    const [only] = await runBatch(fake.engine, [ref]);
+    return { skipped: only?.report.skippedComplete, contacted: only?.contacted, listed, downloads: fake.downloads, statuses: only?.results.map((r) => r.status) };
+  };
+  assert.deepEqual(await run(false), { skipped: true, contacted: false, listed: [], downloads: [], statuses: ["skipped-exists", "skipped-exists"] });
+  assert.deepEqual(await run(true), { skipped: false, contacted: true, listed: [SERIES_ID], downloads: [1, 2], statuses: ["done", "done"] });
 });
 
 test("a 429 stops the run, records the cooldown once and marks the rest without a request", async () => {
@@ -667,24 +801,33 @@ function fakeFetch(routes, log) {
   );
 }
 
-/** @param {{fetch: typeof fetch, saved?: string[], thumbnail?: string, view?: DownloadsView}} options */
+/**
+ * A downloader over fakes: every file it saves goes to `saved` (its path below the Downloads
+ * folder) and the conflict action it asked Chrome for to `conflicts`; `overwrite` as the jobs of
+ * See episodes set it (3.0.0).
+ * @param {{fetch: typeof fetch, saved?: string[], conflicts?: string[], thumbnail?: string, view?: DownloadsView, overwrite?: boolean}} options
+ */
 function downloader(options) {
   /** @type {string[]} */
   const saved = options.saved ?? [];
+  /** @type {string[]} */
+  const conflicts = options.conflicts ?? [];
   let id = 0;
   return new Downloader({
     quality: "compatible",
     thumbnail: options.thumbnail ?? "embed",
     nameFormat: "{series} - Episode {number}",
     includeLocked: false,
+    overwrite: options.overwrite,
     hostPatterns: ["https://*.tiktok.com/*", "https://*.tiktokcdn.com/*"],
     view: options.view ?? /** @type {never} */ ({ completedAt: () => null, remember() {} }),
     rediscover: async () => {
       throw new Error("no rediscovery expected");
     },
     fetch: options.fetch,
-    save: async (_bytes, _mime, filename) => {
+    save: async (_bytes, _mime, filename, conflictAction) => {
       saved.push(filename);
+      conflicts.push(conflictAction);
       id += 1;
       return /** @type {never} */ ({ id, filename: `/home/me/Downloads/${filename}`, state: "complete", exists: true });
     },
@@ -713,6 +856,80 @@ test("download: verified bytes, one cover GET, the cover embedded, saved under i
   assert.equal(result.message, "saved Test Series - Episode 01.mp4 (0.1 MiB) + cover embedded");
   assert.deepEqual(saved, [`DramaFetch/Test Series [${SERIES_ID}]/Test Series - Episode 01.mp4`]);
   assert.equal(log.length, 2);
+});
+
+test("download with overwrite (3.0.0, See episodes' downloads): an episode Chrome's history shows saved at its target is not skipped — existingResult null, needsNetwork true —: it is downloaded again in full and saved with conflictAction `overwrite` under the same name, its cover file too; a locked one stays skipped; without overwrite the same episode is `skipped-exists` with no request, and a new one is saved with `uniquify`", async () => {
+  const folder = `DramaFetch/Test Series [${SERIES_ID}]`;
+  const target = `${folder}/Test Series - Episode 01.mp4`;
+  const old = { id: 7, filename: `/home/me/Downloads/${target}`, state: "complete", exists: true };
+  // Chrome's history: the episode's file, completed at exactly its target and still there
+  const view = /** @type {DownloadsView} */ (/** @type {unknown} */ ({ completedAt: (/** @type {string} */ relative) => (relative === target ? old : null), remember() {} }));
+  const routes = {
+    "https://v16-webapp-prime.tiktok.com/": () => new Response(video(), { headers: { "content-type": "video/mp4", "content-length": String(128 * 1024) } }),
+    "https://p16-sign-sg.tiktokcdn.com/": () => new Response(COVER, { headers: { "content-type": "image/jpeg" } }),
+  };
+  /** @type {string[]} */
+  const log = [];
+  /** @type {string[]} */
+  const saved = [];
+  /** @type {string[]} */
+  const conflicts = [];
+  // without overwrite (a paste, a card's Download): the file at its target is the episode
+  const resume = downloader({ fetch: fakeFetch(routes, log), saved, conflicts, thumbnail: "both", view });
+  assert.equal(resume.existingResult(episode(1), CONTEXT)?.status, "skipped-exists");
+  assert.equal(resume.needsNetwork(episode(1), CONTEXT), false);
+  const skipped = await resume.download(episode(1), CONTEXT);
+  assert.deepEqual([skipped.status, skipped.message, skipped.downloadId], ["skipped-exists", "already exists: Test Series - Episode 01.mp4", 7]);
+  assert.deepEqual(log, []); // no request
+  assert.equal((await resume.download(episode(2), CONTEXT)).status, "done");
+  assert.deepEqual(conflicts, ["uniquify", "uniquify"]); // the video and its cover file: never a file overwritten
+
+  // with overwrite: downloaded again in full, both files replaced under their own names
+  log.length = 0;
+  saved.length = 0;
+  conflicts.length = 0;
+  const again = downloader({ fetch: fakeFetch(routes, log), saved, conflicts, thumbnail: "both", view, overwrite: true });
+  assert.equal(again.existingResult(episode(1), CONTEXT), null);
+  assert.equal(again.needsNetwork(episode(1), CONTEXT), true);
+  const result = await again.download(episode(1), CONTEXT);
+  assert.equal(result.status, "done");
+  assert.equal(result.message, "saved Test Series - Episode 01.mp4 (0.1 MiB) + cover embedded + file");
+  assert.equal(result.path, `/home/me/Downloads/${target}`);
+  assert.deepEqual(saved, [target, `${folder}/Test Series - Episode 01.jpg`]);
+  assert.deepEqual(conflicts, ["overwrite", "overwrite"]);
+  assert.equal(log.length, 2); // the video and the one cover GET
+  // a locked episode: still skipped, no request
+  assert.equal(again.needsNetwork(episode(3, { locked: true }), CONTEXT), false);
+  assert.equal((await again.download(episode(3, { locked: true }), CONTEXT)).status, "skipped-locked");
+  assert.equal(log.length, 2);
+});
+
+test("saveFile hands Chrome its conflict action: `uniquify` by default — never a file overwritten —, `overwrite` only when asked (3.0.0: See episodes' downloads again)", async () => {
+  /** @type {Record<string, unknown>[]} */
+  const asked = [];
+  const api = /** @type {typeof chrome.downloads} */ (
+    /** @type {unknown} */ ({
+      download: async (/** @type {Record<string, unknown>} */ options) => {
+        asked.push(options);
+        return asked.length;
+      },
+      search: async (/** @type {{id?: number}} */ query) => [{ id: query.id, filename: `/home/me/Downloads/E${query.id}.mp4`, state: "complete", exists: true }],
+      onChanged: { addListener: () => undefined, removeListener: () => undefined },
+    })
+  );
+  const bytes = new Uint8Array([0, 0, 0, 8, 0x66, 0x72, 0x65, 0x65]);
+  const first = await saveFile(bytes, "video/mp4", "DramaFetch/S [1]/S - Episode 01.mp4", undefined, api);
+  await saveFile(bytes, "video/mp4", "DramaFetch/S [1]/S - Episode 01.mp4", "overwrite", api);
+  await saveFile(bytes, "image/jpeg", "DramaFetch/S [1]/S - Episode 01.jpg", "uniquify", api);
+  assert.equal(first.filename, "/home/me/Downloads/E1.mp4");
+  assert.deepEqual(
+    asked.map((options) => [options["filename"], options["conflictAction"], options["saveAs"]]),
+    [
+      ["DramaFetch/S [1]/S - Episode 01.mp4", "uniquify", false],
+      ["DramaFetch/S [1]/S - Episode 01.mp4", "overwrite", false],
+      ["DramaFetch/S [1]/S - Episode 01.jpg", "uniquify", false],
+    ],
+  );
 });
 
 test("download: 403 moves on, at most 4 URLs per episode; a host outside the manifest counts, never requested", async () => {
@@ -1356,8 +1573,6 @@ class FakeElement {
     this.selectionEnd = 0;
     this.lang = "";
     this.text = "";
-    /** whether a `<dialog>` is open */
-    this.open = false;
     /** @type {number | undefined} how many times the page scrolled it into view */
     this.scrolledIntoView = undefined;
     /** @type {Record<string, string | undefined>} */
@@ -1476,13 +1691,6 @@ class FakeElement {
   /** @param {string} type */
   fire(type) {
     for (const listener of this.listeners.get(type) ?? []) listener({ preventDefault: () => undefined });
-  }
-  /** A `<dialog>` opened as a modal (the confirmation of Remove from Favorites). */
-  showModal() {
-    this.open = true;
-  }
-  close() {
-    this.open = false;
   }
   scrollIntoView() {
     this.scrolledIntoView = (this.scrolledIntoView ?? 0) + 1;
@@ -3448,9 +3656,9 @@ const partOf = (element, className) => descendants(element).find((part) => ` ${p
 
 /**
  * The library's cards the grid shows (1.5.0's panel rows, on the 1.6.0 card grid): `[series id,
- * title, episodes and length, status, ticked, shown]` — the status the card's badge carries
- * (`on-disk`, `partly`, `none`, `queued`, `running`, `removed`), `shown` true for every card drawn:
- * a drama the search or a status filter leaves out has no card at all.
+ * title, episodes and length, state, ticked, shown]` — the state the card's `data-status` carries
+ * (3.0.0: `queued`, `running` or `idle`, from the jobs alone), `shown` true for every card drawn:
+ * a drama the search leaves out has no card at all.
  * @param {Awaited<ReturnType<typeof fakePage>>} page
  */
 const favoriteRows = (page) =>
@@ -3458,7 +3666,7 @@ const favoriteRows = (page) =>
     card.getAttribute("data-series-id"),
     partOf(card, "favorite-title")?.textContent,
     partOf(card, "favorite-meta")?.textContent,
-    partOf(card, "favorite-status")?.getAttribute("data-status") ?? null,
+    card.getAttribute("data-status"),
     descendants(card).find((part) => part.tagName === "INPUT")?.checked ?? false,
     true,
   ]);
@@ -3474,7 +3682,7 @@ const tickOf = (page, seriesId) => {
   return card === undefined ? undefined : descendants(card).find((part) => part.tagName === "INPUT");
 };
 
-test("the page: List favorites reads every page of the tab's list after a pause each, fills the panel as pages arrive — episodes and length, the records' status —, filters and selects the shown ones, with nothing downloaded until asked; nothing asked of TikTok without the tab's favorites address", async () => {
+test("the page: List favorites reads every page of the tab's list after a pause each, fills the panel as pages arrive — episodes and length, no status from the records (3.0.0) —, filters and selects the shown ones, with nothing downloaded until asked; nothing asked of TikTok without the tab's favorites address", async () => {
   const complete = newState(LIGHTHOUSE, "The Lighthouse Keeper's Promise");
   const partly = newState(SNOW_B, "Snowfall in Two Cities");
   for (const [state, numbers] of /** @type {[import("../src/lib/state.js").SeriesState, number[]][]} */ ([[complete, Array.from({ length: 60 }, (_, index) => index + 1)], [partly, [1]]])) {
@@ -3513,14 +3721,16 @@ test("the page: List favorites reads every page of the tab's list after a pause 
     assert.deepEqual(pauses, [0.8, 0.8]);
     assert.equal(job.contacted, true); // the rest between jobs counts this job
     assert.equal(element("favorites-card").hidden, false); // shown by the listing
-    for (let turns = 0; turns < 10; turns += 1) await page.turn(); // the records' statuses
+    for (let turns = 0; turns < 10; turns += 1) await page.turn(); // the records read
+    // one saved whole, one in part, three never run: no card says so (3.0.0) — idle, no status badge
     assert.deepEqual(favoriteRows(page), [
-      [LIGHTHOUSE, "The Lighthouse Keeper's Promise", "60 episodes · 1h 19m", "on-disk", false, true],
-      [SNOW_A, "Snowfall in Two Cities", "60 episodes · 1h 37m", "none", false, true],
-      [SNOW_B, "Snowfall in Two Cities", "60 episodes · 1h 37m", "partly", false, true],
-      [PAPER, "Paper Crowns", "30 episodes · 25m", "none", false, true],
-      [MOON, "Moonlight Over the Harbor", "12 episodes", "none", false, true],
+      [LIGHTHOUSE, "The Lighthouse Keeper's Promise", "60 episodes · 1h 19m", "idle", false, true],
+      [SNOW_A, "Snowfall in Two Cities", "60 episodes · 1h 37m", "idle", false, true],
+      [SNOW_B, "Snowfall in Two Cities", "60 episodes · 1h 37m", "idle", false, true],
+      [PAPER, "Paper Crowns", "30 episodes · 25m", "idle", false, true],
+      [MOON, "Moonlight Over the Harbor", "12 episodes", "idle", false, true],
     ]);
+    for (const card of element("favorites-grid").children) assert.equal(partOf(card, "favorite-status"), undefined);
     assert.equal(element("favorites-count").textContent, "5 favorite dramas listed.");
     // the guidance (`favoritesLoaded`): a card's own Download, or several ticked and Download selected dramas
     assert.equal(element("input-status").textContent, "5 favorite dramas listed: press Download on a drama, or tick several and press Download selected dramas.");
@@ -3533,7 +3743,8 @@ test("the page: List favorites reads every page of the tab's list after a pause 
     element("favorites-filter").value = "SNOWFALL";
     element("favorites-filter").fire("input");
     assert.deepEqual(favoriteRows(page).map(([id]) => id), [SNOW_A, SNOW_B]);
-    assert.equal(element("library-chip-all").textContent, "All · 5");
+    assert.equal(element("library-shown").textContent, "Showing 2 of 2");
+    assert.equal(element("favorites-count").textContent, "5 favorite dramas listed."); // the library still holds all five
     element("favorites-select-all").checked = true;
     element("favorites-select-all").fire("change");
     assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [SNOW_A, SNOW_B]);
@@ -3980,29 +4191,27 @@ function storedLibrary(items, changes = {}) {
     total: items.length,
     countedAt: null,
     fullReadAt: readAt,
-    unconfirmed: false,
     complete: true,
     short: false,
     ended: null,
     profile: PROFILE,
     items: items.map(([seriesId, title, episodes]) => ({ seriesId, title, episodes, durationS: episodes === null ? null : episodes * 79 })),
-    removed: [],
     ...changes,
   };
 }
 
 /**
- * A series' stored progress: `numbers` saved with the downloader's message (the cover embedded,
- * unless `bareCover` names episodes whose cover was not), found complete with `complete` episodes
- * (at `completeAt`, seconds since the epoch: a fixed time by default).
+ * A series' stored progress: `numbers` saved with the downloader's message (the cover embedded),
+ * found complete with `complete` episodes (at `completeAt`, seconds since the epoch: a fixed time by
+ * default).
  * @param {string} seriesId
  * @param {number[]} numbers
- * @param {{complete?: number, bareCover?: number[], completeAt?: number}} [options]
+ * @param {{complete?: number, completeAt?: number}} [options]
  */
 function savedState(seriesId, numbers, options = {}) {
   const state = newState(seriesId, "A drama");
   for (const number of numbers) {
-    const message = options.bareCover?.includes(number) ? `saved E${number}.mp4 (0.1 MiB); cover: HTTP 404 from p16.tiktokcdn.com` : `saved E${number}.mp4 (0.1 MiB) + cover embedded`;
+    const message = `saved E${number}.mp4 (0.1 MiB) + cover embedded`;
     record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message, downloadId: number }, { exists: () => true, now: 1_800_000_000 });
   }
   if (options.complete !== undefined) markComplete(state, options.completeAt ?? 1_800_000_100, options.complete);
@@ -4026,7 +4235,7 @@ const FIVE = [
 const cardOf = (page, seriesId) => page.element("favorites-grid").children.find((card) => card.getAttribute("data-series-id") === seriesId);
 
 /**
- * A card's button by its action (`remove`, `browse`, `open`), when it has one.
+ * A card's button by its action (`download`, `browse`, `open`), when it has one.
  * @param {Awaited<ReturnType<typeof fakePage>>} page
  * @param {string} seriesId
  * @param {string} action
@@ -4037,41 +4246,34 @@ const actionOf = (page, seriesId, action) => {
 };
 
 /**
- * The cards' `[series id, status text]`.
+ * The cards' `[series id, status text]` — the text of the card's status badge, which it has only
+ * while a job holds its drama (`Queued`, `Downloading · S/N`); `undefined` for an idle card (3.0.0:
+ * no status from the records).
  * @param {Awaited<ReturnType<typeof fakePage>>} page
  */
 const statusTexts = (page) => page.element("favorites-grid").children.map((card) => [card.getAttribute("data-series-id"), partOf(card, "favorite-status")?.textContent]);
+
+/**
+ * A card's episodes and length line (`60 episodes · 1h 19m`), when the card is drawn.
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ * @param {string} seriesId
+ */
+const metaOf = (page, seriesId) => {
+  const card = page.element("favorites-grid").children.find((article) => article.getAttribute("data-series-id") === seriesId);
+  return card === undefined ? undefined : partOf(card, "favorite-meta")?.textContent;
+};
 
 /** @param {Awaited<ReturnType<typeof fakePage>>} page @param {number} [rounds] */
 async function settled(page, rounds = 12) {
   for (let turn = 0; turn < rounds; turn += 1) await page.turn();
 }
 
-test("the line of the dramas DramaFetch removed since the last read: one in the singular, more in the plural, in English and in Spanish (2.0.0: an automatic removal shows it after every drama it removes)", async () => {
-  const cases = [
-    { language: /** @type {const} */ ("en"), removed: [MOON], line: "1 removed from your Favorites by DramaFetch since the last read: it leaves the library when you update it." },
-    { language: /** @type {const} */ ("en"), removed: [MOON, LIGHTHOUSE], line: "2 removed from your Favorites by DramaFetch since the last read: they leave the library when you update it." },
-    { language: /** @type {const} */ ("es"), removed: [MOON], line: "1 quitado de tu Bookmark por DramaFetch desde la última lectura: sale de la biblioteca al actualizarla." },
-    { language: /** @type {const} */ ("es"), removed: [MOON, LIGHTHOUSE], line: "2 quitados de tu Bookmark por DramaFetch desde la última lectura: salen de la biblioteca al actualizarla." },
-  ];
-  for (const item of cases) {
-    const at = Date.now() / 1000 - 60;
-    const page = await fakePage({ language: item.language, storage: { favoritesLibrary: storedLibrary(FIVE, { removed: item.removed.map((seriesId) => ({ seriesId, at })) }) } });
-    try {
-      assert.equal(page.element("library-removed").hidden, false, item.line);
-      assert.equal(page.element("library-removed").textContent, item.line);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("the page: the library kept from an earlier session is shown at once with no request — the connection line with TikTok's count, the filters' counts, the records' statuses, the twins, 60 cards at a time —; the search, the status filters and the sort narrow and order what is shown", async () => {
+test("the page: the library kept from an earlier session is shown at once with no request — the connection line with TikTok's count, the twins, 60 cards at a time, no status from the records and no status filters (3.0.0) —; the search and the sort narrow and order what is shown", async () => {
   /** @type {[string, string, number][]} */
   const many = Array.from({ length: 130 }, (_, n) => [String(7712345678901300000n + BigInt(n)), `Drama ${String(n).padStart(3, "0")}`, 10]);
   const page = await fakePage({
     storage: {
-      favoritesLibrary: storedLibrary([...FIVE, ...many], { total: 134, removed: [{ seriesId: MOON, at: Date.now() / 1000 - 60 }] }),
+      favoritesLibrary: storedLibrary([...FIVE, ...many], { total: 135 }),
       [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, Array.from({ length: 60 }, (_, n) => n + 1), { complete: 60 }),
       [`series:${SNOW_B}`]: savedState(SNOW_B, [1]),
     },
@@ -4083,46 +4285,40 @@ test("the page: the library kept from an earlier session is shown at once with n
     assert.equal(element("library-empty").hidden, true);
     assert.equal(element("library-source").textContent, "Read from your TikTok tab (@invented_viewer)");
     assert.equal(element("library-age").textContent, "2 h ago");
-    assert.equal(element("library-total").textContent, "TikTok counts 134 dramas");
+    assert.equal(element("library-total").textContent, "TikTok counts 135 dramas");
     assert.equal(element("library-stale").hidden, true); // the library holds what TikTok counts
-    assert.equal(element("favorites-count").textContent, "134 favorite dramas listed.");
+    assert.equal(element("favorites-count").textContent, "135 favorite dramas listed.");
     assert.deepEqual(page.sessionKeys.filter((key) => String(key).startsWith("favoritesTemplate:")), []);
-    // the filters' counts: the removed drama in none of them, its own line
-    assert.deepEqual(
-      ["all", "none", "partly", "on-disk"].map((filter) => element(`library-chip-${filter}`).textContent),
-      ["All · 134", "Not downloaded · 132", "Partly · 1", "On disk · 1"],
-    );
-    assert.equal(element("library-chip-all").getAttribute("aria-pressed"), "true");
-    assert.equal(element("library-removed").hidden, false);
-    assert.equal(element("library-removed").textContent, "1 removed from your Favorites by DramaFetch since the last read: it leaves the library when you update it.");
-    // the first 60 cards, in the list's order, with the records' statuses and the twins' badge
+    // the first 60 cards, in the list's order, with the twins' badge — and no status: the one saved
+    // whole, the one saved in part and the ones never run look alike (3.0.0), no badge, no bar
     assert.equal(element("favorites-grid").children.length, 60);
     assert.deepEqual(statusTexts(page).slice(0, 6), [
-      [LIGHTHOUSE, "On disk · 60/60"],
-      [SNOW_A, "Not downloaded"],
-      [SNOW_B, "Partly · 1/60"],
-      [PAPER, "Not downloaded"],
-      [MOON, "Removed from your Favorites"],
-      [many[0]?.[0], "Not downloaded"],
+      [LIGHTHOUSE, undefined],
+      [SNOW_A, undefined],
+      [SNOW_B, undefined],
+      [PAPER, undefined],
+      [MOON, undefined],
+      [many[0]?.[0], undefined],
     ]);
-    assert.deepEqual(favoriteRows(page).slice(0, 2), [
-      [LIGHTHOUSE, "The Lighthouse Keeper's Promise", "60 episodes · 1h 19m", "on-disk", false, true],
-      [SNOW_A, "Snowfall in Two Cities", "60 episodes · 1h 19m", "none", false, true],
+    assert.deepEqual(favoriteRows(page).slice(0, 3), [
+      [LIGHTHOUSE, "The Lighthouse Keeper's Promise", "60 episodes · 1h 19m", "idle", false, true],
+      [SNOW_A, "Snowfall in Two Cities", "60 episodes · 1h 19m", "idle", false, true],
+      [SNOW_B, "Snowfall in Two Cities", "60 episodes · 1h 19m", "idle", false, true],
     ]);
+    for (const card of element("favorites-grid").children) {
+      assert.equal(card.getAttribute("data-status"), "idle");
+      assert.equal(card.className, "drama-card idle");
+      assert.equal(descendants(card).some((part) => part.tagName === "PROGRESS"), false); // a bar only while its drama downloads
+    }
     const twins = page.element("favorites-grid").children.filter((card) => partOf(card, "twin") !== undefined).map((card) => card.getAttribute("data-series-id"));
     assert.deepEqual(twins, [SNOW_A, SNOW_B]);
-    assert.equal(cardOf(page, MOON)?.className, "drama-card removed"); // dashed, no tick, no action but its note
-    assert.equal(tickOf(page, MOON), undefined);
-    assert.equal(actionOf(page, MOON, "open"), undefined);
-    assert.equal(cardOf(page, SNOW_B) !== undefined && descendants(/** @type {FakeElement} */ (cardOf(page, SNOW_B))).some((part) => part.tagName === "PROGRESS"), true); // partly: its bar
-    // the actions: Download (1.7.0), See episodes and Open on TikTok on every card still in the
-    // Bookmark — See episodes is the one way left to list a drama's episodes —, Remove from Favorites
-    // only on an on-disk one; a removed drama none
+    for (const seriesId of [LIGHTHOUSE, SNOW_B, MOON]) assert.ok(tickOf(page, seriesId) !== undefined, seriesId); // every card can be ticked
+    // the actions: Download (1.7.0), See episodes and Open on TikTok on every card, on disk or not —
+    // See episodes is the one way left to list a drama's episodes; 3.0.0: nothing removes a drama
+    // from the Favorites
     /** @param {string} seriesId @returns {(string | null)[]} */
     const actions = (seriesId) => descendants(/** @type {FakeElement} */ (cardOf(page, seriesId))).filter((part) => part.tagName === "BUTTON").map((part) => part.getAttribute("data-action"));
-    assert.deepEqual(actions(LIGHTHOUSE), ["download", "remove", "browse", "open"]);
-    assert.deepEqual(actions(SNOW_B), ["download", "browse", "open"]);
-    assert.deepEqual(actions(MOON), []);
+    for (const seriesId of [LIGHTHOUSE, SNOW_B, MOON]) assert.deepEqual(actions(seriesId), ["download", "browse", "open"], seriesId);
     assert.equal(actionOf(page, LIGHTHOUSE, "download")?.textContent, "Download");
     assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, false);
     // 60 more at a time
@@ -4142,17 +4338,7 @@ test("the page: the library kept from an earlier session is shown at once with n
     element("favorites-filter").value = "";
     element("favorites-filter").fire("input");
     assert.equal(element("favorites-grid").children.length, 60);
-    // a status filter: only its dramas — never the removed one
-    element("library-chip-partly").fire("click");
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [SNOW_B]);
-    assert.equal(element("library-chip-partly").getAttribute("aria-pressed"), "true");
-    assert.equal(element("library-chip-all").getAttribute("aria-pressed"), "false");
-    element("library-chip-on-disk").fire("click");
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE]);
-    element("library-chip-none").fire("click");
-    assert.equal(favoriteRows(page).length, 60);
-    assert.ok(!favoriteRows(page).some(([id]) => [LIGHTHOUSE, SNOW_B, MOON].includes(String(id))));
-    element("library-chip-all").fire("click");
+    assert.equal(element("library-shown").textContent, "Showing 60 of 135"); // every drama, whatever its records hold
     // the sort: title A–Z, most episodes first, back to the list's own order
     element("library-sort").value = "title";
     element("library-sort").fire("change");
@@ -4171,6 +4357,26 @@ test("the page: the library kept from an earlier session is shown at once with n
     assert.equal(element("app-status").dataset["state"], "idle");
   } finally {
     page.restore();
+  }
+});
+
+test("the cards' lasting statuses, their filters and the locked count are gone (DramaFetch 3.0.0, the owner's decision of 2026-11-25): no chip in the page, no handler, no rule, no text in either language — Queued and Downloading stay", () => {
+  const html = readFileSync(new URL("../src/app/app.html", import.meta.url), "utf8");
+  for (const removed of ["library-chip", "chips", "libraryChips", "Filter by status", "“On disk” =", "with what is already on disk"]) assert.equal(html.includes(removed), false, removed);
+  const source = readFileSync(new URL("../src/app/app.js", import.meta.url), "utf8");
+  for (const removed of ["library-chip", "setLibraryFilter", "library.filter", "chipCounts", "inFilter", "libraryChip", "libraryOnDisk", "libraryPartly", "libraryNone", "libraryLocked", "progress.locked", "progress.status"]) {
+    assert.equal(source.includes(removed), false, removed);
+  }
+  const css = readFileSync(new URL("../src/app/app.css", import.meta.url), "utf8");
+  for (const removed of [".chip", ".badge.on-disk", ".badge.partly", ".badge.none"]) assert.equal(css.includes(removed), false, removed);
+  for (const language of ["en", "es"]) {
+    /** @type {Record<string, {message: string}>} */
+    const catalog = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
+    for (const key of Object.keys(catalog)) assert.ok(!/^libraryChip|^libraryOnDisk$|^libraryPartly$|^libraryNone$|^libraryLocked/.test(key), `${language}: ${key}`);
+    // no hint explains a status any more
+    for (const key of ["favoritesHint", "libraryEmpty"]) assert.doesNotMatch(String(catalog[key]?.message), /“On disk”|“En disco”|with what is already on disk|con lo que ya está en disco/, `${language}: ${key}`);
+    // kept: the two statuses a card shows while a job holds its drama
+    for (const key of ["libraryQueued", "libraryRunning"]) assert.ok(Object.hasOwn(catalog, key), `${language}: ${key}`);
   }
 });
 
@@ -4227,15 +4433,22 @@ test("the page: Download selected dramas queues ONE batch job over exactly the t
     assert.equal(element("favorites-selection").textContent, "0 selected · 0 episodes");
     assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked), []);
     assert.equal(element("favorites-status").textContent, "2 series queued: they download one after the other, with the usual pauses.");
-    // the cards of the job's series say Queued; the others what the records say
+    // the cards of the job's series say Queued; the others nothing (idle)
     element("library-sort").value = "recent";
     element("library-sort").fire("change");
     assert.deepEqual(favoriteRows(page).map(([id, , , status]) => [id, status]), [
       [LIGHTHOUSE, "queued"],
-      [SNOW_A, "none"],
-      [SNOW_B, "none"],
+      [SNOW_A, "idle"],
+      [SNOW_B, "idle"],
       [PAPER, "queued"],
-      [MOON, "none"],
+      [MOON, "idle"],
+    ]);
+    assert.deepEqual(statusTexts(page), [
+      [LIGHTHOUSE, "Queued"],
+      [SNOW_A, undefined],
+      [SNOW_B, undefined],
+      [PAPER, "Queued"],
+      [MOON, undefined],
     ]);
   } finally {
     page.restore();
@@ -4472,33 +4685,29 @@ function lockedState(seriesId, done, locked, complete) {
   return JSON.parse(JSON.stringify(state));
 }
 
-test("the page: a card's episode count is its status fraction's — TikTok's count raised to what the records hold —; ` · N locked` from the records' locked episodes, with its tooltip, none without; Most episodes and the selection's sum count the same; in Spanish too", async () => {
+test("the page: a card's episode count — TikTok's count raised to what the records hold — and its length, nothing more: no locked count and no tooltip (3.0.0); Downloading · saved/total counts against the same number; Most episodes and the selection's sum count the same; in Spanish too", async () => {
   const storage = {
-    // TikTok's favorites entry says 12; a run listed 55 — 10 saved, 45 locked: on disk, 10/55
+    // TikTok's favorites entry says 12; a run listed 55 — 10 saved, 45 locked: 55 episodes
     favoritesLibrary: storedLibrary(FIVE),
     [`series:${MOON}`]: lockedState(MOON, Array.from({ length: 10 }, (_, n) => n + 1), Array.from({ length: 45 }, (_, n) => n + 11), 10),
-    // 30 by TikTok's count, 3 saved, none locked: partly, 3/30, no locked note
+    // 30 by TikTok's count, 3 saved, none locked: 30 episodes
     [`series:${PAPER}`]: lockedState(PAPER, [1, 2, 3], []),
   };
   const page = await fakePage({ storage });
   try {
-    const { element } = page;
+    const { element, module } = page;
     await settled(page);
     const moon = favoriteRows(page).find(([id]) => id === MOON);
-    assert.deepEqual(moon?.slice(2, 4), ["55 episodes · 45 locked · 16m", "on-disk"]);
-    assert.deepEqual(statusTexts(page).find(([id]) => id === MOON), [MOON, "On disk · 10/55"]); // the card agrees with itself
+    assert.deepEqual(moon?.slice(2, 4), ["55 episodes · 16m", "idle"]); // the 45 locked ones counted among its episodes, never named
     const meta = partOf(/** @type {FakeElement} */ (cardOf(page, MOON)), "favorite-meta");
-    assert.equal(meta?.getAttribute("data-locked"), "45");
-    // every reason a run records an episode locked, not only a paid one: unlocking helps only those
-    assert.equal(
-      meta?.title,
-      "Locked episodes (45): the downloads of this drama skipped them without asking TikTok for them — paid ones this account has not unlocked, ones TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), ones protected by DRM or with no play address. Unlocking in TikTok helps only the paid ones; See episodes shows each one's reason. DramaFetch never unlocks or decrypts anything.",
-    );
+    assert.equal(meta?.getAttribute("data-locked"), null);
+    assert.equal(meta?.title, "");
+    assert.equal(partOf(/** @type {FakeElement} */ (cardOf(page, MOON)), "favorite-status"), undefined); // no status from the records
     const paper = partOf(/** @type {FakeElement} */ (cardOf(page, PAPER)), "favorite-meta");
     assert.equal(paper?.textContent, "30 episodes · 40m");
     assert.equal(paper?.getAttribute("data-locked"), null);
     assert.equal(paper?.title, "");
-    assert.deepEqual(statusTexts(page).find(([id]) => id === PAPER), [PAPER, "Partly · 3/30"]);
+    assert.equal(statusTexts(page).find(([id]) => id === PAPER)?.[1], undefined);
     // a drama DramaFetch never ran: TikTok's count alone — nothing asked of TikTok to learn more
     assert.equal(partOf(/** @type {FakeElement} */ (cardOf(page, LIGHTHOUSE)), "favorite-meta")?.textContent, "60 episodes · 1h 19m");
     // Most episodes by that number: Moonlight's 55 above Paper Crowns' 30 (by TikTok's 12 it would be last)
@@ -4513,42 +4722,56 @@ test("the page: a card's episode count is its status fraction's — TikTok's cou
       box.fire("change");
     }
     assert.equal(element("favorites-selection").textContent, "2 selected · 85 episodes");
+    // downloading it: the card agrees with itself — Downloading · 10/55, the bar out of 55
+    const engine = module.buildEngine({ ...BATCH_JOB, refs: [refOf(MOON)] }, { pauses: [], inputs: [], taking: true });
+    engine.onSeriesStart?.(1, 1, refOf(MOON));
+    assert.equal(statusTexts(page).find(([id]) => id === MOON)?.[1], "Downloading · 10/55");
+    const bar = descendants(/** @type {FakeElement} */ (cardOf(page, MOON))).find((part) => part.tagName === "PROGRESS");
+    assert.deepEqual([bar?.getAttribute("max"), bar?.getAttribute("value")], ["55", "10"]);
+    assert.equal(metaOf(page, MOON), "55 episodes · 16m");
   } finally {
     page.restore();
   }
-  // in Spanish, with one more drama whose records hold ONE locked episode: `1 bloqueado`, never
-  // `1 bloqueados`
+  // in Spanish, with one more drama whose records hold ONE locked episode: its count and length
+  // only, never `1 bloqueado`
   const spanish = await fakePage({ storage: { ...storage, [`series:${SNOW_A}`]: lockedState(SNOW_A, [1], [2]) }, language: "es" });
   try {
     await settled(spanish);
     const meta = partOf(/** @type {FakeElement} */ (cardOf(spanish, MOON)), "favorite-meta");
-    assert.equal(meta?.textContent, "55 episodios · 45 bloqueados · 16 min");
-    assert.match(String(meta?.title), /^Episodios bloqueados \(45\): las descargas de este drama los omitieron sin pedírselos a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortados \(reproduce … s de … s: una ventana /);
-    assert.match(String(meta?.title), /protegidos con DRM o sin dirección de reproducción—\. Desbloquear en TikTok solo sirve para los de pago;/);
-    assert.deepEqual(statusTexts(spanish).find(([id]) => id === MOON)?.[1], "En disco · 10/55");
+    assert.equal(meta?.textContent, "55 episodios · 16 min");
+    assert.equal(meta?.title, "");
     const one = partOf(/** @type {FakeElement} */ (cardOf(spanish, SNOW_A)), "favorite-meta");
-    assert.equal(one?.textContent, "60 episodios · 1 bloqueado · 1 h 19 min");
-    assert.equal(one?.getAttribute("data-locked"), "1");
-    // its tooltip in the singular too: one episode, skipped, its reason
-    assert.equal(
-      one?.title,
-      "Episodio bloqueado: las descargas de este drama lo omitieron sin pedírselo a TikTok —de pago que esta cuenta no desbloqueó, que TikTok lista como recortado (reproduce … s de … s: una ventana de un episodio no desbloqueado, o un defecto de TikTok), protegido con DRM o sin dirección de reproducción—. Desbloquear en TikTok solo sirve si es de pago; Ver episodios muestra su motivo. DramaFetch nunca desbloquea ni descifra nada.",
-    );
+    assert.equal(one?.textContent, "60 episodios · 1 h 19 min");
+    assert.equal(one?.getAttribute("data-locked"), null);
+    assert.equal(one?.title, "");
+    assert.equal(statusTexts(spanish).find(([id]) => id === MOON)?.[1], undefined);
+    // downloading it, in Spanish: Descargando · 10/55
+    const engine = spanish.module.buildEngine({ ...BATCH_JOB, refs: [refOf(MOON)] }, { pauses: [], inputs: [], taking: true });
+    engine.onSeriesStart?.(1, 1, refOf(MOON));
+    assert.equal(statusTexts(spanish).find(([id]) => id === MOON)?.[1], "Descargando · 10/55");
   } finally {
     spanish.restore();
   }
-  // in English, one locked episode reads `1 locked`
+  // in English, one locked episode: no locked count either
   const english = await fakePage({ storage: { ...storage, [`series:${SNOW_A}`]: lockedState(SNOW_A, [1], [2]) } });
   try {
     await settled(english);
     const one = partOf(/** @type {FakeElement} */ (cardOf(english, SNOW_A)), "favorite-meta");
-    assert.equal(one?.textContent, "60 episodes · 1 locked · 1h 19m");
-    assert.equal(
-      one?.title,
-      "Locked episode: the downloads of this drama skipped it without asking TikTok for it — a paid one this account has not unlocked, one TikTok lists as playing short (plays … s of … s: a window for an episode not unlocked, or a defect on TikTok's side), or one protected by DRM or with no play address. Unlocking in TikTok helps only a paid one; See episodes shows its reason. DramaFetch never unlocks or decrypts anything.",
-    );
+    assert.equal(one?.textContent, "60 episodes · 1h 19m");
+    assert.equal(one?.title, "");
   } finally {
     english.restore();
+  }
+  // a drama TikTok's list gives no episode count and no length for, never run: `–`, and no status
+  const UNKNOWN = "7712345678901234577";
+  const bare = await fakePage({ storage: { favoritesLibrary: storedLibrary([...FIVE, [UNKNOWN, "No Count Yet", null]]) } });
+  try {
+    await settled(bare);
+    assert.equal(metaOf(bare, UNKNOWN), "–");
+    assert.equal(cardOf(bare, UNKNOWN)?.getAttribute("data-status"), "idle");
+    assert.equal(statusTexts(bare).find(([id]) => id === UNKNOWN)?.[1], undefined);
+  } finally {
+    bare.restore();
   }
 });
 
@@ -4627,11 +4850,19 @@ test("the page: Download selected dramas pressed while Update from TikTok still 
   }
 });
 
-test("the page: a card's status follows a batch job — Queued while it waits, Downloading S/N after every episode, then what the records say once its series is done", async () => {
+test("the page: a card's status follows a batch job — Queued while it waits, Downloading S/N with its bar after every episode, then nothing once its series is done (3.0.0: no status from the records — its count stays)", async () => {
   const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
   try {
     const { element, module, local } = page;
     const status = () => Object.fromEntries(statusTexts(page));
+    /** @returns {(string | null | undefined)[]} the card's state, its badge's class and its bar `[value, max]`, or none */
+    const card = () => {
+      const article = /** @type {FakeElement} */ (cardOf(page, PAPER));
+      const bar = descendants(article).find((part) => part.tagName === "PROGRESS");
+      return [article.getAttribute("data-status"), partOf(article, "favorite-status")?.className, bar?.getAttribute("value"), bar?.getAttribute("max")];
+    };
+    assert.equal(status()[PAPER], undefined); // nothing to say while no job holds it
+    assert.deepEqual(card(), ["idle", undefined, undefined, undefined]);
     page.hold();
     const box = tickOf(page, PAPER);
     assert.ok(box !== undefined);
@@ -4640,267 +4871,32 @@ test("the page: a card's status follows a batch job — Queued while it waits, D
     element("library-download").fire("click");
     await page.turn();
     assert.equal(status()[PAPER], "Queued");
+    assert.deepEqual(card(), ["queued", "badge favorite-status queued", undefined, undefined]); // no bar while it waits
     // the running job's hooks, as the engine calls them
     const job = /** @type {import("../src/app/app.js").Job} */ ({ ...BATCH_JOB, label: "Series", refs: [{ kind: "series", seriesId: PAPER, episodeHint: null, sourceUrl: PAPER }] });
     const engine = module.buildEngine(job, { pauses: [], inputs: [], taking: true });
     engine.onSeriesStart?.(1, 1, { kind: "series", seriesId: PAPER, episodeHint: null, sourceUrl: PAPER });
     assert.equal(status()[PAPER], "Downloading · 0/30");
+    assert.deepEqual(card(), ["running", "badge favorite-status running", "0", "30"]);
     local.set(`series:${PAPER}`, savedState(PAPER, [1, 2]));
     const ep = makeEpisode({ number: 2, itemId: "i2", title: "Episode 2", seriesId: PAPER, durationS: 3, coverUrl: null, raw: {} });
     engine.onResult?.({ episode: ep, status: "done", path: "/dl/E2.mp4", message: "saved E2.mp4 (0.1 MiB) + cover embedded", downloadId: 2 });
     await settled(page);
     assert.equal(status()[PAPER], "Downloading · 2/30");
+    assert.deepEqual(card(), ["running", "badge favorite-status running", "2", "30"]);
     local.set(`series:${PAPER}`, savedState(PAPER, Array.from({ length: 30 }, (_, n) => n + 1), { complete: 30 }));
     engine.onSeriesDone?.(1, 1, finishedRun(PAPER, "Paper Crowns", []));
     await settled(page);
-    assert.equal(status()[PAPER], "On disk · 30/30");
-    assert.equal(element("library-chip-on-disk").textContent, "On disk · 1");
+    // done — every episode on disk — and the card says nothing: no On disk, no bar; its count as before
+    assert.equal(status()[PAPER], undefined);
+    assert.deepEqual(card(), ["idle", undefined, undefined, undefined]);
+    assert.equal(metaOf(page, PAPER), "30 episodes · 40m");
   } finally {
     page.restore();
   }
 });
 
-test("the page: Remove from Favorites on an on-disk card opens the confirmation with what the records support — the cover line only when every saved episode's message says it was embedded —; confirmed, it queues the removal once; Cancel queues nothing", async () => {
-  const page = await fakePage({
-    storage: {
-      favoritesLibrary: storedLibrary([
-        [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3],
-        [PAPER, "Paper Crowns", 3],
-        [MOON, "Moonlight Over the Harbor", 3],
-      ]),
-      [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
-      [`series:${PAPER}`]: savedState(PAPER, [1, 2, 3], { complete: 3, bareCover: [2] }),
-      [`series:${MOON}`]: savedState(MOON, [1]),
-    },
-  });
-  try {
-    const { element } = page;
-    const facts = () => element("bookmark-dialog-facts").children.map((fact) => [fact.getAttribute("data-fact"), fact.textContent]);
-    // only an on-disk card offers it
-    assert.equal(actionOf(page, MOON, "remove"), undefined);
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    assert.equal(element("bookmark-dialog").open, true);
-    assert.equal(element("bookmark-dialog-name").textContent, "The Lighthouse Keeper's Promise");
-    assert.equal(element("bookmark-dialog-meta").textContent, "3 episodes · 4m");
-    assert.deepEqual(facts().map(([fact]) => fact), ["saved", "verified", "complete", "cover"]);
-    assert.equal(facts()[0]?.[1], "3 of 3 episodes on disk");
-    assert.equal(facts()[3]?.[1], "Cover included in every episode");
-    element("bookmark-cancel").fire("click");
-    assert.equal(element("bookmark-dialog").open, false);
-    assert.equal(element("app-status").dataset["state"], "idle"); // nothing queued
-    // one episode's cover only kept as a file: no cover line
-    actionOf(page, PAPER, "remove")?.fire("click");
-    await settled(page);
-    assert.deepEqual(facts().map(([fact]) => fact), ["saved", "verified", "complete"]);
-    element("bookmark-cancel").fire("click");
-    // confirmed: the removal job, once
-    page.hold();
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    await page.turn();
-    assert.equal(element("bookmark-dialog").open, false);
-    assert.equal(element("progress-current").textContent, "Remove “The Lighthouse Keeper's Promise” from your Favorites");
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    assert.equal(element("favorites-status").textContent, "“The Lighthouse Keeper's Promise” is already waiting to be removed from your Favorites.");
-    assert.deepEqual(waitingRows(page), []);
-  } finally {
-    page.restore();
-  }
-});
-
-/**
- * The drama's TikTok page and the user's TikTok profile tab (42, its favorites address kept by the
- * worker) on the page's fake chrome, for Remove from Favorites: `tabs` (the background tab 77
- * opened, navigated, closed; the profile tab), `scripting` (the Bookmark read or pressed in the
- * drama's tab, the favorites list's first page fetched in the profile's), `webRequest` (the page's
- * own `collect`, and its own episode list as it reloads: `reloadList`, a status) and the session
- * storage. `log` records the steps; `site.recorded` is the worker's record of the drama's tab
- * (`DISCOVERY_TAB_KEY`) as it stood at the click. `profileUrl` is the profile tab's address (the
- * library's own profile, `@invented_viewer`, by default); `buttonsAfterReload: 0` makes the reloaded
- * page show no Bookmark button; `collectStatus` is TikTok's answer to the page's own `collect` (200 by
- * default); with `loginPage`, the drama's address takes the tab to TikTok's login page instead;
- * `pageText` is the drama page's visible text (`A drama` by default: TikTok's verification wall when
- * it says so).
- * @param {{saved?: boolean, keeps?: boolean, profileTab?: boolean, firstPage?: Record<string, unknown>, profileUrl?: string, reloadList?: number, buttonsAfterReload?: number, collectStatus?: number, loginPage?: boolean, pageText?: string}} [options]
- */
-function bookmarkChrome(options = {}) {
-  const fake = /** @type {Record<string, Record<string, unknown>>} */ (/** @type {unknown} */ (globalThis.chrome));
-  const site = { saved: options.saved ?? true, shown: "", url: "", clicks: 0, loads: 0, recorded: /** @type {unknown} */ (undefined) };
-  /** @type {string[]} */
-  const log = [];
-  /** @type {Map<string, unknown>} */
-  const session = new Map();
-  const profile = options.profileUrl ?? "https://www.tiktok.com/@invented_viewer";
-  // the worker's record: the address and whose list it reads, the profile page that asked for it
-  if (options.profileTab !== false) session.set(`favoritesTemplate:${FAVORITES_TAB}`, { url: FAVORITES_TEMPLATE, at: 1_794_351_500, profile: profileHandleOf(profile) });
-  /** @type {((details: chrome.webRequest.CompletedDetails) => void)[]} */
-  let listeners = [];
-  Object.assign(fake["tabs"] ?? {}, {
-    create: async (/** @type {chrome.tabs.CreateProperties} */ properties) => {
-      log.push(`open ${properties.url}`);
-      site.url = "about:blank";
-      return { id: 77, index: 1, windowId: 10, active: false, status: "complete" };
-    },
-    update: async (/** @type {number} */ tabId, /** @type {chrome.tabs.UpdateProperties} */ properties) => {
-      if (tabId === 77 && properties.url !== undefined) {
-        log.push(`navigate ${properties.url}`);
-        site.url = options.loginPage === true ? "https://www.tiktok.com/login?redirect_url=x" : properties.url;
-        site.loads += 1;
-        site.shown = site.saved ? "saved" : "unsaved";
-        if (site.loads > 1 && options.buttonsAfterReload === 0) site.shown = "";
-        if (site.loads > 1 && options.reloadList !== undefined) {
-          // the reloaded page's own episode-list request, answered so
-          const url = `https://www.tiktok.com/api/drama/episode/item_list/?aid=1988&count=30&cursor=0&seriesId=${LIGHTHOUSE}`;
-          for (const listener of listeners) listener({ requestId: "2", url, method: "GET", tabId: 77, type: "xmlhttprequest", timeStamp: 0, statusCode: options.reloadList, fromCache: false });
-        }
-      }
-      return { id: tabId, index: 1, windowId: 10, active: false };
-    },
-    get: async (/** @type {number} */ tabId) => {
-      if (tabId === 77) return { id: 77, index: 1, windowId: 10, active: false, status: "complete", url: site.url };
-      if (tabId === FAVORITES_TAB) return { id: tabId, index: 0, windowId: 1, active: false, url: profile };
-      throw new Error(`No tab with id: ${tabId}.`);
-    },
-    remove: async (/** @type {number} */ tabId) => void log.push(`close ${tabId}`),
-    query: async () => (options.profileTab === false ? [] : [{ id: FAVORITES_TAB, index: 0, windowId: 1, active: false, url: profile }]),
-  });
-  fake["webRequest"] = {
-    onCompleted: {
-      addListener: (/** @type {(details: chrome.webRequest.CompletedDetails) => void} */ listener) => void listeners.push(listener),
-      removeListener: (/** @type {(details: chrome.webRequest.CompletedDetails) => void} */ listener) => {
-        listeners = listeners.filter((known) => known !== listener);
-      },
-    },
-    onErrorOccurred: { addListener: () => undefined, removeListener: () => undefined },
-  };
-  fake["scripting"] = {
-    executeScript: async (/** @type {chrome.scripting.ScriptInjection<unknown[], unknown>} */ injection) => {
-      if (injection.target.tabId === FAVORITES_TAB) {
-        assert.equal(injection.world, "MAIN");
-        const [url] = /** @type {[string]} */ (injection.args);
-        log.push(`request ${url}`);
-        return [{ frameId: 0, result: JSON.parse(JSON.stringify(options.firstPage ?? FAVORITES_CAPTURE)) }];
-      }
-      assert.equal(injection.target.tabId, 77);
-      assert.equal(injection.world, undefined); // the drama's page: the ISOLATED world only
-      if (injection.args === undefined) return [{ frameId: 0, result: options.pageText ?? "A drama" }]; // its text
-      const [press, seriesId] = /** @type {[boolean, string]} */ (injection.args);
-      assert.ok(typeof seriesId === "string" && site.url.includes(`/shortdrama/episode/${seriesId}/`)); // the drama the tab was opened on
-      if (press && site.shown === "saved") {
-        site.clicks += 1;
-        log.push("click");
-        site.recorded = session.get(DISCOVERY_TAB_KEY); // the worker's record of this tab, while it is open
-        for (const listener of listeners) listener({ requestId: "1", url: "https://www.tiktok.com/api/item/collect/?action=0", method: "GET", tabId: 77, type: "xmlhttprequest", timeStamp: 0, statusCode: options.collectStatus ?? 200, fromCache: false });
-        site.shown = "unsaved";
-        if (options.keeps !== false) site.saved = false;
-        return [{ frameId: 0, documentId: site.url + site.clicks, result: "clicked" }];
-      }
-      return [{ frameId: 0, documentId: `${site.url}#${log.length}`, result: site.shown || "missing" }];
-    },
-  };
-  fake["storage"] = {
-    ...fake["storage"],
-    session: {
-      get: async (/** @type {string} */ key) => (session.has(key) ? { [key]: session.get(key) } : {}),
-      set: async (/** @type {Record<string, unknown>} */ items) => {
-        for (const [key, value] of Object.entries(items)) session.set(key, value);
-      },
-      remove: async (/** @type {string} */ key) => void session.delete(key),
-    },
-  };
-  return { site, log, session };
-}
-
-/**
- * The removal job as the page queues it, and its engine: pauses recorded, a clock they move on.
- * With `auto`, DramaFetch's own removal of the drama (2.0.0, `queueAutoRemoval`): its label and
- * `bookmark.auto` as the page queues it.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- * @param {string} title
- * @param {number | null} episodes the library's count of the drama (null: TikTok's list gave none)
- * @param {import("../src/app/app.js").AutoRemoval} [auto]
- */
-function removalJob(page, seriesId, title, episodes, auto) {
-  /** @type {import("../src/app/app.js").Job} */
-  const job = { id: 9, kind: "unbookmark", label: `Remove “${title}” from your Favorites`, refs: [{ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId }], series: null, numbers: [], includeLocked: false, recheck: false, bookmark: { seriesId, title, episodes } };
-  if (auto !== undefined) {
-    job.label = `Remove “${title}” from your Favorites (automatic)`;
-    job.bookmark = { seriesId, title, episodes, auto };
-  }
-  const engine = page.module.buildEngine(job, { pauses: [], inputs: [], taking: true });
-  /** @type {number[]} */
-  const pauses = [];
-  let clock = 0;
-  engine.sleep = async (seconds) => {
-    pauses.push(seconds);
-    clock += seconds;
-  };
-  engine.clock = () => clock;
-  engine.rng = { uniform: (low) => low };
-  return { job, engine, pauses };
-}
-
-/**
- * What the library's status line adds once a removal TikTok did not keep, did not confirm or refused
- * halted DramaFetch's own removals (2.0.0) — while the automatic removal is on, as it is by default.
- */
-const HALTED_LINE =
-  "TikTok did not keep a removal, or refused one: DramaFetch removes no more dramas from your Favorites on its own until you reload this tab. Remove from Favorites on a card still works.";
-
-test("the page: a removal — the records say on disk —: TikTok's Bookmark pressed once in a background tab and checked after a reload; the card says so at once, the counts follow, TikTok's new total from ONE first-page request of the profile's tab, the library kept without any address", async () => {
-  const LIBRARY = [
-    [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3],
-    [SNOW_A, "Snowfall in Two Cities", 60],
-    [SNOW_B, "Snowfall in Two Cities", 60],
-  ];
-  const page = await fakePage({
-    storage: {
-      favoritesLibrary: storedLibrary(/** @type {[string, string, number][]} */ (LIBRARY), { total: 946, complete: false }),
-      [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
-    },
-  });
-  try {
-    const { element, module, local } = page;
-    const after = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(1);
-    const { site, log } = bookmarkChrome({ firstPage: { ...FAVORITES_CAPTURE, total: "945", dramaList: after } });
-    const { job, engine, pauses } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(element("library-chip-on-disk").textContent, "On disk · 1");
-    assert.equal(await module.runUnbookmark(job, engine, entry), null);
-    // one click, in a background tab opened and closed, the page reloaded to check; then one request
-    assert.equal(site.clicks, 1);
-    // the tab recorded for the worker with THIS DramaFetch tab (1): the worker closes it if this tab goes away
-    assert.deepEqual(site.recorded, { tabId: 77, appTabId: 1 });
-    const drama = `https://www.tiktok.com/shortdrama/episode/${LIGHTHOUSE}/1`;
-    assert.deepEqual(log, ["open about:blank", `navigate ${drama}`, "click", `navigate ${drama}`, "close 77", `request ${FAVORITES_TEMPLATE}`]);
-    // a pause before the click, the reload and the first-page request (and the polls in between)
-    assert.deepEqual(pauses.filter((seconds) => seconds !== 1), [0.8, 0.8, 0.8]);
-    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: "The Lighthouse Keeper's Promise", outcome: "removed" });
-    assert.equal(entry["error"], undefined);
-    // the card says so, out of the counts but its own line; the count TikTok's new total
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-    assert.equal(element("library-chip-all").textContent, "All · 2");
-    assert.equal(element("library-chip-on-disk").textContent, "On disk · 0");
-    assert.equal(element("library-total").textContent, "TikTok counts 945 dramas");
-    assert.equal(element("library-age").textContent, "just now");
-    assert.equal(element("favorites-status").textContent, "“The Lighthouse Keeper's Promise” removed from your Favorites: TikTok kept the change. TikTok counts 945 dramas.");
-    // kept: the removal and the count — and no address, no cover URL, nothing signed
-    const kept = /** @type {Record<string, unknown>} */ (local.get("favoritesLibrary"));
-    assert.equal(kept["total"], 945);
-    assert.deepEqual(/** @type {Record<string, unknown>[]} */ (kept["removed"]).map((removed) => removed["seriesId"]), [LIGHTHOUSE]);
-    assert.doesNotMatch(JSON.stringify(kept), /http/);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a drama whose records hold episodes beyond the library's count that did not download (TikTok added them after the list was read, and the run failed on them) is Partly, never On disk: its card says so, and Remove from Favorites asks nothing of TikTok", async () => {
+test("the page: a drama whose records hold episodes beyond the library's count that did not download (TikTok added them after the list was read, and the run failed on them) counts them: its card says 5 episodes, and Downloading · 3/5 while it downloads — never a status of its own (3.0.0)", async () => {
   const state = JSON.parse(JSON.stringify(savedState(LIGHTHOUSE, [1, 2, 3])));
   for (const number of [4, 5]) {
     state.episodes[String(number)] = { number, item_id: `i${number}`, status: "failed", path: null, message: "download looks incomplete or wrong: truncated body (60 %)", updated_at: "2027-01-15T08:00:00Z", download_id: null };
@@ -4912,96 +4908,18 @@ test("the page: a drama whose records hold episodes beyond the library's count t
     },
   });
   try {
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "partly");
-    assert.equal(Object.fromEntries(statusTexts(page))[LIGHTHOUSE], "Partly · 3/5"); // the records know 5 episodes
-    const { site, log } = bookmarkChrome();
-    const { job, engine, pauses } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
-    assert.deepEqual(log, []); // no tab, no request
-    assert.deepEqual(pauses, []);
-    assert.equal(site.clicks, 0);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES["not-on-disk"]);
+    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "idle");
+    assert.equal(Object.fromEntries(statusTexts(page))[LIGHTHOUSE], undefined);
+    assert.equal(metaOf(page, LIGHTHOUSE), "5 episodes · 4m"); // the records know 5 episodes, TikTok's entry said 3
+    const engine = page.module.buildEngine({ ...BATCH_JOB, refs: [refOf(LIGHTHOUSE)] }, { pauses: [], inputs: [], taking: true });
+    engine.onSeriesStart?.(1, 1, refOf(LIGHTHOUSE));
+    assert.equal(Object.fromEntries(statusTexts(page))[LIGHTHOUSE], "Downloading · 3/5");
   } finally {
     page.restore();
   }
 });
 
-test("the page: a removal that changes nothing — no request without the records' on disk, TikTok still listing the drama first thing (not kept after all), no TikTok tab to count with (the last count minus one, not confirmed), Stop after the click (the outcome unknown)", async () => {
-  // the records do not say on disk: nothing asked of TikTok at all
-  let page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, [1, 2]) } });
-  try {
-    const { site, log } = bookmarkChrome();
-    const { job, engine, pauses } = removalJob(page, PAPER, "Paper Crowns", 30);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
-    assert.deepEqual(log, []);
-    assert.deepEqual(pauses, []);
-    assert.equal(site.clicks, 0);
-    assert.match(String(entry["error"]), /^not removed from your Favorites: DramaFetch's records do not show every episode/);
-    assert.equal(page.element("favorites-status").textContent, "“Paper Crowns” was not removed: DramaFetch's records do not show every episode of it on disk. Nothing was asked of TikTok.");
-    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "partly");
-  } finally {
-    page.restore();
-  }
-  // TikTok keeps nothing a synthetic click did, but the reloaded page lied: the first page still holds it — not kept, a stop
-  const library = { favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946 }), [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }) };
-  page = await fakePage({ storage: library });
-  try {
-    bookmarkChrome({ firstPage: FAVORITES_CAPTURE });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    const stop = await page.module.runUnbookmark(job, engine, entry);
-    assert.equal(stop, "TikTok did not keep the change: the drama is still in your Favorites — remove it on TikTok yourself");
-    assert.equal(entry["error"], stop);
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk"); // back as it was
-    assert.equal(page.element("library-total").textContent, "TikTok counts 946 dramas");
-    // 2.0.0: the user's own removal TikTok did not keep halts DramaFetch's own ones — the line says so
-    assert.equal(page.element("favorites-status").textContent, `TikTok did not keep the change: “The Lighthouse Keeper's Promise” is still in your Favorites. Remove it yourself: Open on TikTok. ${HALTED_LINE}`);
-  } finally {
-    page.restore();
-  }
-  // no TikTok tab with the list open: removed, the count the last one minus one — not confirmed
-  page = await fakePage({ storage: library });
-  try {
-    const { log } = bookmarkChrome({ profileTab: false });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    assert.equal(await page.module.runUnbookmark(job, engine, {}), null);
-    assert.ok(!log.some((step) => step.startsWith("request ")));
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-    assert.equal(page.element("library-total").textContent, "TikTok counts 945 dramas (not confirmed: open your profile → Favorites → Drama and press Update from TikTok)");
-    const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-    assert.equal(kept["total"], 945);
-    assert.equal(kept["unconfirmed"], true);
-  } finally {
-    page.restore();
-  }
-  // Stop once Bookmark was pressed: the tab closed, the outcome unknown — the job's record says to check on TikTok
-  page = await fakePage({ storage: library });
-  try {
-    const { site, log } = bookmarkChrome();
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    const sleep = engine.sleep;
-    engine.sleep = async (seconds) => {
-      if (site.clicks > 0) throw new StopRequested();
-      await sleep(seconds);
-    };
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    await assert.rejects(page.module.runUnbookmark(job, engine, entry), StopRequested);
-    assert.equal(site.clicks, 1);
-    assert.ok(log.includes("close 77"));
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "stopped by you after DramaFetch pressed Bookmark: the outcome is unknown — check on TikTok");
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: the smart refresh — a library read from this TikTok profile and still TikTok's list costs ONE request (the removed dramas leave it); otherwise the whole list is read and becomes the library; nothing kept signed", async () => {
+test("the page: the smart refresh — a library read from this TikTok profile and still TikTok's list costs ONE request (a library 2.x kept: the dramas it had removed from the Favorites leave it as it is read back, never written again); otherwise the whole list is read and becomes the library; nothing kept signed", async () => {
   const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
   /** @param {string} seriesId @param {string} title @param {number} episodes */
   const entryOf = (seriesId, title, episodes) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 79) });
@@ -5011,13 +4929,20 @@ test("the page: the smart refresh — a library read from this TikTok profile an
     "0": { ...FAVORITES_CAPTURE, total: String(dramas.length), cursor: "1794351568", hasMore: true, dramaList: dramas.slice(0, 3) },
     "1794351568": { ...FAVORITES_CAPTURE, total: String(dramas.length), cursor: "1794350100", hasMore: false, dramaList: dramas.slice(3) },
   });
-  // unchanged: one request; TikTok's count; the dramas DramaFetch removed leave the library
-  let page = await fakePage({ storage: { favoritesLibrary: storedLibrary([...FIVE, [LANTERN_ID, "The Last Lantern", 24]], { total: 6, removed: [{ seriesId: LANTERN_ID, at: 1 }] }) } });
+  // unchanged: one request; TikTok's count — over a library 2.x kept after it removed a sixth drama
+  // from the Favorites (its count the last one minus one, not confirmed): that drama left the
+  // library as it was read back (3.0.0), its count is unknown until TikTok says it again (2.x's
+  // estimate, never TikTok's), and 2.x's marks are never written again
+  let page = await fakePage({ storage: { favoritesLibrary: storedLibrary([...FIVE, [LANTERN_ID, "The Last Lantern", 24]], { total: 5, unconfirmed: true, removed: [{ seriesId: LANTERN_ID, at: 1 }] }) } });
   try {
     const { element, module, local } = page;
     const tab = favoritesTab({ pages: pagesOf(list) });
     tab.remember(1_794_351_500);
-    assert.equal(cardOf(page, LANTERN_ID)?.getAttribute("data-status"), "removed");
+    assert.equal(cardOf(page, LANTERN_ID), undefined); // gone at once: no card, no count
+    assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
+    assert.equal(element("favorites-count").textContent, "5 favorite dramas listed.");
+    assert.equal(element("library-total").textContent, "TikTok did not say how many dramas it counts");
+    assert.equal(element("library-stale").hidden, true);
     const job = favoritesJob();
     const { engine, pauses } = favoritesEngine(page, job);
     /** @type {Record<string, unknown>} */
@@ -5027,11 +4952,11 @@ test("the page: the smart refresh — a library read from this TikTok profile an
     assert.deepEqual(pauses, [0.8]);
     assert.equal(element("input-status").textContent, "No changes: TikTok counts 5 dramas.");
     assert.equal(entry["favorites"], 5);
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId)); // the removed one left
-    assert.equal(element("library-removed").hidden, true);
+    assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
     assert.equal(element("library-total").textContent, "TikTok counts 5 dramas");
     const kept = /** @type {Record<string, unknown>} */ (local.get("favoritesLibrary"));
-    assert.deepEqual(kept["removed"], []);
+    assert.equal(Object.hasOwn(kept, "removed"), false); // 2.x's marks never written again
+    assert.equal(Object.hasOwn(kept, "unconfirmed"), false);
     assert.equal(/** @type {unknown[]} */ (kept["items"]).length, 5);
     assert.doesNotMatch(JSON.stringify(kept), /http/);
   } finally {
@@ -5089,7 +5014,7 @@ test("the page: the smart refresh — a library read from this TikTok profile an
   }
 });
 
-test("the page: an update that does not reach TikTok's end never shrinks the library kept — page 2 answered HTTP 429, Stop after page 1, TikTok sending no more after page 1: the library in the page and on disk is the one it was (the drama DramaFetch removed still marked), only TikTok's count of page 1 taken (the library's own profile), the time of its whole read kept; the status line, the job's record, the cooldown and the job's stop as before", async () => {
+test("the page: an update that does not reach TikTok's end never shrinks the library kept — page 2 answered HTTP 429, Stop after page 1, TikTok sending no more after page 1: the library in the page and on disk is the one it was, only TikTok's count of page 1 taken (the library's own profile), the time of its whole read kept; the status line, the job's record, the cooldown and the job's stop as before", async () => {
   const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
   const NEW_ID = "7712345678901234568";
   // TikTok's list now: a favorite added since on top — so the smart refresh's first page differs and
@@ -5101,8 +5026,8 @@ test("the page: an update that does not reach TikTok's end never shrinks the lib
     hasMore: true,
     dramaList: [{ ...shape, dramaID: NEW_ID, dramaName: "A New Favorite" }, .../** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(0, 2)],
   };
-  /** the library kept: the five, and a sixth DramaFetch removed since its whole list was read (two hours ago) */
-  const keptSix = () => storedLibrary([...FIVE, [LANTERN_ID, "The Last Lantern", 24]], { total: 6, removed: [{ seriesId: LANTERN_ID, at: 1_794_000_000 }] });
+  /** the library kept: the five and a sixth, its whole list read two hours ago */
+  const keptSix = () => storedLibrary([...FIVE, [LANTERN_ID, "The Last Lantern", 24]], { total: 6 });
   const sixIds = [...FIVE.map(([seriesId]) => seriesId), LANTERN_ID];
   /**
    * The library as it was, in the page and on disk — but for TikTok's count of page 1, read now.
@@ -5111,16 +5036,13 @@ test("the page: an update that does not reach TikTok's end never shrinks the lib
    */
   const keptAsItWas = (page, stored) => {
     assert.deepEqual(favoriteRows(page).map(([id]) => id), sixIds); // its dramas, in its order
-    assert.equal(cardOf(page, LANTERN_ID)?.getAttribute("data-status"), "removed"); // its mark kept
     assert.equal(cardOf(page, NEW_ID), undefined); // nothing of the partial read
     assert.equal(page.element("library-total").textContent, "TikTok counts 7 dramas"); // page 1's count
-    assert.equal(page.element("library-stale").textContent, "This list has 5: press Update from TikTok to bring it up to date");
+    assert.equal(page.element("library-stale").textContent, "This list has 6: press Update from TikTok to bring it up to date");
     const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
     assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), sixIds);
-    assert.deepEqual(kept["removed"], stored["removed"]);
     assert.equal(kept["total"], 7);
     assert.ok(Math.abs(Number(kept["countedAt"]) - Date.now() / 1000) < 60, "TikTok's count read now");
-    assert.equal(kept["unconfirmed"], false);
     for (const key of ["fullReadAt", "listedAt", "complete", "profile"]) assert.deepEqual(kept[key], stored[key], key); // the whole read's
   };
   // page 2 answered HTTP 429: the job's stop, the cooldown recorded with its reason, nothing counted in the job's record
@@ -5325,34 +5247,6 @@ test("the page: the popup's Open my library away from a TikTok profile shows the
   }
 });
 
-test("the page: after a removal TikTok's count is read only from a tab of the library's own profile — another account's favorites tab is never asked: the last count minus one, not confirmed", async () => {
-  const page = await fakePage({
-    storage: {
-      favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946 }),
-      [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
-    },
-  });
-  try {
-    const { site, log } = bookmarkChrome({ profileUrl: "https://www.tiktok.com/@someone_else" });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
-    assert.equal(site.clicks, 1);
-    assert.ok(log.includes("close 77"));
-    assert.ok(!log.some((step) => step.startsWith("request ")), "another account's list is never asked for this library's count");
-    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: "The Lighthouse Keeper's Promise", outcome: "removed" });
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-    assert.equal(page.element("library-total").textContent, "TikTok counts 945 dramas (not confirmed: open your profile → Favorites → Drama and press Update from TikTok)");
-    const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-    assert.equal(kept["total"], 945);
-    assert.equal(kept["unconfirmed"], true);
-    assert.equal(kept["profile"], PROFILE);
-  } finally {
-    page.restore();
-  }
-});
-
 test("the page: the episode list's thumbnails and the library's covers share the page's one lane — never two cover requests in flight at once — and the same gate: never during a job or a cooldown, nor after a refused write", async () => {
   const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
   try {
@@ -5368,258 +5262,7 @@ test("the page: the episode list's thumbnails and the library's covers share the
   }
 });
 
-/** The library of the removal tests: two dramas, TikTok counting 946; the first one downloaded whole. */
-const REMOVAL_LIBRARY = () => ({
-  favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946 }),
-  [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
-});
-/** The connection line's count once a removal could not be counted: the last one minus one. */
-const UNCONFIRMED_945 = "TikTok counts 945 dramas (not confirmed: open your profile → Favorites → Drama and press Update from TikTok)";
-
-test("the page: a removal whose reloaded drama page saw TikTok answer its OWN episode list HTTP 429 — the discovery's rule —: the removal stands (the card removed), the cooldown recorded, and the job stops without asking for the count (the last one minus one, not confirmed)", async () => {
-  const page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const { site, log } = bookmarkChrome({ reloadList: 429 });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    try {
-      assert.equal(await page.module.runUnbookmark(job, engine, entry), LIST_RATE_LIMIT_MESSAGE); // the job's stop
-      assert.equal(site.clicks, 1);
-      assert.ok(log.includes("close 77"));
-      assert.ok(!log.some((step) => step.startsWith("request ")), "nothing asked after TikTok's refusal");
-      assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: "The Lighthouse Keeper's Promise", outcome: "removed" });
-      assert.equal(entry["error"], LIST_RATE_LIMIT_MESSAGE);
-      const cooldown = /** @type {Record<string, unknown>} */ (page.local.get("cooldown"));
-      assert.equal(cooldown["reason"], LIST_RATE_LIMIT_MESSAGE);
-      assert.equal(cooldown["source"], "discovery");
-      assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-      assert.equal(page.element("library-total").textContent, UNCONFIRMED_945);
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a removal pressed and seen off whose reloaded page shows no Bookmark button: not-confirmed — the job's stop (never a second click), the drama as it was, the page's own words", async () => {
-  const page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const { site, log } = bookmarkChrome({ buttonsAfterReload: 0 });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    const stop = await page.module.runUnbookmark(job, engine, entry);
-    assert.equal(stop, BOOKMARK_MESSAGES["not-confirmed"]); // a stop: the jobs waiting behind end without a request
-    assert.equal(site.clicks, 1);
-    assert.ok(log.includes("close 77"));
-    assert.ok(!log.some((step) => step.startsWith("request ")));
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], BOOKMARK_MESSAGES["not-confirmed"]);
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk");
-    // 2.0.0: not confirmed halts DramaFetch's own removals too — the line says so after the reason
-    assert.equal(
-      page.element("favorites-status").textContent,
-      `TikTok did not confirm that “The Lighthouse Keeper's Promise” was removed: DramaFetch pressed Bookmark once and could not check that TikTok kept the change (the button did not turn off, or the page could not be read again). It does not press it again — check with Open on TikTok. ${HALTED_LINE}`,
-    );
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a write chrome.storage.local refuses during a removal — after the click, or right before the drama's page opens — means not one request more: the count's first page is never asked, the job's stop is the refusal", async () => {
-  // refused from the click on: the removal stands (TikTok removed it), its count is never asked
-  let page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const { site, log } = bookmarkChrome();
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    const set = chrome.storage.local.set;
-    Object.assign(chrome.storage.local, {
-      set: async (/** @type {Record<string, unknown>} */ items) => {
-        if (site.clicks > 0) throw new Error(REFUSED);
-        return set(items);
-      },
-    });
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), UNSAVED);
-    assert.equal(entry["error"], UNSAVED);
-    assert.equal(site.clicks, 1);
-    assert.ok(log.includes("close 77"));
-    assert.ok(!log.some((step) => step.startsWith("request ")), "no request after a refused write");
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-    assert.equal(page.element("library-total").textContent, UNCONFIRMED_945);
-  } finally {
-    page.restore();
-  }
-  // refused when the job notes its contact, right before the drama's page: no tab opened at all
-  page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const { site, log } = bookmarkChrome();
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    const set = chrome.storage.local.set;
-    let pacingWrites = 0;
-    Object.assign(chrome.storage.local, {
-      set: async (/** @type {Record<string, unknown>} */ items) => {
-        if ("pacing" in items && (pacingWrites += 1) >= 2) throw new Error(REFUSED); // the gate's own write passed
-        return set(items);
-      },
-    });
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), UNSAVED);
-    assert.deepEqual(log, []);
-    assert.equal(site.clicks, 0);
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: Stop while TikTok's count is about to be read after a removal: the removal stands, the count is the last one minus one — not confirmed, and kept so —, the job stopped before that request", async () => {
-  const page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const { site, log } = bookmarkChrome();
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    const sleep = engine.sleep;
-    engine.sleep = async (seconds) => {
-      if (log.includes("close 77")) throw new StopRequested(); // Stop during the pause before the count's request
-      await sleep(seconds);
-    };
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    await assert.rejects(page.module.runUnbookmark(job, engine, entry), StopRequested);
-    assert.equal(site.clicks, 1);
-    assert.ok(!log.some((step) => step.startsWith("request ")));
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-    assert.equal(page.element("library-total").textContent, UNCONFIRMED_945);
-    const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-    assert.equal(kept["total"], 945);
-    assert.equal(kept["unconfirmed"], true);
-    assert.equal(
-      page.element("favorites-status").textContent,
-      "“The Lighthouse Keeper's Promise” removed from your Favorites: TikTok kept the change. TikTok's count is not confirmed: open your profile → Favorites → Drama and press Update from TikTok.",
-    );
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a drama whose page already shows the Bookmark as off (no proof TikTok's list lost it: a page may draw the button before it knows): nothing pressed, nothing changed — the card as it was, the count as it was, no request for it —, the status line points to Update from TikTok", async () => {
-  const page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const after = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(1);
-    const { site, log } = bookmarkChrome({ saved: false, firstPage: { ...FAVORITES_CAPTURE, total: "945", dramaList: after } });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    const total = page.element("library-total").textContent;
-    const stored = JSON.stringify(page.local.get("favoritesLibrary"));
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
-    assert.equal(site.clicks, 0);
-    const drama = `https://www.tiktok.com/shortdrama/episode/${LIGHTHOUSE}/1`;
-    assert.deepEqual(log, ["open about:blank", `navigate ${drama}`, "close 77"]); // no count requested
-    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: "The Lighthouse Keeper's Promise", outcome: "already" });
-    assert.equal(entry["error"], undefined);
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk");
-    assert.equal(page.element("library-total").textContent, total);
-    assert.equal(JSON.stringify(page.local.get("favoritesLibrary")), stored); // the library kept as it was
-    assert.equal(page.element("favorites-status").textContent, "On the page of “The Lighthouse Keeper's Promise”, the Bookmark already shows as off: DramaFetch pressed nothing and changed nothing in your library. If you removed it on TikTok yourself, press Update from TikTok.");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: the removal job's gate — the rest between jobs before the drama's page opens, a cooldown met right after that rest, a write the storage refuses — and TikTok refusing the count's request (HTTP 429): a stop with the cooldown, the drama removed, the count the last one minus one, not confirmed", async () => {
-  /** TikTok contacted 30 s ago (the stored pacing): the next job rests first. */
-  const contacted = { pacing: { lastContactAt: Date.now() / 1000 - 30 } };
-  let page = await fakePage({ storage: { ...REMOVAL_LIBRARY(), ...contacted } });
-  try {
-    const { log } = bookmarkChrome({ firstPage: { ...FAVORITES_CAPTURE, total: "945", dramaList: /** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(1) } });
-    const { job, engine, pauses } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {number[]} how many steps the drama's tab had taken at each pause */
-    const steps = [];
-    const sleep = engine.sleep;
-    engine.sleep = async (seconds) => {
-      steps.push(log.length);
-      await sleep(seconds);
-    };
-    assert.equal(await page.module.runUnbookmark(job, engine, {}), null);
-    assert.equal(pauses[0], 60); // the rest between jobs, at the rng's floor
-    assert.equal(steps[0], 0); // before the drama's tab was even opened
-    assert.equal(log[0], "open about:blank");
-  } finally {
-    page.restore();
-  }
-  // a cooldown recorded during that rest (another tab's job, say): met right after it — no tab opened
-  page = await fakePage({ storage: { ...REMOVAL_LIBRARY(), ...contacted } });
-  try {
-    const { log } = bookmarkChrome();
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    const sleep = engine.sleep;
-    engine.sleep = async (seconds) => {
-      if (seconds === 60) await recordBlock(engine.cooldownStore, "rate limited (HTTP 429) by the video server", "browser", { now: Date.now() / 1000 });
-      await sleep(seconds);
-    };
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    try {
-      const stop = await page.module.runUnbookmark(job, engine, entry);
-      assert.match(String(stop), /^TikTok refused a request at /);
-      assert.equal(entry["error"], stop);
-      assert.deepEqual(log, []);
-      assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk");
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-  // chrome.storage.local refuses the write that asks whether anything can be stored: no tab opened
-  page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const { log } = bookmarkChrome();
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    Object.assign(chrome.storage.local, {
-      set: async () => {
-        throw new Error(REFUSED);
-      },
-    });
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), UNSAVED);
-    assert.equal(entry["error"], UNSAVED);
-    assert.deepEqual(log, []);
-  } finally {
-    page.restore();
-  }
-  // TikTok refuses the count's first page (HTTP 429): the job's stop, with the cooldown; the removal stands
-  page = await fakePage({ storage: REMOVAL_LIBRARY() });
-  try {
-    const { site, log } = bookmarkChrome({ firstPage: { __dramafetch_status: 429, __dramafetch_text: "" } });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    try {
-      assert.equal(await page.module.runUnbookmark(job, engine, entry), FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(entry["error"], FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(site.clicks, 1);
-      assert.equal(log.filter((step) => step.startsWith("request ")).length, 1); // that one, nothing after it
-      const cooldown = /** @type {Record<string, unknown>} */ (page.local.get("cooldown"));
-      assert.equal(cooldown["reason"], FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-      assert.equal(page.element("library-total").textContent, UNCONFIRMED_945);
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: the library's episode counts are trusted for 24 hours after its whole list was read — the smart refresh then costs one request; older, the whole list is read again and a series that gained episodes says so —; a removal needs a count that fresh (the whole read, or a run that found the series complete), else nothing is asked of TikTok", async () => {
+test("the page: the library's episode counts — the numbers its cards show — are trusted for 24 hours after its whole list was read — the smart refresh then costs one request; older, the whole list is read again and a series that gained episodes says so on its card", async () => {
   const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
   /** @param {string} seriesId @param {string} title @param {number} episodes */
   const entryOf = (seriesId, title, episodes) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 79) });
@@ -5631,17 +5274,18 @@ test("the page: the library's episode counts are trusted for 24 hours after its 
   };
   const stale = Date.now() / 1000 - 25 * 3600;
   const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
-  let page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) } });
+  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) } });
   try {
     await settled(page);
-    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], "On disk · 30/30"); // what the old count says
+    assert.equal(metaOf(page, PAPER), "30 episodes · 40m"); // what the old count says
     let tab = favoritesTab({ pages });
     tab.remember(1_794_351_500);
     let job = favoritesJob();
     assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
     assert.equal(tab.fetched.length, 2); // the whole list: its first page could not tell
     await settled(page);
-    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], "Partly · 30/40");
+    assert.equal(metaOf(page, PAPER), "40 episodes · 53m");
+    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], undefined); // its count, never a status
     const read = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
     assert.ok(Math.abs(Number(read["fullReadAt"]) - Date.now() / 1000) < 60, "the whole list read now");
     // read whole a moment ago: nothing changed — one request, and the whole read stays the earlier one
@@ -5651,205 +5295,6 @@ test("the page: the library's episode counts are trusted for 24 hours after its 
     assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
     assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]);
     assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"))["fullReadAt"], read["fullReadAt"]);
-  } finally {
-    page.restore();
-  }
-  // a removal whose count was read more than 24 h ago — and no run found the series complete since —: nothing asked
-  const library = storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946, fullReadAt: stale });
-  page = await fakePage({ storage: { favoritesLibrary: library, [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3, completeAt: Date.now() / 1000 - 3 * 86_400 }) } });
-  try {
-    const { site, log } = bookmarkChrome();
-    const { job, engine, pauses } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), null); // nothing pressed: no stop
-    assert.deepEqual(log, []);
-    assert.deepEqual(pauses, []);
-    assert.equal(site.clicks, 0);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk");
-    assert.equal(
-      page.element("favorites-status").textContent,
-      "“The Lighthouse Keeper's Promise” was not removed: its episode count was read from TikTok more than 24 hours ago, and new episodes may have come since. Press Update from TikTok first, then remove it. Nothing was asked of TikTok.",
-    );
-  } finally {
-    page.restore();
-  }
-  // a run found the series complete an hour ago: that count is fresh — removed as usual
-  page = await fakePage({ storage: { favoritesLibrary: library, [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3, completeAt: Date.now() / 1000 - 3600 }) } });
-  try {
-    const { site } = bookmarkChrome({ firstPage: { ...FAVORITES_CAPTURE, total: "945", dramaList: /** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(1) } });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    assert.equal(await page.module.runUnbookmark(job, engine, {}), null);
-    assert.equal(site.clicks, 1);
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "removed");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a removal's gate reads the drama as the library holds it when the job runs, never the count its confirmation showed — confirmed while a library read 25 h ago said On disk · 30/30, queued behind Update from TikTok, which reads 40 episodes: nothing asked (not on disk); the same update reading 30 still removes it —; a whole read that gave no episode count for the drama (none, or 0) vouches for nothing — no-count: only a run that found the series complete within 24 h does —; a drama the library no longer holds, or marks removed, is asked nothing (gone); each refusal in its own words", async () => {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  /** @param {string} seriesId @param {string} title @param {number} episodes */
-  const entryOf = (seriesId, title, episodes) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 79) });
-  /**
-   * TikTok's whole list in two pages: the five dramas — Paper Crowns with `paper` episodes, listed
-   * without any `numVideos` ("no count"), or left out (null)
-   * @param {number | "no count" | null} paper
-   */
-  const pagesWith = (paper) => {
-    const kept = FIVE.filter(([seriesId]) => paper !== null || seriesId !== PAPER);
-    const entries = kept.map(([seriesId, title, episodes]) => {
-      if (seriesId !== PAPER || typeof paper !== "string") return entryOf(seriesId, title, seriesId === PAPER && typeof paper === "number" ? paper : episodes);
-      const { numVideos: _left, ...countless } = entryOf(seriesId, title, episodes);
-      return countless;
-    });
-    const total = String(entries.length);
-    return {
-      "0": { ...FAVORITES_CAPTURE, total, cursor: "1794351568", hasMore: true, dramaList: entries.slice(0, 3) },
-      "1794351568": { ...FAVORITES_CAPTURE, total, cursor: "1794350100", hasMore: false, dramaList: entries.slice(3) },
-    };
-  };
-  const stale = Date.now() / 1000 - 25 * 3600;
-  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
-  const threeDaysAgo = Date.now() / 1000 - 3 * 86_400;
-  const NOT_ON_DISK = "“Paper Crowns” was not removed: DramaFetch's records do not show every episode of it on disk. Nothing was asked of TikTok.";
-  const NO_COUNT = "“Paper Crowns” was not removed: TikTok's list gives no episode count for it, so only a download can show it is complete. Download it again (Download selected dramas), then remove it within 24 hours. Nothing was asked of TikTok.";
-  const GONE = "“Paper Crowns” was not removed: it is no longer in your library — TikTok's list, read after you confirmed, no longer holds it, or DramaFetch already removed it. Nothing was asked of TikTok.";
-  /**
-   * Update from TikTok — the whole list read (its first page could not tell) —, then the removal
-   * the user confirmed before it: `episodes` the count its dialog showed
-   * @param {Awaited<ReturnType<typeof fakePage>>} page
-   * @param {number | "no count" | null} paper Paper Crowns' episodes in TikTok's list now, listed without a count, or null: not in it any more
-   * @param {number | null} episodes
-   */
-  const updateThenRemove = async (page, paper, episodes) => {
-    const tab = favoritesTab({ pages: pagesWith(paper) });
-    tab.remember(1_794_351_500);
-    const listing = favoritesJob();
-    assert.equal(await page.module.runFavorites(listing, favoritesEngine(page, listing).engine, {}), null);
-    assert.equal(tab.fetched.length, 2);
-    await settled(page);
-    const site = bookmarkChrome();
-    const { job, engine, pauses } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (episodes));
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    const stop = await page.module.runUnbookmark(job, engine, entry);
-    return { ...site, pauses, entry, stop };
-  };
-  // confirmed on the old count, run after an update that read 40: Partly · 30/40 — nothing asked of TikTok
-  let page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
-  try {
-    await settled(page);
-    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], "On disk · 30/30"); // what the dialog was shown
-    assert.notEqual(actionOf(page, PAPER, "remove"), undefined);
-    const { site, log, pauses, entry, stop } = await updateThenRemove(page, 40, 30);
-    assert.equal(stop, null); // nothing pressed: no stop
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.deepEqual(pauses, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES["not-on-disk"]);
-    assert.deepEqual(entry["bookmark"], { series_id: PAPER, title: "Paper Crowns", outcome: BOOKMARK_MESSAGES["not-on-disk"] });
-    assert.equal(page.element("favorites-status").textContent, NOT_ON_DISK);
-    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], "Partly · 30/40");
-    assert.deepEqual(/** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"))["removed"], []);
-  } finally {
-    page.restore();
-  }
-  // the same, the update reading 30 again: that count is TikTok's, read now — removed as usual
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
-  try {
-    await settled(page);
-    const { site, entry } = await updateThenRemove(page, 30, 30);
-    assert.equal(site.clicks, 1);
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
-    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "removed");
-  } finally {
-    page.restore();
-  }
-  // the update no longer lists it (removed on TikTok meanwhile): no card, nothing asked — even with a run that found it complete an hour ago
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: Date.now() / 1000 - 3600 }) } });
-  try {
-    await settled(page);
-    const { site, log, entry, stop } = await updateThenRemove(page, null, 30);
-    assert.equal(stop, null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.gone);
-    assert.equal(page.element("favorites-status").textContent, GONE);
-    assert.equal(cardOf(page, PAPER), undefined);
-  } finally {
-    page.restore();
-  }
-  // a drama the library marks removed (an earlier removal ran first): nothing asked
-  const removedAt = Date.now() / 1000 - 600;
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { removed: [{ seriesId: PAPER, at: removedAt }] }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: Date.now() / 1000 - 3600 }) } });
-  try {
-    await settled(page);
-    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "removed");
-    const { site, log } = bookmarkChrome();
-    const { job, engine } = removalJob(page, PAPER, "Paper Crowns", 30);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.gone);
-    assert.equal(page.element("favorites-status").textContent, GONE);
-  } finally {
-    page.restore();
-  }
-  // confirmed on the old count, run after an update that lists the drama WITHOUT a count: the whole
-  // read is fresh but vouches for no count — nothing asked (no-count), whatever count the job carries
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
-  try {
-    await settled(page);
-    const { site, log, entry, stop } = await updateThenRemove(page, "no count", 30);
-    assert.equal(stop, null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES["no-count"]);
-    assert.equal(page.element("favorites-status").textContent, NO_COUNT);
-    const kept = /** @type {{items: {seriesId: string, episodes: number | null}[]}} */ (page.local.get("favoritesLibrary"));
-    assert.equal(kept.items.find((item) => item.seriesId === PAPER)?.episodes, null);
-  } finally {
-    page.restore();
-  }
-  // the whole list read two hours ago gave no episode count for the drama: it vouches for none —
-  // the records' complete mark of 3 days ago says On disk, and nothing is asked of TikTok
-  // (a count of 0 is no count either: the card's On disk rests on the complete mark alone, as `knownEpisodes` reads it)
-  for (const none of [null, 0]) {
-    /** @type {[string, string, number | null][]} */
-    const countless = FIVE.map(([seriesId, title, episodes]) => [seriesId, title, seriesId === PAPER ? none : episodes]);
-    page = await fakePage({ storage: { favoritesLibrary: storedLibrary(countless), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: threeDaysAgo }) } });
-    try {
-      await settled(page);
-      assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "on-disk", String(none));
-      const { site, log } = bookmarkChrome();
-      const { job, engine, pauses } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (/** @type {unknown} */ (none)));
-      /** @type {Record<string, unknown>} */
-      const entry = {};
-      assert.equal(await page.module.runUnbookmark(job, engine, entry), null, String(none));
-      assert.equal(site.clicks, 0, String(none));
-      assert.deepEqual(log, [], String(none));
-      assert.deepEqual(pauses, [], String(none));
-      assert.equal(entry["error"], BOOKMARK_MESSAGES["no-count"], String(none));
-      assert.equal(page.element("favorites-status").textContent, NO_COUNT, String(none));
-    } finally {
-      page.restore();
-    }
-  }
-  // ... while a run that found the series complete an hour ago does: removed as usual
-  /** @type {[string, string, number | null][]} */
-  const countless = FIVE.map(([seriesId, title, episodes]) => [seriesId, title, seriesId === PAPER ? null : episodes]);
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(countless), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30, completeAt: Date.now() / 1000 - 3600 }) } });
-  try {
-    await settled(page);
-    const { site } = bookmarkChrome();
-    const { job, engine } = removalJob(page, PAPER, "Paper Crowns", /** @type {number} */ (/** @type {unknown} */ (null)));
-    assert.equal(await page.module.runUnbookmark(job, engine, {}), null);
-    assert.equal(site.clicks, 1);
-    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "removed");
   } finally {
     page.restore();
   }
@@ -6163,7 +5608,7 @@ test("the page: an update that received every drama TikTok counts is TikTok's wh
   }
 });
 
-test("the page: an update that stops before TikTok's end keeps the library's dramas and order but takes the episode counts it read from the library's own profile — Paper Crowns, saved whole at 30, listed with 40 now, says Partly · 30/40 and Remove from Favorites asks nothing (TikTok page 2 cut short, answered HTTP 429, or Stop); another account's listing renews nothing", async () => {
+test("the page: an update that stops before TikTok's end keeps the library's dramas and order but takes the episode counts it read from the library's own profile — Paper Crowns, saved whole at 30, listed with 40 now, says 40 episodes (TikTok page 2 cut short, answered HTTP 429, or Stop); another account's listing renews nothing", async () => {
   const NEW_ID = "7712345678901234568";
   // TikTok's list now: a favorite added on top (so the smart refresh reads on), Paper Crowns grown to 40 episodes
   const first = { ...FAVORITES_CAPTURE, total: "6", cursor: "1794351568", hasMore: true, dramaList: [listed(NEW_ID, "A New Favorite"), listed(PAPER, "Paper Crowns", 40), listed(LIGHTHOUSE, "The Lighthouse Keeper's Promise", 60)] };
@@ -6175,7 +5620,7 @@ test("the page: an update that stops before TikTok's end keeps the library's dra
   ])) {
     const page = await fakePage({ storage: storage() });
     try {
-      assert.equal(statusTexts(page).find(([id]) => id === PAPER)?.[1], "On disk · 30/30", why);
+      assert.equal(metaOf(page, PAPER), "30 episodes · 40m", why);
       const tab = favoritesTab({ pages: page2 === null ? { "0": first } : { "0": first, "1794351568": page2 } });
       tab.remember(1_794_351_500);
       const job = favoritesJob();
@@ -6190,20 +5635,11 @@ test("the page: an update that stops before TikTok's end keeps the library's dra
       await settled(page);
       // the library as it was — its dramas, its order, its whole read's time —, Paper Crowns' count TikTok's now
       assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId), why);
-      assert.equal(statusTexts(page).find(([id]) => id === PAPER)?.[1], "Partly · 30/40", why);
-      assert.equal(actionOf(page, PAPER, "remove"), undefined, why);
+      assert.equal(metaOf(page, PAPER), "40 episodes · 1h 5m", why); // the listing's entry: 40 episodes, its length too
+      assert.equal(statusTexts(page).find(([id]) => id === PAPER)?.[1], undefined, why); // its count, never a status
       const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
       assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), FIVE.map(([seriesId]) => seriesId), why);
       assert.equal(/** @type {{seriesId: string, episodes: number}[]} */ (kept["items"]).find((item) => item.seriesId === PAPER)?.episodes, 40, why);
-      // a removal queued with the card's count asks nothing of TikTok
-      const { log, site } = bookmarkChrome();
-      const removal = removalJob(page, PAPER, "Paper Crowns", 40);
-      /** @type {Record<string, unknown>} */
-      const entry = {};
-      assert.equal(await page.module.runUnbookmark(removal.job, removal.engine, entry), null, why);
-      assert.equal(entry["error"], BOOKMARK_MESSAGES["not-on-disk"], why);
-      assert.deepEqual(log, [], why);
-      assert.equal(site.clicks, 0, why);
     } finally {
       page.restore();
     }
@@ -6216,7 +5652,7 @@ test("the page: an update that stops before TikTok's end keeps the library's dra
     const job = favoritesJob();
     await other.module.runFavorites(job, favoritesEngine(other, job).engine, {});
     await settled(other);
-    assert.equal(statusTexts(other).find(([id]) => id === PAPER)?.[1], "On disk · 30/30");
+    assert.equal(metaOf(other, PAPER), "30 episodes · 40m");
     assert.equal(/** @type {{seriesId: string, episodes: number}[]} */ (/** @type {Record<string, unknown>} */ (other.local.get("favoritesLibrary"))["items"]).find((item) => item.seriesId === PAPER)?.episodes, 30);
   } finally {
     other.restore();
@@ -6511,7 +5947,7 @@ test("the alert's Retry, handed over by the worker: the page that made it queues
   }
 });
 
-test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopped in — its stopped episodes retryable, the stop's reason the context —, and at the job's end ONE more: DramaFetch stopped, how many dramas were never started — those of the jobs the stop took out of the queue counted too; Stop in the middle of a batch counts the dramas after the one it ran; a listing or a removal that stops says so only for the download jobs it took out of the queue", async () => {
+test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopped in — its stopped episodes retryable, the stop's reason the context —, and at the job's end ONE more: DramaFetch stopped, how many dramas were never started — those of the jobs the stop took out of the queue counted too; Stop in the middle of a batch counts the dramas after the one it ran; a listing that stops says so only for the download jobs it took out of the queue", async () => {
   const page = await fakePage();
   try {
     const { module } = page;
@@ -6570,20 +6006,20 @@ test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopp
     assert.equal(notes.shown.get(`${page6}:stopped`)?.["title"], "DramaFetch stopped: stopped by you");
     assert.equal(notes.shown.get(`${page6}:stopped`)?.["message"], "1 drama was not started — download it again later");
     // nothing when no drama was left unstarted, when the job asked TikTok for nothing (refused at
-    // its gate), or for a job that downloads nothing (a listing, a removal) when its stop cancelled
-    // no download: its own series are no downloads
+    // its gate), or for a job that downloads nothing (a listing) when its stop cancelled no
+    // download: its own series are no downloads
     notes.created.length = 0;
     module.alertJobEnd({ ...job, id: 8 }, "stopped by you", null, { begun: 3 }, []);
     module.alertJobEnd({ ...job, id: 9, contacted: false }, "cooldown until 12:30", null, {}, [waiting]);
     const listingLoad = { kind: /** @type {const} */ ("load"), refs: [refOf("7699393770256782377")] };
-    for (const kind of /** @type {const} */ (["load", "favorites", "unbookmark"])) module.alertJobEnd({ id: 10, kind, refs: [refOf(SERIES_ID)], contacted: true }, FAVORITES_RATE_LIMIT_MESSAGE, null, {}, [listingLoad]);
+    for (const kind of /** @type {const} */ (["load", "favorites"])) module.alertJobEnd({ id: 10, kind, refs: [refOf(SERIES_ID)], contacted: true }, FAVORITES_RATE_LIMIT_MESSAGE, null, {}, [listingLoad]);
     assert.deepEqual(notes.created, []);
-    // ... but the download jobs a listing's or a removal's stop took out of the queue are said, as
-    // a batch's would be (an alert's Retry may wait behind one): their dramas only
-    for (const [id, kind] of /** @type {const} */ ([[11, "load"], [12, "favorites"], [13, "unbookmark"]])) {
+    // ... but the download jobs a listing's stop took out of the queue are said, as a batch's would
+    // be (an alert's Retry may wait behind one): their dramas only
+    for (const [id, kind] of /** @type {const} */ ([[11, "load"], [12, "favorites"]])) {
       module.alertJobEnd({ id, kind, refs: [refOf(SERIES_ID)], contacted: true }, FAVORITES_RATE_LIMIT_MESSAGE, null, {}, [waiting, listingLoad]);
     }
-    assert.deepEqual(notes.created, [11, 12, 13].map((id) => `dramafetch-alert:${module.alerts.page}:${id}:stopped`));
+    assert.deepEqual(notes.created, [11, 12].map((id) => `dramafetch-alert:${module.alerts.page}:${id}:stopped`));
     assert.deepEqual(notes.shown.get(`dramafetch-alert:${module.alerts.page}:12:stopped`), {
       type: "basic",
       iconUrl: ALERT_ICON_URL,
@@ -6675,7 +6111,7 @@ test("the alert setting: Alert me when a drama finishes, on by default, saved wi
   }
 });
 
-test("the alert: nothing for a drama skipped as complete (no request), nothing of their own for a listing, a listing of the favorites or a removal from the Bookmark, nothing for a batch refused at its gate; a listing TikTok stops with a 429 while a batch and an alert's Retry wait behind it says once how many dramas that left unstarted; each job run to its end through the page's own queue", async () => {
+test("the alert: nothing for a drama skipped as complete (no request), nothing of their own for a listing or a listing of the favorites, nothing for a batch refused at its gate; a listing TikTok stops with a 429 while a batch and an alert's Retry wait behind it says once how many dramas that left unstarted; each job run to its end through the page's own queue", async () => {
   // a drama found complete less than 24 hours ago, every file still there: skipped, no request
   let page = await fakePage();
   try {
@@ -6748,30 +6184,6 @@ test("the alert: nothing for a drama skipped as complete (no request), nothing o
     assert.equal(notes.shown.get(stopped)?.["buttons"], undefined);
   } finally {
     await clearCooldown(pageCooldownStore());
-    page.restore();
-  }
-  // a removal from the Bookmark (confirmed on its card): pressed, checked, counted — and nothing said
-  page = await fakePage({
-    storage: {
-      favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946, complete: false }),
-      [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
-    },
-    testSettings: { ...QUICK, bookmarkPollS: 0.001, bookmarkWaitS: 0.5 },
-  });
-  try {
-    const { element } = page;
-    const notes = fakeNotifications();
-    const { site } = bookmarkChrome({ firstPage: { ...FAVORITES_CAPTURE, total: "945", dramaList: /** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(1) } });
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    const journal = () => page.module.journal();
-    for (let turn = 0; turn < 2000 && (journal().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    assert.equal(journal()[0]?.["kind"], "unbookmark");
-    assert.deepEqual(/** @type {Record<string, unknown>} */ (journal()[0]?.["bookmark"])["outcome"], "removed");
-    assert.equal(site.clicks, 1);
-    assert.deepEqual(notes.created, []);
-  } finally {
     page.restore();
   }
   // a batch refused at its gate (a cooldown in force) with another waiting behind it — two series
@@ -8078,6 +7490,47 @@ test("the automatic retry setting (1.8.0): Retry on its own what did not downloa
   }
 });
 
+test("the settings saved in another DramaFetch tab (2.0.0: a read-only tab's form still saves): the tab that downloads follows what is stored — the form shows it, and what the page does next follows it: the automatic retry unticked there, a plain failure here gets none (the 1.7.0 ⚠ instead); ticked again there, the next one does —; a 2.x tab's automatic removal switch stored with them is ignored (3.0.0) and never written back; its own Save, heard back, changes nothing more — the form left as it is being edited", async () => {
+  const page = await fakePage();
+  try {
+    const { element, local, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    // the other tab saves the automatic retry unticked and a longer pause — a 2.x tab its automatic
+    // removal switch with them —: chrome.storage.local holds them, and Chrome tells every DramaFetch page
+    local.set("settings", { ...DEFAULT_SETTINGS, autoRetry: false, delayMinS: 6, autoRemove: true });
+    page.storageChanged("settings");
+    await settled(page);
+    assert.equal(element("setting-auto-retry").checked, false); // the form shows what is stored
+    assert.equal(element("setting-delay-min").value, "6");
+    await batchOfOther(page, 4, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    assert.deepEqual(jobsOf(page), []); // no automatic retry: what the other tab saved
+    assert.deepEqual(notes.created, [`dramafetch-alert:${module.alerts.page}:4:${OTHER_ID}:retry`]); // the 1.7.0 ⚠ instead
+    // ticked again in the other tab: the next plain failure gets its automatic retry
+    local.set("settings", { ...DEFAULT_SETTINGS });
+    page.storageChanged("settings");
+    await settled(page);
+    assert.equal(element("setting-auto-retry").checked, true);
+    assert.equal(element("setting-delay-min").value, String(DEFAULT_SETTINGS.delayMinS));
+    await batchOfOther(page, 5, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers]), [["Automatic retry: 1 of Drama 2399", [2]]]);
+    // its own Save, which Chrome tells this page too — maybe once the user is editing the form
+    // again: nothing more happens, and the edit stays as typed
+    element("setting-alerts").checked = false;
+    element("settings-form").fire("submit");
+    for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
+    assert.deepEqual(local.get("settings"), { ...DEFAULT_SETTINGS, alerts: false }); // nothing of 2.x's switch written back
+    element("setting-auto-retry").checked = false; // being edited, not saved yet
+    page.storageChanged("settings");
+    await settled(page);
+    assert.equal(element("setting-auto-retry").checked, false);
+    assert.equal(element("setting-alerts").checked, false);
+    assert.equal(jobsOf(page).length, 1); // the automatic retry queued before is still there
+  } finally {
+    page.restore();
+  }
+});
+
 test("the automatic retry in Spanish under a Spanish Chrome (1.8.0): its queue label, “retrying”, what came of it, the Did not download line and the duplicate guard's status line", async () => {
   const page = await fakePage({ language: "es" });
   try {
@@ -8262,2490 +7715,6 @@ test("Past runs is gone (DramaFetch 2.0.0): no card, no header link, no list, no
   }
 });
 
-// --------------------- DramaFetch 2.0.0: the automatic removal from the Favorites (A1)
-
-/** The second drama's title as the library of these tests holds it (its runs name it `Drama 2399`). */
-const SECOND_TITLE = "Second Chance Bride";
-/** The label of DramaFetch's own removal of it (the job's: its progress line, its journal entry). */
-const AUTO_LABEL = `Remove “${SECOND_TITLE}” from your Favorites (automatic)`;
-/** The Waiting card's row of DramaFetch's own removal of it (2.0.0: what it is, its name, its whole id). */
-const AUTO_ROW = `Remove from Favorites (automatic) — ${SECOND_TITLE} · ${OTHER_ID}`;
-
-/**
- * A library holding OTHER_ID (`SECOND_TITLE`, 3 episodes) and LIGHTHOUSE (3 episodes), its whole list
- * read two hours ago — its counts fresh —, as `chrome.storage.local` keeps it.
- * @param {Record<string, unknown>} [changes] as `storedLibrary`'s
- */
-const autoLibrary = (changes = {}) =>
-  storedLibrary(
-    [
-      [OTHER_ID, SECOND_TITLE, 3],
-      [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3],
-    ],
-    changes,
-  );
-
-/**
- * A finished run of `seriesId` (named `Drama <its last four digits>`, as the scripted engine names
- * it) in which every one of its `count` episodes was downloaded — but the rows `rows` gives, which
- * take their place (a locked one, a DRM verdict, one served short).
- * @param {string} seriesId
- * @param {number} [count]
- * @param {Record<number, import("../src/lib/report.js").DownloadResult>} [rows]
- * @returns {import("../src/app/engine.js").SeriesRun}
- */
-function completeRun(seriesId, count = 3, rows = {}) {
-  /** @type {import("../src/lib/report.js").DownloadResult[]} */
-  const results = [];
-  for (let number = 1; number <= count; number += 1) {
-    results.push(rows[number] ?? { episode: episode(number, { seriesId }), status: "done", path: `/dl/${seriesId}/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number });
-  }
-  return finishedRun(seriesId, `Drama ${seriesId.slice(-4)}`, results);
-}
-
-/**
- * DramaFetch's own removals the page holds — running or waiting —, in order.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- */
-const autoRemovalsOf = (page) => jobsOf(page).filter((job) => job.kind === "unbookmark" && job.bookmark?.auto !== undefined);
-
-/**
- * The re-listings DramaFetch's own removals queued (2.0.0: a removal whose episode count was more
- * than 24 hours old at its turn lists its drama again first) — running or waiting —, in order.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- */
-const relistsOf = (page) => jobsOf(page).filter((job) => job.kind === "batch" && job.relist !== undefined);
-
-/** The outcome of DramaFetch's own removal that queued a re-listing of its drama in its place (2.0.0). */
-const RELISTED = "not removed yet: its episode count was more than 24 hours old — DramaFetch lists the drama again first, then removes it";
-/** The same, when a download of the drama waiting in the queue lists it again by itself (nothing queued). */
-const RELIST_PENDING = "not removed yet: a download of the drama waiting in the queue lists it again first";
-
-/**
- * `chrome.storage.local.get` and `chrome.storage.session.get` counted while `act` runs (what it asks
- * of the storage before it returns).
- * @param {() => void} act
- * @returns {number}
- */
-function storageReads(act) {
-  const storage = /** @type {{local: {get: (keys: unknown) => unknown}, session: {get: (keys: unknown) => unknown}}} */ (/** @type {unknown} */ (chrome.storage));
-  const { local, session } = storage;
-  const [localGet, sessionGet] = [local.get, session.get];
-  let reads = 0;
-  local.get = (keys) => ((reads += 1), localGet(keys));
-  session.get = (keys) => ((reads += 1), sessionGet(keys));
-  try {
-    act();
-  } finally {
-    local.get = localGet;
-    session.get = sessionGet;
-  }
-  return reads;
-}
-
-test("the automatic removal (2.0.0): a drama of a download job done with every episode on disk — none locked — that the library holds queues ONE removal from the Favorites at the END of the queue — exactly the job Remove from Favorites' confirmation queues for a drama, the drama as the library holds it, labelled (automatic), plus `bookmark.auto`: when the run found it complete and the id of its ✓ alert, shown first —; nothing is read or asked to queue it", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: autoLibrary(), [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }) } });
-  try {
-    const { element, module } = page;
-    const notes = fakeNotifications();
-    page.hold(); // every job stays at its tabs.getCurrent: it runs, and makes no request
-    assert.equal(paste(page, SERIES_ID), true); // running
-    assert.equal(paste(page, THIRD_ID), true); // waiting
-    const before = Date.now() / 1000;
-    const { runs } = await batchOfOther(page, 7);
-    const after = Date.now() / 1000;
-    assert.deepEqual(runs.map((run) => [run.report.complete, run.report.locked, run.stop]), [[true, 0, false]]);
-    const complete = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:complete`;
-    const [removal, ...more] = autoRemovalsOf(page);
-    assert.deepEqual(more, []);
-    const found = Number(removal?.bookmark?.auto?.foundCompleteAt);
-    assert.ok(found >= before && found <= after, `found complete at ${found}`);
-    // after the job running and the one waiting: the removal, exactly
-    assert.deepEqual(jobsOf(page).map((job) => job.label), [`Series ${SERIES_ID}`, `Series ${THIRD_ID}`, AUTO_LABEL]);
-    assert.deepEqual(jobsOf(page)[2], {
-      kind: "unbookmark",
-      label: AUTO_LABEL,
-      refs: [refOf(OTHER_ID)],
-      series: null,
-      numbers: [],
-      includeLocked: false,
-      recheck: false,
-      // `auto.episodes`: how many episodes the list the run read counted (what the gate checks a
-      // drama TikTok's favorites list gives no count for against)
-      bookmark: { seriesId: OTHER_ID, title: SECOND_TITLE, episodes: 3, auto: { foundCompleteAt: found, alertId: complete, episodes: 3 } },
-    });
-    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), dramaRow(THIRD_ID), AUTO_ROW]); // the running paste's drama (held: never begun) first
-    // the drama's ✓ alert came first, as for any complete drama; the removal's own comes as it ends
-    assert.deepEqual(notes.created, [complete]);
-    assert.equal(notes.shown.get(complete)?.["title"], "✓ Drama 2399 — downloaded");
-    // what the confirmation of Remove from Favorites queues for a drama: the same job, but its label and `auto`
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    assert.deepEqual(jobsOf(page)[3], {
-      kind: "unbookmark",
-      label: "Remove “The Lighthouse Keeper's Promise” from your Favorites",
-      refs: [refOf(LIGHTHOUSE)],
-      series: null,
-      numbers: [],
-      includeLocked: false,
-      recheck: false,
-      bookmark: { seriesId: LIGHTHOUSE, title: "The Lighthouse Keeper's Promise", episodes: 3 },
-    });
-    // the decision reads no storage: the run and the page's memory only
-    assert.equal(
-      storageReads(() => module.dramaDone({ ...BATCH_JOB, id: 8, refs: [refOf(LIGHTHOUSE)] }, completeRun(LIGHTHOUSE), {})),
-      0,
-    );
-  } finally {
-    page.restore();
-  }
-});
-
-test("no automatic removal unless all six hold (2.0.0), each both ways: the setting on; a download job — a batch, a selection —, never a listing, the favorites' listing or a removal; a run that did not stop, no Stop pressed during the job, the tab free to queue (no cooldown in force, no write refused, the engine's tab); every episode on disk — complete, none locked, no DRM verdict, none served short —; the library holds the drama and DramaFetch has not removed it; no removal of it running or waiting", async () => {
-  const at = Date.now() / 1000;
-  const cooldown = { until: at + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: at };
-  /** @type {import("../src/lib/report.js").DownloadResult} */
-  const shortServed = { episode: episode(2, { seriesId: OTHER_ID }), status: "failed-unavailable", path: null, message: shortServedMessage(131072, "2", "3") };
-  /** @type {import("../src/lib/report.js").DownloadResult} */
-  const locked = { episode: episode(3, { seriesId: OTHER_ID, locked: true }), status: "skipped-locked", path: null, message: "looks locked: no play address" };
-  const stopped = completeRun(OTHER_ID);
-  /**
-   * @type {{label: string, storage?: Record<string, unknown>, lockTaken?: boolean, job?: Partial<import("../src/app/app.js").Job>, run?: import("../src/app/engine.js").SeriesRun, before?: (page: Awaited<ReturnType<typeof fakePage>>) => void | Promise<void>, removals: number}[]}
-   */
-  const cases = [
-    { label: "all six hold: a batch's drama", removals: 1 },
-    { label: "a selection job's drama (Download all available, a Retry)", job: { kind: "selection", label: "3 episodes of Drama 2399", numbers: [1, 2, 3] }, removals: 1 },
-    { label: "the setting off", storage: { settings: { autoRemove: false } }, removals: 0 },
-    { label: "a listing (See episodes)", job: { kind: "load" }, removals: 0 },
-    { label: "the favorites' listing", job: { kind: "favorites" }, removals: 0 },
-    { label: "a removal", job: { kind: "unbookmark" }, removals: 0 },
-    { label: "its run stopped", run: { ...stopped, stop: true }, removals: 0 },
-    { label: "its report says stopped", run: { ...stopped, report: { ...stopped.report, stopped: "stopped by you" } }, removals: 0 },
-    { label: "a job running, no Stop pressed", before: (page) => void assert.equal(paste(page, SERIES_ID), true), removals: 1 },
-    {
-      label: "Stop pressed during the job (the engine past its last look at it)",
-      before: (page) => {
-        assert.equal(paste(page, SERIES_ID), true);
-        page.element("stop-button").fire("click");
-      },
-      removals: 0,
-    },
-    { label: "a cooldown in force", storage: { cooldown }, removals: 0 },
-    {
-      // the tab's own gate refuses it (retryAllowed), never `enqueue`, which would say the refusal
-      // again — reading the storage — from inside the drama's end
-      label: "a write refused earlier in this page",
-      before: async (page) => {
-        const engine = page.module.buildEngine({ ...BATCH_JOB }, { pauses: [], inputs: [], taking: true });
-        Object.assign(chrome.storage.local, {
-          set: async () => {
-            throw new Error(REFUSED);
-          },
-        });
-        await engine.persist?.(); // a save of the pacing, refused: remembered (`app.unsaved`)
-        assert.equal(engine.unsaved?.(), UNSAVED);
-      },
-      removals: 0,
-    },
-    { label: "a read-only tab", lockTaken: true, removals: 0 },
-    { label: "an episode served short: not complete", run: completeRun(OTHER_ID, 3, { 2: shortServed }), removals: 0 },
-    { label: "a locked episode", run: completeRun(OTHER_ID, 3, { 3: locked }), removals: 0 },
-    { label: "a DRM verdict its records remember", run: completeRun(OTHER_ID, 3, { 3: drmMemorySkip(episode(3, { seriesId: OTHER_ID })) }), removals: 0 },
-    { label: "a drama the library does not hold", storage: { favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]) }, removals: 0 },
-    { label: "a drama DramaFetch removed already", storage: { favoritesLibrary: autoLibrary({ removed: [{ seriesId: OTHER_ID, at: at - 60 }] }) }, removals: 0 },
-  ];
-  for (const item of cases) {
-    const page = await fakePage({ storage: { favoritesLibrary: autoLibrary(), ...item.storage }, ...(item.lockTaken === true ? { lockTaken: true } : {}) });
-    try {
-      fakeNotifications();
-      page.hold();
-      await item.before?.(page);
-      const run = item.run ?? completeRun(OTHER_ID);
-      if (item.label.startsWith("all six")) assert.deepEqual([run.report.complete, run.report.locked, run.stop], [true, 0, false]);
-      if (item.label.includes("locked") || item.label.includes("DRM")) assert.deepEqual([run.report.complete, run.report.locked], [true, 1], item.label); // complete all the same
-      // the decision reads no storage — the run and the page's memory only — and never waits
-      const reads = storageReads(() => page.module.dramaDone({ ...BATCH_JOB, id: 5, label: "Series", refs: [refOf(OTHER_ID)], ...item.job }, run, {}));
-      assert.equal(reads, 0, item.label);
-      assert.equal(autoRemovalsOf(page).length, item.removals, item.label); // queued at once
-      await page.turn();
-      assert.equal(autoRemovalsOf(page).length, item.removals, item.label);
-    } finally {
-      page.restore();
-    }
-  }
-  // no removal of it running or waiting: one is queued, a second never — waiting behind a job, or running itself
-  for (const running of [false, true]) {
-    const page = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
-    try {
-      fakeNotifications();
-      page.hold();
-      if (!running) assert.equal(paste(page, SERIES_ID), true); // the removal waits behind it
-      page.module.dramaDone({ ...BATCH_JOB, id: 5, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-      await page.turn();
-      assert.equal(jobsOf(page)[running ? 0 : 1]?.label, AUTO_LABEL);
-      page.module.dramaDone({ ...BATCH_JOB, id: 6, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-      await page.turn();
-      assert.equal(autoRemovalsOf(page).length, 1, running ? "its removal running" : "its removal waiting");
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("a complete skip counts (2.0.0): a drama found complete less than 24 h ago — no request, no alert of its own — queues its removal, `foundCompleteAt` the records' complete mark and no ✓ alert to replace; the records holding a locked episode — which the skip's report counts — queue none", async () => {
-  for (const withLocked of [false, true]) {
-    const page = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
-    try {
-      const notes = fakeNotifications();
-      page.hold();
-      const nowS = Date.now() / 1000;
-      const state = newState(OTHER_ID, SECOND_TITLE);
-      for (const number of [1, 2, 3]) {
-        record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: nowS - 7200 });
-      }
-      if (withLocked) record(state, { episode: { number: 4, itemId: "i4" }, status: "skipped-locked", path: null, message: "looks locked: no play address" }, { exists: () => true, now: nowS - 7200 });
-      markComplete(state, nowS - 3600, 3);
-      const skipped = completeSkip(state, { seriesId: OTHER_ID, nowS, exists: () => true });
-      assert.ok(skipped !== null);
-      /** @type {import("../src/app/engine.js").SeriesRun} */
-      const run = { ref: refOf(OTHER_ID), series: null, results: skipped.results, report: skipped.report, error: null, stop: false, exitCode: 0, errorKind: null, contacted: false };
-      assert.deepEqual([run.report.skippedComplete, run.report.complete, run.report.locked], [true, true, withLocked ? 1 : 0]);
-      page.module.dramaDone({ ...BATCH_JOB, id: 5, refs: [refOf(OTHER_ID)] }, run, {});
-      await page.turn();
-      assert.deepEqual(notes.created, []); // a skip has no alert of its own
-      const removals = autoRemovalsOf(page);
-      if (withLocked) {
-        assert.deepEqual(removals, []);
-      } else {
-        assert.equal(removals.length, 1);
-        assert.equal(removals[0]?.bookmark?.auto?.alertId, null);
-        assert.equal(removals[0]?.bookmark?.auto?.episodes, null); // a skip read no list: no count of its own
-        const found = Number(removals[0]?.bookmark?.auto?.foundCompleteAt);
-        assert.ok(Math.abs(found - (nowS - 3600)) < 5, `found complete at ${found}, marked at ${nowS - 3600}`);
-      }
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("after its automatic retry (2.0.0): a drama whose E02 did not download is not complete — its automatic retry queued, no removal —; that retry's own drama, done with every episode on disk, queues the removal behind it — `foundCompleteAt` its end, though a selection job sets no complete mark —, under the id of its alert: “retrying”, then ✓, then the removal's as it ends", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
-  try {
-    const { module } = page;
-    const notes = fakeNotifications();
-    page.hold();
-    const first = await batchOfOther(page, 7, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
-    assert.deepEqual(autoRemovalsOf(page), []); // not complete: its automatic retry instead
-    const [auto] = module.queuedJobs();
-    assert.ok(auto?.autoRetry !== undefined);
-    const alertId = auto.autoRetry.alertId;
-    // the automatic retry's run, as runJob gets it: listed again, E02 saved now — every episode on disk
-    const scripted = scriptedEngine(page, auto);
-    scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
-    const before = Date.now() / 1000;
-    const run = await runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null });
-    assert.deepEqual([run.report.complete, run.report.locked], [true, 0]);
-    assert.equal(/** @type {Record<string, unknown>} */ (scripted.states.get(OTHER_ID))["complete_at"] ?? null, null); // a selection sets no complete mark
-    module.dramaDone(auto, run, scripted.jobRecord);
-    await page.turn();
-    assert.deepEqual(jobsOf(page).map((job) => job.label), ["Automatic retry: 1 of Drama 2399", AUTO_LABEL]);
-    const [removal] = autoRemovalsOf(page);
-    assert.equal(removal?.bookmark?.auto?.alertId, alertId);
-    assert.ok(Number(removal?.bookmark?.auto?.foundCompleteAt) >= before);
-    assert.equal(removal?.bookmark?.auto?.episodes, 3); // the retry's fresh list: the whole series' count, not its one episode
-    assert.deepEqual(notes.created, [alertId, alertId]); // “retrying”, then ✓ — one notification per drama
-    assert.equal(notes.shown.get(alertId)?.["title"], "✓ Drama 2399 — downloaded");
-    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "After an automatic retry.");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the gate of DramaFetch's own removal (2.0.0): when its download found the drama complete counts like the records' complete mark in the 24 h freshness check — the library's counts read 25 h ago and no complete mark (a retry's selection sets none): the user's removal is stale, DramaFetch's own goes on and removes it; found complete 25 h ago, or at no known time, too old as well: nothing pressed — the first such removal lists its drama again (one re-listing queued), one a re-listing led to (`relisted`) is stale —; the records holding a locked episode stop DramaFetch's own (not on disk, nothing asked) while the user's own goes on", async () => {
-  const dayAgo = Date.now() / 1000 - 25 * 3600;
-  const old = {
-    favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946, fullReadAt: dayAgo, listedAt: dayAgo }),
-    [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3]), // every episode saved, no complete mark
-  };
-  /** @type {[string, import("../src/app/app.js").AutoRemoval | undefined, number, string | undefined][]} */
-  const cases = [
-    ["the user's own", undefined, 0, BOOKMARK_MESSAGES.stale],
-    ["DramaFetch's own, found complete a minute ago", { foundCompleteAt: Date.now() / 1000 - 60, alertId: null }, 1, undefined],
-    ["DramaFetch's own, found complete 25 h ago: its drama listed again first", { foundCompleteAt: dayAgo, alertId: null }, 0, RELISTED],
-    ["DramaFetch's own, found complete 25 h ago, a re-listing's", { foundCompleteAt: dayAgo, alertId: null, relisted: true }, 0, BOOKMARK_MESSAGES.stale],
-    ["DramaFetch's own, at no known time: its drama listed again first", { foundCompleteAt: null, alertId: null }, 0, RELISTED],
-    ["DramaFetch's own, at no known time, a re-listing's", { foundCompleteAt: null, alertId: null, relisted: true }, 0, BOOKMARK_MESSAGES.stale],
-  ];
-  for (const [label, auto, clicks, error] of cases) {
-    const page = await fakePage({ storage: old });
-    try {
-      const { site } = bookmarkChrome({ profileTab: false });
-      page.hold(); // a re-listing queued starts and waits at its tabs.getCurrent: it asks nothing
-      const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3, auto);
-      /** @type {Record<string, unknown>} */
-      const entry = {};
-      assert.equal(await page.module.runUnbookmark(job, engine, entry), null, label);
-      assert.equal(site.clicks, clicks, label);
-      assert.equal(entry["error"], error, label);
-      assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], error ?? "removed", label);
-      assert.equal(relistsOf(page).length, error === RELISTED ? 1 : 0, label);
-    } finally {
-      page.restore();
-    }
-  }
-  // a locked episode in the records, on disk all the same (saved + locked): the user's own goes on, DramaFetch's own asks nothing
-  const state = JSON.parse(JSON.stringify(savedState(LIGHTHOUSE, [1, 2], { complete: 2 })));
-  state.episodes["3"] = { number: 3, item_id: "i3", status: "skipped-locked", path: null, message: "looks locked: no play address", updated_at: "2027-01-15T08:00:00Z", download_id: null };
-  for (const auto of [undefined, { foundCompleteAt: Date.now() / 1000 - 60, alertId: null }]) {
-    const page = await fakePage({ storage: { ...REMOVAL_LIBRARY(), [`series:${LIGHTHOUSE}`]: state } });
-    try {
-      const { site, log } = bookmarkChrome({ profileTab: false });
-      const { job, engine } = removalJob(page, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3, auto);
-      assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "on-disk");
-      /** @type {Record<string, unknown>} */
-      const entry = {};
-      assert.equal(await page.module.runUnbookmark(job, engine, entry), null);
-      if (auto === undefined) {
-        assert.equal(site.clicks, 1);
-        assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
-      } else {
-        assert.equal(site.clicks, 0);
-        assert.deepEqual(log, []); // no tab opened
-        assert.equal(entry["error"], BOOKMARK_MESSAGES["not-on-disk"]);
-        assert.equal(page.element("favorites-status").textContent, "“The Lighthouse Keeper's Promise” was not removed: DramaFetch's records do not show every episode of it on disk. Nothing was asked of TikTok.");
-      }
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("the gate of DramaFetch's own removal of a drama TikTok's favorites list gives no episode count for (2.0.0): the records are checked against the count of the list its download read (`auto.episodes`) — a retry's selection sets no complete mark, which is all the records could vouch with otherwise —: every episode saved, found complete a minute ago, removes it; fewer saved than that count, no count carried (a complete skip's), or found complete 25 h ago ask nothing — found complete 25 h ago, the first such removal lists the drama again (one re-listing queued), one a re-listing led to ends `no-count` —; the user's own removal is unchanged; a drama the library holds a count for is checked against the library's count, never the download's", async () => {
-  const TITLE = "The Lighthouse Keeper's Promise";
-  const soon = Date.now() / 1000 - 60;
-  const dayAgo = Date.now() / 1000 - 25 * 3600;
-  /** @param {number | null} count @param {number[]} saved */
-  const storage = (count, saved) => ({
-    // the whole list read two hours ago — no episode count for this drama when `count` is null
-    favoritesLibrary: storedLibrary([[LIGHTHOUSE, TITLE, count], [SNOW_A, "Snowfall in Two Cities", 60]]),
-    [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, saved), // no complete mark: as a retry's selection leaves it
-  });
-  /** @type {[string, number | null, number[], import("../src/app/app.js").AutoRemoval | undefined, number, string | undefined][]} */
-  const cases = [
-    ["the user's own, no count anywhere", null, [1, 2, 3], undefined, 0, BOOKMARK_MESSAGES["not-on-disk"]],
-    ["DramaFetch's own, its download's list counted 3, all 3 saved", null, [1, 2, 3], { foundCompleteAt: soon, alertId: null, episodes: 3 }, 1, undefined],
-    ["DramaFetch's own, its download's list counted 3, 2 saved", null, [1, 2], { foundCompleteAt: soon, alertId: null, episodes: 3 }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
-    ["DramaFetch's own, no count carried", null, [1, 2, 3], { foundCompleteAt: soon, alertId: null }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
-    ["DramaFetch's own, count carried as null", null, [1, 2, 3], { foundCompleteAt: soon, alertId: null, episodes: null }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
-    ["DramaFetch's own, found complete 25 h ago: its drama listed again first", null, [1, 2, 3], { foundCompleteAt: dayAgo, alertId: null, episodes: 3 }, 0, RELISTED],
-    ["DramaFetch's own, found complete 25 h ago, a re-listing's", null, [1, 2, 3], { foundCompleteAt: dayAgo, alertId: null, episodes: 3, relisted: true }, 0, BOOKMARK_MESSAGES["no-count"]],
-    ["DramaFetch's own, the library counts 4", 4, [1, 2, 3], { foundCompleteAt: soon, alertId: null, episodes: 3 }, 0, BOOKMARK_MESSAGES["not-on-disk"]],
-    ["DramaFetch's own, the library counts 3", 3, [1, 2, 3], { foundCompleteAt: soon, alertId: null, episodes: 9 }, 1, undefined],
-  ];
-  for (const [label, count, saved, auto, clicks, error] of cases) {
-    const page = await fakePage({ storage: storage(count, saved) });
-    try {
-      const { site, log } = bookmarkChrome({ profileTab: false });
-      page.hold(); // a re-listing queued starts and waits at its tabs.getCurrent: it asks nothing
-      const { job, engine } = removalJob(page, LIGHTHOUSE, TITLE, count, auto);
-      /** @type {Record<string, unknown>} */
-      const entry = {};
-      assert.equal(await page.module.runUnbookmark(job, engine, entry), null, label);
-      assert.equal(site.clicks, clicks, label);
-      assert.equal(entry["error"], error, label);
-      assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], error ?? "removed", label);
-      assert.equal(relistsOf(page).length, error === RELISTED ? 1 : 0, label);
-      if (clicks === 0) assert.deepEqual(log, [], label); // nothing asked: no tab opened
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("Stop takes every automatic removal waiting out of the queue at once (2.0.0) — none ever starts after a Stop —, the library's status line says how many, and no alert; the user's own removal and download waiting are left to the stop, which cancels them as ever; unticking the setting takes them out too, and a later drama queues none", async () => {
-  const FOURTH_TITLE = "Limited Free Drama";
-  const storage = {
-    favoritesLibrary: storedLibrary([[OTHER_ID, SECOND_TITLE, 3], [FOURTH_ID, FOURTH_TITLE, 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]),
-    [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
-  };
-  const page = await fakePage({ testSettings: QUICK, storage });
-  try {
-    const { element, module } = page;
-    const notes = fakeNotifications();
-    const journal = () => module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"]]);
-    const open = gateJobs();
-    assert.equal(paste(page, SERIES_ID), true); // job 1, started: waits at the gate
-    await page.turn();
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    module.dramaDone({ ...BATCH_JOB, id: 8, refs: [refOf(FOURTH_ID)] }, completeRun(FOURTH_ID), {});
-    // the user's own removal of another drama, and a download, behind them
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    assert.equal(paste(page, THIRD_ID), true);
-    const fourthLabel = `Remove “${FOURTH_TITLE}” from your Favorites (automatic)`;
-    const userRemoval = "Remove “The Lighthouse Keeper's Promise” from your Favorites";
-    const fourthRow = whatRow("Remove from Favorites (automatic)", FOURTH_ID, FOURTH_TITLE);
-    const userRemovalRow = whatRow("Remove from Favorites", LIGHTHOUSE, "The Lighthouse Keeper's Promise");
-    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), AUTO_ROW, fourthRow, userRemovalRow, dramaRow(THIRD_ID)]);
-    const created = [...notes.created]; // the two dramas' ✓
-    assert.equal(created.length, 2);
-    element("stop-button").fire("click");
-    // both out at once, whatever job 1 does now; the jobs the user queued are left to the stop
-    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), userRemovalRow, dramaRow(THIRD_ID)]);
-    assert.equal(element("favorites-status").textContent, "2 automatic removals from your Favorites taken out of the queue: their cards keep Remove from Favorites.");
-    const notStarted = `not started: batch stopped in Series ${SERIES_ID} (stopped by you)`;
-    assert.deepEqual(journal(), [
-      ["unbookmark", fourthLabel, notStarted],
-      ["unbookmark", AUTO_LABEL, notStarted],
-    ]);
-    assert.deepEqual(notes.created, created); // no alert for them
-    open(); // job 1 goes on, and meets the Stop before any request
-    for (let turn = 0; turn < 1000 && (journal().length < 5 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    assert.deepEqual(journal(), [
-      ["batch", `Series ${SERIES_ID}`, "stopped by you"],
-      ["batch", `Series ${THIRD_ID}`, notStarted],
-      ["unbookmark", userRemoval, notStarted],
-      ["unbookmark", fourthLabel, notStarted],
-      ["unbookmark", AUTO_LABEL, notStarted],
-    ]);
-    assert.deepEqual(notes.created, created); // no removal ran; job 1 asked TikTok for nothing
-  } finally {
-    page.restore();
-  }
-  // the setting unticked while one waits: out of the queue at once, said; no other is queued then
-  const off = await fakePage({ testSettings: QUICK, storage: { favoritesLibrary: autoLibrary() } });
-  try {
-    const { element, module } = off;
-    fakeNotifications();
-    off.hold();
-    assert.equal(paste(off, SERIES_ID), true); // running
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    assert.deepEqual(waitingRows(off), [dramaRow(SERIES_ID), AUTO_ROW]);
-    assert.equal(element("setting-auto-remove").checked, true); // on by default
-    element("setting-auto-remove").checked = false;
-    element("settings-form").fire("submit");
-    for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await off.turn();
-    assert.equal(/** @type {Record<string, unknown>} */ (off.local.get("settings"))["autoRemove"], false);
-    assert.deepEqual(waitingRows(off), [dramaRow(SERIES_ID)]); // the running paste's drama alone
-    assert.equal(element("favorites-status").textContent, "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.");
-    assert.deepEqual(module.journal().map((entry) => [entry["label"], entry["error"]]), [[AUTO_LABEL, "not started: the automatic removal from the Favorites was turned off"]]);
-    module.dramaDone({ ...BATCH_JOB, id: 8, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    assert.deepEqual(autoRemovalsOf(off), []);
-    assert.equal(element("app-status").dataset["state"], "running"); // the job running goes on
-  } finally {
-    off.restore();
-  }
-});
-
-test("the halt (2.0.0): a removal TikTok did not keep — the user's own as DramaFetch's —, did not confirm, or refused (HTTP 429 or 403 on the drama page's own collect, HTTP 429 on its episode list after the press, HTTP 429 or 403 on the count's request, its verification wall, its login page) stops every later automatic removal in this page — a later complete drama queues none —, and the library's status line says so after the removal's own words; a removal that asked TikTok nothing (gone) halts nothing; with the automatic removal off the halt holds all the same, unsaid until the setting is saved on again (Save settings, Defaults) — then the line says it, once", async () => {
-  const storage = () => ({
-    ...REMOVAL_LIBRARY(),
-    favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [OTHER_ID, SECOND_TITLE, 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946 }),
-  });
-  const soon = () => ({ foundCompleteAt: Date.now() / 1000 - 60, alertId: null });
-  /** @type {{label: string, chrome: Parameters<typeof bookmarkChrome>[0], auto: boolean, seriesId?: string, stop: string | null, halted: boolean}[]} */
-  const cases = [
-    { label: "the user's own, not kept", chrome: { keeps: false }, auto: false, stop: BOOKMARK_MESSAGES["not-kept"], halted: true },
-    { label: "DramaFetch's own, not kept", chrome: { keeps: false }, auto: true, stop: BOOKMARK_MESSAGES["not-kept"], halted: true },
-    { label: "DramaFetch's own, not confirmed", chrome: { buttonsAfterReload: 0 }, auto: true, stop: BOOKMARK_MESSAGES["not-confirmed"], halted: true },
-    { label: "the user's own, its page's episode list refused after the press", chrome: { reloadList: 429 }, auto: false, stop: LIST_RATE_LIMIT_MESSAGE, halted: true },
-    { label: "the user's own, the count's request refused", chrome: { firstPage: { __dramafetch_status: 429, __dramafetch_text: "" } }, auto: false, stop: FAVORITES_RATE_LIMIT_MESSAGE, halted: true },
-    { label: "DramaFetch's own, the page's own collect refused (HTTP 429)", chrome: { collectStatus: 429 }, auto: true, stop: BOOKMARK_RATE_LIMIT_MESSAGE, halted: true },
-    { label: "DramaFetch's own, the page's own collect refused (HTTP 403)", chrome: { collectStatus: 403 }, auto: true, stop: BLOCKED_MESSAGE, halted: true },
-    { label: "the user's own, the count's request refused (HTTP 403)", chrome: { firstPage: { __dramafetch_status: 403, __dramafetch_text: "" } }, auto: false, stop: BLOCKED_MESSAGE, halted: true },
-    { label: "the user's own, TikTok's verification wall on the drama's page", chrome: { pageText: "Security check\nVerify to continue" }, auto: false, stop: BOOKMARK_CHALLENGE_MESSAGE, halted: true },
-    { label: "DramaFetch's own, TikTok's verification wall on the drama's page", chrome: { pageText: "Security check\nVerify to continue" }, auto: true, stop: BOOKMARK_CHALLENGE_MESSAGE, halted: true },
-    { label: "the user's own, TikTok's login page instead of the drama's", chrome: { loginPage: true }, auto: false, stop: LOGIN_REDIRECT_MESSAGE, halted: true },
-    { label: "the user's own, gone from the library: nothing asked", chrome: {}, auto: false, seriesId: MOON, stop: null, halted: false },
-  ];
-  for (const item of cases) {
-    const page = await fakePage({ storage: storage() });
-    try {
-      bookmarkChrome(item.chrome);
-      const seriesId = item.seriesId ?? LIGHTHOUSE;
-      const { job, engine } = removalJob(page, seriesId, seriesId === MOON ? "Moonlight Over the Harbor" : "The Lighthouse Keeper's Promise", 3, item.auto ? soon() : undefined);
-      try {
-        assert.equal(await page.module.runUnbookmark(job, engine, {}), item.stop, item.label);
-      } finally {
-        await clearCooldown(engine.cooldownStore); // a refusal's: what follows meets no cooldown
-      }
-      const line = String(page.element("favorites-status").textContent);
-      assert.equal(line.endsWith(` ${HALTED_LINE}`), item.halted, `${item.label}: ${line}`);
-      page.hold();
-      page.module.dramaDone({ ...BATCH_JOB, id: 5, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-      await page.turn();
-      assert.equal(autoRemovalsOf(page).length, item.halted ? 0 : 1, item.label);
-    } finally {
-      page.restore();
-    }
-  }
-  // the automatic removal off: the user's removal TikTok did not keep halts it all the same, unsaid;
-  // turned on again in this page, a complete drama still queues none — until the tab is reloaded —,
-  // and the library's line says so the moment the setting is saved on (never twice)
-  const off = await fakePage({ storage: { ...storage(), settings: { autoRemove: false } } });
-  try {
-    const { element, module } = off;
-    bookmarkChrome({ keeps: false });
-    const { job, engine } = removalJob(off, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3);
-    assert.equal(await module.runUnbookmark(job, engine, {}), BOOKMARK_MESSAGES["not-kept"]);
-    const notKept = "TikTok did not keep the change: “The Lighthouse Keeper's Promise” is still in your Favorites. Remove it yourself: Open on TikTok.";
-    assert.equal(element("favorites-status").textContent, notKept);
-    element("setting-auto-remove").checked = true;
-    element("settings-form").fire("submit");
-    for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await off.turn();
-    assert.equal(/** @type {Record<string, unknown>} */ (off.local.get("settings"))["autoRemove"], true);
-    assert.equal(element("settings-status").textContent, "Settings saved.");
-    assert.equal(element("favorites-status").textContent, `${notKept} ${HALTED_LINE}`); // after the removal's own words
-    assert.equal(element("favorites-status").className, "status error");
-    // saved again, or Defaults (the automatic removal on): said once, never twice
-    element("settings-form").fire("submit");
-    await settled(off);
-    element("settings-reset").fire("click");
-    await settled(off);
-    assert.equal(element("favorites-status").textContent, `${notKept} ${HALTED_LINE}`);
-    // the line said something else since (a listing, say): Defaults say the halt again, after it
-    element("favorites-status").textContent = "Listed 3 dramas.";
-    element("settings-reset").fire("click");
-    await settled(off);
-    assert.equal(element("favorites-status").textContent, `Listed 3 dramas. ${HALTED_LINE}`);
-    off.hold();
-    module.dramaDone({ ...BATCH_JOB, id: 5, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    await off.turn();
-    assert.deepEqual(autoRemovalsOf(off), []);
-  } finally {
-    off.restore();
-  }
-  const reloaded = await fakePage({ storage: storage() }); // the tab reloaded: no halt
-  try {
-    fakeNotifications();
-    reloaded.hold();
-    reloaded.module.dramaDone({ ...BATCH_JOB, id: 5, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    await reloaded.turn();
-    assert.equal(autoRemovalsOf(reloaded).length, 1);
-  } finally {
-    reloaded.restore();
-  }
-});
-
-test("the alerts of DramaFetch's own removal (2.0.0): removed — ✓ under the id of the drama's ✓ alert (Chrome replaces it), else its own —; removed nothing — ⚠ still in your Favorites, the reason as the library's status line shows it (not kept, a cooldown met, a refused write) —; none when the page showed the Bookmark off already, none when the library no longer holds the drama (gone: TikTok's list read since without it — the drama's ✓ alert as it was, the library's line saying why), none after Stop, none for the user's own removal, none with the alerts off; refused at its job's own gate (a cooldown in force as it starts): ⚠ with the cooldown's words; taken out of the queue by another job's stop: none, the drama's ✓ alert as it was", async () => {
-  const soon = () => ({ foundCompleteAt: Date.now() / 1000 - 60, alertId: null });
-  const title = "The Lighthouse Keeper's Promise";
-  /**
-   * @type {{label: string, storage?: Record<string, unknown>, chrome?: Parameters<typeof bookmarkChrome>[0], auto: import("../src/app/app.js").AutoRemoval | undefined, seriesId?: string, setup?: (page: Awaited<ReturnType<typeof fakePage>>, engine: import("../src/app/engine.js").Engine) => Promise<void> | void, stop?: boolean, alert: "removed" | "kept" | null, own?: boolean, line?: string}[]}
-   */
-  const cases = [
-    { label: "removed, under the drama's ✓ alert", auto: { foundCompleteAt: Date.now() / 1000 - 60, alertId: "dramafetch-alert:earlier:7:x:complete" }, alert: "removed" },
-    { label: "removed, under its own id", auto: soon(), alert: "removed", own: true },
-    {
-      // TikTok's list, read since, no longer holds it (or DramaFetch removed it already): a “still in
-      // your Favorites” would contradict that list — no alert, the drama's ✓ one left as it was
-      label: "gone from the library",
-      auto: { foundCompleteAt: Date.now() / 1000 - 60, alertId: "dramafetch-alert:earlier:7:x:complete" },
-      seriesId: MOON,
-      alert: null,
-      // the library's line says why, in its own words: nobody confirmed anything (the user's own
-      // removal keeps `bookmarkGone`'s)
-      line: "“Moonlight Over the Harbor” was not removed: it is no longer in your library — TikTok's list, read after DramaFetch queued its removal, no longer holds it, or it was removed already. Nothing was asked of TikTok.",
-    },
-    { label: "not kept", chrome: { keeps: false }, auto: soon(), alert: "kept", own: true },
-    {
-      label: "a cooldown met before its first step",
-      auto: soon(),
-      setup: async (_page, engine) => void (await recordBlock(engine.cooldownStore, MEDIA_RATE_LIMIT_MESSAGE, "browser", { now: Date.now() / 1000 })),
-      alert: "kept",
-      own: true,
-    },
-    {
-      label: "a write the storage refuses",
-      auto: soon(),
-      setup: () =>
-        void Object.assign(chrome.storage.local, {
-          set: async () => {
-            throw new Error(REFUSED);
-          },
-        }),
-      alert: "kept",
-      own: true,
-    },
-    { label: "the page shows the Bookmark off already", chrome: { saved: false }, auto: soon(), alert: null },
-    {
-      label: "Stop before the press",
-      auto: soon(),
-      setup: (_page, engine) => {
-        engine.sleep = async () => {
-          throw new StopRequested();
-        };
-      },
-      stop: true,
-      alert: null,
-    },
-    { label: "the user's own removal, removed", auto: undefined, alert: null },
-    { label: "the alerts off", storage: { settings: { alerts: false } }, auto: soon(), alert: null },
-  ];
-  for (const item of cases) {
-    const page = await fakePage({ storage: { ...REMOVAL_LIBRARY(), ...item.storage } });
-    try {
-      const notes = fakeNotifications();
-      bookmarkChrome({ profileTab: false, ...item.chrome });
-      const seriesId = item.seriesId ?? LIGHTHOUSE;
-      const name = seriesId === MOON ? "Moonlight Over the Harbor" : title;
-      const { job, engine } = removalJob(page, seriesId, name, 3, item.auto);
-      await item.setup?.(page, engine);
-      try {
-        if (item.stop === true) await assert.rejects(page.module.runUnbookmark(job, engine, {}), StopRequested, item.label);
-        else await page.module.runUnbookmark(job, engine, {});
-      } finally {
-        await clearCooldown(engine.cooldownStore);
-      }
-      // the library's status line — before the halt's line, when one follows
-      const line = String(page.element("favorites-status").textContent).replace(` ${HALTED_LINE}`, "");
-      if (item.line !== undefined) assert.equal(line, item.line, item.label);
-      if (item.alert === null) {
-        assert.deepEqual(notes.created, [], item.label);
-        continue;
-      }
-      const id = item.own === true ? `dramafetch-alert:${page.module.alerts.page}:9:${seriesId}:removal` : String(item.auto?.alertId);
-      assert.deepEqual(notes.created, [id], item.label);
-      const shown = notes.shown.get(id);
-      assert.equal(shown?.["buttons"], undefined, item.label);
-      assert.equal(shown?.["contextMessage"], undefined, item.label);
-      if (item.alert === "removed") {
-        assert.equal(shown?.["title"], `✓ ${name} — removed from your Favorites`, item.label);
-        assert.equal(shown?.["message"], "Every episode is on disk.", item.label);
-      } else {
-        assert.equal(shown?.["title"], `⚠ ${name} — still in your Favorites`, item.label);
-        // the reason as the library's status line shows it
-        assert.equal(shown?.["message"], plainText(line), item.label);
-        assert.ok(line.length > 0 && !line.startsWith("Removing"), `${item.label}: ${line}`);
-      }
-    } finally {
-      page.restore();
-    }
-  }
-  // refused at its own job's gate: a cooldown recorded after it was queued (another tab's, say) —
-  // it never reaches the drama's page: ⚠ under the drama's ✓ alert, the cooldown's words
-  const gate = await fakePage({ testSettings: QUICK, storage: { favoritesLibrary: autoLibrary() } });
-  try {
-    const { element, module } = gate;
-    const notes = fakeNotifications();
-    const open = gateJobs();
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {}); // the removal, running at once: waits at the gate
-    await gate.turn();
-    assert.deepEqual(jobsOf(gate).map((job) => job.label), [AUTO_LABEL]);
-    const complete = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:complete`;
-    const at = Date.now() / 1000;
-    gate.local.set("cooldown", { until: at + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: at });
-    open();
-    for (let turn = 0; turn < 1000 && (module.journal().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await gate.turn();
-    const [entry] = module.journal();
-    assert.equal(entry?.["kind"], "unbookmark");
-    assert.equal(entry?.["bookmark"], undefined); // the removal itself never began
-    assert.match(String(entry?.["error"]), /^TikTok refused a request at /);
-    assert.deepEqual(notes.created, [complete, complete]);
-    assert.equal(notes.shown.get(complete)?.["title"], `⚠ ${SECOND_TITLE} — still in your Favorites`);
-    assert.match(String(notes.shown.get(complete)?.["message"]), /^TikTok refused a request at /);
-    assert.equal(notes.shown.get(complete)?.["buttons"], undefined);
-  } finally {
-    gate.restore();
-  }
-  // waiting behind the user's own removal, which TikTok does not keep — a stop: the jobs behind it
-  // end unstarted —: taken out of the queue (`not started: …`) with no alert of its own, the
-  // drama's ✓ alert left as it was
-  const behind = await fakePage({
-    testSettings: { ...QUICK, bookmarkPollS: 0.001, bookmarkWaitS: 0.5 },
-    storage: { ...REMOVAL_LIBRARY(), favoritesLibrary: storedLibrary([[LIGHTHOUSE, title, 3], [OTHER_ID, SECOND_TITLE, 3]], { total: 946 }) },
-  });
-  try {
-    const { element, module } = behind;
-    const notes = fakeNotifications();
-    const { site } = bookmarkChrome({ keeps: false, profileTab: false });
-    const open = gateJobs();
-    actionOf(behind, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(behind);
-    element("bookmark-confirm").fire("click"); // the user's own removal: it starts, and waits at the gate
-    await behind.turn();
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {}); // DramaFetch's own, behind it
-    const userLabel = `Remove “${title}” from your Favorites`;
-    assert.deepEqual(jobsOf(behind).map((job) => job.label), [userLabel, AUTO_LABEL]);
-    const complete = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:complete`;
-    assert.deepEqual(notes.created, [complete]);
-    open();
-    for (let turn = 0; turn < 2000 && (module.journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await behind.turn();
-    assert.equal(site.clicks, 1); // pressed once, not kept: the user's removal stopped there
-    assert.deepEqual(
-      module.journal().map((entry) => [entry["label"], entry["error"]]),
-      [
-        [userLabel, BOOKMARK_MESSAGES["not-kept"]],
-        [AUTO_LABEL, `not started: batch stopped in ${userLabel} (${BOOKMARK_MESSAGES["not-kept"]})`],
-      ],
-    );
-    assert.deepEqual(notes.created, [complete]); // no alert for the one the stop took out of the queue
-    assert.equal(notes.shown.get(complete)?.["title"], "✓ Drama 2399 — downloaded");
-    assert.equal(notes.shown.get(complete)?.["message"], "All 3 episodes are on disk.");
-  } finally {
-    behind.restore();
-  }
-});
-
-test("DramaFetch's own removal whose setting is saved unticked once it runs — during its rest between jobs, or before it — ends before its first request (2.0.0): no tab, no press, the drama left in the Favorites, not a stop (the jobs waiting go on), no alert, the library's line says so; the user's own removal does not ask the setting", async () => {
-  const title = "The Lighthouse Keeper's Promise";
-  const OFF = "not removed: the automatic removal from the Favorites was turned off before anything was asked of TikTok";
-  const LINE = `“${title}” stays in your Favorites: the automatic removal was turned off before DramaFetch asked TikTok anything.`;
-  for (const when of ["during its rest", "before its rest"]) {
-    // the rest between jobs is due: TikTok was contacted a moment ago
-    const page = await fakePage({ storage: { ...REMOVAL_LIBRARY(), pacing: { lastContactAt: Date.now() / 1000 } } });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      const { site, log } = bookmarkChrome({ profileTab: false });
-      const { job, engine, pauses } = removalJob(page, LIGHTHOUSE, title, 3, { foundCompleteAt: Date.now() / 1000 - 60, alertId: null, episodes: 3 });
-      const untick = async () => {
-        assert.equal(element("setting-auto-remove").checked, true, when); // on by default
-        element("setting-auto-remove").checked = false;
-        element("settings-form").fire("submit");
-        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-        assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("settings"))["autoRemove"], false, when);
-      };
-      if (when === "before its rest") {
-        await untick(); // saved while the removal ran towards its gate
-      } else {
-        const sleep = engine.sleep;
-        engine.sleep = async (seconds) => {
-          if (element("setting-auto-remove").checked) await untick(); // saved during the rest
-          await sleep(seconds);
-        };
-      }
-      /** @type {Record<string, unknown>} */
-      const entry = {};
-      assert.equal(await module.runUnbookmark(job, engine, entry), null, when); // not a stop: the queue goes on
-      assert.equal(site.clicks, 0, when);
-      assert.deepEqual(log, [], when); // no tab opened: nothing asked of TikTok
-      assert.deepEqual(pauses, when === "during its rest" ? [60] : [], when); // the rest it was in, nothing after it
-      assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title, outcome: OFF }, when);
-      assert.equal(entry["error"], OFF, when);
-      assert.equal(element("favorites-status").textContent, LINE, when);
-      assert.deepEqual(notes.created, [], when); // no alert: the user's own doing, as Stop
-      assert.ok(actionOf(page, LIGHTHOUSE, "remove") !== undefined, `${when}: the card keeps Remove from Favorites`);
-      assert.equal(element("library-removed").hidden, true, when);
-    } finally {
-      page.restore();
-    }
-  }
-  // the user's own removal with the setting off: the setting is DramaFetch's own removal's only — pressed once, removed
-  const own = await fakePage({ storage: { ...REMOVAL_LIBRARY(), settings: { autoRemove: false } } });
-  try {
-    const { site } = bookmarkChrome({ profileTab: false });
-    const { job, engine } = removalJob(own, LIGHTHOUSE, title, 3);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(own.element("setting-auto-remove").checked, false);
-    assert.equal(await own.module.runUnbookmark(job, engine, entry), null);
-    assert.equal(site.clicks, 1);
-    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title, outcome: "removed" });
-  } finally {
-    own.restore();
-  }
-  // in Spanish: the library's line
-  const es = await fakePage({ language: "es", storage: { ...REMOVAL_LIBRARY(), settings: { autoRemove: false } } });
-  try {
-    bookmarkChrome({ profileTab: false });
-    const { job, engine } = removalJob(es, LIGHTHOUSE, title, 3, { foundCompleteAt: Date.now() / 1000 - 60, alertId: null, episodes: 3 });
-    assert.equal(await es.module.runUnbookmark(job, engine, {}), null);
-    assert.equal(es.element("favorites-status").textContent, `“${title}” sigue en tu Bookmark: la eliminación automática se desactivó antes de que DramaFetch pidiera nada a TikTok.`);
-  } finally {
-    es.restore();
-  }
-});
-
-test("DramaFetch's own removal leaves the progress card as it is (2.0.0): the last download's Did not download block — its table, its line, its Retry, its Save the report and the line of the report it saved — stays while the removal runs and after it ends, and that download's automatic retry, coming next, keeps it as after its own job; a stop of the removal that takes that retry out of the queue takes only the block's line away; the block's Retry, pressed while the removal runs, is given back as it ends — also when its stop (not kept, Stop) took the retry it queued out of the queue: pressed again, it queues the block's episodes once more; the user's own Remove from Favorites takes the block away as any job does (1.8.0)", async () => {
-  const truncated = "download looks incomplete or wrong: truncated body (100000 of 131072 bytes) from v16-webapp-prime.tiktok.com";
-  const results = [
-    { episode: episode(1, { seriesId: OTHER_ID }), status: /** @type {const} */ ("done"), path: "/dl/E1.mp4", message: "saved E1.mp4 (0.1 MiB)", downloadId: 1 },
-    { episode: episode(2, { seriesId: OTHER_ID }), status: /** @type {const} */ ("failed"), path: null, message: truncated },
-    { episode: episode(3, { seriesId: OTHER_ID }), status: /** @type {const} */ ("failed-unavailable"), path: null, message: DRM_MESSAGE },
-  ];
-  const records = [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed", truncated], [3, "failed-unavailable", DRM_MESSAGE]])];
-  const title = "The Lighthouse Keeper's Promise";
-  const autoLabel = `Remove “${title}” from your Favorites (automatic)`;
-  const retryLabel = "Automatic retry: 1 of Drama 2399";
-  const settings = { testSettings: { ...QUICK, bookmarkPollS: 0.001, bookmarkWaitS: 0.5 }, storage: { ...REMOVAL_LIBRARY(), favoritesLibrary: storedLibrary([[LIGHTHOUSE, title, 3], [OTHER_ID, SECOND_TITLE, 3]], { total: 946 }) } };
-  /**
-   * The progress card's Did not download block as the page shows it.
-   * @param {Awaited<ReturnType<typeof fakePage>>} page
-   */
-  const blockOf = (page) => ({
-    hidden: page.element("failed-block").hidden,
-    heading: page.element("failed-heading").textContent,
-    rows: page.element("failed-table").querySelector("tbody").children.map((row) => row.getAttribute("data-number")),
-    line: page.element("failed-auto").hidden ? null : page.element("failed-auto").textContent,
-    retryDisabled: page.element("retry-button").disabled,
-    reportDisabled: page.element("report-button").disabled,
-    saved: String(page.element("failed-report").textContent).startsWith("Report saved: Drama 2399 - did not download "),
-  });
-  const drawn = { hidden: false, heading: "Did not download (2)", rows: ["2", "3"], line: "1 of them will be retried automatically, once.", retryDisabled: false, reportDisabled: false, saved: true };
-  /**
-   * A download job (7) that ended as runJob draws it — its block, its automatic retry of E02 counted,
-   * its report saved (the setting on) —, then its two dramas done, as its batch would have them:
-   * the complete one's automatic removal starts (and waits at the gate), E02's automatic retry
-   * waits behind it.
-   * @param {Awaited<ReturnType<typeof fakePage>>} page
-   * @returns {Promise<() => void>} what opens the gate
-   */
-  const downloadThenRemoval = async (page) => {
-    const { module } = page;
-    const alertId = module.alerts.idOf(7, `${OTHER_ID}:retry`);
-    module.renderFailed(records, [{ numbers: [2], autoRetry: { alertId, name: "Drama 2399" } }]);
-    await module.reportJobEnd({ kind: "batch", label: "2 series" }, OUTCOME, [finishedRun(OTHER_ID, "Drama 2399", results)], TRACES.of);
-    for (let turns = 0; turns < 20 && !blockOf(page).saved; turns += 1) await page.turn();
-    assert.deepEqual(blockOf(page), drawn);
-    const open = gateJobs();
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(LIGHTHOUSE)] }, completeRun(LIGHTHOUSE), {});
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, finishedRun(OTHER_ID, "Drama 2399", results), {});
-    await page.turn();
-    assert.deepEqual(jobsOf(page).map((job) => job.label), [autoLabel, retryLabel]);
-    assert.equal(jobsOf(page)[1]?.autoRetry?.alertId, alertId); // the retry the block's line counts
-    return open;
-  };
-  // removed: the block as the download left it while the removal runs, after it, and while the
-  // automatic retry that follows runs
-  const page = await fakePage(settings);
-  try {
-    const { element, module } = page;
-    fakeNotifications();
-    const { site } = bookmarkChrome({ profileTab: false });
-    const open = await downloadThenRemoval(page);
-    assert.equal(element("progress-current").textContent, autoLabel); // its label shows
-    assert.deepEqual(blockOf(page), drawn);
-    open();
-    gateJobs(); // the automatic retry, once it starts, waits at a gate of its own
-    for (let turn = 0; turn < 2000 && element("progress-current").textContent !== retryLabel; turn += 1) await page.turn();
-    assert.equal(site.clicks, 1);
-    assert.deepEqual(module.journal()[0]?.["bookmark"], { series_id: LIGHTHOUSE, title, outcome: "removed" });
-    assert.equal(element("progress-current").textContent, retryLabel);
-    assert.deepEqual(blockOf(page), drawn); // through the removal's end, and kept for that retry
-    element("retry-button").fire("click"); // its Retry still takes what that retry does not hold: E03
-    await page.turn();
-    assert.deepEqual(jobsOf(page).at(-1)?.numbers, [3]);
-  } finally {
-    page.restore();
-  }
-  // not kept — a stop: the retry behind it ends unstarted —: the block stays, its line goes
-  const stopped = await fakePage(settings);
-  try {
-    const { element, module } = stopped;
-    const notes = fakeNotifications();
-    bookmarkChrome({ keeps: false, profileTab: false });
-    const open = await downloadThenRemoval(stopped);
-    open();
-    for (let turn = 0; turn < 2000 && (module.journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await stopped.turn();
-    assert.deepEqual(
-      module.journal().map((entry) => [entry["label"], entry["error"]]),
-      [
-        [autoLabel, BOOKMARK_MESSAGES["not-kept"]],
-        [retryLabel, `not started: batch stopped in ${autoLabel} (${BOOKMARK_MESSAGES["not-kept"]})`],
-      ],
-    );
-    assert.deepEqual(blockOf(stopped), { ...drawn, line: null });
-    assert.equal(element("failed-auto").textContent, "");
-    const retryAlert = notes.shown.get(module.alerts.idOf(7, `${OTHER_ID}:retry`)); // ⚠ with its Retry, in place of “retrying”
-    assert.deepEqual(retryAlert?.["buttons"], [{ title: "Retry" }]);
-  } finally {
-    stopped.restore();
-  }
-  // the block's Retry pressed while the removal waits at its gate — it queues what the automatic
-  // retry does not hold (E03), and is spent —, then the removal stops (not kept, or Stop), taking
-  // both retries out of the queue: the block stays, and its Retry is given back as the removal ends,
-  // as at every job's end (1.8.0) — pressed again, it queues the block's episodes once more
-  for (const ending of ["not kept", "Stop"]) {
-    const pressed = await fakePage(settings);
-    try {
-      const { element, module } = pressed;
-      fakeNotifications();
-      const { site } = bookmarkChrome({ keeps: ending !== "not kept", profileTab: false });
-      const open = await downloadThenRemoval(pressed);
-      element("retry-button").fire("click");
-      await pressed.turn();
-      const userRetry = "Retry 1 of Drama 2399";
-      assert.deepEqual(
-        jobsOf(pressed).map((job) => [job.label, job.numbers]),
-        [
-          [autoLabel, []],
-          [retryLabel, [2]],
-          [userRetry, [3]],
-        ],
-        ending,
-      );
-      assert.equal(blockOf(pressed).retryDisabled, true, ending); // spent
-      if (ending === "Stop") element("stop-button").fire("click");
-      open();
-      for (let turn = 0; turn < 2000 && (module.journal().length < 3 || element("app-status").dataset["state"] !== "idle"); turn += 1) await pressed.turn();
-      const reason = ending === "Stop" ? new StopRequested().message : BOOKMARK_MESSAGES["not-kept"];
-      assert.deepEqual(
-        module.journal().map((entry) => [entry["label"], entry["error"]]),
-        [
-          [autoLabel, reason],
-          [userRetry, `not started: batch stopped in ${autoLabel} (${reason})`],
-          [retryLabel, `not started: batch stopped in ${autoLabel} (${reason})`],
-        ],
-        ending,
-      );
-      assert.equal(site.clicks, ending === "Stop" ? 0 : 1, ending);
-      assert.equal(element("app-status").dataset["state"], "idle", ending);
-      assert.deepEqual(jobsOf(pressed), [], ending);
-      assert.deepEqual(blockOf(pressed), { ...drawn, line: null }, ending); // its Retry given back
-      pressed.hold(); // the next job stays where it starts: what it is, is what was queued
-      element("retry-button").fire("click");
-      await pressed.turn();
-      assert.deepEqual(
-        jobsOf(pressed).map((job) => [job.label, job.numbers]),
-        [["Retry 2 of Drama 2399", [2, 3]]],
-        ending,
-      );
-    } finally {
-      pressed.restore();
-    }
-  }
-  // the user's own removal: as any job that starts, it takes the block away (1.8.0)
-  const own = await fakePage(settings);
-  try {
-    const { element, module } = own;
-    module.renderFailed(records, []);
-    await module.reportJobEnd({ kind: "batch", label: "2 series" }, OUTCOME, [finishedRun(OTHER_ID, "Drama 2399", results)], TRACES.of);
-    for (let turns = 0; turns < 20 && !blockOf(own).saved; turns += 1) await own.turn();
-    own.hold();
-    actionOf(own, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(own);
-    element("bookmark-confirm").fire("click");
-    await own.turn();
-    assert.equal(element("progress-current").textContent, `Remove “${title}” from your Favorites`);
-    assert.deepEqual(blockOf(own), { hidden: true, heading: "", rows: [], line: null, retryDisabled: true, reportDisabled: true, saved: false });
-  } finally {
-    own.restore();
-  }
-});
-
-test("the automatic removal setting (2.0.0): Remove a drama from my Favorites once all its episodes are downloaded — a checkbox under the automatic retry, on by default, saved with the settings and back with Defaults —; off, a complete drama of the library is downloaded and stays a favorite: nothing queued", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
-  try {
-    const { element, local, module } = page;
-    const html = readFileSync(new URL("../src/app/app.html", import.meta.url), "utf8");
-    const retry = html.indexOf('id="setting-auto-retry"');
-    const remove = html.indexOf('id="setting-auto-remove"');
-    assert.ok(retry > 0 && remove > retry, "under the automatic retry");
-    assert.ok(html.includes('data-i18n="settingAutoRemove"') && html.includes('data-i18n="settingAutoRemoveHint"'));
-    assert.equal(element("setting-auto-remove").checked, true);
-    element("setting-auto-remove").checked = false;
-    element("settings-form").fire("submit");
-    for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-    assert.equal(/** @type {Record<string, unknown>} */ (local.get("settings"))["autoRemove"], false);
-    assert.equal(/** @type {Record<string, unknown>} */ (local.get("settings"))["autoRetry"], true); // the others as they were
-    fakeNotifications();
-    page.hold();
-    module.dramaDone({ ...BATCH_JOB, id: 5, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    await page.turn();
-    assert.deepEqual(jobsOf(page), []);
-    // Defaults: on again
-    element("settings-reset").fire("click");
-    for (let turns = 0; turns < 20 && !element("setting-auto-remove").checked; turns += 1) await page.turn();
-    assert.equal(element("setting-auto-remove").checked, true);
-    assert.equal(/** @type {Record<string, unknown>} */ (local.get("settings"))["autoRemove"], true);
-  } finally {
-    page.restore();
-  }
-  const off = await fakePage({ storage: { settings: { autoRemove: false } } });
-  try {
-    assert.equal(off.element("setting-auto-remove").checked, false);
-    assert.equal(off.element("setting-auto-retry").checked, true);
-  } finally {
-    off.restore();
-  }
-});
-
-test("the settings saved in another DramaFetch tab (2.0.0: a read-only tab's form still saves): the tab that downloads follows what is stored — the form shows it; the automatic removal unticked, the removals waiting leave the queue (the library's line says how many), a complete drama queues none and the one running ends before its first request; ticked again, a complete drama queues its removal, and a halt in this tab is said, once —; its own Save, heard back, changes nothing more", async () => {
-  const title = "The Lighthouse Keeper's Promise";
-  const OFF = "not removed: the automatic removal from the Favorites was turned off before anything was asked of TikTok";
-  const page = await fakePage({ storage: { favoritesLibrary: autoLibrary(), [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }) } });
-  try {
-    const { element, local, module } = page;
-    fakeNotifications();
-    page.hold();
-    assert.equal(paste(page, SERIES_ID), true); // a job running: the removals wait behind it
-    module.dramaDone({ ...BATCH_JOB, id: 5, refs: [refOf(LIGHTHOUSE)] }, completeRun(LIGHTHOUSE), {});
-    await page.turn();
-    assert.equal(autoRemovalsOf(page).length, 1);
-    // the other tab saves the box unticked (and a longer pause): chrome.storage.local holds it, and
-    // Chrome tells every DramaFetch page
-    local.set("settings", { ...DEFAULT_SETTINGS, autoRemove: false, delayMinS: 6 });
-    page.storageChanged("settings");
-    await settled(page);
-    assert.deepEqual(autoRemovalsOf(page), []);
-    assert.equal(element("favorites-status").textContent, "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.");
-    assert.equal(element("setting-auto-remove").checked, false); // the form shows what is stored
-    assert.equal(element("setting-delay-min").value, "6");
-    module.dramaDone({ ...BATCH_JOB, id: 6, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    await page.turn();
-    assert.deepEqual(autoRemovalsOf(page), []); // a complete drama queues none
-    // one that was running already: the setting asked again before its first request — nothing asked of TikTok
-    const { site, log } = bookmarkChrome({ profileTab: false });
-    const { job, engine } = removalJob(page, LIGHTHOUSE, title, 3, { foundCompleteAt: Date.now() / 1000 - 60, alertId: null, episodes: 3 });
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await module.runUnbookmark(job, engine, entry), null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []); // no tab, no request
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], OFF);
-    // ticked again in the other tab: a complete drama queues its removal again
-    local.set("settings", { ...DEFAULT_SETTINGS });
-    page.storageChanged("settings");
-    await settled(page);
-    assert.equal(element("setting-auto-remove").checked, true);
-    assert.equal(element("setting-delay-min").value, String(DEFAULT_SETTINGS.delayMinS));
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    await page.turn();
-    assert.equal(autoRemovalsOf(page).length, 1);
-    // its own Save unticked, which Chrome tells this page too — maybe once the user is editing the
-    // form again: the line counts the removal once, and the edit stays as typed
-    element("setting-auto-remove").checked = false;
-    element("settings-form").fire("submit");
-    for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-    assert.deepEqual(autoRemovalsOf(page), []);
-    const said = element("favorites-status").textContent;
-    assert.equal(said, "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.");
-    element("setting-auto-retry").checked = false; // being edited, not saved yet
-    page.storageChanged("settings");
-    await settled(page);
-    assert.equal(element("favorites-status").textContent, said);
-    assert.equal(element("setting-auto-remove").checked, false);
-    assert.equal(element("setting-auto-retry").checked, false);
-  } finally {
-    page.restore();
-  }
-  // halted in this tab while the setting was off — unsaid —: ticked again in the other tab, this
-  // tab's library line says so after what it says, once
-  const halted = await fakePage({ storage: { ...REMOVAL_LIBRARY(), settings: { autoRemove: false } } });
-  try {
-    const { element, local, module } = halted;
-    bookmarkChrome({ keeps: false });
-    const { job, engine } = removalJob(halted, LIGHTHOUSE, title, 3);
-    assert.equal(await module.runUnbookmark(job, engine, {}), BOOKMARK_MESSAGES["not-kept"]);
-    const notKept = `TikTok did not keep the change: “${title}” is still in your Favorites. Remove it yourself: Open on TikTok.`;
-    assert.equal(element("favorites-status").textContent, notKept);
-    local.set("settings", { ...DEFAULT_SETTINGS });
-    halted.storageChanged("settings");
-    await settled(halted);
-    assert.equal(element("favorites-status").textContent, `${notKept} ${HALTED_LINE}`);
-    halted.storageChanged("settings");
-    await settled(halted);
-    assert.equal(element("favorites-status").textContent, `${notKept} ${HALTED_LINE}`); // never twice
-  } finally {
-    halted.restore();
-  }
-});
-
-test("the automatic removal in Spanish under a Spanish Chrome (2.0.0): its queue label, the status lines of Stop and of the halt, and its alerts", async () => {
-  const page = await fakePage({ language: "es", storage: { favoritesLibrary: autoLibrary() } });
-  try {
-    const { element, module } = page;
-    fakeNotifications();
-    page.hold();
-    assert.equal(paste(page, SERIES_ID), true); // running
-    await page.turn(); // held at its tabs.getCurrent
-    module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {});
-    assert.deepEqual(waitingRows(page), [`${SERIES_ID} · el nombre aparece al leer su lista`, `Quitar de Bookmark (automático) — ${SECOND_TITLE} · ${OTHER_ID}`]);
-    element("stop-button").fire("click");
-    assert.equal(element("favorites-status").textContent, "Se sacó de la cola 1 eliminación automática de tu Bookmark: su tarjeta sigue teniendo Quitar de Bookmark.");
-    await page.turn();
-  } finally {
-    page.restore();
-  }
-  for (const keeps of [false, true]) {
-    const es = await fakePage({ language: "es", storage: REMOVAL_LIBRARY() });
-    try {
-      const notes = fakeNotifications();
-      bookmarkChrome({ keeps, profileTab: false });
-      const { job, engine } = removalJob(es, LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3, { foundCompleteAt: Date.now() / 1000 - 60, alertId: null });
-      await es.module.runUnbookmark(job, engine, {});
-      const id = `dramafetch-alert:${es.module.alerts.page}:9:${LIGHTHOUSE}:removal`;
-      if (keeps) {
-        assert.equal(notes.shown.get(id)?.["title"], "✓ The Lighthouse Keeper's Promise — quitado de tu Bookmark");
-        assert.equal(notes.shown.get(id)?.["message"], "Todos sus episodios están en el disco.");
-        continue;
-      }
-      assert.equal(
-        es.element("favorites-status").textContent,
-        "TikTok no guardó el cambio: “The Lighthouse Keeper's Promise” sigue en tu Bookmark. Quítalo tú mismo: Abrir en TikTok. TikTok no guardó una eliminación, o la rechazó: DramaFetch no quitará más dramas de tu Bookmark por su cuenta hasta que recargues esta pestaña. Quitar de Bookmark en una tarjeta sigue funcionando.",
-      );
-      assert.equal(notes.shown.get(id)?.["title"], "⚠ The Lighthouse Keeper's Promise — sigue en tu Bookmark");
-      assert.equal(notes.shown.get(id)?.["message"], "TikTok no guardó el cambio: “The Lighthouse Keeper's Promise” sigue en tu Bookmark. Quítalo tú mismo: Abrir en TikTok.");
-    } finally {
-      es.restore();
-    }
-  }
-});
-
-// ------- DramaFetch 2.0.0: an automatic removal too old at its turn lists its drama again, once (A1)
-
-/** The drama of the re-listing tests, as the library holds it. */
-const KEEPER = "The Lighthouse Keeper's Promise";
-/** The label of its re-listing (the progress card, the test journal). */
-const RELIST_LABEL = `List “${KEEPER}” again, then remove it from your Favorites (automatic)`;
-/** Its re-listing's row in the Waiting card: what it is, the drama's name and its whole id. */
-const RELIST_ROW = `List again, then remove from Favorites (automatic) — ${KEEPER} · ${LIGHTHOUSE}`;
-/** The library's status line of a removal that lists its drama again first (or finds a download of it waiting). */
-const RELIST_LINE = `“${KEEPER}”: its episode count is more than a day old — DramaFetch lists it again, then removes it from your Favorites.`;
-/** The stale gate's line: the user's own removal's, and that of a removal a re-listing led to. */
-const STALE_LINE = `“${KEEPER}” was not removed: its episode count was read from TikTok more than 24 hours ago, and new episodes may have come since. Press Update from TikTok first, then remove it. Nothing was asked of TikTok.`;
-/** The library's status line of DramaFetch's own removal ended by its setting, saved unticked. */
-const TURNED_OFF_LINE = `“${KEEPER}” stays in your Favorites: the automatic removal was turned off before DramaFetch asked TikTok anything.`;
-/** The drama's ✓ alert of the download that queued the removal: what the removal's own alert replaces. */
-const EARLIER_ALERT = `dramafetch-alert:earlier:7:${LIGHTHOUSE}:complete`;
-
-/**
- * Storage in which every count DramaFetch holds of LIGHTHOUSE is more than a day old: the library's
- * whole list read 25 hours ago — LIGHTHOUSE with 3 episodes (none with `episodes` null), OTHER_ID,
- * SNOW_A — and LIGHTHOUSE's three episodes saved, found complete 25 hours ago.
- * @param {number | null} [episodes]
- * @returns {Record<string, unknown>}
- */
-function staleStorage(episodes = 3) {
-  const dayAgo = Date.now() / 1000 - 25 * 3600;
-  return {
-    favoritesLibrary: storedLibrary(
-      [
-        [LIGHTHOUSE, KEEPER, episodes],
-        [OTHER_ID, SECOND_TITLE, 3],
-        [SNOW_A, "Snowfall in Two Cities", 60],
-      ],
-      { total: 946, fullReadAt: dayAgo, listedAt: dayAgo },
-    ),
-    [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3, completeAt: dayAgo }),
-  };
-}
-
-/**
- * DramaFetch's own removal of LIGHTHOUSE as a download that found it complete 25 hours ago — and
- * showed the drama's ✓ alert — queued it.
- * @param {Partial<import("../src/app/app.js").AutoRemoval>} [changes]
- * @returns {import("../src/app/app.js").AutoRemoval}
- */
-const dayOld = (changes = {}) => ({ foundCompleteAt: Date.now() / 1000 - 25 * 3600, alertId: EARLIER_ALERT, episodes: 3, ...changes });
-
-/**
- * The re-listing a removal of LIGHTHOUSE queues, as the queue holds it (its id left out): a batch
- * over the drama, `recheck` on, `relist` the removal's alert id.
- * @param {string | null} alertId
- * @returns {Omit<import("../src/app/app.js").Job, "id">}
- */
-const relistOf = (alertId) => ({ kind: "batch", label: RELIST_LABEL, refs: [refOf(LIGHTHOUSE)], series: null, numbers: [], includeLocked: false, recheck: true, relist: { alertId } });
-
-/**
- * A removal of LIGHTHOUSE run as its job runs it (`auto`: DramaFetch's own, else the user's), the
- * drama's TikTok page faked: what it returned, its record and what it asked of TikTok.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {import("../src/app/app.js").AutoRemoval | undefined} auto
- * @param {{episodes?: number | null, chrome?: Parameters<typeof bookmarkChrome>[0]}} [options] the
- *   library's count the job carries; the faked page
- */
-async function removalOfKeeper(page, auto, options = {}) {
-  const { site, log } = bookmarkChrome(options.chrome ?? { profileTab: false });
-  const { job, engine, pauses } = removalJob(page, LIGHTHOUSE, KEEPER, options.episodes === undefined ? 3 : options.episodes, auto);
-  /** @type {Record<string, unknown>} */
-  const entry = {};
-  const stop = await page.module.runUnbookmark(job, engine, entry);
-  return { stop, entry, site, log, pauses };
-}
-
-test("DramaFetch's own removal whose episode count is more than 24 hours old at its turn (2.0.0) — found complete 25 h ago, the library's whole list read 25 h ago, the records' mark as old — asks TikTok nothing (no tab, no press, no pause) and, in place of `stale` and its ⚠, lists its drama again first: ONE re-listing at the END of the queue — a batch over the drama, `recheck` on, `relist` the removal's alert id, labelled (automatic) —, its own row in the Waiting card, its card Queued (a download of it, as a paste) — a paste of the drama, the user's own request, queued behind it all the same —; the outcome in the job's record, the library's line says so, no alert, not a stop; in Spanish too", async () => {
-  const page = await fakePage({ storage: staleStorage() });
-  try {
-    const { element } = page;
-    const notes = fakeNotifications();
-    page.hold(); // every job stays at its tabs.getCurrent: it runs, and makes no request
-    assert.equal(paste(page, SERIES_ID), true); // running
-    assert.equal(paste(page, THIRD_ID), true); // waiting
-    const { stop, entry, site, log, pauses } = await removalOfKeeper(page, dayOld());
-    assert.equal(stop, null); // not a stop: the jobs waiting go on
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []); // no tab: nothing asked of TikTok
-    assert.deepEqual(pauses, []); // it ended at its gate, before the rest between jobs
-    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: RELISTED });
-    assert.equal(entry["error"], RELISTED);
-    assert.deepEqual(notes.created, []); // no alert: the drama's ✓ one stays as it was
-    assert.equal(element("favorites-status").textContent, RELIST_LINE);
-    // ONE re-listing, at the end of the queue: after the job running and the one waiting
-    assert.deepEqual(
-      jobsOf(page).map((queued) => queued.label),
-      [`Series ${SERIES_ID}`, `Series ${THIRD_ID}`, RELIST_LABEL],
-    );
-    assert.deepEqual(jobsOf(page)[2], relistOf(EARLIER_ALERT));
-    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), dramaRow(THIRD_ID), RELIST_ROW]);
-    const row = element("queue-list").children[2];
-    assert.equal(row?.getAttribute("data-kind"), "autorelist");
-    assert.equal(row?.className, "queue-row autorelist");
-    // a download of the drama, as a paste of it is: its card says Queued — yet a paste of the drama,
-    // the user's own request, is never folded into it (an untick or Stop takes the re-listing out):
-    // queued behind it, the user's own job
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "queued");
-    assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, false);
-    assert.equal(paste(page, LIGHTHOUSE), true);
-    assert.equal(element("input-status").textContent, `Series ${LIGHTHOUSE} queued: it downloads whole, with the usual pauses.`);
-    assert.deepEqual(
-      jobsOf(page).map((queued) => queued.label),
-      [`Series ${SERIES_ID}`, `Series ${THIRD_ID}`, RELIST_LABEL, `Series ${LIGHTHOUSE}`],
-    );
-    assert.equal(jobsOf(page)[3]?.relist, undefined);
-  } finally {
-    page.restore();
-  }
-  const es = await fakePage({ language: "es", storage: staleStorage() });
-  try {
-    fakeNotifications();
-    es.hold();
-    const { entry } = await removalOfKeeper(es, dayOld());
-    assert.equal(entry["error"], RELISTED); // the engine's English
-    assert.equal(es.element("favorites-status").textContent, `“${KEEPER}”: su número de episodios tiene más de un día — DramaFetch lo vuelve a listar y después lo quita de tu Bookmark.`);
-    assert.equal(relistsOf(es)[0]?.label, `Volver a listar “${KEEPER}” y quitarlo de tu Bookmark (automático)`);
-    assert.deepEqual(waitingRows(es), [`Volver a listar y quitar de Bookmark (automático) — ${KEEPER} · ${LIGHTHOUSE}`]); // running: not begun yet
-  } finally {
-    es.restore();
-  }
-});
-
-test("the same for a drama TikTok's favorites list gives no episode count for (2.0.0, `no-count`): every episode saved against the count of the list its download read (`auto.episodes` 3), found complete 25 h ago — nothing asked of TikTok, ONE re-listing queued (`relist.alertId` null: its download showed no ✓ alert), the library's line says so, no alert, not a stop", async () => {
-  const page = await fakePage({ storage: staleStorage(null) });
-  try {
-    const notes = fakeNotifications();
-    page.hold();
-    const { stop, entry, site, log } = await removalOfKeeper(page, dayOld({ alertId: null }), { episodes: null });
-    assert.equal(stop, null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: RELISTED });
-    assert.equal(entry["error"], RELISTED);
-    assert.deepEqual(notes.created, []);
-    assert.equal(page.element("favorites-status").textContent, RELIST_LINE);
-    assert.deepEqual(jobsOf(page), [relistOf(null)]); // nothing else to run: it started (held)
-    assert.deepEqual(waitingRows(page), [RELIST_ROW]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the re-listing runs as a paste of its drama does (2.0.0): its drama listed again — `recheck`: even a complete mark of an hour ago skips nothing —, found complete: its ✓ alert under the removal's alert id (Chrome replaces the drama's earlier one), and its automatic removal queued, `auto.relisted` with that same alert id, when it found it complete; that removal, its count fresh now, presses TikTok's Bookmark ONCE, and ✓ removed takes the same id", async () => {
-  const page = await fakePage({ storage: staleStorage() });
-  try {
-    const { module } = page;
-    const notes = fakeNotifications();
-    page.hold();
-    await removalOfKeeper(page, dayOld());
-    const [relist] = module.queuedJobs(); // running, held at its tabs.getCurrent
-    assert.ok(relist !== undefined && relist.relist !== undefined);
-    // its run as runJob makes it: the page's own hooks over a scripted TikTok, the drama's records
-    // saying complete an hour ago (the scripted clock's) — what a paste without `recheck` skips
-    const scripted = scriptedEngine(page, relist);
-    const state = newState(LIGHTHOUSE, KEEPER);
-    for (const number of [1, 2, 3]) {
-      record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: 1_800_000_000 - 7200 });
-    }
-    markComplete(state, 1_800_000_000 - 3600, 3);
-    scripted.states.set(LIGHTHOUSE, JSON.parse(JSON.stringify(state)));
-    /** @type {string[]} */
-    const listed = [];
-    const discover = scripted.engine.discover;
-    scripted.engine.discover = (ref) => (listed.push(ref.seriesId), discover(ref));
-    const before = Date.now() / 1000;
-    const runs = await runBatch(scripted.engine, relist.refs);
-    await page.turn();
-    assert.deepEqual(listed, [LIGHTHOUSE]); // listed again: one listing
-    assert.deepEqual(runs.map((run) => [run.report.skippedComplete, run.report.complete, run.report.locked, run.stop]), [[false, true, 0, false]]);
-    // the drama's ✓ alert under the removal's id: Chrome replaces the earlier one
-    assert.deepEqual(notes.created, [EARLIER_ALERT]);
-    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], "✓ Drama 4561 — downloaded");
-    // its removal, at the end of the queue, marked: a re-listing led to it
-    const [removal, ...more] = autoRemovalsOf(page);
-    assert.deepEqual(more, []);
-    assert.deepEqual(jobsOf(page).map((queued) => queued.label), [RELIST_LABEL, `Remove “${KEEPER}” from your Favorites (automatic)`]);
-    const auto = removal?.bookmark?.auto;
-    assert.ok(auto !== undefined);
-    assert.ok(Number(auto.foundCompleteAt) >= before, `found complete at ${auto.foundCompleteAt}`);
-    assert.deepEqual({ ...auto, foundCompleteAt: 0 }, { foundCompleteAt: 0, alertId: EARLIER_ALERT, episodes: 3, relisted: true });
-    // that removal: its count fresh now — one press, removed, ✓ under the same id
-    const { stop, entry, site } = await removalOfKeeper(page, auto);
-    assert.equal(stop, null);
-    assert.equal(site.clicks, 1);
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
-    assert.deepEqual(notes.created, [EARLIER_ALERT, EARLIER_ALERT]);
-    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `✓ ${KEEPER} — removed from your Favorites`);
-  } finally {
-    page.restore();
-  }
-});
-
-test("a removal a re-listing led to (`auto.relisted`) whose count is more than 24 hours old again at its turn (2.0.0): today's end — `stale`, its line, its ⚠ alert under the drama's ✓ one —, and never a second re-listing", async () => {
-  const page = await fakePage({ storage: staleStorage() });
-  try {
-    const notes = fakeNotifications();
-    page.hold();
-    const { stop, entry, site, log } = await removalOfKeeper(page, dayOld({ relisted: true }));
-    assert.equal(stop, null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], BOOKMARK_MESSAGES.stale);
-    assert.equal(page.element("favorites-status").textContent, STALE_LINE);
-    assert.deepEqual(jobsOf(page), []); // no second re-listing
-    assert.deepEqual(notes.created, [EARLIER_ALERT]);
-    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `⚠ ${KEEPER} — still in your Favorites`);
-    assert.equal(notes.shown.get(EARLIER_ALERT)?.["message"], plainText(STALE_LINE));
-  } finally {
-    page.restore();
-  }
-});
-
-test("a download of the drama already waiting in the queue — a paste of it, a Retry of some of its episodes — lists it again by itself, and its drama's end queues a fresh removal (2.0.0): the removal too old at its turn queues nothing (`RELIST_PENDING`), asks TikTok nothing, no alert, the library's line says so, not a stop", async () => {
-  for (const waiting of ["a paste", "a Retry"]) {
-    const page = await fakePage({ storage: staleStorage() });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      page.hold();
-      assert.equal(paste(page, SERIES_ID), true); // running
-      if (waiting === "a paste") {
-        assert.equal(paste(page, LIGHTHOUSE), true);
-      } else {
-        module.renderFailed([seriesRecord(LIGHTHOUSE, KEEPER, [[2, "failed"]])]);
-        element("retry-button").fire("click");
-      }
-      const queued = jobsOf(page);
-      assert.equal(queued.length, 2, waiting);
-      assert.equal(queued[1]?.kind, waiting === "a paste" ? "batch" : "selection", waiting);
-      const { stop, entry, site, log } = await removalOfKeeper(page, dayOld());
-      assert.equal(stop, null, waiting);
-      assert.equal(site.clicks, 0, waiting);
-      assert.deepEqual(log, [], waiting);
-      assert.deepEqual(entry["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: RELIST_PENDING }, waiting);
-      assert.equal(entry["error"], RELIST_PENDING, waiting);
-      assert.deepEqual(jobsOf(page), queued, waiting); // nothing queued
-      assert.deepEqual(notes.created, [], waiting);
-      assert.equal(element("favorites-status").textContent, RELIST_LINE, waiting);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("refused, the removal too old at its turn ends as before (2.0.0): with a cooldown in force, a write the storage refused, or the automatic removals halted in this page — `stale`, its line, its ⚠ alert —; with the setting saved unticked meanwhile, as an untick ends it before its first request — its line, no alert —, a removal a re-listing led to (`relisted`) as well; never a re-listing, nothing asked of TikTok", async () => {
-  const at = Date.now() / 1000;
-  /** @type {{label: string, storage?: Record<string, unknown>, before?: (page: Awaited<ReturnType<typeof fakePage>>) => Promise<void>, auto?: import("../src/app/app.js").AutoRemoval, error: string, line: string, alert: boolean}[]} */
-  const cases = [
-    { label: "a cooldown in force", storage: { cooldown: { until: at + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: at } }, error: BOOKMARK_MESSAGES.stale, line: STALE_LINE, alert: true },
-    {
-      label: "a write refused earlier in this page",
-      before: async (page) => {
-        const engine = page.module.buildEngine({ ...BATCH_JOB }, { pauses: [], inputs: [], taking: true });
-        Object.assign(chrome.storage.local, {
-          set: async () => {
-            throw new Error(REFUSED);
-          },
-        });
-        await engine.persist?.(); // a save of the pacing, refused: remembered (`app.unsaved`)
-        assert.equal(engine.unsaved?.(), UNSAVED);
-      },
-      error: BOOKMARK_MESSAGES.stale,
-      line: STALE_LINE,
-      alert: true,
-    },
-    {
-      label: "the automatic removals halted",
-      before: async (page) => {
-        // a removal TikTok did not keep — DramaFetch's own, its count fresh: it presses — halts them
-        const { stop } = await removalOfKeeper(page, dayOld({ foundCompleteAt: Date.now() / 1000 - 60, alertId: null }), { chrome: { keeps: false, profileTab: false } });
-        assert.equal(stop, BOOKMARK_MESSAGES["not-kept"]);
-      },
-      error: BOOKMARK_MESSAGES.stale,
-      line: STALE_LINE,
-      alert: true,
-    },
-    { label: "the setting saved unticked", storage: { settings: { autoRemove: false } }, error: "not removed: the automatic removal from the Favorites was turned off before anything was asked of TikTok", line: TURNED_OFF_LINE, alert: false },
-    // an untick wins over the once-only rule too: the user's own doing, never a ⚠ `stale`
-    { label: "the setting saved unticked, a removal a re-listing led to", storage: { settings: { autoRemove: false } }, auto: dayOld({ relisted: true }), error: "not removed: the automatic removal from the Favorites was turned off before anything was asked of TikTok", line: TURNED_OFF_LINE, alert: false },
-  ];
-  for (const item of cases) {
-    const page = await fakePage({ storage: { ...staleStorage(), ...item.storage } });
-    try {
-      const notes = fakeNotifications();
-      page.hold();
-      await item.before?.(page);
-      const created = [...notes.created];
-      const { stop, entry, site, log } = await removalOfKeeper(page, item.auto ?? dayOld());
-      assert.equal(stop, null, item.label);
-      assert.equal(site.clicks, 0, item.label);
-      assert.deepEqual(log, [], item.label);
-      assert.equal(entry["error"], item.error, item.label);
-      assert.equal(page.element("favorites-status").textContent, item.line, item.label);
-      assert.deepEqual(relistsOf(page), [], item.label);
-      if (!item.alert) {
-        assert.deepEqual(notes.created, created, item.label);
-        continue;
-      }
-      assert.deepEqual(notes.created, [...created, EARLIER_ALERT], item.label);
-      assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `⚠ ${KEEPER} — still in your Favorites`, item.label);
-      assert.equal(notes.shown.get(EARLIER_ALERT)?.["message"], plainText(STALE_LINE), item.label);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("the user's own Remove from Favorites too old at its turn is unchanged (2.0.0): `stale`, its line — Press Update from TikTok first, then remove it —, no alert, never a re-listing", async () => {
-  const page = await fakePage({ storage: staleStorage() });
-  try {
-    const notes = fakeNotifications();
-    page.hold();
-    const { stop, entry, site, log } = await removalOfKeeper(page, undefined);
-    assert.equal(stop, null);
-    assert.equal(site.clicks, 0);
-    assert.deepEqual(log, []);
-    assert.equal(entry["error"], BOOKMARK_MESSAGES.stale);
-    assert.equal(page.element("favorites-status").textContent, STALE_LINE);
-    assert.deepEqual(jobsOf(page), []);
-    assert.deepEqual(notes.created, []);
-  } finally {
-    page.restore();
-  }
-});
-
-test("Stop and the automatic removal saved unticked — in this tab (Save settings) or in another one (the page follows the stored settings) — take a waiting re-listing out of the queue with the automatic removals (2.0.0): a part of an automatic removal, counted in the library's line, `not started: …` in the journal, no alert; the user's download behind them stays in the queue", async () => {
-  for (const how of ["Stop", "Save settings", "another tab"]) {
-    const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
-    try {
-      const { element, local, module } = page;
-      const notes = fakeNotifications();
-      page.hold();
-      assert.equal(paste(page, SERIES_ID), true); // running
-      await removalOfKeeper(page, dayOld()); // its re-listing, waiting
-      module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(OTHER_ID)] }, completeRun(OTHER_ID), {}); // an automatic removal, waiting
-      assert.equal(paste(page, THIRD_ID), true); // the user's download, waiting
-      assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), RELIST_ROW, AUTO_ROW, dramaRow(THIRD_ID)], how);
-      const created = [...notes.created]; // the second drama's ✓
-      if (how === "Stop") {
-        element("stop-button").fire("click");
-      } else if (how === "Save settings") {
-        element("setting-auto-remove").checked = false;
-        element("settings-form").fire("submit");
-        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-      } else {
-        local.set("settings", { ...DEFAULT_SETTINGS, autoRemove: false });
-        page.storageChanged("settings");
-        await settled(page);
-      }
-      assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), dramaRow(THIRD_ID)], how);
-      assert.deepEqual(relistsOf(page), [], how);
-      assert.equal(element("favorites-status").textContent, "2 automatic removals from your Favorites taken out of the queue: their cards keep Remove from Favorites.", how);
-      const notStarted = how === "Stop" ? `not started: batch stopped in Series ${SERIES_ID} (stopped by you)` : "not started: the automatic removal from the Favorites was turned off";
-      assert.deepEqual(
-        module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"]]),
-        [
-          ["unbookmark", AUTO_LABEL, notStarted],
-          ["batch", RELIST_LABEL, notStarted],
-        ],
-        how,
-      );
-      assert.deepEqual(notes.created, created, how); // no alert for them
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("a re-listing a stop takes out of the queue (2.0.0) is part of an automatic removal, never a download the user lost: `not started: …` in the journal, no alert of its own, and the stop's one alert counts only the user's dramas not started", async () => {
-  const page = await fakePage({
-    testSettings: { ...QUICK, bookmarkPollS: 0.001, bookmarkWaitS: 0.5 },
-    storage: { ...staleStorage(), [`series:${OTHER_ID}`]: savedState(OTHER_ID, [1, 2, 3], { complete: 3, completeAt: Date.now() / 1000 - 60 }) },
-  });
-  try {
-    const { element, module } = page;
-    const notes = fakeNotifications();
-    const open = gateJobs();
-    // the user's own removal of the second drama (found complete a minute ago), which TikTok does not keep — a stop
-    bookmarkChrome({ keeps: false, profileTab: false });
-    actionOf(page, OTHER_ID, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    await page.turn(); // running: at its tabs.getCurrent
-    const userLabel = `Remove “${SECOND_TITLE}” from your Favorites`;
-    // behind it: the re-listing of a removal too old at its turn, and a download the user pasted
-    const { entry } = await removalOfKeeper(page, dayOld(), { chrome: { keeps: false, profileTab: false } });
-    assert.equal(entry["error"], RELISTED);
-    assert.equal(paste(page, THIRD_ID), true);
-    assert.deepEqual(jobsOf(page).map((job) => job.label), [userLabel, RELIST_LABEL, `Series ${THIRD_ID}`]);
-    open();
-    for (let turn = 0; turn < 2000 && (module.journal().length < 3 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    const notKept = BOOKMARK_MESSAGES["not-kept"];
-    const notStarted = `not started: batch stopped in ${userLabel} (${notKept})`;
-    assert.deepEqual(
-      module.journal().map((job) => [job["label"], job["error"]]),
-      [
-        [userLabel, notKept],
-        [`Series ${THIRD_ID}`, notStarted],
-        [RELIST_LABEL, notStarted],
-      ],
-    );
-    // the stop's one alert: the user's download only — the re-listing's drama is on disk
-    const stopped = `dramafetch-alert:${module.alerts.page}:1:stopped`;
-    assert.deepEqual(notes.created, [stopped]);
-    assert.equal(notes.shown.get(stopped)?.["title"], `DramaFetch stopped: ${notKept}`);
-    assert.equal(notes.shown.get(stopped)?.["message"], "1 drama was not started — download it again later");
-  } finally {
-    page.restore();
-  }
-});
-
-/**
- * The first job the page starts waits at its `chrome.tabs.getCurrent` until the test releases it;
- * every later one waits there for good (it runs, and makes no request).
- * @returns {() => void} what releases the first one
- */
-function gateFirstJob() {
-  const tabs = /** @type {{getCurrent: () => Promise<unknown>}} */ (/** @type {unknown} */ (globalThis.chrome.tabs));
-  const answer = tabs.getCurrent;
-  /** @type {(value?: unknown) => void} */
-  let release = () => undefined;
-  const released = new Promise((resolve) => {
-    release = resolve;
-  });
-  let calls = 0;
-  tabs.getCurrent = () => {
-    calls += 1;
-    return calls === 1 ? released.then(() => answer()) : new Promise(() => undefined);
-  };
-  return () => release();
-}
-
-test("the re-listing's own gate (2.0.0), asked before its rest between jobs and again after it: the automatic removal saved unticked, halted, or its drama no longer in the library — marked removed, or left out of TikTok's whole list an Update from TikTok read — met as it starts, or during its rest — ends it there with no request and no alert; not a stop: the next waiting job runs; the journal's `not started: …`, the library's line says why — the halt's sentence added to the line as it stands then", async () => {
-  /** @type {Record<"off" | "halted" | "gone" | "dropped", string>} */
-  const ENDS = {
-    off: "not started: the automatic removal from the Favorites was turned off",
-    halted: "not started: the automatic removal from the Favorites is halted",
-    gone: "not started: the drama is no longer in the library",
-    dropped: "not started: the drama is no longer in the library",
-  };
-  /** @param {string} name */
-  const goneLine = (name) => `“${name}” was not removed: it is no longer in your library — TikTok's list, read after DramaFetch queued its removal, no longer holds it, or it was removed already. Nothing was asked of TikTok.`;
-  /** The library's line as it stands when the re-listing's gate asks, once a removal halted the automatic ones: another one since (a listing's, say). */
-  const LATER_LINE = "Listed 3 dramas.";
-  /** TikTok's whole favorites list, one page, without LIGHTHOUSE: the owner took it out of their Favorites in the TikTok app meanwhile. */
-  const withoutKeeper = { "0": { ...FAVORITES_CAPTURE, total: "2", cursor: "1794350100", hasMore: false, dramaList: [listed(OTHER_ID, SECOND_TITLE, 3), listed(SNOW_A, "Snowfall in Two Cities", 60)] } };
-  const REST_S = 0.5;
-  for (const when of /** @type {const} */ (["at its start", "during its rest"])) {
-    for (const what of /** @type {const} */ (["off", "halted", "gone", "dropped"])) {
-      const label = `${what}, ${when}`;
-      // TikTok contacted "a minute from now" as the page reads its clock: the rest between jobs is due whatever the test's pace
-      const page = await fakePage({ testSettings: { ...QUICK, restMinS: REST_S, restMaxS: REST_S }, storage: { ...staleStorage(), pacing: { lastContactAt: Date.now() / 1000 + 60 } } });
-      try {
-        const { element, module } = page;
-        const notes = fakeNotifications();
-        const release = gateFirstJob();
-        let requests = (await removalOfKeeper(page, dayOld())).log; // its re-listing: started, at its tabs.getCurrent
-        assert.deepEqual(relistsOf(page), [relistOf(EARLIER_ALERT)], label);
-        assert.equal(paste(page, THIRD_ID), true); // the user's download, waiting behind it
-        /** @type {string[]} the favorites list's pages fetched from inside the profile's tab */
-        let fetched = [];
-        /** the condition, met now */
-        const meet = async () => {
-          if (what === "off") {
-            element("setting-auto-remove").checked = false;
-            element("settings-form").fire("submit");
-            for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-            assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("settings"))["autoRemove"], false, label);
-            return;
-          }
-          if (what === "dropped") {
-            // an Update from TikTok ran meanwhile and read TikTok's whole list without the drama: the
-            // library no longer holds it — and marks nothing removed
-            const tab = favoritesTab({ pages: withoutKeeper });
-            tab.remember(1_794_351_500);
-            const listing = favoritesJob();
-            assert.equal(await module.runFavorites(listing, favoritesEngine(page, listing).engine, {}), null, label);
-            fetched = tab.fetched;
-            assert.equal(fetched.length, 1, label); // the whole list: its one page
-            const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-            assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), [OTHER_ID, SNOW_A], label);
-            assert.deepEqual(kept["removed"], [], label);
-            return;
-          }
-          // a removal of the drama ran meanwhile — DramaFetch's own, its count fresh: it presses —, which
-          // TikTok did not keep (the automatic removals halted) or kept (the drama marked removed)
-          const { stop, log } = await removalOfKeeper(page, dayOld({ foundCompleteAt: Date.now() / 1000 - 60, alertId: null }), { chrome: { keeps: what === "gone", profileTab: false } });
-          assert.equal(stop, what === "gone" ? null : BOOKMARK_MESSAGES["not-kept"], label);
-          requests = log;
-          if (what === "halted") element("favorites-status").textContent = LATER_LINE; // the line as it stands when the gate asks
-        };
-        if (when === "at its start") {
-          await meet();
-          release();
-        } else {
-          release();
-          for (let turns = 0; turns < 200 && element("progress-pause").hidden; turns += 1) await page.turn();
-          assert.equal(element("progress-pause").hidden, false, `${label}: the re-listing rests`);
-          const resting = Date.now();
-          await meet();
-          assert.ok(Date.now() - resting < REST_S * 1000, `${label}: the condition was met while the re-listing rested`);
-        }
-        const asked = [...requests];
-        const pagesAsked = fetched.length;
-        const alerted = [...notes.created];
-        // its rest is real time (the page's own sleep): waited for, for a few seconds at most
-        const deadline = Date.now() + 5000;
-        while (module.journal().length === 0 && Date.now() < deadline) await page.turn();
-        // ended at its gate: no request, no alert, not a stop
-        assert.deepEqual(
-          module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
-          [["batch", RELIST_LABEL, ENDS[what], null]],
-          label,
-        );
-        assert.deepEqual(module.journal()[0]?.["series"], [], label);
-        // met at its start: ended before its rest; met during its rest: ended right after it
-        const pauses = /** @type {{kind: string}[]} */ (module.journal()[0]?.["pauses"]);
-        assert.deepEqual(pauses.map((pause) => pause.kind), when === "at its start" ? [] : [JOB_REST], label);
-        assert.deepEqual(requests, asked, label);
-        assert.equal(fetched.length, pagesAsked, label);
-        assert.deepEqual(notes.created, alerted, label);
-        // the next waiting job runs (held at its tabs.getCurrent)
-        await settled(page);
-        assert.equal(element("app-status").dataset["state"], "running", label);
-        assert.equal(element("progress-current").textContent, `Series ${THIRD_ID}`, label);
-        assert.equal(module.journal().length, 1, label); // the download behind it was not taken out
-        const line = String(element("favorites-status").textContent);
-        if (what === "off") assert.equal(line, TURNED_OFF_LINE, label);
-        else if (what === "halted") assert.equal(line, `${LATER_LINE} ${HALTED_LINE}`, label); // said by the gate itself
-        // a drama the library no longer holds is named as DramaFetch's records name it (these tests' records: `A drama`)
-        else assert.equal(line, goneLine(what === "dropped" ? "A drama" : KEEPER), label);
-      } finally {
-        page.restore();
-      }
-    }
-  }
-});
-
-test("an automatic retry a re-listing queued (2.0.0) carries its `relist` — its “retrying” alert, its drama's ✓ and the removal's alert under the re-listing's alert id when it has one (one notification per drama), else its own — and the removal it queues once it completes the drama is marked `relisted`: never a second re-listing; it is a download, never taken out with the automatic removals when the setting is saved unticked", async () => {
-  for (const alertId of [`dramafetch-alert:earlier:5:${OTHER_ID}:complete`, null]) {
-    const page = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      page.hold();
-      assert.equal(paste(page, SERIES_ID), true); // running: what it queues waits behind it
-      /** @type {import("../src/app/app.js").Job} */
-      const relist = { ...BATCH_JOB, id: 7, label: `List “${SECOND_TITLE}” again, then remove it from your Favorites (automatic)`, refs: [refOf(OTHER_ID)], recheck: true, relist: { alertId } };
-      const scripted = scriptedEngine(page, relist, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
-      const runs = await runBatch(scripted.engine, relist.refs);
-      await page.turn();
-      assert.deepEqual(runs.map((run) => [run.report.complete, run.stop]), [[false, false]]);
-      const retryId = alertId ?? `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
-      const [, retry, ...more] = module.queuedJobs();
-      assert.deepEqual(more, []); // not complete: no removal
-      assert.ok(retry !== undefined);
-      assert.deepEqual(
-        { kind: retry.kind, numbers: retry.numbers, autoRetry: retry.autoRetry, relist: retry.relist },
-        { kind: "selection", numbers: [2], autoRetry: { alertId: retryId, name: "Drama 2399" }, relist: { alertId } },
-        String(alertId),
-      );
-      assert.deepEqual(notes.created, [retryId]); // “retrying”, in place of the drama's earlier alert when there is one
-      assert.equal(notes.shown.get(retryId)?.["title"], "↻ Drama 2399 — retrying 1 episode");
-      assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID), whatRow("Automatic retry E02", OTHER_ID, "Drama 2399")]); // an automatic retry's row
-      // the retry's run, as runJob gets it: listed again, E02 saved now — every episode on disk
-      const second = scriptedEngine(page, retry);
-      second.states.set(OTHER_ID, scripted.states.get(OTHER_ID));
-      const run = await runSelectionJob(second.engine, refOf(OTHER_ID), retry.numbers, { lastContactAt: null });
-      assert.deepEqual([run.report.complete, run.report.locked], [true, 0]);
-      module.dramaDone(retry, run, second.jobRecord);
-      await page.turn();
-      const [removal] = autoRemovalsOf(page);
-      assert.equal(removal?.bookmark?.auto?.relisted, true, String(alertId)); // a re-listing led to it
-      assert.equal(removal?.bookmark?.auto?.alertId, retryId, String(alertId));
-      assert.deepEqual(notes.created, [retryId, retryId]); // “retrying”, then ✓ — one notification per drama
-      // the setting saved unticked: the automatic removal leaves the queue, the retry — a download — stays
-      element("setting-auto-remove").checked = false;
-      element("settings-form").fire("submit");
-      for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-      assert.deepEqual(autoRemovalsOf(page), []);
-      assert.deepEqual(module.queuedJobs().map((job) => job.label), [`Series ${SERIES_ID}`, "Automatic retry: 1 of Drama 2399"]);
-      assert.equal(element("favorites-status").textContent, "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.");
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-/**
- * A complete skip of LIGHTHOUSE whose removal's turn comes more than a day after the records'
- * complete mark (`checkedAgoS` 25 h: a skip finds a mark less than 24 hours old, and the queue ran
- * on): through the page's own `dramaDone`, what queues DramaFetch's own removal of it, too old at
- * its turn.
- * @returns {import("../src/app/engine.js").SeriesRun}
- */
-function staleSkipOfKeeper() {
-  const nowS = Date.now() / 1000;
-  const state = newState(LIGHTHOUSE, KEEPER);
-  for (const number of [1, 2, 3]) {
-    record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: nowS - 7200 });
-  }
-  markComplete(state, nowS - 3600, 3);
-  const skipped = completeSkip(state, { seriesId: LIGHTHOUSE, nowS, exists: () => true });
-  assert.ok(skipped !== null);
-  return { ref: refOf(LIGHTHOUSE), series: null, results: skipped.results, report: { ...skipped.report, checkedAgoS: 25 * 3600 }, error: null, stop: false, exitCode: 0, errorKind: null, contacted: false };
-}
-
-test("Stop pressed while DramaFetch's own removal too old at its turn is starting (2.0.0) — its job held at its gate (`chrome.tabs.getCurrent`), or reading the drama's records, before its freshness check —: a stop, as one met past that check is — no re-listing queued, no tab, no press, no alert, `stopped by you` in the journal and the jobs waiting cancelled; the library's line left as it was; the last download's Did not download block stays, and its Retry, pressed meanwhile, is given back — Stop asked before anything else that check may end it with: the same for a removal a re-listing led to (`relisted`: else `stale` and its ⚠) and for one whose setting is saved unticked as it starts (else the untick's end, not a stop)", async () => {
-  const AUTO_KEEPER = `Remove “${KEEPER}” from your Favorites (automatic)`;
-  /** @type {[string, "first" | "relisted" | "unticked"][]} where the removal is held; which removal */
-  const cases = [
-    ["its job's gate", "first"],
-    ["the records' read", "first"],
-    ["its job's gate", "relisted"],
-    ["its job's gate", "unticked"],
-  ];
-  for (const [where, variant] of cases) {
-    const label = `${where}, ${variant}`;
-    const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      const { site, log } = bookmarkChrome({ profileTab: false });
-      /** @type {() => void} what lets the removal go on */
-      let release = () => undefined;
-      /** @type {Promise<unknown>} the removal held where this case holds it */
-      let held = Promise.resolve();
-      if (where === "its job's gate") {
-        release = gateFirstJob(); // every later job waits there for good
-      } else {
-        // its read of the drama's records — the last thing it awaits before its freshness check — waits
-        const local = /** @type {{get: (keys: unknown) => Promise<Record<string, unknown>>}} */ (/** @type {unknown} */ (chrome.storage.local));
-        const get = local.get;
-        /** @type {(value?: unknown) => void} */
-        let reached = () => undefined;
-        held = new Promise((resolve) => {
-          reached = resolve;
-        });
-        const opened = new Promise((resolve) => {
-          release = () => resolve(undefined);
-        });
-        local.get = (keys) => {
-          if (keys !== `series:${LIGHTHOUSE}`) return get(keys);
-          local.get = get;
-          reached();
-          return opened.then(() => get(keys));
-        };
-      }
-      // the last download's Did not download block, with its Retry
-      module.renderFailed([seriesRecord(OTHER_ID, SECOND_TITLE, [[2, "failed"]])]);
-      // DramaFetch's own removal of LIGHTHOUSE, queued by a complete skip of it: it starts at once —
-      // `relisted`: queued by a re-listing's drama (the job carries `relist`), so that a count too
-      // old at its turn would end it `stale`, with its ⚠, and never list the drama again
-      const done = { ...BATCH_JOB, id: 7, refs: [refOf(LIGHTHOUSE)] };
-      module.dramaDone(variant === "relisted" ? { ...done, recheck: true, relist: { alertId: null } } : done, staleSkipOfKeeper(), {});
-      await held;
-      if (where === "the records' read") page.hold(); // every later job waits at its gate for good
-      assert.deepEqual(jobsOf(page).map((job) => job.label), [AUTO_KEEPER], label); // running
-      assert.equal(jobsOf(page)[0]?.bookmark?.auto?.relisted, variant === "relisted" ? true : undefined, label);
-      if (variant === "unticked") {
-        // the automatic removal saved unticked while it starts (Settings → Save settings): without
-        // the Stop it would end there as an untick ends it — not a stop, the jobs waiting going on
-        element("setting-auto-remove").checked = false;
-        element("settings-form").fire("submit");
-        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-        assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("settings"))["autoRemove"], false, label);
-      }
-      // behind it: the user's paste, and the block's Retry — spent until a job ends
-      assert.equal(paste(page, THIRD_ID), true, label);
-      element("retry-button").fire("click");
-      assert.equal(element("retry-button").disabled, true, label);
-      const waiting = jobsOf(page)
-        .slice(1)
-        .map((job) => [job.kind, job.label]);
-      assert.deepEqual(
-        waiting.map(([kind]) => kind),
-        ["batch", "selection"],
-        label,
-      );
-      const line = element("favorites-status").textContent;
-      element("stop-button").fire("click");
-      release();
-      for (let turns = 0; turns < 200 && (module.journal().length < 3 || element("app-status").dataset["state"] !== "idle"); turns += 1) await page.turn();
-      // a stop: the removal's own entry, then each job it took out of the queue
-      const notStarted = `not started: batch stopped in ${AUTO_KEEPER} (stopped by you)`;
-      assert.deepEqual(
-        module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
-        [["unbookmark", AUTO_KEEPER, "stopped by you", "stopped by you"], ...[...waiting].reverse().map(([kind, name]) => [kind, name, notStarted, null])],
-        label,
-      );
-      assert.deepEqual(module.journal()[0]?.["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: null }, label);
-      assert.deepEqual(jobsOf(page), [], label); // nothing queued after the Stop: no re-listing
-      assert.equal(element("app-status").dataset["state"], "idle", label);
-      assert.deepEqual(log, [], label); // no tab
-      assert.equal(site.clicks, 0, label);
-      assert.deepEqual(notes.created, [], label); // no alert: neither ⚠ nor “DramaFetch stopped” (nothing was asked of TikTok)
-      assert.equal(element("favorites-status").textContent, line, label); // never the re-listing's line, nor `stale`'s, nor the untick's
-      // the block stays, and its Retry is given back
-      assert.equal(element("failed-block").hidden, false, label);
-      assert.equal(element("retry-button").disabled, false, label);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-/**
- * Storage in which every count DramaFetch holds of LIGHTHOUSE is fresh: the library's whole list
- * read a moment ago — LIGHTHOUSE with 3 episodes, OTHER_ID, SNOW_A — and LIGHTHOUSE's three episodes
- * saved, found complete a moment ago; no contact with TikTok stored, so no rest between jobs is due.
- * @returns {Record<string, unknown>}
- */
-function freshStorage() {
-  const nowS = Date.now() / 1000;
-  return {
-    favoritesLibrary: storedLibrary(
-      [
-        [LIGHTHOUSE, KEEPER, 3],
-        [OTHER_ID, SECOND_TITLE, 3],
-        [SNOW_A, "Snowfall in Two Cities", 60],
-      ],
-      { total: 946, fullReadAt: nowS, listedAt: nowS },
-    ),
-    [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3, completeAt: nowS }),
-  };
-}
-
-/**
- * LIGHTHOUSE's records with its three episodes saved and a fourth one locked (no play address),
- * found complete 25 hours ago: on disk for the user's own removal (a locked episode counts as done),
- * never for DramaFetch's own (`not-on-disk`).
- * @returns {unknown}
- */
-function keeperWithLockedFourth() {
-  const nowS = Date.now() / 1000;
-  const state = newState(LIGHTHOUSE, KEEPER);
-  for (const number of [1, 2, 3]) {
-    record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: nowS - 90_000 });
-  }
-  record(state, { episode: { number: 4, itemId: "i4" }, status: "skipped-locked", path: null, message: "looks locked: no play address" }, { exists: () => true, now: nowS - 90_000 });
-  markComplete(state, nowS - 25 * 3600, 4);
-  return JSON.parse(JSON.stringify(state));
-}
-
-/**
- * The page's `chrome.storage.local` with what the tests below hold of it.
- * @returns {{get: (keys: unknown) => Promise<Record<string, unknown>>, set: (items: Record<string, unknown>) => Promise<void>}}
- */
-const localArea = () => /** @type {{get: (keys: unknown) => Promise<Record<string, unknown>>, set: (items: Record<string, unknown>) => Promise<void>}} */ (/** @type {unknown} */ (chrome.storage.local));
-
-test("Stop pressed while a removal from the Favorites starts, held at its job's gate — DramaFetch's own or the user's own — ends it as a stop whatever its gate would have ended it with (2.0.0): its records no longer showing every episode on disk (TikTok counts 4), a locked episode among them, the drama gone from the library meanwhile (marked removed), or — the user's own — a count more than a day old: `stopped by you`, the jobs waiting cancelled, no tab, no press, no alert, never `not-on-disk`, `gone` or `stale`", async () => {
-  const AUTO_KEEPER = `Remove “${KEEPER}” from your Favorites (automatic)`;
-  const USER_KEEPER = `Remove “${KEEPER}” from your Favorites`;
-  /** @type {["own" | "user's", "not on disk" | "a locked episode" | "gone" | "stale"][]} which removal; what its gate would end it with */
-  const cases = [
-    ["own", "not on disk"],
-    ["own", "a locked episode"],
-    ["own", "gone"],
-    ["user's", "stale"],
-  ];
-  for (const [whose, would] of cases) {
-    const label = `${whose}, ${would}`;
-    /** @type {Record<string, unknown>} */
-    let storage = staleStorage();
-    if (would === "not on disk") storage = staleStorage(4); // TikTok's list counts 4: the records show 3
-    if (would === "a locked episode") storage = { ...staleStorage(4), [`series:${LIGHTHOUSE}`]: keeperWithLockedFourth() };
-    const page = await fakePage({ testSettings: QUICK, storage });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      let { site, log } = bookmarkChrome({ profileTab: false });
-      const release = gateFirstJob(); // every later job waits there for good
-      if (whose === "own") {
-        // DramaFetch's own removal of LIGHTHOUSE, queued by a complete skip of it: it starts at once
-        module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(LIGHTHOUSE)] }, staleSkipOfKeeper(), {});
-      } else {
-        // the user's own, confirmed in its dialog: it starts at once
-        actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-        await settled(page);
-        element("bookmark-confirm").fire("click");
-      }
-      await page.turn();
-      const name = whose === "own" ? AUTO_KEEPER : USER_KEEPER;
-      assert.deepEqual(jobsOf(page).map((job) => job.label), [name], label); // running, held at its gate
-      if (would === "gone") {
-        // a removal of the drama ran meanwhile — DramaFetch's own, its count fresh: it presses, and
-        // TikTok keeps it — so the library marks the drama removed
-        const done = await removalOfKeeper(page, dayOld({ foundCompleteAt: Date.now() / 1000 - 60, alertId: null }), { chrome: { keeps: true, profileTab: false } });
-        assert.equal(done.stop, null, label);
-        assert.equal(done.site.clicks, 1, label);
-        site = done.site;
-        log = done.log;
-      }
-      // behind it: the user's paste
-      assert.equal(paste(page, THIRD_ID), true, label);
-      const waiting = jobsOf(page)
-        .slice(1)
-        .map((job) => [job.kind, job.label]);
-      assert.deepEqual(
-        waiting.map(([kind]) => kind),
-        ["batch"],
-        label,
-      );
-      const asked = [...log];
-      const clicks = site.clicks;
-      const alerted = [...notes.created];
-      element("stop-button").fire("click");
-      release();
-      for (let turns = 0; turns < 200 && (module.journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turns += 1) await page.turn();
-      // a stop: the removal's own entry, then the job it took out of the queue
-      const notStarted = `not started: batch stopped in ${name} (stopped by you)`;
-      assert.deepEqual(
-        module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
-        [["unbookmark", name, "stopped by you", "stopped by you"], ...waiting.map(([kind, waited]) => [kind, waited, notStarted, null])],
-        label,
-      );
-      assert.deepEqual(module.journal()[0]?.["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: null }, label);
-      assert.deepEqual(jobsOf(page), [], label);
-      assert.equal(element("app-status").dataset["state"], "idle", label);
-      assert.deepEqual(log, asked, label); // no tab
-      assert.equal(site.clicks, clicks, label);
-      assert.deepEqual(notes.created, alerted, label); // no alert: neither ⚠ nor “DramaFetch stopped” (nothing was asked of TikTok)
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("Stop pressed while a removal from the Favorites whose count is fresh starts, no rest between jobs due (2.0.0) — held while it reads the cooldown, the first time or the second (DramaFetch's own, its setting saved unticked meanwhile), while it stores the pacing (DramaFetch's own, the user's own), while it notes its contact (DramaFetch's own) or while its background tab opens (the user's own) —: a stop before the drama's page is asked for — `stopped by you`, the jobs waiting cancelled, no tab (or the one opening closed again), no page loaded, no press, no alert, the library's line no longer saying a tab opens —, never the untick's end", async () => {
-  const AUTO_KEEPER = `Remove “${KEEPER}” from your Favorites (automatic)`;
-  const USER_KEEPER = `Remove “${KEEPER}” from your Favorites`;
-  /** @type {["own" | "user's", "the cooldown's read" | "the second cooldown read" | "the pacing stored" | "the contact noted" | "its tab opened"][]} which removal; where it is held */
-  const cases = [
-    ["own", "the cooldown's read"],
-    ["own", "the second cooldown read"],
-    ["own", "the pacing stored"],
-    ["user's", "the pacing stored"],
-    ["own", "the contact noted"],
-    ["user's", "its tab opened"],
-  ];
-  for (const [whose, where] of cases) {
-    const label = `${whose}, ${where}`;
-    const page = await fakePage({ testSettings: QUICK, storage: freshStorage() });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      const { site, log } = bookmarkChrome({ profileTab: false });
-      if (whose === "user's") {
-        actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-        await settled(page);
-      }
-      // held right after its gate read the drama's records: at its first or second read of the
-      // cooldown, at the pacing it stores before its first request (the first write) or as it notes
-      // its contact (the second), or as Chrome opens its background tab
-      const local = localArea();
-      const { get, set } = local;
-      const tabs = /** @type {{create: (properties: unknown) => Promise<unknown>}} */ (/** @type {unknown} */ (chrome.tabs));
-      const create = tabs.create;
-      const cooldownHold = where === "the cooldown's read" ? 1 : where === "the second cooldown read" ? 2 : 0;
-      const pacingHold = where === "the pacing stored" ? 1 : where === "the contact noted" ? 2 : 0;
-      let recordsRead = false;
-      let cooldownReads = 0;
-      let pacingWrites = 0;
-      /** @type {(value?: unknown) => void} */
-      let reached = () => undefined;
-      const held = new Promise((resolve) => {
-        reached = resolve;
-      });
-      /** @type {() => void} */
-      let release = () => undefined;
-      const opened = new Promise((resolve) => {
-        release = () => resolve(undefined);
-      });
-      local.get = (keys) => {
-        if (keys === `series:${LIGHTHOUSE}`) recordsRead = true;
-        if (cooldownHold === 0 || !recordsRead || keys !== "cooldown" || ++cooldownReads < cooldownHold) return get(keys);
-        local.get = get;
-        reached();
-        return opened.then(() => get(keys));
-      };
-      local.set = (items) => {
-        if (pacingHold === 0 || !recordsRead || !("pacing" in items) || ++pacingWrites < pacingHold) return set(items);
-        local.set = set;
-        reached();
-        return opened.then(() => set(items));
-      };
-      if (where === "its tab opened") {
-        tabs.create = (properties) => {
-          tabs.create = create;
-          reached();
-          return opened.then(() => create(properties));
-        };
-      }
-      if (whose === "own") {
-        // DramaFetch's own removal of LIGHTHOUSE, queued by a complete skip of it: it starts at once
-        module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(LIGHTHOUSE)] }, staleSkipOfKeeper(), {});
-      } else {
-        element("bookmark-confirm").fire("click");
-      }
-      await held;
-      local.get = get;
-      local.set = set;
-      page.hold(); // every later job waits at its gate for good
-      const name = whose === "own" ? AUTO_KEEPER : USER_KEEPER;
-      assert.deepEqual(jobsOf(page).map((job) => job.label), [name], label); // running, past its gate's records
-      assert.deepEqual(log, [], label); // no tab yet
-      if (cooldownHold > 0) {
-        // the automatic removal saved unticked while it starts (Settings → Save settings): without
-        // the Stop it would end there as an untick ends it — not a stop, the jobs waiting going on
-        element("setting-auto-remove").checked = false;
-        element("settings-form").fire("submit");
-        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-        assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("settings"))["autoRemove"], false, label);
-      }
-      // behind it: the user's paste
-      assert.equal(paste(page, THIRD_ID), true, label);
-      const waiting = jobsOf(page)
-        .slice(1)
-        .map((job) => [job.kind, job.label]);
-      assert.deepEqual(
-        waiting.map(([kind]) => kind),
-        ["batch"],
-        label,
-      );
-      element("stop-button").fire("click");
-      release();
-      for (let turns = 0; turns < 200 && (module.journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turns += 1) await page.turn();
-      const notStarted = `not started: batch stopped in ${name} (stopped by you)`;
-      assert.deepEqual(
-        module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
-        [["unbookmark", name, "stopped by you", "stopped by you"], ...waiting.map(([kind, waited]) => [kind, waited, notStarted, null])],
-        label,
-      );
-      assert.deepEqual(module.journal()[0]?.["bookmark"], { series_id: LIGHTHOUSE, title: KEEPER, outcome: null }, label);
-      assert.deepEqual(jobsOf(page), [], label);
-      assert.equal(element("app-status").dataset["state"], "idle", label);
-      // no tab — or the one Chrome was opening, closed again —: the drama's page never asked for
-      assert.deepEqual(log, where === "its tab opened" ? ["open about:blank", "close 77"] : [], label);
-      assert.equal(site.loads, 0, label);
-      assert.equal(site.clicks, 0, label);
-      assert.deepEqual(notes.created, [], label); // no alert: neither ⚠ nor “DramaFetch stopped” (nothing was asked of TikTok)
-      assert.equal(element("favorites-status").textContent, "", label); // no longer “… a background tab opens on TikTok…”
-      // a Stop before the contact was noted notes none: the next job owes no rest between jobs to it
-      // (one noted as the tab opened stays noted — the safe side)
-      const pacing = /** @type {Record<string, unknown> | undefined} */ (page.local.get("pacing"));
-      if (where === "the contact noted" || where === "its tab opened") assert.equal(typeof pacing?.["lastContactAt"], "number", label);
-      else assert.equal(pacing?.["lastContactAt"] ?? null, null, label);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("Stop pressed while the drama's page loads — TikTok asked for it, nothing pressed yet (2.0.0) —, DramaFetch's own removal or the user's own: a stop — the tab closed, nothing pressed, the jobs waiting cancelled, the library's line cleared —, its contact kept: the “DramaFetch stopped” alert counts the paste it cancelled, and the next job owes TikTok its rest between jobs", async () => {
-  const AUTO_KEEPER = `Remove “${KEEPER}” from your Favorites (automatic)`;
-  const USER_KEEPER = `Remove “${KEEPER}” from your Favorites`;
-  const PAGE_URL = `https://www.tiktok.com/shortdrama/episode/${LIGHTHOUSE}/1`;
-  for (const whose of /** @type {const} */ (["own", "user's"])) {
-    const label = whose;
-    const page = await fakePage({ testSettings: QUICK, storage: freshStorage() });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      const { site, log } = bookmarkChrome({ profileTab: false });
-      if (whose === "user's") {
-        actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-        await settled(page);
-      }
-      // held at its first look at the drama's page — the page asked for already
-      const scripting = /** @type {{executeScript: (injection: unknown) => Promise<unknown>}} */ (/** @type {unknown} */ (chrome.scripting));
-      const exec = scripting.executeScript;
-      /** @type {(value?: unknown) => void} */
-      let reached = () => undefined;
-      const held = new Promise((resolve) => {
-        reached = resolve;
-      });
-      /** @type {() => void} */
-      let release = () => undefined;
-      const opened = new Promise((resolve) => {
-        release = () => resolve(undefined);
-      });
-      scripting.executeScript = (injection) => {
-        scripting.executeScript = exec;
-        reached();
-        return opened.then(() => exec(injection));
-      };
-      if (whose === "own") {
-        module.dramaDone({ ...BATCH_JOB, id: 7, refs: [refOf(LIGHTHOUSE)] }, staleSkipOfKeeper(), {});
-      } else {
-        element("bookmark-confirm").fire("click");
-      }
-      await held;
-      page.hold(); // every later job waits at its gate for good
-      const name = whose === "own" ? AUTO_KEEPER : USER_KEEPER;
-      assert.deepEqual(log, ["open about:blank", `navigate ${PAGE_URL}`], label);
-      assert.equal(site.loads, 1, label);
-      // behind it: the user's paste
-      assert.equal(paste(page, THIRD_ID), true, label);
-      const waiting = jobsOf(page)
-        .slice(1)
-        .map((job) => [job.kind, job.label]);
-      element("stop-button").fire("click");
-      release();
-      for (let turns = 0; turns < 200 && (module.journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turns += 1) await page.turn();
-      const notStarted = `not started: batch stopped in ${name} (stopped by you)`;
-      assert.deepEqual(
-        module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
-        [["unbookmark", name, "stopped by you", "stopped by you"], ...waiting.map(([kind, waited]) => [kind, waited, notStarted, null])],
-        label,
-      );
-      assert.deepEqual(log, ["open about:blank", `navigate ${PAGE_URL}`, "close 77"], label);
-      assert.equal(site.clicks, 0, label);
-      assert.equal(element("favorites-status").textContent, "", label);
-      // TikTok was asked: the contact stands — the stop's one alert, and the rest between jobs owed
-      assert.deepEqual(
-        [...notes.shown.values()].map((shown) => [shown["title"], shown["message"]]),
-        [["DramaFetch stopped: stopped by you", "1 drama was not started — download it again later"]],
-        label,
-      );
-      const pacing = /** @type {Record<string, unknown> | undefined} */ (page.local.get("pacing"));
-      assert.equal(typeof pacing?.["lastContactAt"], "number", label);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("the library's line after a Stop (2.0.0): only the stopped removal's own “… a background tab opens on TikTok…” goes — the line Stop writes as it takes DramaFetch's own waiting removals out of the queue stays", async () => {
-  const USER_KEEPER = `Remove “${KEEPER}” from your Favorites`;
-  const AUTO_OTHER = `Remove “${SECOND_TITLE}” from your Favorites (automatic)`;
-  const page = await fakePage({ testSettings: QUICK, storage: freshStorage() });
-  try {
-    const { element, module } = page;
-    fakeNotifications();
-    bookmarkChrome({ profileTab: false });
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    // the user's own removal, held at its first read of the cooldown once it read the drama's records
-    const local = localArea();
-    const { get } = local;
-    let recordsRead = false;
-    /** @type {(value?: unknown) => void} */
-    let reached = () => undefined;
-    const held = new Promise((resolve) => {
-      reached = resolve;
-    });
-    /** @type {() => void} */
-    let release = () => undefined;
-    const opened = new Promise((resolve) => {
-      release = () => resolve(undefined);
-    });
-    local.get = (keys) => {
-      if (keys === `series:${LIGHTHOUSE}`) recordsRead = true;
-      if (!recordsRead || keys !== "cooldown") return get(keys);
-      local.get = get;
-      reached();
-      return opened.then(() => get(keys));
-    };
-    element("bookmark-confirm").fire("click");
-    await held;
-    local.get = get;
-    page.hold(); // every later job waits at its gate for good
-    assert.equal(element("favorites-status").textContent, `Removing “${KEEPER}” from your Favorites: a background tab opens on TikTok…`);
-    // DramaFetch's own removal of OTHER_ID, queued behind it by a complete skip of that drama
-    const nowS = Date.now() / 1000;
-    const state = newState(OTHER_ID, SECOND_TITLE);
-    for (const number of [1, 2, 3]) {
-      record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: nowS - 7200 });
-    }
-    markComplete(state, nowS - 3600, 3);
-    const skipped = completeSkip(state, { seriesId: OTHER_ID, nowS, exists: () => true });
-    assert.ok(skipped !== null);
-    module.dramaDone({ ...BATCH_JOB, id: 8, refs: [refOf(OTHER_ID)] }, { ref: refOf(OTHER_ID), series: null, results: skipped.results, report: skipped.report, error: null, stop: false, exitCode: 0, errorKind: null, contacted: false }, {});
-    assert.deepEqual(
-      jobsOf(page).map((job) => job.label),
-      [USER_KEEPER, AUTO_OTHER],
-    );
-    element("stop-button").fire("click");
-    const dropped = "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.";
-    assert.equal(element("favorites-status").textContent, dropped);
-    release();
-    for (let turns = 0; turns < 200 && (module.journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turns += 1) await page.turn();
-    assert.deepEqual(
-      module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"], entry["stopped"]]),
-      [
-        ["unbookmark", USER_KEEPER, "stopped by you", "stopped by you"],
-        ["unbookmark", AUTO_OTHER, `not started: batch stopped in ${USER_KEEPER} (stopped by you)`, null],
-      ],
-    );
-    assert.equal(element("favorites-status").textContent, dropped); // kept: never cleared with the removal's own line
-  } finally {
-    page.restore();
-  }
-});
-
-test("the removal a re-listing's drama queues runs NEXT (2.0.0): at the head of the queue — ahead of the paste the user queued while the re-listing ran, which Waiting shows after it —, so that its count is minutes old at its turn whatever waits behind: it presses once, and the paste runs after it; the removal an automatic retry a re-listing queued queues once it completes the drama, the same; any other automatic removal still waits at the END", async () => {
-  const REMOVE_KEEPER = `Remove “${KEEPER}” from your Favorites (automatic)`;
-  const page = await fakePage({ storage: staleStorage() });
-  try {
-    const { module } = page;
-    const notes = fakeNotifications();
-    page.hold();
-    await removalOfKeeper(page, dayOld()); // its re-listing: started, held before its gate
-    const [relist] = module.queuedJobs();
-    assert.ok(relist !== undefined && relist.relist !== undefined);
-    assert.equal(paste(page, THIRD_ID), true); // the user's next paste, waiting behind it
-    // its run as runJob makes it — the page's own hooks over a scripted TikTok —: listed again, every episode on disk
-    const scripted = scriptedEngine(page, relist);
-    const runs = await runBatch(scripted.engine, relist.refs);
-    await page.turn();
-    assert.deepEqual(runs.map((run) => [run.report.complete, run.report.locked, run.stop]), [[true, 0, false]]);
-    // its removal: next — ahead of the paste —, marked
-    assert.deepEqual(jobsOf(page).map((job) => job.label), [RELIST_LABEL, REMOVE_KEEPER, `Series ${THIRD_ID}`]);
-    assert.deepEqual(waitingRows(page), [whatRow("Remove from Favorites (automatic)", LIGHTHOUSE, KEEPER), dramaRow(THIRD_ID)]);
-    const auto = jobsOf(page)[1]?.bookmark?.auto;
-    assert.ok(auto !== undefined);
-    assert.equal(auto.relisted, true);
-    // its turn, right after the re-listing: its count minutes old — ONE press, ✓ removed under the drama's alert id
-    const { stop, entry, site } = await removalOfKeeper(page, auto);
-    assert.equal(stop, null);
-    assert.equal(site.clicks, 1);
-    assert.equal(/** @type {Record<string, unknown>} */ (entry["bookmark"])["outcome"], "removed");
-    assert.equal(notes.shown.get(EARLIER_ALERT)?.["title"], `✓ ${KEEPER} — removed from your Favorites`);
-  } finally {
-    page.restore();
-  }
-  // an automatic retry a re-listing queued: once it completes the drama, its removal goes next too
-  const second = await fakePage({ storage: { favoritesLibrary: autoLibrary() } });
-  try {
-    const { module } = second;
-    fakeNotifications();
-    second.hold();
-    assert.equal(paste(second, SERIES_ID), true); // running: what is queued waits behind it
-    /** @type {import("../src/app/app.js").Job} */
-    const relist = { ...BATCH_JOB, id: 7, label: `List “${SECOND_TITLE}” again, then remove it from your Favorites (automatic)`, refs: [refOf(OTHER_ID)], recheck: true, relist: { alertId: null } };
-    const scripted = scriptedEngine(second, relist, { statuses: { [`${OTHER_ID}:2`]: "failed" } });
-    await runBatch(scripted.engine, relist.refs); // E02 fails: its automatic retry queued, carrying `relist`
-    await second.turn();
-    const [, retry] = module.queuedJobs();
-    assert.ok(retry !== undefined && retry.relist !== undefined);
-    assert.equal(paste(second, THIRD_ID), true); // the user's paste, behind the retry
-    // the retry's run (the test runs it: its job still waits in the page's queue): E02 saved, every episode on disk
-    const rerun = scriptedEngine(second, retry);
-    rerun.states.set(OTHER_ID, scripted.states.get(OTHER_ID));
-    const run = await runSelectionJob(rerun.engine, refOf(OTHER_ID), retry.numbers, { lastContactAt: null });
-    assert.deepEqual([run.report.complete, run.report.locked], [true, 0]);
-    module.dramaDone(retry, run, rerun.jobRecord);
-    await second.turn();
-    assert.equal(autoRemovalsOf(second)[0]?.bookmark?.auto?.relisted, true);
-    assert.deepEqual(jobsOf(second).map((job) => job.label), [`Series ${SERIES_ID}`, AUTO_LABEL, "Automatic retry: 1 of Drama 2399", `Series ${THIRD_ID}`]);
-  } finally {
-    second.restore();
-  }
-});
-
-test("a download the user asks for is never folded into DramaFetch's own re-listing (2.0.0): a paste, Enter, the popup's Download this series or a card's Download — enabled, though the card says Queued — of a drama only a re-listing holds, waiting or running before its first request, is queued behind it as the user's own job, which then holds the drama as any download does (asked again, nothing more is queued); the setting saved unticked takes the waiting re-listing out of the queue, or ends the running one at its gate, and the user's job stays — it runs next; once the re-listing asked TikTok for its list, it holds the drama as any download does", async () => {
-  const LINK = `https://www.tiktok.com/shortdrama/episode/${LIGHTHOUSE}/1`;
-  const MINE = `Series ${LIGHTHOUSE}`;
-  /** @type {[string, (page: Awaited<ReturnType<typeof fakePage>>) => void][]} */
-  const ASKS = [
-    ["a paste", (page) => void paste(page, LIGHTHOUSE)],
-    [
-      "Enter",
-      (page) => {
-        page.element("links").value = LIGHTHOUSE;
-        press(page);
-      },
-    ],
-    ["the popup's Download this series", (page) => void page.message({ type: "dramafetch:load", input: LINK })],
-    ["a card's Download", (page) => actionOf(page, LIGHTHOUSE, "download")?.fire("click")],
-  ];
-  for (const [how, ask] of ASKS) {
-    for (const state of ["waiting", "running"]) {
-      const label = `${how}, the re-listing ${state}`;
-      const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
-      try {
-        const { element, module } = page;
-        fakeNotifications();
-        /** @type {() => void} */
-        let release = () => undefined;
-        if (state === "waiting") {
-          page.hold(); // every job waits at its gate: it runs, and makes no request
-          assert.equal(paste(page, SERIES_ID), true, label); // running: the re-listing waits behind it
-        } else {
-          release = gateFirstJob(); // the re-listing runs first, held before its own gate; every later job waits for good
-        }
-        await removalOfKeeper(page, dayOld()); // its re-listing
-        const before = jobsOf(page).map((job) => job.label);
-        assert.equal(before.at(-1), RELIST_LABEL, label);
-        assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "queued", label);
-        assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, false, label);
-        ask(page);
-        assert.deepEqual(jobsOf(page).map((job) => job.label), [...before, MINE], label);
-        assert.equal(jobsOf(page).at(-1)?.relist, undefined, label); // the user's own job
-        // the user's own job holds the drama now: asked again, nothing more is queued
-        assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, true, label);
-        ask(page);
-        assert.deepEqual(jobsOf(page).map((job) => job.label), [...before, MINE], label);
-        // the setting saved unticked: the re-listing comes out of the queue — or ends at its own gate —, the user's job stays
-        element("setting-auto-remove").checked = false;
-        element("settings-form").fire("submit");
-        for (let turns = 0; turns < 20 && element("settings-status").className !== "status ok"; turns += 1) await page.turn();
-        if (state === "waiting") {
-          assert.deepEqual(jobsOf(page).map((job) => job.label), [`Series ${SERIES_ID}`, MINE], label);
-          assert.equal(element("favorites-status").textContent, "1 automatic removal from your Favorites taken out of the queue: its card keeps Remove from Favorites.", label);
-        } else {
-          release();
-          for (let turns = 0; turns < 200 && module.journal().length === 0; turns += 1) await page.turn();
-          await settled(page);
-          assert.deepEqual(
-            module.journal().map((entry) => [entry["label"], entry["error"], entry["stopped"]]),
-            [[RELIST_LABEL, "not started: the automatic removal from the Favorites was turned off", null]],
-            label,
-          );
-          assert.deepEqual(jobsOf(page).map((job) => job.label), [MINE], label); // the user's job runs next
-        }
-      } finally {
-        page.restore();
-      }
-    }
-  }
-  // the box keeping a typed id of such a drama beside a paste: Enter would download it, and the line says so
-  const typed = await fakePage({ storage: staleStorage() });
-  try {
-    typed.hold();
-    assert.equal(paste(typed, SERIES_ID), true); // running
-    await removalOfKeeper(typed, dayOld()); // its re-listing, waiting
-    typed.element("links").value = LIGHTHOUSE;
-    assert.equal(paste(typed, THIRD_ID), true);
-    assert.equal(typed.element("links").value, LIGHTHOUSE);
-    assert.equal(typed.element("input-status").textContent, `Series ${THIRD_ID} queued: it downloads whole, with the usual pauses. · What the box held before stays there: press Enter to download it.`);
-  } finally {
-    typed.restore();
-  }
-  // once the re-listing asked TikTok for its list — its drama's tab opened —, a download of it as any other
-  const page = await fakePage({ testSettings: { ...QUICK, discoveryTimeoutS: 0.2 }, storage: staleStorage() });
-  try {
-    const { element } = page;
-    fakeNotifications();
-    const release = gateFirstJob();
-    const { log } = await removalOfKeeper(page, dayOld()); // its re-listing: the first job, held at its gate
-    release();
-    for (let turns = 0; turns < 500 && !log.includes("open about:blank"); turns += 1) await page.turn();
-    // what the page shows and does while it lists the drama — read now, checked once the job is over
-    const asked = [...log];
-    const disabled = actionOf(page, LIGHTHOUSE, "download")?.disabled;
-    const taken = paste(page, LIGHTHOUSE);
-    const said = element("input-status").textContent;
-    const queued = jobsOf(page).map((job) => job.label);
-    // its listing gets nothing from the fake (a stop): the page idle again before the test ends
-    const deadline = Date.now() + 5000;
-    while (element("app-status").dataset["state"] !== "idle" && Date.now() < deadline) await page.turn();
-    assert.equal(element("app-status").dataset["state"], "idle");
-    assert.ok(asked.includes("open about:blank"), `the re-listing asked for its list: ${JSON.stringify(asked)}`);
-    assert.equal(disabled, true);
-    assert.equal(taken, true);
-    assert.equal(said, `Already being downloaded, or waiting to be — not queued twice: ${LIGHTHOUSE}.`);
-    assert.deepEqual(queued, [RELIST_LABEL]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the re-listing's own gate (2.0.0) after an Update from TikTok queued ahead of it — the popup's Open my library, say — read TikTok's whole list without its drama (the owner took it out of their Favorites in the TikTok app meanwhile): the library no longer holds the drama and marks nothing removed; the re-listing ends at its gate, `not started: the drama is no longer in the library`, nothing asked of TikTok, no alert, not a stop", async () => {
-  const page = await fakePage({ testSettings: QUICK, storage: staleStorage() });
-  try {
-    const { element, module } = page;
-    const notes = fakeNotifications();
-    // the first job waits at its gate until released; every later one goes on at once
-    const tabs = /** @type {{getCurrent: () => Promise<unknown>}} */ (/** @type {unknown} */ (globalThis.chrome.tabs));
-    const answer = tabs.getCurrent;
-    /** @type {(value?: unknown) => void} */
-    let release = () => undefined;
-    const released = new Promise((resolve) => {
-      release = resolve;
-    });
-    let calls = 0;
-    tabs.getCurrent = () => {
-      calls += 1;
-      return calls === 1 ? released.then(() => answer()) : answer();
-    };
-    // the update, through the page's own runtime message: running, held
-    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), [{ ok: true, tabId: 1 }]);
-    await settled(page);
-    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["favorites"]);
-    // the automatic removal's turn, too old: ONE re-listing at the END, behind the update
-    const { entry, log } = await removalOfKeeper(page, dayOld());
-    assert.equal(entry["error"], RELISTED);
-    assert.deepEqual(relistsOf(page), [relistOf(EARLIER_ALERT)]);
-    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["favorites", "batch"]);
-    // TikTok's whole list no longer holds LIGHTHOUSE
-    const tab = favoritesTab({ pages: { "0": { ...FAVORITES_CAPTURE, total: "2", cursor: "1794351568", hasMore: false, dramaList: [listed(OTHER_ID, SECOND_TITLE, 3), listed(SNOW_A, "Snowfall in Two Cities", 60)] } } });
-    tab.remember(1_794_351_500);
-    const asked = [...log];
-    release();
-    const deadline = Date.now() + 8000;
-    while ((module.journal().length < 2 || element("app-status").dataset["state"] !== "idle") && Date.now() < deadline) await page.turn();
-    const stored = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-    assert.deepEqual(/** @type {{seriesId: string}[]} */ (stored["items"]).map((item) => item.seriesId), [OTHER_ID, SNOW_A]);
-    assert.deepEqual(stored["removed"], []);
-    assert.equal(cardOf(page, LIGHTHOUSE), undefined);
-    assert.equal(tab.fetched.length, 1); // the update's one page
-    assert.deepEqual(
-      module.journal().map((job) => [job["kind"], job["error"], job["stopped"]]),
-      [
-        ["batch", "not started: the drama is no longer in the library", null],
-        ["favorites", null, null],
-      ],
-    );
-    assert.deepEqual(module.journal()[0]?.["series"], []);
-    assert.deepEqual(log.slice(asked.length), []); // nothing asked of TikTok for the drama
-    assert.deepEqual(notes.created, []);
-    assert.equal(element("app-status").dataset["state"], "idle");
-  } finally {
-    page.restore();
-  }
-});
-
-test("a re-listing Stop ends while it lists its drama (2.0.0): its stop's alert never counts that drama — on disk, its listing a part of DramaFetch's own removal — among the dramas not started, unlike a paste of it stopped the same way; the user's downloads the stop took out of the queue still are", async () => {
-  for (const kind of ["a re-listing", "a paste"]) {
-    const page = await fakePage({ storage: staleStorage() });
-    try {
-      const { element, module } = page;
-      const notes = fakeNotifications();
-      /** @type {import("../src/app/app.js").Job} */
-      const job = { ...BATCH_JOB, id: 12, label: kind === "a paste" ? `Series ${LIGHTHOUSE}` : RELIST_LABEL, refs: [refOf(LIGHTHOUSE)], ...(kind === "a paste" ? {} : { recheck: true, relist: { alertId: EARLIER_ALERT } }) };
-      const { engine, jobRecord } = scriptedEngine(page, job);
-      // Stop, pressed while the drama's list is read (the listing noted its contact first)
-      engine.discover = async () => {
-        job.contacted = true;
-        element("stop-button").fire("click");
-        throw new StopRequested();
-      };
-      await assert.rejects(runBatch(engine, job.refs), StopRequested);
-      const stopped = `dramafetch-alert:${module.alerts.page}:12:stopped`;
-      // what runJob says as such a job ends: its own drama only for the paste
-      module.alertJobEnd(job, "stopped by you", null, jobRecord, []);
-      assert.deepEqual(notes.created, kind === "a paste" ? [stopped] : [], kind);
-      if (kind === "a paste") {
-        assert.equal(notes.shown.get(stopped)?.["message"], "1 drama was not started — download it again later");
-        continue;
-      }
-      // the user's own download the same stop took out of the queue: counted, and alone
-      module.alertJobEnd(job, "stopped by you", null, jobRecord, [{ kind: "batch", refs: [refOf(THIRD_ID)] }]);
-      assert.deepEqual(notes.created, [stopped], kind);
-      assert.equal(notes.shown.get(stopped)?.["title"], "DramaFetch stopped: stopped by you", kind);
-      assert.equal(notes.shown.get(stopped)?.["message"], "1 drama was not started — download it again later", kind);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
 // --------------- DramaFetch 2.0.0: the countdown in minutes and seconds (C1), the Waiting card (C2)
 
 /**
@@ -10869,12 +7838,11 @@ test("the cooldown banner counts down in minutes and seconds too (2.0.0): `30 mi
   });
 });
 
-/** Dramas of the Waiting card's tests: four the library holds, one only the stored records name, one nothing names. */
+/** Dramas of the Waiting card's tests: two the library holds, one only the stored records name, one nothing names. */
 const ALPHA = "7712345678901234571";
 const BETA = "7712345678901234572";
 const GAMMA = "7712345678901234573";
 const STORED = "7712345678901234574";
-const DELTA = "7712345678901234575";
 
 /**
  * **See episodes** of `seriesId` run through the page's own `runLoad` — a listing job of its own
@@ -10912,14 +7880,11 @@ function tickEpisodes(page, ticked) {
   table.querySelectorAll = () => boxes;
 }
 
-test("the Waiting card (2.0.0): one row per drama still to run, in the order they will run — the running batch's dramas not begun yet, then every waiting job's —, each by its name when DramaFetch knows it without asking TikTok (the library's title, its stored records', a name a run of this page read) and its WHOLE id, else its id and `name shown once its list is read`; every other kind of row says what it is — a Retry and an automatic retry of E02, E07 (ten at most, then `and N more`), Download all available, Download selected, See episodes, Remove from Favorites and the automatic one, the re-listing an automatic one too old at its turn queued, Update from TikTok (no drama)", async () => {
+test("the Waiting card (2.0.0): one row per drama still to run, in the order they will run — the running batch's dramas not begun yet, then every waiting job's —, each by its name when DramaFetch knows it without asking TikTok (the library's title, its stored records', a name a run of this page read) and its WHOLE id, else its id and `name shown once its list is read`; every other kind of row says what it is — a Retry and an automatic retry of E02, E07 (ten at most, then `and N more`), Download all available, Download selected, See episodes, Update from TikTok (no drama)", async () => {
   const page = await fakePage({
     storage: {
-      favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [BETA, "Beta Heir", 3], [DELTA, "Delta Vows", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [LANTERN_ID, "The Last Lantern", null]]),
+      favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [BETA, "Beta Heir", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]),
       [`series:${STORED}`]: savedState(STORED, [1]), // named `A drama` by its records alone
-      [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }),
-      // on disk, found complete 25 h ago, and TikTok's list gives no count for it: its automatic removal comes too old
-      [`series:${LANTERN_ID}`]: savedState(LANTERN_ID, [1, 2, 3], { complete: 3, completeAt: Date.now() / 1000 - 25 * 3600 }),
     },
   });
   try {
@@ -10966,17 +7931,6 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
     element("download-available-button").fire("click");
     tickEpisodes(page, [1, 2, 4]);
     element("download-selected-button").fire("click");
-    // Remove from Favorites, confirmed; DramaFetch's own removal of a drama found complete
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    module.dramaDone({ ...BATCH_JOB, id: 8, refs: [refOf(DELTA)] }, completeRun(DELTA), {});
-    // DramaFetch's own removal whose count is more than a day old at its turn: the re-listing of its drama
-    const stale = removalJob(page, LANTERN_ID, "The Last Lantern", null, { foundCompleteAt: Date.now() / 1000 - 25 * 3600, alertId: null, episodes: 3 });
-    /** @type {Record<string, unknown>} */
-    const relisted = {};
-    assert.equal(await module.runUnbookmark(stale.job, stale.engine, relisted), null);
-    assert.equal(relisted["error"], RELISTED);
     // Update from TikTok (the popup's hand-over of a TikTok tab's favorites): no drama
     page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
     await settled(page);
@@ -10992,14 +7946,11 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
       whatRow("See episodes", LIGHTHOUSE, "The Lighthouse Keeper's Promise"),
       whatRow("Download all available", SERIES_ID, "Test Series"),
       whatRow("Download selected E01, E02, E04", SERIES_ID, "Test Series"),
-      whatRow("Remove from Favorites", LIGHTHOUSE, "The Lighthouse Keeper's Promise"),
-      whatRow("Remove from Favorites (automatic)", DELTA, "Delta Vows"),
-      whatRow("List again, then remove from Favorites (automatic)", LANTERN_ID, "The Last Lantern"),
       "Update from TikTok",
     ]);
     assert.deepEqual(
       list.children.map((row) => row.getAttribute("data-kind")),
-      ["download", "download", "download", "download", "retry", "retry", "autoretry", "load", "available", "selected", "unbookmark", "autounbookmark", "autorelist", "favorites"],
+      ["download", "download", "download", "download", "retry", "retry", "autoretry", "load", "available", "selected", "favorites"],
     );
     assert.equal(list.children.at(-1)?.getAttribute("data-series-id"), null); // the favorites' listing names no drama
     // the rows as the page holds them: the episodes only where a row names them
@@ -11016,9 +7967,6 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
         ["load", LIGHTHOUSE, []],
         ["available", SERIES_ID, []],
         ["selected", SERIES_ID, [1, 2, 4]],
-        ["unbookmark", LIGHTHOUSE, []],
-        ["autounbookmark", DELTA, []],
-        ["autorelist", LANTERN_ID, []],
         ["favorites", null, []],
       ],
     );
@@ -11039,7 +7987,6 @@ test("the Waiting card (2.0.0): hidden while nothing waits; the running batch's 
   const page = await fakePage({
     storage: {
       favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [BETA, "Beta Heir", 3]]),
-      settings: { ...DEFAULT_SETTINGS, autoRemove: false }, // no removal queued behind the batch here
     },
   });
   try {
@@ -11158,7 +8105,7 @@ test("the Waiting card (2.0.0): hidden while nothing waits; the running batch's 
 });
 
 test("the Waiting card in Spanish under a Spanish Chrome (2.0.0): what each row is, the note of a drama whose name is not known yet, the id whole", async () => {
-  const page = await fakePage({ language: "es", storage: { favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [DELTA, "Delta Vows", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]), [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, [1, 2, 3], { complete: 3 }) } });
+  const page = await fakePage({ language: "es", storage: { favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]) } });
   try {
     const { element, module } = page;
     fakeNotifications();
@@ -11172,10 +8119,6 @@ test("the Waiting card in Spanish under a Spanish Chrome (2.0.0): what each row 
     element("download-available-button").fire("click");
     tickEpisodes(page, [1, 2]);
     element("download-selected-button").fire("click");
-    actionOf(page, LIGHTHOUSE, "remove")?.fire("click");
-    await settled(page);
-    element("bookmark-confirm").fire("click");
-    module.dramaDone({ ...BATCH_JOB, id: 8, refs: [refOf(DELTA)] }, completeRun(DELTA), {});
     page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
     await settled(page);
     assert.deepEqual(waitingRows(page), [
@@ -11186,12 +8129,445 @@ test("the Waiting card in Spanish under a Spanish Chrome (2.0.0): what each row 
       `Ver episodios — The Lighthouse Keeper's Promise · ${LIGHTHOUSE}`,
       `Descargar todo lo disponible — Test Series · ${SERIES_ID}`,
       `Descargar selección E01, E02 — Test Series · ${SERIES_ID}`,
-      `Quitar de Bookmark — The Lighthouse Keeper's Promise · ${LIGHTHOUSE}`,
-      `Quitar de Bookmark (automático) — Delta Vows · ${DELTA}`,
       "Actualizar desde TikTok",
     ]);
     assert.equal(element("queue-list").children[1]?.children[0]?.title, "El ID completo del drama: un clic lo selecciona y Ctrl+C lo copia.");
   } finally {
+    page.restore();
+  }
+});
+
+// ------------------------------------------------- See episodes downloads again in full (3.0.0)
+
+test("See episodes downloads again in full (DramaFetch 3.0.0, the owner's decision of 2026-11-25): Download all available and Download selected queue `selection` jobs with `overwrite` — the engine built for one carries it to its run and to its downloader, whose saves ask Chrome to replace the file —; a paste, a card's Download, Download selected dramas and the popup's hand-over keep what is on disk: no `overwrite`", async () => {
+  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
+  try {
+    const { element, module } = page;
+    page.hold(); // the first job's tabs.getCurrent never answers: it runs, asking nothing; the others wait
+    await listOnScreen(page, SERIES_ID, "Test Series");
+    element("download-available-button").fire("click");
+    tickEpisodes(page, [1, 3]);
+    element("download-selected-button").fire("click");
+    assert.equal(paste(page, OTHER_ID), true); // a paste
+    actionOf(page, MOON, "download")?.fire("click"); // a card's Download
+    const box = tickOf(page, PAPER);
+    assert.ok(box !== undefined);
+    box.checked = true;
+    box.fire("change");
+    element("library-download").fire("click"); // Download selected dramas
+    page.message({ type: "dramafetch:load", input: THIRD_ID }); // the popup's Download this series
+    await settled(page);
+    assert.deepEqual(
+      jobsOf(page).map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.pick, job.numbers, job.overwrite]),
+      [
+        ["selection", [SERIES_ID], "available", [1, 2, 3, 4], true],
+        ["selection", [SERIES_ID], "selected", [1, 3], true],
+        ["batch", [OTHER_ID], undefined, [], undefined],
+        ["batch", [MOON], undefined, [], undefined],
+        ["batch", [PAPER], undefined, [], undefined],
+        ["batch", [THIRD_ID], undefined, [], undefined],
+      ],
+    );
+    // the engine of such a job: no done skip, and a downloader with no existing-file skip whose
+    // saves replace the file at its target (the page's own chrome.downloads)
+    const [available] = module.queuedJobs();
+    assert.ok(available !== undefined);
+    const engine = module.buildEngine({ ...available, id: 990 }, { pauses: [], inputs: [], taking: true });
+    assert.equal(engine.overwrite, true);
+    assert.equal(engine.downloader.config.overwrite, true);
+    await engine.downloader.save(new Uint8Array([0, 0, 0, 8, 0x66, 0x72, 0x65, 0x65]), "video/mp4", `DramaFetch/Test Series [${SERIES_ID}]/Test Series - Episode 01.mp4`, "overwrite");
+    assert.deepEqual(page.downloads.map((saved) => [saved.filename, saved.conflictAction]), [[`DramaFetch/Test Series [${SERIES_ID}]/Test Series - Episode 01.mp4`, "overwrite"]]);
+    // any other job's: the resume (what is on disk is skipped)
+    const batch = module.buildEngine({ ...BATCH_JOB, id: 991, refs: [refOf(OTHER_ID)] }, { pauses: [], inputs: [], taking: true });
+    assert.equal(batch.overwrite, false);
+    assert.equal(batch.downloader.config.overwrite, false);
+  } finally {
+    page.restore();
+  }
+  // run through the page's own queue to its end: the job's record says it downloaded again in full
+  // (what every retry of it reads); a paste's does not
+  const queued = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = queued;
+    const ended = async (/** @type {number} */ count) => {
+      for (let turn = 0; turn < 500 && (module.journal().length < count || element("app-status").dataset["state"] !== "idle"); turn += 1) await queued.turn();
+    };
+    await listOnScreen(queued, SERIES_ID, "Test Series");
+    element("download-available-button").fire("click"); // the discovery can open no tab here: no request at all
+    await ended(1);
+    const [selection] = module.journal();
+    assert.equal(selection?.["kind"], "selection");
+    const [record] = /** @type {Record<string, unknown>[]} */ (selection?.["series"]);
+    assert.deepEqual([record?.["series_id"], record?.["overwrite"]], [SERIES_ID, true]);
+    assert.equal(paste(queued, SERIES_ID), true);
+    await ended(2);
+    const [pasted] = module.journal();
+    assert.equal(pasted?.["kind"], "batch");
+    const [batchRecord] = /** @type {Record<string, unknown>[]} */ (pasted?.["series"]);
+    assert.deepEqual([batchRecord?.["series_id"], Object.hasOwn(batchRecord ?? {}, "overwrite")], [SERIES_ID, false]);
+  } finally {
+    queued.restore();
+  }
+});
+
+test("the retries of a job that downloaded again in full do too (3.0.0): its records say `overwrite`, and so does each retry read from them — the tab's Retry, its one automatic retry, the alert's Retry, the ⚠ alert of an automatic retry that did not run —, so that an episode whose download again failed is never skipped for the old copy on disk; a retry of any other job keeps the resume", async () => {
+  const again = { ...seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed-unavailable"]]), overwrite: true };
+  const kept = seriesRecord(THIRD_ID, "Drama 2388", [[1, "failed"]]);
+  /**
+   * A See episodes job over `THIRD_ID`'s three episodes (Download all available).
+   * @param {number} id
+   * @returns {import("../src/app/app.js").Job}
+   */
+  const seeEpisodesJob = (id) => ({ id, kind: "selection", label: "3 episodes of Drama 2388", refs: [refOf(THIRD_ID)], series: null, numbers: [1, 2, 3], includeLocked: false, recheck: false, overwrite: true, pick: "available" });
+  let page = await fakePage();
+  try {
+    const { element, module } = page;
+    // what a retry takes from the records, and the jobs it queues
+    assert.deepEqual(module.retryTargets([again, kept]), [
+      { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2, 3], overwrite: true },
+      { seriesId: THIRD_ID, name: "Drama 2388", numbers: [1] },
+    ]);
+    assert.deepEqual(
+      module.retryJobs(module.retryTargets([again, kept])).map((job) => [job.kind, job.label, job.numbers, job.includeLocked, job.overwrite]),
+      [
+        ["selection", "Retry 2 of Drama 2399", [2, 3], false, true],
+        ["selection", "Retry 1 of Drama 2388", [1], false, undefined],
+      ],
+    );
+    // the tab's Retry over them
+    page.hold();
+    module.renderFailed([again, kept]);
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.deepEqual(jobsOf(page).map((job) => [job.refs[0]?.seriesId, job.numbers, job.overwrite]), [
+      [OTHER_ID, [2, 3], true],
+      [THIRD_ID, [1], undefined],
+    ]);
+  } finally {
+    page.restore();
+  }
+  // the automatic retry of a See episodes job's plain failure, and the ⚠ alert it gets when it
+  // does not run (Stop): both download again in full
+  page = await fakePage();
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const job = seeEpisodesJob(5);
+    const scripted = scriptedEngine(page, job, { statuses: { [`${THIRD_ID}:2`]: "failed" } });
+    assert.equal(scripted.engine.overwrite, true);
+    const run = await runSelectionJob(scripted.engine, refOf(THIRD_ID), job.numbers, { lastContactAt: null });
+    assert.deepEqual(run.results.map((result) => [result.episode.number, result.status]), [[1, "done"], [2, "failed"], [3, "done"]]);
+    module.dramaDone(job, run, scripted.jobRecord); // where runJob makes the drama's alert
+    await page.turn();
+    const alertId = `dramafetch-alert:${module.alerts.page}:5:${THIRD_ID}:retry`;
+    assert.deepEqual(jobsOf(page), [
+      { kind: "selection", label: "Automatic retry: 1 of Drama 2388", refs: [refOf(THIRD_ID)], series: null, numbers: [2], includeLocked: false, recheck: false, overwrite: true, autoRetry: { alertId, name: "Drama 2388" } },
+    ]);
+    assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2388 — retrying 1 episode");
+    const [automatic] = module.queuedJobs();
+    assert.ok(automatic !== undefined);
+    module.alertNotRetried(automatic, "stopped by you");
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: THIRD_ID, name: "Drama 2388", numbers: [2], overwrite: true });
+    module.alertNotRetried({ ...automatic, overwrite: undefined }, "stopped by you"); // an automatic retry of a paste's drama
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: THIRD_ID, name: "Drama 2388", numbers: [2] });
+  } finally {
+    page.restore();
+  }
+  // the automatic retry off: the ⚠ alert's Retry, handed over by the worker
+  page = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    const job = seeEpisodesJob(6);
+    const scripted = scriptedEngine(page, job, { statuses: { [`${THIRD_ID}:2`]: "failed" } });
+    const run = await runSelectionJob(scripted.engine, refOf(THIRD_ID), job.numbers, { lastContactAt: null });
+    module.dramaDone(job, run, scripted.jobRecord);
+    const alertId = `dramafetch-alert:${module.alerts.page}:6:${THIRD_ID}:retry`;
+    assert.deepEqual(notes.created, [alertId]);
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: THIRD_ID, name: "Drama 2388", numbers: [2], overwrite: true });
+    page.hold();
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: alertId }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await page.turn();
+    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers, queued.overwrite]), [["Retry 1 of Drama 2388", [2], true]]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("See episodes (3.0.0): an episode on disk keeps its On disk badge and comes unticked; its tooltip says that the list's buttons download it again in full and replace the file — in English and in Spanish —; Download all available takes it with the rest", async () => {
+  /** @type {["en" | "es", string][]} */
+  const languages = [
+    ["en", "Already downloaded: “Download all available”, or “Download selected” with it ticked, downloads it again in full and replaces the file"],
+    ["es", "Ya descargado: “Descargar todo lo disponible”, o “Descargar selección” con él marcado, lo vuelve a descargar completo y reemplaza el archivo"],
+  ];
+  for (const [language, title] of languages) {
+    const page = await fakePage({ storage: { [`series:${SERIES_ID}`]: savedState(SERIES_ID, [1, 2]) }, language });
+    try {
+      const { element, module } = page;
+      // See episodes over the five-episode list (E05 locked), Chrome's history showing E01 and E02's files
+      /** @type {import("../src/app/app.js").Job} */
+      const job = { id: 99, kind: "load", label: `List series ${SERIES_ID}`, refs: [refOf(SERIES_ID)], series: null, numbers: [], includeLocked: false, recheck: false };
+      const engine = module.buildEngine(job, { pauses: [], inputs: [], taking: true });
+      engine.sleep = async () => undefined;
+      engine.discover = async () => series([episode(1), episode(2), episode(3), episode(4), episode(5, { locked: true })]);
+      engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
+        /** @type {unknown} */ ({ exists: () => true, refresh: async () => undefined, completedAt: () => null, remember() {} })
+      );
+      assert.equal(await module.runLoad(job, engine, {}), null);
+      const rows = element("episode-table").querySelector("tbody")?.children ?? [];
+      assert.deepEqual(
+        rows.map((row) => [row.getAttribute("data-number"), row.children[0]?.children[0]?.checked, descendants(row).find((part) => part.className === "badge ondisk")?.title ?? null]),
+        [
+          ["1", false, title],
+          ["2", false, title],
+          ["3", true, null],
+          ["4", true, null],
+          ["5", false, null],
+        ],
+        language,
+      );
+      page.hold();
+      element("download-available-button").fire("click");
+      await page.turn();
+      assert.deepEqual(jobsOf(page).map((queued) => [queued.numbers, queued.overwrite]), [[[1, 2, 3, 4], true]]); // on disk or not
+    } finally {
+      page.restore();
+    }
+  }
+});
+
+/**
+ * A library card's state as the tests compare it: its `data-status`, its badge's text and its bar's
+ * `[value, max]` — no badge and no bar while it is idle.
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ * @param {string} seriesId
+ */
+const cardState = (page, seriesId) => {
+  const article = /** @type {FakeElement} */ (cardOf(page, seriesId));
+  const bar = descendants(article).find((part) => part.tagName === "PROGRESS");
+  return [article.getAttribute("data-status"), partOf(article, "favorite-status")?.textContent, bar?.getAttribute("value"), bar?.getAttribute("max")];
+};
+
+/**
+ * Every text a library card's badge shows from now on, in order, one entry per change — `(idle)`
+ * for no badge: what a user sees between the samples a test takes, every redraw of the grid read.
+ * @param {Awaited<ReturnType<typeof fakePage>>} page
+ * @param {string} seriesId
+ * @returns {string[]}
+ */
+function recordCard(page, seriesId) {
+  const grid = page.element("favorites-grid");
+  /** @type {string[]} */
+  const seen = [];
+  const draw = grid.replaceChildren.bind(grid);
+  grid.replaceChildren = (/** @type {FakeElement[]} */ ...cards) => {
+    draw(...cards);
+    const card = cardOf(page, seriesId);
+    const text = card === undefined ? "(no card)" : (partOf(card, "favorite-status")?.textContent ?? "(idle)");
+    if (seen.at(-1) !== text) seen.push(text);
+  };
+  return seen;
+}
+
+test("the page: See episodes' download (a `selection` job — 3.0.0: in full) waiting behind another drama's batch holds its drama like any download: its card says Queued, its Download is disabled, and a paste or the popup's hand-over of it queues nothing", async () => {
+  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
+  try {
+    const { element, module } = page;
+    page.hold(); // the running job's tabs.getCurrent never answers: it runs, asking nothing; the next one waits
+    await listOnScreen(page, PAPER, "Paper Crowns");
+    assert.equal(paste(page, MOON), true); // another drama's batch: it runs
+    await page.turn();
+    tickEpisodes(page, [2]);
+    element("download-selected-button").fire("click"); // waits behind it
+    await settled(page);
+    assert.deepEqual(jobsOf(page).map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.overwrite === true]), [
+      ["batch", [MOON], false],
+      ["selection", [PAPER], true],
+    ]);
+    assert.deepEqual(cardState(page, PAPER), ["queued", "Queued", undefined, undefined]);
+    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
+    assert.equal(paste(page, PAPER), true);
+    assert.equal(element("input-status").textContent, `Already being downloaded, or waiting to be — not queued twice: ${PAPER}.`);
+    element("input-status").textContent = "";
+    assert.deepEqual(page.message({ type: "dramafetch:load", input: PAPER }), [{ ok: true, tabId: 1 }]); // the popup's Download this series
+    assert.equal(element("input-status").textContent, `Already being downloaded, or waiting to be — not queued twice: ${PAPER}.`);
+    assert.equal(module.queuedJobs().length, 2); // nothing queued twice
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: See episodes' download in full of a drama already on disk (3.0.0) holds its drama like any download — Queued while it waits, Downloading with its bar while it runs, its Download disabled and a paste of it refused throughout — and its count follows the job: the episodes it takes again count once saved anew, against the drama's own 30, never going down; at its end the card says nothing and its Download is back", async () => {
+  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
+  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) }, testSettings: QUICK });
+  try {
+    const { element, module, local } = page;
+    const refused = `Already being downloaded, or waiting to be — not queued twice: ${PAPER}.`;
+    const open = gateJobs(); // the job starts and waits at its first step, asking nothing
+    await listOnScreen(page, PAPER, "Paper Crowns");
+    tickEpisodes(page, [1, 3]); // both on disk: ticked, they download again in full
+    const seen = recordCard(page, PAPER);
+    element("download-selected-button").fire("click");
+    await settled(page);
+    assert.deepEqual(jobsOf(page).map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.numbers, job.overwrite]), [["selection", [PAPER], [1, 3], true]]);
+    // not begun yet: Queued, no bar
+    assert.deepEqual(cardState(page, PAPER), ["queued", "Queued", undefined, undefined]);
+    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
+    assert.equal(paste(page, PAPER), true);
+    assert.equal(element("input-status").textContent, refused);
+    assert.equal(module.queuedJobs().length, 1);
+    // its drama begins (the engine's hooks, as it calls them): Downloading, the two it takes again not counted
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined);
+    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
+    /** @param {number} number */
+    const ep = (number) => makeEpisode({ number, itemId: `i${number}`, title: `Episode ${number}`, seriesId: PAPER, durationS: 3, coverUrl: null, raw: {} });
+    engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: [ep(1), ep(3)], skippedComplete: false });
+    await settled(page);
+    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 28/30", "28", "30"]);
+    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
+    element("input-status").textContent = "";
+    assert.equal(paste(page, PAPER), true);
+    assert.equal(element("input-status").textContent, refused);
+    assert.equal(module.queuedJobs().length, 1);
+    // E01 saved anew (the records hold its new download): counted again
+    local.set(`series:${PAPER}`, savedState(PAPER, thirty));
+    engine.onResult?.({ episode: ep(1), status: "done", path: "/dl/E1.mp4", message: "saved E1.mp4 (0.1 MiB) + cover embedded", downloadId: 201 });
+    await settled(page);
+    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 29/30", "29", "30"]);
+    // E03's download again failed (its record says so; its old file untouched): not counted, the count unchanged
+    const failed = savedState(PAPER, thirty.filter((number) => number !== 3));
+    failed.episodes["3"] = { number: 3, item_id: "i3", status: "failed", path: null, message: "download failed: HTTP 500", updated_at: "2027-01-15T08:00:00Z", download_id: null };
+    local.set(`series:${PAPER}`, failed);
+    engine.onResult?.({ episode: ep(3), status: "failed", path: null, message: "download failed: HTTP 500" });
+    await settled(page);
+    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 29/30", "29", "30"]);
+    // the job ends (its listing can open no tab here: no request at all): nothing on the card, its Download back
+    open();
+    for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    assert.equal(module.journal().length, 1);
+    await settled(page);
+    assert.deepEqual(cardState(page, PAPER), ["idle", undefined, undefined, undefined]);
+    assert.equal(actionOf(page, PAPER, "download")?.disabled, false);
+    assert.equal(metaOf(page, PAPER), "30 episodes · 40m");
+    // everything the card showed, every redraw: its count only went up
+    assert.deepEqual(seen, ["Queued", "Downloading · 28/30", "Downloading · 29/30", "(idle)"]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: a download in full (3.0.0) counts again each episode it takes once that one is done — saved anew, or skipped as locked with its earlier download kept, no request — and takes only what its fresh list holds: an episode ticked on the list on screen that the fresh list lacks keeps counting as on disk; its first count is exact — also when it takes episodes not on disk, as a Retry of its failures does —, the count only goes up and ends at the drama's 30", async () => {
+  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
+  for (const fourth of ["missing", "locked"]) {
+    const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) }, testSettings: QUICK });
+    try {
+      const { element, module } = page;
+      const open = gateJobs(); // the job starts and waits at its first step, asking nothing
+      await listOnScreen(page, PAPER, "Paper Crowns");
+      tickEpisodes(page, [1, 2, 3, 4]); // all four on disk: ticked, they download again in full
+      const seen = recordCard(page, PAPER);
+      element("download-selected-button").fire("click");
+      await settled(page);
+      const [running] = module.queuedJobs();
+      assert.ok(running !== undefined);
+      assert.deepEqual([running.numbers, running.overwrite], [[1, 2, 3, 4], true], fourth);
+      const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
+      // the fresh list: E04 gone from it, or listed locked now (an entitlement that lapsed)
+      const taken = [1, 2, 3].map((number) => episode(number, { seriesId: PAPER })).concat(fourth === "locked" ? [episode(4, { locked: true, seriesId: PAPER })] : []);
+      engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: taken, skippedComplete: false });
+      await settled(page);
+      const first = fourth === "missing" ? 27 : 26;
+      assert.deepEqual(cardState(page, PAPER), ["running", `Downloading · ${first}/30`, String(first), "30"], fourth);
+      // E01–E03 saved anew (the records hold a done entry each, as before)
+      for (const ep of taken.slice(0, 3)) {
+        engine.onResult?.({ episode: ep, status: "done", path: `/dl/E${ep.number}.mp4`, message: `saved E${ep.number}.mp4 (0.1 MiB) + cover embedded`, downloadId: 200 + ep.number });
+        await settled(page);
+      }
+      if (fourth === "locked") {
+        // no request: the locked skip, which never replaces an entry on disk — its earlier download counts again
+        engine.onResult?.({ episode: /** @type {import("../src/lib/catalog.js").Episode} */ (taken[3]), status: "skipped-locked", path: null, message: "looks locked: no play address" });
+        await settled(page);
+      }
+      assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 30/30", "30", "30"], fourth);
+      open();
+      for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+      await settled(page);
+      assert.deepEqual(cardState(page, PAPER), ["idle", undefined, undefined, undefined], fourth);
+      const counts = seen.flatMap((text) => /Downloading · (\d+)\/30$/.exec(text)?.[1] ?? []).map(Number);
+      assert.deepEqual(counts, fourth === "missing" ? [27, 28, 29, 30] : [26, 27, 28, 29, 30], `${fourth}: ${JSON.stringify(seen)}`);
+      assert.deepEqual([seen[0], seen.at(-1)], ["Queued", "(idle)"], fourth);
+    } finally {
+      page.restore();
+    }
+  }
+  // E02 and E04 not on disk (an earlier download in full's failures): 28 at once — never 26, the 28
+  // lowered by two episodes the records do not count anyway —, then 29 and 30 as each is saved
+  const missing = thirty.filter((number) => number !== 2 && number !== 4);
+  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, missing) }, testSettings: QUICK });
+  try {
+    const { element, module, local } = page;
+    const open = gateJobs();
+    await listOnScreen(page, PAPER, "Paper Crowns");
+    tickEpisodes(page, [2, 4]);
+    const seen = recordCard(page, PAPER);
+    element("download-selected-button").fire("click");
+    await settled(page);
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined);
+    assert.deepEqual([running.numbers, running.overwrite], [[2, 4], true]);
+    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
+    const [two, four] = [2, 4].map((number) => episode(number, { seriesId: PAPER }));
+    assert.ok(two !== undefined && four !== undefined);
+    engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: [two, four], skippedComplete: false });
+    await settled(page);
+    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 28/30", "28", "30"]);
+    local.set(`series:${PAPER}`, savedState(PAPER, thirty.filter((number) => number !== 4)));
+    engine.onResult?.({ episode: two, status: "done", path: "/dl/E2.mp4", message: "saved E2.mp4 (0.1 MiB) + cover embedded", downloadId: 202 });
+    await settled(page);
+    local.set(`series:${PAPER}`, savedState(PAPER, thirty));
+    engine.onResult?.({ episode: four, status: "done", path: "/dl/E4.mp4", message: "saved E4.mp4 (0.1 MiB) + cover embedded", downloadId: 204 });
+    await settled(page);
+    open();
+    for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    await settled(page);
+    assert.deepEqual(seen, ["Queued", "Downloading · 28/30", "Downloading · 29/30", "Downloading · 30/30", "(idle)"]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("the page: a download in full (3.0.0) whose drama's records the storage refuses to read as it begins still says Downloading on its card — at most the count it would have read (the stored one less the episodes it takes again), never more", async () => {
+  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
+  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) }, testSettings: QUICK });
+  const local = /** @type {{get: (keys: unknown) => unknown}} */ (/** @type {unknown} */ (chrome.storage.local));
+  const get = local.get;
+  try {
+    const { element, module } = page;
+    const open = gateJobs();
+    await listOnScreen(page, PAPER, "Paper Crowns");
+    tickEpisodes(page, [1, 3]);
+    const seen = recordCard(page, PAPER);
+    element("download-selected-button").fire("click");
+    await settled(page);
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined);
+    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
+    local.get = async () => {
+      throw new Error("IO error: the profile's storage refused the read");
+    };
+    engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: [1, 3].map((number) => episode(number, { seriesId: PAPER })), skippedComplete: false });
+    await settled(page);
+    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 28/30", "28", "30"]);
+    assert.deepEqual(seen, ["Queued", "Downloading · 28/30"]);
+    local.get = get;
+    open();
+    for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    await settled(page);
+    assert.deepEqual(cardState(page, PAPER), ["idle", undefined, undefined, undefined]);
+  } finally {
+    local.get = get;
     page.restore();
   }
 });

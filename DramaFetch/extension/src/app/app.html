@@ -47,7 +47,7 @@
   </section>
 
   <div id="library" class="library">
-    <p id="library-empty" class="card hint" data-i18n="libraryEmpty">Your library is empty: open your TikTok profile → Favorites → Drama, then DramaFetch's toolbar button → Open my library. DramaFetch then shows every drama you keep there, with what is already on disk.</p>
+    <p id="library-empty" class="card hint" data-i18n="libraryEmpty">Your library is empty: open your TikTok profile → Favorites → Drama, then DramaFetch's toolbar button → Open my library. DramaFetch then shows every drama you keep there.</p>
     <section class="card" id="favorites-card" hidden aria-labelledby="favorites-heading">
       <h2 id="favorites-heading" data-i18n="favoritesHeading">Your TikTok library</h2>
       <div class="connection">
@@ -63,12 +63,6 @@
       <p class="hint" data-i18n="libraryHint">No password and no separate API: DramaFetch reads the same list your profile shows, from your own TikTok tab, with pauses. Nothing downloads until you ask.</p>
       <div class="library-tools">
         <input type="search" id="favorites-filter" spellcheck="false" autocomplete="off" data-i18n-placeholder="favoritesFilterPlaceholder" data-i18n-aria-label="favoritesFilterPlaceholder">
-        <div class="chips" role="group" data-i18n-aria-label="libraryChipsLabel" aria-label="Filter by status">
-          <button type="button" class="chip pressed" id="library-chip-all" data-filter="all" aria-pressed="true"></button>
-          <button type="button" class="chip" id="library-chip-none" data-filter="none" aria-pressed="false"></button>
-          <button type="button" class="chip" id="library-chip-partly" data-filter="partly" aria-pressed="false"></button>
-          <button type="button" class="chip" id="library-chip-on-disk" data-filter="on-disk" aria-pressed="false"></button>
-        </div>
         <select id="library-sort" data-i18n-aria-label="librarySortLabel" aria-label="Sort">
           <option value="recent" data-i18n="librarySortRecent">Most recent first</option>
           <option value="title" data-i18n="librarySortTitle">Title A–Z</option>
@@ -76,7 +70,6 @@
         </select>
         <label class="select-shown"><input type="checkbox" id="favorites-select-all"> <span data-i18n="favoritesSelectShown">Select all shown</span></label>
       </div>
-      <p id="library-removed" class="meta" hidden></p>
       <div class="selection-bar">
         <span id="favorites-selection" class="selection-count"></span>
         <span class="selection-note" data-i18n="librarySelectionNote">downloaded one after the other, with the usual pauses</span>
@@ -90,26 +83,9 @@
         <span id="library-shown" class="meta"></span>
         <button type="button" id="library-more" hidden></button>
       </div>
-      <p class="hint" data-i18n="favoritesHint">Reading the whole list takes 1–2 minutes (about 50 pages, a pause before each). “On disk” = every episode your account may watch, saved and checked. Download on a card downloads that drama; Download selected dramas downloads the ticked ones one after the other — exactly as pasting their links would.</p>
+      <p class="hint" data-i18n="favoritesHint">Reading the whole list takes 1–2 minutes (about 50 pages, a pause before each). Download on a card downloads that drama; Download selected dramas downloads the ticked ones one after the other — exactly as pasting their links would, skipping the episodes already on disk.</p>
     </section>
   </div>
-
-  <dialog id="bookmark-dialog" aria-labelledby="bookmark-dialog-title">
-    <h2 id="bookmark-dialog-title" data-i18n="bookmarkDialogTitle">Remove from your Favorites on TikTok?</h2>
-    <div class="dialog-drama">
-      <span id="bookmark-dialog-cover" class="dialog-cover"></span>
-      <div>
-        <div id="bookmark-dialog-name" class="dialog-name"></div>
-        <div id="bookmark-dialog-meta" class="meta"></div>
-      </div>
-    </div>
-    <ul id="bookmark-dialog-facts" class="facts"></ul>
-    <p class="hint" data-i18n="bookmarkDialogHow">DramaFetch will open the drama in a background tab, press its Bookmark button once and check, after reloading the page, that TikTok kept the change. If you change your mind, press Bookmark again on TikTok.</p>
-    <div class="buttons dialog-buttons">
-      <button type="button" id="bookmark-cancel" data-i18n="bookmarkCancel">Cancel</button>
-      <button type="button" id="bookmark-confirm" class="danger" data-i18n="bookmarkConfirm">Remove from Favorites</button>
-    </div>
-  </dialog>
 
   <section class="card" id="series-card" hidden>
     <h2 id="series-title"></h2>
@@ -244,13 +220,10 @@
         <input type="checkbox" id="setting-alerts">
         <label for="setting-auto-retry" data-i18n="settingAutoRetry">Retry on its own what did not download</label>
         <input type="checkbox" id="setting-auto-retry">
-        <label for="setting-auto-remove" data-i18n="settingAutoRemove">Remove a drama from my Favorites once all its episodes are downloaded</label>
-        <input type="checkbox" id="setting-auto-remove">
       </div>
       <p class="hint" data-i18n="settingReportHint">A JSON file in Downloads/DramaFetch/reports: for each episode that did not download, its status, message, probable cause, the requests made (hosts, HTTP statuses, sizes) and the list entry TikTok served to your session — never your cookies.</p>
-      <p class="hint" data-i18n="settingAlertsHint">A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button; and, when DramaFetch removes a drama from your Favorites on its own, whether it did. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.</p>
+      <p class="hint" data-i18n="settingAlertsHint">A notification from Chrome as each drama a download finishes: downloaded, or the episodes to retry, with a Retry button. None shows? Allow Chrome's notifications in Windows (Settings → System → Notifications) and check that Focus assist (Do not disturb) is off.</p>
       <p class="hint" data-i18n="settingAutoRetryHint">When a drama's download ends with episodes that did not download for a reason a retry can change — a cut transfer, a file that failed its check, a network error —, DramaFetch queues one retry of them, the same as pressing Retry: the rest between downloads, a fresh list, the usual pauses. Never after TikTok refused a request, during the 30-minute cooldown or after a stop, and never for locked, DRM-protected or short-served episodes.</p>
-      <p class="hint" data-i18n="settingAutoRemoveHint">Only a drama your library holds, once every episode of its list is on disk — none locked, protected by DRM, served short or missing —, after its automatic retry when it needed one: DramaFetch presses TikTok's own Bookmark button once in a background tab and checks it after a reload, exactly as Remove from Favorites does. Never after a stop or during the 30-minute wait. Untick it to keep your Favorites as they are.</p>
       <p class="hint" data-i18n="settingsHint">File names may use {series}, {number}, {n}, {title} and {id}. Pauses may only be made longer than the defaults (4–9 s between episodes, 60–120 s every 10): faster is never safe against TikTok.</p>
       <div class="buttons">
         <button type="submit" id="settings-save" data-i18n="saveSettings">Save settings</button>

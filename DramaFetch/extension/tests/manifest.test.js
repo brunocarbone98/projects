@@ -5,12 +5,13 @@
 // shipped file (the test harness adds both to a temporary COPY), no remote code — and the sources
 // never reach for an API the extension must not use (cookies, debugger, blocking webRequest) or no
 // longer uses (contextMenus, a message to a content script), nor does a function it injects into a
-// TikTok tab reach for an extension API or a storage (2.0.1).
+// TikTok tab reach for an extension API or a storage (2.0.1), nor does anything press, read or
+// observe TikTok's Bookmark button or its request any more (3.0.0: the removal from the Favorites
+// is gone).
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 
-import { bookmarkInPage } from "../src/app/bookmark.js";
 import { fetchInPage, pageTextInPage, scrollInPage } from "../src/app/discovery.js";
 import { TIKTOK_DOMAINS, hostCovered } from "../src/app/downloader.js";
 
@@ -57,6 +58,29 @@ function walk(relative) {
     else found.push(...walk(path));
   }
   return found;
+}
+
+/**
+ * The object literal each `executeScript(` of a source is called with — its braces matched, so a nested
+ * `target: { tabId }` stays inside —, where it starts and where it ends; a call given anything but an object
+ * literal gives none.
+ * @param {string} text
+ * @returns {{start: number, end: number, literal: string}[]}
+ */
+function injectionCalls(text) {
+  /** @type {{start: number, end: number, literal: string}[]} */
+  const calls = [];
+  for (const match of text.matchAll(/\bexecuteScript\s*\(\s*\{/g)) {
+    const start = match.index + match[0].length - 1;
+    for (let at = start, depth = 0; at < text.length; at += 1) {
+      if (text[at] === "{") depth += 1;
+      else if (text[at] === "}" && --depth === 0) {
+        calls.push({ start, end: at, literal: text.slice(start, at + 1) });
+        break;
+      }
+    }
+  }
+  return calls;
 }
 
 test("a Manifest V3 extension named from _locales, English by default", () => {
@@ -106,20 +130,65 @@ test("no content script and no right-click menu (DramaFetch 2.0.0, the owner's d
   assert.doesNotMatch(declared, /namespace contextMenus|function sendMessage\(tabId|onInstalled|onStartup|lastError/);
 });
 
-test("what DramaFetch injects into a TikTok tab uses no extension API and no storage (2.0.1: from Chrome 140 on, chrome.storage.local refuses a script run there)", () => {
+test("what DramaFetch injects into a TikTok tab — fetchInPage in the MAIN world, scrollInPage and pageTextInPage in the ISOLATED world, nothing else — uses no extension API and no storage (2.0.1: from Chrome 140 on, chrome.storage.local refuses a script run there)", () => {
   /** @type {Record<string, Function>} */
-  const injected = { fetchInPage, scrollInPage, pageTextInPage, bookmarkInPage };
-  // every `func` of the sources reads `func: <one of these four>` — an inline, shorthand, quoted or spaced one reads
+  const injected = { fetchInPage, scrollInPage, pageTextInPage };
+  // every `func` of the sources reads `func: <one of these three>` — an inline, shorthand, quoted or spaced one reads
   // "not a plain name" and fails —, and no file is injected nor a content script registered
   const sources = walk("src").filter((path) => path.endsWith(".js"));
   const named = new Set(sources.flatMap((path) => [...readFileSync(file(path), "utf8").matchAll(/\bfunc\b(?::\s*([A-Za-z_$][\w$]*))?/g)].map((match) => match[1] ?? `${path}: not a plain name`)));
   assert.deepEqual([...named].sort(), Object.keys(injected).sort());
+  // each in its own world, named in the `executeScript({…})` call itself: the page's own `fetch` in the MAIN world,
+  // the scroll and the page's text in the ISOLATED world (Chrome's default when no `world` is given) — no `func`
+  // outside such a call, no spread in one, no `world` but a quoted MAIN or ISOLATED, and only one
+  /** @type {Record<string, string>} */
+  const worlds = { fetchInPage: "MAIN", scrollInPage: "ISOLATED", pageTextInPage: "ISOLATED" };
+  for (const path of sources) {
+    const text = readFileSync(file(path), "utf8");
+    const calls = injectionCalls(text).filter((call) => /\bfunc\b/.test(call.literal));
+    for (const match of text.matchAll(/\bfunc\b/g)) {
+      assert.ok(calls.some((call) => call.start < match.index && match.index < call.end), `${path}: a \`func\` outside an executeScript({…}) call`);
+    }
+    for (const { literal } of calls) {
+      const name = /\bfunc:\s*([A-Za-z_$][\w$]*)/.exec(literal)?.[1] ?? "";
+      assert.doesNotMatch(literal, /\.\.\./, `${path}: ${name} injected with a spread`);
+      const given = [...literal.matchAll(/\bworld\b(?:\s*:\s*["'](MAIN|ISOLATED)["'])?/g)].map((world) => world[1] ?? "not a quoted world");
+      assert.ok(given.length <= 1, `${path}: ${name} given more than one world`);
+      assert.equal(given[0] ?? "ISOLATED", worlds[name], `${path}: ${name} injected in the wrong world`);
+    }
+  }
+  // and only discovery.js injects any — the module that defines the three functions this test and the next one read: a
+  // function of the same name declared and injected in another module would escape both
+  assert.deepEqual(sources.filter((path) => injectionCalls(readFileSync(file(path), "utf8")).some((call) => /\bfunc\b/.test(call.literal))), ["src/app/discovery.js"]);
   for (const path of sources) {
     assert.doesNotMatch(readFileSync(file(path), "utf8"), /\bfiles\b["']?\s*:|\bregisterContentScripts\b/, `${path}: no injected file and no registered content script`);
   }
   for (const [name, inject] of Object.entries(injected)) {
     assert.doesNotMatch(String(inject), /\bchrome\b|\blocalStorage\b|\bsessionStorage\b|\bindexedDB\b|\bcaches\b|\bcookie/, `${name}: no extension API or storage in a TikTok tab`);
   }
+});
+
+test("nothing presses, reads or observes TikTok's Bookmark any more (DramaFetch 3.0.0, the owner's decision of 2026-11-25): no src/app/bookmark.js, no source that looks for the button or its `collect` request, nothing that clicks an element — and nothing injected into a TikTok tab presses, focuses or submits anything or dispatches an event but the list's scroll —, no removal dialog or setting on the page", () => {
+  assert.equal(existsSync(file("src/app/bookmark.js")), false, "src/app/bookmark.js: the removal from the Favorites is gone");
+  for (const path of walk("src").filter((name) => name.endsWith(".js"))) {
+    const text = readFileSync(file(path), "utf8");
+    assert.doesNotMatch(text, /favorite-icon|action_favorite|FACE15/i, `${path}: TikTok's Bookmark button`);
+    assert.doesNotMatch(text, /\/collect\b|isCollectUrl/, `${path}: the Bookmark's collect request`);
+    assert.doesNotMatch(text, /\.click\s*(\?\.\s*)?\(|\[\s*["'`]click["'`]\s*\]/, `${path}: a click on an element`);
+  }
+  // only these three run in a TikTok tab (the test above pins every `func` to them, with no file and no
+  // registered script): none presses, focuses or submits anything there or looks for the Bookmark — the one
+  // event any of them makes is scrollInPage's `scroll`, on the list it scrolls
+  for (const [name, inject] of Object.entries({ fetchInPage, scrollInPage, pageTextInPage })) {
+    const body = String(inject);
+    assert.doesNotMatch(body, /click|submit|focus|createEvent|(Mouse|Pointer|Keyboard|Touch|Wheel|Drag|Input|UI|Custom)Event|__react|aria-|favorite|bookmark|collect|data-e2e/i, `${name}: nothing pressed or looked for in TikTok's page`);
+    const made = [...body.matchAll(/\bnew\s+([\w$.]*Event)\s*\(\s*([^),]*)/g)].map((match) => `${match[1]}(${match[2]})`);
+    assert.deepEqual(made, name === "scrollInPage" ? ['Event("scroll")'] : [], `${name}: the events it makes in a TikTok tab`);
+    const dispatched = [...body.matchAll(/\bdispatchEvent\b[^;\n]*/g)].map((match) => match[0]);
+    assert.deepEqual(dispatched, name === "scrollInPage" ? ['dispatchEvent(new Event("scroll"))'] : [], `${name}: the events it dispatches in a TikTok tab`);
+  }
+  const html = readFileSync(file("src/app/app.html"), "utf8");
+  assert.doesNotMatch(html, /<dialog|setting-auto-remove|library-removed|bookmark/i, "app.html: no removal dialog, setting or line");
 });
 
 test("host access to TikTok and its media and image CDNs only, https, never localhost", () => {
