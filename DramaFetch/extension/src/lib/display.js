@@ -39,7 +39,6 @@ import {
   LEFT_OUT_SHORTER,
   NO_PLAY_ADDRESS,
   SHORT_HEADER_HINT_PREFIX,
-  SKIP_HIGHLIGHT,
   SKIP_NO_ID,
   SKIP_NO_NUMBER,
   SKIP_OTHER_DRAMA,
@@ -473,7 +472,6 @@ const SKIP_REASONS_ES = new Map([
   [SKIP_OTHER_DRAMA, "id de otro drama"],
   [SKIP_NO_ID, "sin id"],
   [SKIP_NO_NUMBER, "sin número de episodio"],
-  [SKIP_HIGHLIGHT, "un fragmento destacado, un clip de un episodio"],
 ]);
 
 /** How the Spanish of an uncertain list starts (3.0.1, `catalog.UNCERTAIN_TEXT`). */

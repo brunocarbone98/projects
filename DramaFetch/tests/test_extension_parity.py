@@ -218,8 +218,6 @@ def js_listing(listing: catalog.Listing) -> dict[str, Any]:
         "skipped": [js_skipped(item) for item in listing.skipped],
         "itemsReceived": listing.items_received,
         "totalHint": listing.total_hint,
-        # 3.0.1: the numbers of the lone highlights, which the count rule reaches
-        "highlightNumbers": list(listing.highlight_numbers),
     }
 
 
@@ -242,7 +240,6 @@ def js_series(series: Series) -> dict[str, Any]:
         "warnings": list(series.warnings),
         # 3.0.1: what the report holds TikTok's count against, and how the listing ended
         "itemsReceived": series.items_received,
-        "highlightNumbers": list(series.highlight_numbers),
         "earlyEnd": series.early_end,
         "missingNumbers": list(series.missing_numbers),
     }
@@ -859,8 +856,7 @@ def test_the_shared_texts_and_constants_are_the_python_ones() -> None:
         "catalog.SKIP_NO_ID": catalog.SKIP_NO_ID,
         "catalog.SKIP_NO_NUMBER": catalog.SKIP_NO_NUMBER,
         "catalog.SKIP_REASONS": list(catalog.SKIP_REASONS),
-        # 3.0.1 (the lead's D2, D3): a lone highlight's reason, an uncertain list's words
-        "catalog.SKIP_HIGHLIGHT": catalog.SKIP_HIGHLIGHT,
+        # 3.0.1 (the lead's D2): an uncertain list's words
         "catalog.UNCERTAIN_TEXT": catalog.UNCERTAIN_TEXT,
         "catalog.LEFT_OUT_HIGHLIGHT": catalog.LEFT_OUT_HIGHLIGHT,
         "catalog.LEFT_OUT_LOCKED": catalog.LEFT_OUT_LOCKED,
@@ -1508,7 +1504,8 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
         for n in (1, 2)
         for sid in (HIGHLIGHT_SERIES_ID,)
     ]
-    # 3.0.1 (D3): the fifth series with its E02 never listed — the highlight alone holds 2
+    # 4.0.1: the fifth series with its E02 never listed — the highlight alone holds 2, so it is
+    # episode 2 (3.0.1 skipped it)
     lone = load_fixture("item_list_series5_page1.json")
     lone["itemList"] = [i for i in lone["itemList"] if i.get("id") != "7699400000000000602"]
     alone = [catalog.parse_item_list_payload(lone, HIGHLIGHT_SERIES_ID), fifth[1]]
@@ -1520,23 +1517,59 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
         catalog.parse_item_list_payload({"itemList": [again], "hasMore": False}, "s"),
     ]
 
-    # 3.0.1 (D3 at the top of the list): the last episodes never listed, their highlights
-    # numbered like them — the numbers past the highest one listed are the lone highlights'
-    def numbered(number: int, *, highlight: bool = False) -> dict[str, Any]:
+    # 4.0.1: the last episodes listed only as items TikTok marks as highlights, numbered like
+    # them — each is the episode of its number (5 and 6 listed, 4 a hole)
+    def numbered(
+        number: int, *, highlight: bool = False, base: int = 100, **video: Any
+    ) -> dict[str, Any]:
         video_data: dict[str, Any] = {"EpisodeNumber": number}
         if highlight:
             video_data["IsHighlight"] = True
         return {
-            "id": f"7700000000000000{(900 if highlight else 100) + number:03d}",
+            "id": f"7700000000000000{(900 if highlight else base) + number:03d}",
             "dramaInfo": {"dramaID": "s", "DramaVideoData": video_data},
-            "video": {"duration": 41 if highlight else 90},
+            "video": {"duration": 41 if highlight else 90, **video},
         }
 
     top_items = [numbered(1), numbered(2), numbered(3), numbered(5, highlight=True)]
     top_items.append(numbered(6, highlight=True))
     top = [catalog.parse_item_list_payload({"itemList": top_items, "hasMore": False}, "s")]
+    # 4.0.1: several highlights of one number and no other item — the merge's order from its
+    # second rule on picks the episode: free over locked (no play address), the longer, the first
+    play = {"playAddr": PLAY_URLS[0]}
+    among_items = [
+        numbered(1, base=200, **play),
+        numbered(4, highlight=True),  # no play address: locked
+        {**numbered(4, highlight=True, **play), "id": "7700000000000000404"},
+        {**numbered(4, highlight=True, **play), "id": "7700000000000000414"},
+        {**numbered(5, highlight=True, duration=90, **play), "id": "7700000000000000505"},
+        {**numbered(5, highlight=True, **play), "id": "7700000000000000515"},
+    ]
+    among = [catalog.parse_item_list_payload({"itemList": among_items, "hasMore": False}, "s")]
+    # 4.0.1, the owner's drama of 2026-11-27: 66 items for 66 episodes, TikTok counts 66, the
+    # items of episodes 9 and 17 marked as highlights and alone with their numbers
+    owners_items = [
+        {
+            "id": f"7699400000000000{700 + number}",
+            "dramaInfo": {
+                "dramaID": "s",
+                "numVideos": 66,
+                "DramaVideoData": {
+                    "EpisodeNumber": number,
+                    "IsHighlight": number in (9, 17),
+                    "LinkedEpisodeID": "0",
+                },
+            },
+            "video": {"duration": 95, **play},
+        }
+        for number in range(1, 67)
+    ]
+    owners = [
+        catalog.parse_item_list_payload({"itemList": owners_items[:30], "hasMore": True}, "s"),
+        catalog.parse_item_list_payload({"itemList": owners_items[30:], "hasMore": False}, "s"),
+    ]
     listings = [fifth, fifth[:1], fifth[::-1], [fifth[0], fifth[0]], [], alone, alone[:1], twice]
-    listings.append(top)
+    listings += [top, among, owners]
     listings += [[rng.choice(pages) for _ in range(rng.randint(1, 4))] for _ in range(220)]
     run = 0
     while run + 4 <= len(pages) and len(listings) < 300:  # consecutive pages: a real listing
@@ -1564,7 +1597,6 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
                             "duplicates": [js_duplicate(d, raw=True) for d in merged.duplicates],
                             "skipped": [js_skipped(item) for item in merged.skipped],
                             "itemsReceived": items_received,
-                            "highlights": list(merged.highlight_numbers),
                         },
                     )
                 )
@@ -1575,7 +1607,6 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
                         duplicates=merged.duplicates,
                         skipped=merged.skipped,
                         items_received=items_received,
-                        highlights=merged.highlight_numbers,
                     )
                 )
     for listing in listings[:100]:  # a list that still holds its duplicates: the same rules
@@ -1609,24 +1640,42 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
     assert whys == set(catalog.LEFT_OUT_REASONS)
     texts = [text for value in warnings for text in value]
     assert any(text.startswith("duplicate episode number ") for text in texts)
-    for reason in (*catalog.SKIP_REASONS, catalog.SKIP_HIGHLIGHT):
+    for reason in catalog.SKIP_REASONS:
         assert any(text.endswith(f"could not read ({reason})") for text in texts), reason
     assert any(" items DramaFetch could not read " in text for text in texts)
     assert any(text.startswith("TikTok announces ") for text in texts)
-    # 3.0.1: an uncertain list (D2), the lone highlight's number missing (D3), and an id-less item
-    # a listing served twice counted once (D4: a page repeated in a listing)
+    # 3.0.1: an uncertain list (D2) and an id-less item a listing served twice counted once (D4:
+    # a page repeated in a listing)
     assert any(text.startswith(f"{catalog.UNCERTAIN_TEXT}: ") for text in texts)
-    assert merged_values[5]["skipped"][-1] == {
-        "reason": catalog.SKIP_HIGHLIGHT,
-        "itemId": "7699400000000000692",
-    }
-    assert [e["number"] for e in merged_values[5]["episodes"]] == [1, 3, 4, 5]
-    assert merged_values[5]["highlightNumbers"] == [2]
     assert [item["itemId"] for item in merged_values[7]["skipped"]].count(None) == 1
-    # the lone highlights past the highest number listed: their numbers missing, named a gap
-    assert merged_values[8]["highlightNumbers"] == [5, 6]
-    assert [e["number"] for e in merged_values[8]["episodes"]] == [1, 2, 3]
-    assert "episodes 4-6 missing (gap)" in texts
+    # 4.0.1: a highlight alone with its number is that number's episode — never a skipped item
+    assert [e["number"] for e in merged_values[5]["episodes"]] == [1, 2, 3, 4, 5]
+    assert merged_values[5]["episodes"][1]["itemId"] == "7699400000000000692"
+    assert all(item["itemId"] != "7699400000000000692" for item in merged_values[5]["skipped"])
+    # the highlights past the highest episode listed are episodes 5 and 6; 4 is a hole, which the
+    # top listing's own warnings name, its only gap, whatever the count and the items received
+    assert [e["number"] for e in merged_values[8]["episodes"]] == [1, 2, 3, 5, 6]
+    for top_warnings in expected_warnings[8 * 10 : 9 * 10]:  # 5 totals x 2 items_received each
+        assert top_warnings[0] == "episode 4 missing (gap)", top_warnings
+        assert [text for text in top_warnings if text.endswith(" (gap)")] == [top_warnings[0]]
+    # among highlights only: free over locked, then the longer, then the first listed
+    assert [(e["number"], e["itemId"]) for e in merged_values[9]["episodes"]] == [
+        (1, "7700000000000000201"),
+        (4, "7700000000000000404"),
+        (5, "7700000000000000505"),
+    ]
+    assert [(d["leftOut"]["itemId"], d["why"]) for d in merged_values[9]["duplicates"]] == [
+        ("7700000000000000904", catalog.LEFT_OUT_LOCKED),
+        ("7700000000000000414", catalog.LEFT_OUT_LATER),
+        ("7700000000000000515", catalog.LEFT_OUT_SHORTER),
+    ]
+    # the owner's drama: 66 of 66 listed, nothing left out or skipped, TikTok's count met
+    owners_value = merged_values[10]
+    assert [e["number"] for e in owners_value["episodes"]] == list(range(1, 67))
+    assert (owners_value["duplicates"], owners_value["skipped"]) == ([], [])
+    assert (owners_value["itemsReceived"], owners_value["totalHint"]) == (66, 66)
+    owners_warnings = expected_warnings[10 * 10 : 11 * 10]  # 5 totals x 2 items_received each
+    assert owners_warnings[2] == []  # its own count (66) and its items received: nothing to say
 
 
 def test_the_canonical_item_key_makes_the_same_items_the_same_in_both() -> None:
@@ -1766,103 +1815,6 @@ def test_the_count_rule_missing_numbers_and_the_detail_of_one_drama_match() -> N
     )
     assert any(value["total"] == 40 for value in detail_values)  # a related drama's, without id
     assert any(value["name"] == "Mine" for value in detail_values)
-
-
-def test_the_count_rule_reaches_a_lone_highlight_s_number_in_both() -> None:
-    """3.0.1 (D3 at the top of the list): a lone highlight's number (``Listing.highlight_numbers``)
-    is a number the drama has — ``count_check`` / ``countCheck``, ``missing_numbers`` /
-    ``missingNumbers`` and ``fill_target`` / ``fillTarget`` reach it, past the highest number
-    listed too —: the same answers in both front ends on a table of listings, counts, items
-    received, spans covered and highlights."""
-    sixty_five = list(range(1, 66))
-    checks: list[tuple[list[int], int | None, int | None, list[int]]] = [
-        (numbers, total, received, clips)
-        for numbers in ([], [1, 2, 3], [1, 2, 3, 5])
-        for total, received in ((None, None), (None, 5), (5, 4), (6, 5), (7, 5), (3, 4), (0, 3))
-        for clips in ([], [4], [6], [2], [4, 9])
-    ]
-    checks += [(sixty_five, 66, 66, [66]), (sixty_five, None, 66, [66]), (sixty_five, 67, 66, [66])]
-    targets = [
-        (numbers, total, received, early_end, covered, limit, clips)
-        for numbers in ([1, 2, 3], [1, 2, 3, 5])
-        for total, received in ((None, None), (None, 5), (6, 5), (7, 5))
-        for early_end in (True, False)
-        for covered in ([], [(4, None)], [(4, 6)], [(6, 6)])
-        for limit in (10_000, 5)
-        for clips in ([6], [4], [2, 8])
-    ]
-    calls = [call("catalog.countCheck", *check) for check in checks]
-    calls += [
-        call("catalog.missingNumbers", numbers, total, received, limit, clips)
-        for numbers, total, received, clips in checks
-        for limit in (10_000, 5)
-    ]
-    calls += [
-        call(
-            "catalog.fillTarget",
-            numbers,
-            total,
-            received,
-            {
-                "earlyEnd": early_end,
-                "covered": [list(span) for span in covered],
-                "limit": limit,
-                "highlights": clips,
-            },
-        )
-        for numbers, total, received, early_end, covered, limit, clips in targets
-    ]
-    values = js_values(calls)
-    checked = values[: len(checks)]
-    missing = values[len(checks) : 3 * len(checks)]
-    target_values = values[3 * len(checks) :]
-    assert_same(
-        [
-            (
-                check,
-                catalog.count_check(*check[:3], highlights=check[3]),
-                (value["certainTop"], value["otherItems"], value["uncertain"]),
-            )
-            for check, value in zip(checks, checked, strict=True)
-        ]
-    )
-    expected_missing = [
-        catalog.missing_numbers(numbers, total, received, limit=limit, highlights=clips)
-        for numbers, total, received, clips in checks
-        for limit in (10_000, 5)
-    ]
-    assert_same(
-        [
-            (index, py, js)
-            for index, (py, js) in enumerate(zip(expected_missing, missing, strict=True))
-        ]
-    )
-    expected_targets = [
-        catalog.fill_target(
-            numbers,
-            total,
-            received,
-            early_end=early_end,
-            covered=covered,
-            limit=limit,
-            highlights=clips,
-        )
-        for numbers, total, received, early_end, covered, limit, clips in targets
-    ]
-    assert_same(
-        [
-            (case, py, js)
-            for case, py, js in zip(targets, expected_targets, target_values, strict=True)
-        ]
-    )
-    # the review's case: E66 lost, its highlight listed — 66 missing, uncertain only past it
-    assert [[v["certainTop"], v["otherItems"], v["uncertain"]] for v in checked[-3:]] == [
-        [66, 1, False],
-        [66, 1, False],
-        [66, 1, True],
-    ]
-    assert missing[-6:] == [[66], [], [66], [], [66], []]  # the limit of 5 names none of them
-    assert any(value is not None and value > 5 for value in target_values)
 
 
 def test_the_gap_filling_rules_match() -> None:

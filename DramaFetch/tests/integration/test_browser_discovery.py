@@ -1152,35 +1152,58 @@ def test_the_review_case_b_names_the_hole_only_and_case_c_the_last_episode() -> 
     assert _line_of(last) == "incomplete: 65 of 66 — episode 66 missing from TikTok's list"
 
 
-@pytest.mark.parametrize("num_videos", [None, 66], ids=["no count", "a count of 66"])
-def test_a_lone_highlight_past_the_last_episode_is_asked_for_and_named(
-    num_videos: int | None,
-) -> None:
-    """3.0.1, D3 at the top of the list: TikTok drops the last episode (E66) but lists its
-    highlight, numbered 66 — a clip of an episode, so the drama has that number: missing, one
-    filling request for it (cursor 65), the warnings and the line name it, never complete; with
-    TikTok's count of 66 (the episodes only) never uncertain either."""
-    drama_info: dict[str, Any] = {
-        "dramaID": SERIES_ID,
-        "DramaVideoData": {
-            "EpisodeNumber": 66,
-            "IsHighlight": True,
-            "LinkedEpisodeID": "7699400000000500066",
-        },
-    }
-    if num_videos is not None:
-        drama_info["numVideos"] = num_videos
-    clip = {"id": "7699400000000000066", "dramaInfo": drama_info, "video": {"duration": 41}}
+def _marked(number: int, num_videos: int | None) -> dict[str, Any]:
+    """Episode ``number`` of the fake drama carrying TikTok's highlight mark (``IsHighlight``
+    true): a full episode TikTok marks as a highlight, as on episodes 9 and 17 of the owner's
+    drama of 2026-11-27."""
+    item = _list_item(number, num_videos)
+    item["dramaInfo"]["DramaVideoData"]["IsHighlight"] = True
+    return item
+
+
+def test_the_owners_drama_lists_and_counts_the_episodes_tiktok_marks_as_highlights() -> None:
+    """4.0.1, the owner's report of 2026-11-27 ("y los episodios existen"): TikTok's list holds 66
+    items for 66 episodes, TikTok counts 66, and the items of episodes 9 and 17 carry TikTok's
+    highlight marks with no other item of their numbers — full episodes that play on TikTok. Every
+    episode is listed (9 and 17 the marked items), nothing is missing, no gap filling request, no
+    warning, and the report line is complete."""
+    marked = {9: _marked(9, 66), 17: _marked(17, 66)}
     fake = _FakeList(
-        66, num_videos=num_videos, leave=lambda number, cursor: number == 66, extras=((66, clip),)
+        66,
+        leave=lambda number, cursor: number in marked,
+        extras=tuple(marked.items()),
     )
     series = _paced(_listing_browser(fake))
-    assert series.numbers == list(range(1, 66))
-    assert (series.missing_numbers, series.highlight_numbers) == ([66], [66])
-    assert [p.cursor_asked for p in _fills(series)] == ["65"]
-    assert series.warnings[0] == "episode 66 missing (gap)"
-    assert uncertain_text(66, 65, 1) not in series.warnings
-    assert _line_of(series) == "incomplete: 65 of 66 — episode 66 missing from TikTok's list"
+    assert series.numbers == list(range(1, 67))
+    assert [series.episode(n).item_id for n in marked] == [item["id"] for item in marked.values()]
+    assert (series.total_hint, series.items_received) == (66, 66)
+    assert (series.missing_numbers, series.early_end, series.skipped_items) == ([], None, [])
+    assert series.warnings == []
+    assert _fills(series) == []
+    assert _line_of(series) == "complete: 66 of 66 (66 downloaded)"
+
+
+@pytest.mark.parametrize("num_videos", [None, 66], ids=["no count", "a count of 66"])
+def test_a_highlight_alone_with_the_last_number_is_the_last_episode(
+    num_videos: int | None,
+) -> None:
+    """4.0.1: TikTok lists the drama's last episode (E66) only as an item it marks as a highlight
+    (``IsHighlight`` and a ``LinkedEpisodeID``) — that item is episode 66: every episode listed,
+    nothing missing, no filling request, no warning, the line complete — with no count and with
+    TikTok's count of 66."""
+    last = _marked(66, num_videos)
+    last["dramaInfo"]["DramaVideoData"]["LinkedEpisodeID"] = "7699400000000000066"
+    fake = _FakeList(
+        66, num_videos=num_videos, leave=lambda number, cursor: number == 66, extras=((66, last),)
+    )
+    series = _paced(_listing_browser(fake))
+    assert series.numbers == list(range(1, 67))
+    episode_66 = series.episode(66)
+    assert episode_66 is not None and episode_66.item_id == last["id"]
+    assert (series.missing_numbers, series.early_end, series.skipped_items) == ([], None, [])
+    assert series.warnings == []
+    assert _fills(series) == []
+    assert _line_of(series) == "complete: 66 of 66 (66 downloaded)"
 
 
 def test_an_id_less_item_served_again_by_a_filling_page_counts_once() -> None:

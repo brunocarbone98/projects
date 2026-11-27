@@ -12,7 +12,6 @@ import {
   LEFT_OUT_SHORTER,
   NO_PLAY_ADDRESS,
   SHORT_HEADER_HINT_PREFIX,
-  SKIP_HIGHLIGHT,
   SKIP_NO_ID,
   SKIP_NO_NUMBER,
   SKIP_OTHER_DRAMA,
@@ -795,123 +794,151 @@ test("mergePages counts the items received of the series and keeps every skipped
   ]);
   assert.equal(listing.itemsReceived, 5); // two episodes, the trailer, two without an id
   assert.equal(listing.totalHint, 9);
-  assert.deepEqual(mergePages([]), { episodes: [], duplicates: [], skipped: [], itemsReceived: 0, totalHint: null, highlightNumbers: [] });
+  assert.deepEqual(mergePages([]), { episodes: [], duplicates: [], skipped: [], itemsReceived: 0, totalHint: null });
 });
 
-test("a highlight never stands for an episode (3.0.1, D3): with no episode of its number it is a skipped item and its number missing", () => {
+/**
+ * The owner's report of 2026-11-27 (4.0.1, “y los episodios existen”): a drama of 66 episodes whose
+ * list TikTok serves whole — 66 items, TikTok's count 66 (`numVideos`) — where the items of episodes
+ * 9 and 17 carry TikTok's highlight marks and no other item holds 9 or 17. Both are full episodes
+ * that play on TikTok; 3.0.1 read them “missing (gap)”. Ids and name anonymised
+ * (`tests/test_catalog.py` holds the same case).
+ */
+const OWNERS_DRAMA_ID = "7699393770256782381";
+const OWNERS_MARKED = [9, 17];
+
+/**
+ * The owner's drama as TikTok's one `item_list` answer, in the captured item shape: 66 items
+ * (`7699400000000000701` … `…766`), `numVideos` 66 on each, `marks` on the `DramaVideoData` of
+ * episodes 9 and 17, `IsHighlight: false` and `LinkedEpisodeID: "0"` on every other one.
+ * @param {Record<string, unknown>} marks
+ */
+function ownersDrama(marks) {
+  const itemList = Array.from({ length: 66 }, (_, index) => {
+    const number = index + 1;
+    return {
+      id: `7699400000000000${700 + number}`,
+      desc: `Episode ${number}`,
+      dramaInfo: {
+        dramaID: OWNERS_DRAMA_ID,
+        dramaName: "The Owner's Drama",
+        numVideos: 66,
+        DramaVideoData: { EpisodeNumber: number, IsHighlight: false, LinkedEpisodeID: "0", ...(OWNERS_MARKED.includes(number) ? marks : {}) },
+      },
+      video: { duration: 95, ...PLAYABLE },
+    };
+  });
+  return { statusCode: 0, itemList, cursor: 66, hasMore: false };
+}
+
+test("4.0.1, the owner's drama: an episode TikTok marks as a highlight, alone with its number, is that number's episode — 66 of 66 listed, nothing missing, nothing uncertain, no warning", () => {
+  for (const marks of [{ IsHighlight: true }, { LinkedEpisodeID: "7699400000000000999" }]) {
+    const label = JSON.stringify(marks);
+    const page = parseItemListPayload(ownersDrama(marks), OWNERS_DRAMA_ID);
+    assert.deepEqual([page.seenItems, page.skippedItems, page.totalHint], [66, 0, 66], label);
+    const listing = mergePages([page]);
+    assert.deepEqual(
+      listing.episodes.map((episode) => episode.number),
+      Array.from({ length: 66 }, (_, index) => index + 1),
+      label,
+    );
+    for (const number of OWNERS_MARKED) {
+      const episode = listing.episodes[number - 1];
+      assert.equal(episode?.itemId, `7699400000000000${700 + number}`, label);
+      assert.equal(isHighlight(episode?.raw), true, label);
+      assert.deepEqual([episode?.access, episode && isLocked(episode)], ["free", false], label);
+    }
+    assert.deepEqual([listing.duplicates, listing.skipped], [[], []], label);
+    assert.deepEqual([listing.itemsReceived, listing.totalHint], [66, 66], label);
+    const numbers = listing.episodes.map((episode) => episode.number);
+    assert.deepEqual(countCheck(numbers, 66, listing.itemsReceived), { certainTop: 66, otherItems: 0, uncertain: false }, label);
+    assert.deepEqual(missingNumbers(numbers, 66, listing.itemsReceived, 10_000), [], label);
+    assert.equal(fillTarget(numbers, 66, listing.itemsReceived, { earlyEnd: false, limit: 10_000 }), null, label);
+    const options = { duplicates: listing.duplicates, skipped: listing.skipped, itemsReceived: listing.itemsReceived };
+    assert.deepEqual(catalogWarnings(listing.episodes, listing.totalHint, options), [], label);
+    assert.deepEqual(mergeEpisodes([page.episodes]), listing.episodes, label);
+  }
+});
+
+test("4.0.1: a number only highlights hold keeps one of them as its episode — listed, counted among the episode numbers, never a skipped item; of several, the usual order picks; a highlight beside an episode stays the duplicate left out", () => {
   const first = parseItemListPayload(fixture("item_list_series5_page1.json"), FIFTH_SERIES_ID);
   const second = parseItemListPayload(fixture("item_list_series5_page2.json"), FIFTH_SERIES_ID);
-  const lone = { ...first, episodes: first.episodes.filter((episode) => episode.itemId !== E2_ID) }; // the clip, not E02
+  const lone = { ...first, episodes: first.episodes.filter((episode) => episode.itemId !== E2_ID) }; // TikTok lists the highlight, not E02
   const listing = mergePages([lone, second]);
-  assert.deepEqual(numbered(listing.episodes), [[1, "601"], [3, "603"], [4, "604"], [5, "605"]]);
+  assert.deepEqual(numbered(listing.episodes), [[1, "601"], [2, "692"], [3, "603"], [4, "604"], [5, "605"]]);
+  assert.equal(isHighlight(listing.episodes[1]?.raw), true);
+  assert.equal(listing.episodes[1] && isLocked(listing.episodes[1]), false);
   assert.deepEqual(listing.duplicates, []);
   assert.deepEqual(listing.skipped, [
     { reason: SKIP_NO_NUMBER, itemId: TRAILER_ID },
     { reason: SKIP_OTHER_DRAMA, itemId: FOREIGN_ID },
-    { reason: SKIP_HIGHLIGHT, itemId: HIGHLIGHT_OF_E2 },
   ]);
-  assert.equal(listing.itemsReceived, 6); // E01, E03-E05, the highlight and the trailer
+  // E01, the highlight (E02 now), E03-E05 and the trailer: 6 items, 5 numbers, 1 other item — the
+  // trailer alone; TikTok's 7 then places E06 (7 - 1), the count rule as ever (3.0.1)
+  assert.equal(listing.itemsReceived, 6);
   const numbers = listing.episodes.map((episode) => episode.number);
-  assert.deepEqual(countCheck(numbers, 7, listing.itemsReceived), { certainTop: 5, otherItems: 2, uncertain: true });
-  assert.deepEqual(missingNumbers(numbers, 7, listing.itemsReceived, 10_000), [2]);
-  assert.equal(fillTarget(numbers, 7, listing.itemsReceived, { earlyEnd: false, limit: 10_000 }), 2);
+  assert.deepEqual(countCheck(numbers, 7, listing.itemsReceived), { certainTop: 6, otherItems: 1, uncertain: true });
+  assert.deepEqual(missingNumbers(numbers, 7, listing.itemsReceived, 10_000), [6]);
   assert.deepEqual(catalogWarnings(listing.episodes, 7, { duplicates: listing.duplicates, skipped: listing.skipped, itemsReceived: listing.itemsReceived }), [
-    "episode 2 missing (gap)",
     "TikTok listed 1 item DramaFetch could not read (another drama's id)",
     "TikTok listed 1 item DramaFetch could not read (no episode number)",
-    "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
-    "TikTok announces 7 episodes, 4 listed",
-    uncertainText(7, 4, 2),
+    "TikTok announces 7 episodes, 5 listed",
+    uncertainText(7, 5, 1),
   ]);
-  // two highlights of one number and no episode: both skipped, no duplicate between them
+  // with no count, nothing is missing and nothing is said but the skipped items
+  assert.deepEqual(missingNumbers(numbers, null, listing.itemsReceived, 10_000), []);
+  assert.deepEqual(catalogWarnings(listing.episodes, null, { skipped: listing.skipped }), [
+    "TikTok listed 1 item DramaFetch could not read (another drama's id)",
+    "TikTok listed 1 item DramaFetch could not read (no episode number)",
+  ]);
+  // two highlights of one number and no other item: the longer is the episode, the shorter the
+  // duplicate left out — no skipped item
   const clipA = candidate("clip-a", { highlight: true, duration: 40 });
   const clipB = candidate("clip-b", { highlight: true, duration: 50 });
   const one = candidate("e1", { number: 1 });
   const both = mergePages([{ episodes: [one, clipA, clipB], cursor: null, hasMore: false, seenItems: 3, skippedItems: 0, skipped: [], totalHint: null }]);
-  assert.deepEqual(both.episodes.map((episode) => episode.itemId), ["e1"]);
-  assert.deepEqual(both.duplicates, []);
-  assert.deepEqual(both.skipped, [
-    { reason: SKIP_HIGHLIGHT, itemId: "clip-a" },
-    { reason: SKIP_HIGHLIGHT, itemId: "clip-b" },
-  ]);
-  assert.equal(both.itemsReceived, 3);
-  assert.deepEqual(mergeEpisodes([[one, clipA]]), [one]);
+  assert.deepEqual(both.episodes.map((episode) => episode.itemId), ["e1", "clip-b"]);
+  assert.deepEqual(both.duplicates, [{ number: 2, kept: clipB, leftOut: clipA, why: LEFT_OUT_SHORTER }]);
+  assert.deepEqual([both.skipped, both.itemsReceived], [[], 3]);
+  assert.deepEqual(missingNumbers(both.episodes.map((episode) => episode.number), null, 3, 10_000), []);
+  assert.deepEqual(mergeEpisodes([[one, clipA]]), [one, clipA]);
+  // among highlights only, the usual order from its second rule on: free over locked, then the
+  // first listed
+  const lockedClip = candidate("locked-clip", { highlight: true, access: "locked", duration: 99 });
+  assert.deepEqual(keptAndLeftOut(lockedClip, clipA), ["clip-a", [["locked-clip", LEFT_OUT_LOCKED]]]);
+  const twin = candidate("clip-a2", { highlight: true, duration: 40 });
+  assert.deepEqual(keptAndLeftOut(clipA, twin), ["clip-a", [["clip-a2", LEFT_OUT_LATER]]]);
+  assert.deepEqual(keptAndLeftOut(twin, clipA), ["clip-a2", [["clip-a", LEFT_OUT_LATER]]]);
   // the paired case is unchanged: the episode kept, the highlight the duplicate left out
   const paired = mergePages([first, second]);
-  assert.deepEqual(paired.duplicates.map((found) => found.leftOut.itemId), [HIGHLIGHT_OF_E2]);
-  assert.ok(paired.skipped.every((found) => found.reason !== SKIP_HIGHLIGHT));
-  assert.ok(!SKIP_REASONS.includes(SKIP_HIGHLIGHT)); // the merge's reason, not skipReason's
-  assert.deepEqual([listing.highlightNumbers, paired.highlightNumbers], [[2], []]);
-  assert.deepEqual(both.highlightNumbers, [2]); // two clips of one number: one number
+  assert.deepEqual(paired.duplicates.map((found) => [found.leftOut.itemId, found.why]), [[HIGHLIGHT_OF_E2, LEFT_OUT_HIGHLIGHT]]);
+  assert.equal(paired.episodes[1]?.itemId, E2_ID);
+  assert.deepEqual(paired.skipped, listing.skipped);
+  assert.equal(paired.itemsReceived, 7);
 });
 
-test("a lone highlight past the last episode listed makes its number missing (3.0.1, D3 at the top of the list): the filling asks for it and the warnings name it, whether TikTok's count is unknown or counts the episodes only", () => {
+test("4.0.1: a highlight alone with its number at the top of the list is the last episode — nothing missing whether TikTok's count is unknown or 66, no filling request, no warning; the same below the highest number", () => {
   const episodes = Array.from({ length: 65 }, (_, index) => candidate(`e${index + 1}`, { number: index + 1 }));
   const clip = candidate("clip-66", { highlight: true, number: 66 });
   const listing = mergePages([{ episodes: [...episodes, clip], cursor: null, hasMore: false, seenItems: 66, skippedItems: 0, skipped: [], totalHint: null }]);
-  assert.equal(listing.episodes.length, 65);
-  assert.deepEqual(listing.skipped, [{ reason: SKIP_HIGHLIGHT, itemId: "clip-66" }]);
-  assert.deepEqual([listing.itemsReceived, listing.highlightNumbers], [66, [66]]);
+  assert.deepEqual(listing.episodes.map((episode) => episode.number), Array.from({ length: 66 }, (_, index) => index + 1));
+  assert.equal(listing.episodes[65], clip);
+  assert.deepEqual([listing.duplicates, listing.skipped, listing.itemsReceived], [[], [], 66]);
   const numbers = listing.episodes.map((episode) => episode.number);
   for (const total of [null, 66]) {
-    assert.deepEqual(countCheck(numbers, total, 66, [66]), { certainTop: 66, otherItems: 1, uncertain: false });
-    assert.deepEqual(missingNumbers(numbers, total, 66, 10_000, [66]), [66]);
-    assert.equal(fillTarget(numbers, total, 66, { earlyEnd: false, limit: 10_000, highlights: [66] }), 66);
-    assert.equal(fillTarget(numbers, total, 66, { earlyEnd: false, covered: [[66, null]], limit: 10_000, highlights: [66] }), null);
+    assert.deepEqual(countCheck(numbers, total, 66), { certainTop: 66, otherItems: 0, uncertain: false });
+    assert.deepEqual(missingNumbers(numbers, total, 66, 10_000), []);
+    assert.equal(fillTarget(numbers, total, 66, { earlyEnd: false, limit: 10_000 }), null);
+    assert.deepEqual(catalogWarnings(listing.episodes, total, { itemsReceived: 66 }), []);
   }
-  assert.deepEqual(catalogWarnings(listing.episodes, null, { skipped: listing.skipped, itemsReceived: 66, highlights: listing.highlightNumbers }), [
-    "episode 66 missing (gap)",
-    "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
-  ]);
-  // a count of 67 may hold the highlight, or one more episode: 66 missing, the rest uncertain
-  assert.deepEqual(countCheck(numbers, 67, 66, [66]), { certainTop: 66, otherItems: 1, uncertain: true });
-  assert.deepEqual(missingNumbers(numbers, 67, 66, 10_000, [66]), [66]);
-  // once the filling covered 66 (its answer brought the clip again, hasMore true), the uncertain
-  // list asks once for the page after the clip's number — never the clip's own page again
-  assert.equal(fillTarget(numbers, 67, 66, { earlyEnd: false, covered: [[66, 66]], limit: 10_000, highlights: [66] }), 67);
-  assert.equal(fillTarget(numbers, 67, 66, { earlyEnd: false, covered: [[66, null]], limit: 10_000 }), null);
-  // without the highlight's number, the old reading: nothing missing past the last episode
-  assert.deepEqual(missingNumbers(numbers, null, 66, 10_000), []);
-  // a lone highlight below the highest number listed was a hole already: unchanged
   const middle = episodes.filter((episode) => episode.number !== 30);
-  const below = mergePages([{ episodes: [...middle, candidate("clip-30", { highlight: true, number: 30 })], cursor: null, hasMore: false, seenItems: 65, skippedItems: 0, skipped: [], totalHint: null }]);
-  assert.deepEqual(below.highlightNumbers, [30]);
+  const alone = candidate("clip-30", { highlight: true, number: 30 });
+  const below = mergePages([{ episodes: [...middle, alone], cursor: null, hasMore: false, seenItems: 65, skippedItems: 0, skipped: [], totalHint: null }]);
+  assert.deepEqual(below.episodes.map((episode) => episode.number), Array.from({ length: 65 }, (_, index) => index + 1));
+  assert.equal(below.episodes[29], alone);
   const belowNumbers = below.episodes.map((episode) => episode.number);
-  assert.deepEqual(missingNumbers(belowNumbers, null, 65, 10_000, [30]), [30]);
-  assert.deepEqual(missingNumbers(belowNumbers, null, 65, 10_000), [30]);
-});
-
-test("a lone highlight numbered past TikTok's count raises no row (3.0.1): no missing number, no gap warning, no filling request; with no count its number is the drama's", () => {
-  const episodes = Array.from({ length: 65 }, (_, index) => candidate(`e${index + 1}`, { number: index + 1 }));
-  const clip = candidate("clip-500", { highlight: true, number: 500 });
-  const listing = mergePages([{ episodes: [...episodes, clip], cursor: null, hasMore: false, seenItems: 66, skippedItems: 0, skipped: [], totalHint: null }]);
-  assert.deepEqual([listing.itemsReceived, listing.highlightNumbers], [66, [500]]);
-  const numbers = listing.episodes.map((episode) => episode.number);
-  // every episode TikTok counts is listed: nothing missing, nothing asked, not uncertain
-  assert.deepEqual(countCheck(numbers, 65, 66, [500]), { certainTop: 65, otherItems: 1, uncertain: false });
-  assert.deepEqual(missingNumbers(numbers, 65, 66, 10_000, [500]), []);
-  assert.equal(fillTarget(numbers, 65, 66, { earlyEnd: false, limit: 10_000, highlights: [500] }), null);
-  assert.deepEqual(catalogWarnings(listing.episodes, 65, { skipped: listing.skipped, itemsReceived: 66, highlights: [500] }), [
-    "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
-  ]);
-  // a count of 66 may hold the clip, or one more episode: uncertain, the page after E65 asked
-  assert.deepEqual(countCheck(numbers, 66, 66, [500]), { certainTop: 65, otherItems: 1, uncertain: true });
-  assert.deepEqual(missingNumbers(numbers, 66, 66, 10_000, [500]), []);
-  assert.equal(fillTarget(numbers, 66, 66, { earlyEnd: false, limit: 10_000, highlights: [500] }), 66);
-  assert.deepEqual(catalogWarnings(listing.episodes, 66, { skipped: listing.skipped, itemsReceived: 66, highlights: [500] }), [
-    "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
-    "TikTok announces 66 episodes, 65 listed",
-    uncertainText(66, 65, 1),
-  ]);
-  // a clip within the count is placed as before; with no count, the clip's number is the drama's
-  assert.deepEqual(missingNumbers(numbers, 67, 66, 10_000, [66, 500]), [66]);
-  assert.deepEqual(missingNumbers(numbers, null, 66, 10_000, [500]), Array.from({ length: 435 }, (_, index) => 66 + index));
-  // a count the list itself goes past (60 with E1-E65 listed: a stale count) holds nothing back:
-  // the clip of E66 makes E66 missing, as with no count — asked for, named, never hidden
-  assert.deepEqual(countCheck(numbers, 60, 66, [66]), { certainTop: 66, otherItems: 1, uncertain: false });
-  assert.deepEqual(missingNumbers(numbers, 60, 66, 10_000, [66]), [66]);
-  assert.equal(fillTarget(numbers, 60, 66, { earlyEnd: false, limit: 10_000, highlights: [66] }), 66);
-  assert.equal(catalogWarnings(listing.episodes, 60, { skipped: listing.skipped, itemsReceived: 66, highlights: [66] })[0], "episode 66 missing (gap)");
+  assert.deepEqual(missingNumbers(belowNumbers, 65, 65, 10_000), []);
+  assert.deepEqual(catalogWarnings(below.episodes, 65, { itemsReceived: 65 }), []);
 });
 
 test("an item without an id counts once per listing (3.0.1, D4): the same item served again is one item", () => {

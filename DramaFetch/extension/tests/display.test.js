@@ -13,7 +13,6 @@ import {
   LEFT_OUT_REASONS,
   NO_PLAY_ADDRESS,
   SHORT_HEADER_HINT_PREFIX,
-  SKIP_HIGHLIGHT,
   SKIP_NO_ID,
   SKIP_NO_NUMBER,
   SKIP_OTHER_DRAMA,
@@ -411,8 +410,6 @@ function warnings() {
         { reason: SKIP_NO_ID, itemId: null },
         { reason: SKIP_NO_NUMBER, itemId: "7699400000000000690" },
         { reason: SKIP_NO_NUMBER, itemId: "7699400000000000691" },
-        // 3.0.1 (D3): a highlight no episode of its number came with
-        { reason: SKIP_HIGHLIGHT, itemId: "7699400000000000692" },
       ],
       itemsReceived: 3,
     }),
@@ -804,11 +801,6 @@ test("the list's 3.0.1 warnings read in Spanish: the item left out and why, the 
   assert.equal(es("TikTok listed 1 item DramaFetch could not read (no episode number)"), "TikTok listó 1 elemento que DramaFetch no pudo leer (sin número de episodio)");
   assert.equal(es("TikTok listed 2 items DramaFetch could not read (another drama's id)"), "TikTok listó 2 elementos que DramaFetch no pudo leer (id de otro drama)");
   assert.equal(es("TikTok listed 3 items DramaFetch could not read (no id)"), "TikTok listó 3 elementos que DramaFetch no pudo leer (sin id)");
-  // 3.0.1 (D3): a highlight no episode of its number came with
-  assert.equal(
-    es("TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)"),
-    "TikTok listó 1 elemento que DramaFetch no pudo leer (un fragmento destacado, un clip de un episodio)",
-  );
   // 3.0.1 (D2): an uncertain list, its warning and its line group, one other item and several
   assert.equal(
     es(uncertainText(66, 65, 1)),
@@ -830,6 +822,9 @@ test("the list's 3.0.1 warnings read in Spanish: the item left out and why, the 
   for (const odd of [
     "TikTok listed 1 item DramaFetch could not read (an odd reason)",
     `duplicate episode number 17: item ${left} left out (an odd reason), item ${kept} kept`,
+    // 4.0.1: 3.0.1's reason of a highlight alone with its number is no reason any more — such an
+    // item is that number's episode
+    "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
   ]) {
     assert.equal(es(odd), odd);
     assert.equal(en(odd), odd);

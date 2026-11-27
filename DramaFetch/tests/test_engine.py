@@ -16,7 +16,7 @@ from typing import ClassVar
 import pytest
 
 from dramafetch import engine
-from dramafetch.catalog import parse_item_list_payload
+from dramafetch.catalog import merge_pages, parse_item_list_payload
 from dramafetch.cooldown import (
     active_cooldown,
     clear_cooldown,
@@ -3026,25 +3026,60 @@ def test_unlisted_and_ignored_requested_numbers():
     assert engine.ignored_requested(series, "1-9") == [(6, 9)]
 
 
-def test_a_requested_episode_whose_lone_highlight_was_listed_gets_its_row():
-    """3.0.1 (the owner's report of 2026-11-27): TikTok left E66 out of its list but listed E66's
-    highlight clip, so the drama has episode 66 (``Series.highlight_numbers``): ``download
-    --episodes 66`` gives it a row of its own, never an ignored note — with no count, and with a
-    count of 66; a number past it stays ignored."""
-    series = make_series(numbers=tuple(range(1, 66)))
-    series.items_received = 66  # the 65 episodes and the clip
-    series.highlight_numbers = [66]
-    for total in (None, 66):
-        series.total_hint = total
-        assert engine.unlisted_requested(series, "66") == [66]
-        assert engine.ignored_requested(series, "66") == []
-        assert engine.unlisted_requested(series, "64-70") == [66]
-        assert engine.ignored_requested(series, "64-70") == [(67, 70)]
-    # without the clip's number, the old reading: E66 is past the drama's last episode
-    series.highlight_numbers = []
-    series.total_hint = None
-    assert engine.unlisted_requested(series, "66") == []
-    assert engine.ignored_requested(series, "66") == [(66, 66)]
+def test_a_requested_episode_tiktok_marks_as_a_highlight_downloads_like_any_other(tmp_path):
+    """4.0.1 (the owner's report of 2026-11-27): the items of episodes 9 and 17 of the owner's
+    drama carry TikTok's highlight marks and no other item holds 9 or 17 — they ARE episodes 9
+    and 17. ``download --episodes 9,17`` lists them, asks for them and saves them like any other:
+    no row of a number the list lacks, nothing ignored. A number no item holds past the drama's
+    last episode stays an ignored note, as ever."""
+    items = [
+        {
+            "id": f"7699400000000000{700 + number}",
+            "dramaInfo": {
+                "dramaID": SERIES_ID,
+                "dramaName": NAME,
+                "numVideos": 66,
+                "DramaVideoData": {
+                    "EpisodeNumber": number,
+                    "IsHighlight": number in (9, 17),
+                    "LinkedEpisodeID": "0",
+                },
+            },
+            "video": {"duration": 95, "playAddr": "https://v16-webapp-prime.tiktok.com/v/x.mp4"},
+        }
+        for number in range(1, 67)
+    ]
+    listing = merge_pages([parse_item_list_payload({"itemList": items}, SERIES_ID)])
+    series = Series(SERIES_ID, NAME, listing.episodes, total_hint=listing.total_hint)
+    series.items_received = listing.items_received
+    assert (series.numbers, series.total_hint, series.items_received) == (
+        list(range(1, 67)),
+        66,
+        66,
+    )
+    assert engine.unlisted_requested(series, "9,17") == []
+    assert engine.ignored_requested(series, "9,17") == []
+    downloader = FakeDownloader()
+    run = _run_series(
+        series,
+        _quiet(tmp_path),
+        BatchDiscovery(series),
+        downloader=downloader,
+        episodes_spec="9,17",
+    )
+    assert [number for number, _ in downloader.calls] == [9, 17]
+    assert [(r.episode.number, r.episode.item_id, r.status.value) for r in run.results] == [
+        (9, "7699400000000000709", "done"),
+        (17, "7699400000000000717", "done"),
+    ]
+    assert (run.exit_code, run.report.gaps, run.report.failed) == (engine.EXIT_OK, (), 0)
+    # a number no item holds past the drama's last episode is no episode of it
+    assert engine.unlisted_requested(series, "67") == []
+    assert engine.ignored_requested(series, "67") == [(67, 67)]
+    shorter = make_series(numbers=tuple(range(1, 66)))
+    shorter.items_received = 66  # the 65 episodes and a trailer
+    assert engine.unlisted_requested(shorter, "66") == []
+    assert engine.ignored_requested(shorter, "66") == [(66, 66)]
 
 
 def test_a_selection_gives_a_requested_number_its_fresh_list_lacks_a_row_and_no_request(tmp_path):

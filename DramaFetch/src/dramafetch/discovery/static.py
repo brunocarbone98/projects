@@ -70,8 +70,8 @@ RATE_LIMIT_MESSAGE = (
 NO_DATA_MESSAGE = "page has no episode data; use --strategy browser"
 PARTIAL_WARNING = "static strategy: only the embedded first page was read"
 #: What the static strategy says of a list the page embeds whole (no ``hasMore``) that still lacks
-#: an episode — a hole, or a number TikTok's count or a lone highlight places past it (3.0.1): the
-#: page's list was not cut short, TikTok's list lacks the episode; the browser asks again.
+#: an episode — a hole, or a number TikTok's count places past it (3.0.1): the page's list was not
+#: cut short, TikTok's list lacks the episode; the browser asks again.
 LACKING_WARNING = "static strategy: the episode list the page embeds lacks an episode"
 HYDRATION_SCRIPT_RE = re.compile(
     r"<script\b[^>]*\bid=[\"'](?:__UNIVERSAL_DATA_FOR_REHYDRATION__|SIGI_STATE)[\"'][^>]*>"
@@ -313,7 +313,6 @@ class StaticHtmlDiscovery:
                 duplicates=listing.duplicates,
                 skipped=listing.skipped,
                 items_received=listing.items_received,
-                highlights=listing.highlight_numbers,
             )
         )
         # What the page does not embed: a number missing (a hole below the highest one listed, or
@@ -325,7 +324,6 @@ class StaticHtmlDiscovery:
             total,
             listing.items_received,
             limit=MAX_EPISODE_NUMBER,
-            highlights=listing.highlight_numbers,
         )
         early_end = PARTIAL_WARNING if any(p.has_more for p in pages) else None
         if early_end is not None:
@@ -341,7 +339,6 @@ class StaticHtmlDiscovery:
             warnings=warnings,
             skipped_items=listing.skipped,
             items_received=listing.items_received,
-            highlight_numbers=listing.highlight_numbers,
             missing_numbers=missing,
             early_end=early_end,
             listing=ListingRecord(

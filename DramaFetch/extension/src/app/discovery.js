@@ -915,7 +915,7 @@ export async function discoverSeries(ref, options = {}) {
         listing.episodes.map((episode) => episode.number),
         capture.count(listing),
         listing.itemsReceived,
-        { earlyEnd: capture.earlyEnd !== null, covered, limit: MAX_EPISODE_NUMBER, highlights: listing.highlightNumbers },
+        { earlyEnd: capture.earlyEnd !== null, covered, limit: MAX_EPISODE_NUMBER },
       );
       if (target === null) return;
       const url = withQueryParams(template, { cursor: String(target - 1), count: String(pageCount) });
@@ -1044,18 +1044,15 @@ function buildSeries(ref, capture) {
         duplicates: listing.duplicates,
         skipped: listing.skipped,
         itemsReceived: listing.itemsReceived,
-        highlights: listing.highlightNumbers,
       }),
     ],
     skippedItems: listing.skipped,
     itemsReceived: listing.itemsReceived,
-    highlightNumbers: listing.highlightNumbers,
     missingNumbers: missingNumbers(
       episodes.map((episode) => episode.number),
       total,
       listing.itemsReceived,
       MAX_EPISODE_NUMBER,
-      listing.highlightNumbers,
     ),
     earlyEnd: capture.earlyEnd,
     listing: { endpoint: capture.endpoint, pages: [...capture.listing] },

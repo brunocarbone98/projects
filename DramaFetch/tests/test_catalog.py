@@ -21,7 +21,6 @@ from dramafetch.catalog import (
     SHORT_HEADER_HINT_PREFIX,
     SHORT_HEADER_MIN_GAP_S,
     SHORT_HEADER_RATIO,
-    SKIP_HIGHLIGHT,
     SKIP_NO_ID,
     SKIP_NO_NUMBER,
     SKIP_OTHER_DRAMA,
@@ -2118,29 +2117,101 @@ def test_merge_pages_counts_the_items_received_and_keeps_the_skipped_reasons():
     assert merge_pages([]) == Listing([], [], [], 0, None)
 
 
-def test_a_highlight_never_stands_for_an_episode():
-    """3.0.1, the lead's decision D3 (the review's L3): a highlight no episode of its number came
-    with is a skipped item (``SKIP_HIGHLIGHT``), counted among the items received (so among the
-    drama's other items), and its number is a hole the filling asks for and the warnings name; a
-    highlight beside its episode stays the duplicate left out, as before."""
+#: The owner's report of 2026-11-27 (4.0.1, "y los episodios existen"): a drama of 66 episodes whose
+#: list TikTok serves whole — 66 items, TikTok's count 66 (``numVideos``) — where the items of
+#: episodes 9 and 17 carry TikTok's highlight marks and no other item holds 9 or 17. Both are full
+#: episodes that play on TikTok; 3.0.1 read them "missing (gap)". Ids and name anonymised.
+OWNERS_DRAMA_ID = "7699393770256782381"
+OWNERS_MARKED = (9, 17)
+
+
+def _owners_drama(marks):
+    """The owner's drama as TikTok's one ``item_list`` answer, in the captured item shape: 66
+    items (``7699400000000000701`` … ``…766``), ``numVideos`` 66 on each, ``marks`` on the
+    ``DramaVideoData`` of episodes 9 and 17, ``IsHighlight: false`` and ``LinkedEpisodeID: "0"``
+    on every other one."""
+    items = []
+    for number in range(1, 67):
+        video_data = {"EpisodeNumber": number, "IsHighlight": False, "LinkedEpisodeID": "0"}
+        if number in OWNERS_MARKED:
+            video_data.update(marks)
+        items.append(
+            {
+                "id": f"7699400000000000{700 + number}",
+                "desc": f"Episode {number}",
+                "dramaInfo": {
+                    "dramaID": OWNERS_DRAMA_ID,
+                    "dramaName": "The Owner's Drama",
+                    "numVideos": 66,
+                    "DramaVideoData": video_data,
+                },
+                "video": {"duration": 95, **PLAYABLE},
+            }
+        )
+    return {"statusCode": 0, "itemList": items, "cursor": 66, "hasMore": False}
+
+
+@pytest.mark.parametrize(
+    "marks", [{"IsHighlight": True}, {"LinkedEpisodeID": "7699400000000000999"}]
+)
+def test_an_episode_tiktok_marks_as_a_highlight_is_the_episode_of_its_number(marks):
+    """4.0.1, the owner's drama (66 items for 66 episodes, TikTok counts 66, episodes 9 and 17
+    marked as highlights and alone with their numbers): TikTok marks some full episodes as
+    highlights, so a number only highlights hold keeps one of them as its episode — every episode
+    listed, nothing missing, nothing uncertain, no warning; it downloads like any other."""
+    page = parse_item_list_payload(_owners_drama(marks), OWNERS_DRAMA_ID)
+    assert (page.seen_items, page.skipped_items, page.total_hint) == (66, 0, 66)
+    listing = merge_pages([page])
+    assert [e.number for e in listing.episodes] == list(range(1, 67))
+    for number in OWNERS_MARKED:
+        episode = listing.episodes[number - 1]
+        assert episode.item_id == f"7699400000000000{700 + number}"
+        assert is_highlight(episode.raw)
+        assert (episode.access, episode.locked) == ("free", False)
+    assert (listing.duplicates, listing.skipped) == ([], [])
+    assert (listing.items_received, listing.total_hint) == (66, 66)
+    numbers = [e.number for e in listing.episodes]
+    assert count_check(numbers, 66, listing.items_received) == CountCheck(66, 0, False)
+    assert missing_numbers(numbers, 66, listing.items_received, limit=10_000) == []
+    assert fill_target(numbers, 66, listing.items_received, early_end=False, limit=10_000) is None
+    assert (
+        catalog_warnings(
+            listing.episodes,
+            listing.total_hint,
+            duplicates=listing.duplicates,
+            skipped=listing.skipped,
+            items_received=listing.items_received,
+        )
+        == []
+    )
+    assert merge_episodes([page.episodes]) == listing.episodes
+
+
+def test_a_number_only_highlights_hold_keeps_one_of_them_as_its_episode():
+    """4.0.1 (the owner's report of 2026-11-27; 3.0.1's "a highlight never stands for an episode"
+    withdrawn): TikTok marks some full episodes as highlights, so a highlight no other item of its
+    number came with is that number's episode — listed, downloaded, counted among the episode
+    numbers (never among the drama's other items), no skipped item, its number never missing —;
+    of several such highlights the merge keeps one by its usual order (free or unlocked, then the
+    longer, then the first listed), the others the duplicates it left out; a highlight beside an
+    item that is no highlight stays the duplicate left out, as before."""
     first, second = (parse_item_list_payload(page, FIFTH_SERIES_ID) for page in _series5_pages())
-    lone = [e for e in first.episodes if e.item_id != E2_ID]  # TikTok lists the clip, not E02
-    page = replace(first, episodes=lone)
-    listing = merge_pages([page, second])
-    assert [e.number for e in listing.episodes] == [1, 3, 4, 5]
-    assert all(e.item_id != HIGHLIGHT_OF_E2 for e in listing.episodes)
+    lone = [e for e in first.episodes if e.item_id != E2_ID]  # TikTok lists the highlight, not E02
+    listing = merge_pages([replace(first, episodes=lone), second])
+    assert [e.number for e in listing.episodes] == [1, 2, 3, 4, 5]
+    assert listing.episodes[1].item_id == HIGHLIGHT_OF_E2
+    assert is_highlight(listing.episodes[1].raw) and not listing.episodes[1].locked
     assert listing.duplicates == []
     assert listing.skipped == [
         SkippedItem(SKIP_NO_NUMBER, TRAILER_ID),
         SkippedItem(SKIP_OTHER_DRAMA, FOREIGN_ID),
-        SkippedItem(SKIP_HIGHLIGHT, HIGHLIGHT_OF_E2),
     ]
-    # E01, E03-E05, the highlight and the trailer: 6 items, 4 numbers, 2 other items
+    # E01, the highlight (E02 now), E03-E05 and the trailer: 6 items, 5 numbers, 1 other item —
+    # the trailer alone; TikTok's 7 then places E06 (7 - 1), the count rule as ever (3.0.1)
     assert listing.items_received == 6
     numbers = [e.number for e in listing.episodes]
-    assert count_check(numbers, 7, listing.items_received) == CountCheck(5, 2, True)
-    assert missing_numbers(numbers, 7, listing.items_received, limit=10_000) == [2]
-    assert fill_target(numbers, 7, listing.items_received, early_end=False, limit=10_000) == 2
+    assert count_check(numbers, 7, listing.items_received) == CountCheck(6, 1, True)
+    assert missing_numbers(numbers, 7, listing.items_received, limit=10_000) == [6]
     assert catalog_warnings(
         listing.episodes,
         7,
@@ -2148,148 +2219,69 @@ def test_a_highlight_never_stands_for_an_episode():
         skipped=listing.skipped,
         items_received=listing.items_received,
     ) == [
-        "episode 2 missing (gap)",
         "TikTok listed 1 item DramaFetch could not read (another drama's id)",
         "TikTok listed 1 item DramaFetch could not read (no episode number)",
-        "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
-        "TikTok announces 7 episodes, 4 listed",
-        uncertain_text(7, 4, 2),
+        "TikTok announces 7 episodes, 5 listed",
+        uncertain_text(7, 5, 1),
     ]
-    # two highlights of one number and no episode: both skipped, no duplicate between them
+    # with no count, nothing is missing and nothing is said but the skipped items
+    assert missing_numbers(numbers, None, listing.items_received, limit=10_000) == []
+    assert catalog_warnings(listing.episodes, None, skipped=listing.skipped) == [
+        "TikTok listed 1 item DramaFetch could not read (another drama's id)",
+        "TikTok listed 1 item DramaFetch could not read (no episode number)",
+    ]
+    # two highlights of one number and no other item: the longer is the episode, the shorter the
+    # duplicate left out — no skipped item
     clip_a = _candidate("clip-a", highlight=True, duration=40)
     clip_b = _candidate("clip-b", highlight=True, duration=50)
     one = _candidate("e1", number=1)
     both = merge_pages([PagePayload([one, clip_a, clip_b], None, False, 3, 0)])
-    assert [e.item_id for e in both.episodes] == ["e1"]
-    assert both.duplicates == []
-    assert both.skipped == [
-        SkippedItem(SKIP_HIGHLIGHT, "clip-a"),
-        SkippedItem(SKIP_HIGHLIGHT, "clip-b"),
-    ]
-    assert both.items_received == 3
-    assert merge_episodes([[one, clip_a]]) == [one]
+    assert [e.item_id for e in both.episodes] == ["e1", "clip-b"]
+    assert both.duplicates == [Duplicate(2, clip_b, clip_a, LEFT_OUT_SHORTER)]
+    assert both.skipped == [] and both.items_received == 3
+    assert missing_numbers([e.number for e in both.episodes], None, 3, limit=10_000) == []
+    assert merge_episodes([[one, clip_a]]) == [one, clip_a]
+    # among highlights only, the usual order from its second rule on: free over locked, then the
+    # first listed
+    locked_clip = _candidate("locked-clip", highlight=True, locked=True, duration=99)
+    assert _kept_and_left_out(locked_clip, clip_a) == ("clip-a", [("locked-clip", LEFT_OUT_LOCKED)])
+    twin = _candidate("clip-a2", highlight=True, duration=40)
+    assert _kept_and_left_out(clip_a, twin) == ("clip-a", [("clip-a2", LEFT_OUT_LATER)])
+    assert _kept_and_left_out(twin, clip_a) == ("clip-a2", [("clip-a", LEFT_OUT_LATER)])
     # the paired case is unchanged: the episode kept, the highlight the duplicate left out
     paired = merge_pages([first, second])
-    assert [d.left_out.item_id for d in paired.duplicates] == [HIGHLIGHT_OF_E2]
-    assert all(item.reason != SKIP_HIGHLIGHT for item in paired.skipped)
-    assert (listing.highlight_numbers, paired.highlight_numbers) == ([2], [])
-    assert both.highlight_numbers == [2]  # two clips of one number: one number
+    assert [(d.left_out.item_id, d.why) for d in paired.duplicates] == [
+        (HIGHLIGHT_OF_E2, LEFT_OUT_HIGHLIGHT)
+    ]
+    assert paired.episodes[1].item_id == E2_ID
+    assert paired.skipped == listing.skipped
+    assert paired.items_received == 7
 
 
-def test_a_lone_highlight_past_the_last_episode_listed_makes_its_number_missing():
-    """3.0.1, D3 at the top of the list: TikTok drops a drama's last episode but lists its
-    highlight, numbered like it. A highlight is a clip of an episode, so the drama has that number:
-    it is missing like a hole below the highest one — the filling asks for it, the warnings name it
-    —, whether TikTok's count is unknown (never complete) or counts the episodes only (missing, not
-    uncertain); a count that may also hold the highlight is uncertain past it, as ever."""
+def test_a_highlight_alone_with_its_number_at_the_top_of_the_list_is_the_last_episode():
+    """4.0.1: TikTok lists the drama's last episode (66) only as an item it marks as a highlight —
+    that item is episode 66: listed, nothing missing whether TikTok's count is unknown or 66, no
+    filling request, no warning; the same for one alone with its number below the highest (30)."""
     episodes = [_candidate(f"e{number}", number=number) for number in range(1, 66)]
     clip = _candidate("clip-66", highlight=True, number=66)
     listing = merge_pages([PagePayload([*episodes, clip], None, False, 66, 0)])
-    assert [e.number for e in listing.episodes] == list(range(1, 66))
-    assert listing.skipped == [SkippedItem(SKIP_HIGHLIGHT, "clip-66")]
-    assert (listing.items_received, listing.highlight_numbers) == (66, [66])
+    assert [e.number for e in listing.episodes] == list(range(1, 67))
+    assert listing.episodes[-1] is clip
+    assert (listing.duplicates, listing.skipped, listing.items_received) == ([], [], 66)
     numbers = [e.number for e in listing.episodes]
     for total in (None, 66):
-        assert count_check(numbers, total, 66, highlights=[66]) == CountCheck(66, 1, False)
-        assert missing_numbers(numbers, total, 66, limit=10_000, highlights=[66]) == [66]
-        assert fill_target(numbers, total, 66, early_end=False, limit=10_000, highlights=[66]) == 66
-        assert (
-            fill_target(
-                numbers,
-                total,
-                66,
-                early_end=False,
-                covered=[(66, None)],
-                limit=10_000,
-                highlights=[66],
-            )
-            is None
-        )
-    assert catalog_warnings(
-        listing.episodes,
-        None,
-        skipped=listing.skipped,
-        items_received=66,
-        highlights=listing.highlight_numbers,
-    ) == [
-        "episode 66 missing (gap)",
-        "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
-    ]
-    # a count of 67 may hold the highlight, or one more episode: 66 missing, the rest uncertain
-    assert count_check(numbers, 67, 66, highlights=[66]) == CountCheck(66, 1, True)
-    assert missing_numbers(numbers, 67, 66, limit=10_000, highlights=[66]) == [66]
-    # once the filling covered 66 (its answer brought the clip again, hasMore true), the uncertain
-    # list asks once for the page after the clip's number — never the clip's own page again
-    clip_page = [(66, 66)]
-    assert (
-        fill_target(
-            numbers, 67, 66, early_end=False, covered=clip_page, limit=10_000, highlights=[66]
-        )
-        == 67
-    )
-    assert fill_target(numbers, 67, 66, early_end=False, covered=[(66, None)], limit=10_000) is None
-    # without the highlight's number, the old reading: nothing missing past the last episode
-    assert missing_numbers(numbers, None, 66, limit=10_000) == []
-    # a lone highlight below the highest number listed was a hole already: unchanged
+        assert count_check(numbers, total, 66) == CountCheck(66, 0, False)
+        assert missing_numbers(numbers, total, 66, limit=10_000) == []
+        assert fill_target(numbers, total, 66, early_end=False, limit=10_000) is None
+        assert catalog_warnings(listing.episodes, total, items_received=66) == []
     middle = [e for e in episodes if e.number != 30]
-    below = merge_pages(
-        [
-            PagePayload(
-                [*middle, _candidate("clip-30", highlight=True, number=30)], None, False, 65, 0
-            )
-        ]
-    )
-    assert below.highlight_numbers == [30]
+    alone = _candidate("clip-30", highlight=True, number=30)
+    below = merge_pages([PagePayload([*middle, alone], None, False, 65, 0)])
+    assert [e.number for e in below.episodes] == list(range(1, 66))
+    assert below.episodes[29] is alone
     below_numbers = [e.number for e in below.episodes]
-    assert missing_numbers(below_numbers, None, 65, limit=10_000, highlights=[30]) == [30]
-    assert missing_numbers(below_numbers, None, 65, limit=10_000) == [30]
-
-
-def test_a_lone_highlight_numbered_past_tiktoks_count_raises_no_row():
-    """3.0.1: TikTok counts every episode of the drama, so a lone highlight numbered past its
-    count is no episode number DramaFetch can place: it raises no missing number, no gap warning
-    and no filling request — never hundreds of rows for episodes that may not exist —, and stays
-    one of the other items, so a count it may be part of reads uncertain as ever. With no count,
-    nothing holds its number against anything: it is the drama's, as before."""
-    episodes = [_candidate(f"e{number}", number=number) for number in range(1, 66)]
-    clip = _candidate("clip-500", highlight=True, number=500)
-    listing = merge_pages([PagePayload([*episodes, clip], None, False, 66, 0)])
-    assert (listing.items_received, listing.highlight_numbers) == (66, [500])
-    numbers = [e.number for e in listing.episodes]
-    # every episode TikTok counts is listed: nothing missing, nothing asked, not uncertain
-    assert count_check(numbers, 65, 66, highlights=[500]) == CountCheck(65, 1, False)
-    assert missing_numbers(numbers, 65, 66, limit=10_000, highlights=[500]) == []
-    assert fill_target(numbers, 65, 66, early_end=False, limit=10_000, highlights=[500]) is None
-    assert catalog_warnings(
-        listing.episodes, 65, skipped=listing.skipped, items_received=66, highlights=[500]
-    ) == ["TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)"]
-    # a count of 66 may hold the clip, or one more episode: uncertain, the page after E65 asked
-    assert count_check(numbers, 66, 66, highlights=[500]) == CountCheck(65, 1, True)
-    assert missing_numbers(numbers, 66, 66, limit=10_000, highlights=[500]) == []
-    assert fill_target(numbers, 66, 66, early_end=False, limit=10_000, highlights=[500]) == 66
-    assert catalog_warnings(
-        listing.episodes, 66, skipped=listing.skipped, items_received=66, highlights=[500]
-    ) == [
-        "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
-        "TikTok announces 66 episodes, 65 listed",
-        uncertain_text(66, 65, 1),
-    ]
-    # a clip within the count is placed as before; with no count, the clip's number is the drama's
-    assert missing_numbers(numbers, 67, 66, limit=10_000, highlights=[66, 500]) == [66]
-    assert missing_numbers(numbers, None, 66, limit=10_000, highlights=[500]) == list(
-        range(66, 501)
-    )
-    # a count the list itself goes past (60 with E1-E65 listed: a stale count) holds nothing back:
-    # the clip of E66 makes E66 missing, as with no count — asked for, named, never hidden
-    assert count_check(numbers, 60, 66, highlights=[66]) == CountCheck(66, 1, False)
-    assert missing_numbers(numbers, 60, 66, limit=10_000, highlights=[66]) == [66]
-    assert fill_target(numbers, 60, 66, early_end=False, limit=10_000, highlights=[66]) == 66
-    assert (
-        catalog_warnings(
-            listing.episodes, 60, skipped=listing.skipped, items_received=66, highlights=[66]
-        )[0]
-        == "episode 66 missing (gap)"
-    )
+    assert missing_numbers(below_numbers, 65, 65, limit=10_000) == []
+    assert catalog_warnings(below.episodes, 65, items_received=65) == []
 
 
 def test_an_item_without_an_id_counts_once_per_listing():

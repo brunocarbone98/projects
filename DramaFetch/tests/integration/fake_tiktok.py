@@ -998,10 +998,10 @@ def window_page(
 ) -> dict[str, Any]:
     """The window of a series' list after `cursor` episodes (`opens_at_episode`, 3.0.1): its
     episodes cursor+1 … cursor+count from the fixture pages `pages`, in episode order — a trailer,
-    a highlight and another drama's item are no episode of `series_id` and stay out —, the last
-    number served as the next `cursor`, `hasMore` while episodes are left after it: a cursor as the
-    episodes before a page, the model the gap filling asks by (`cursor` = the first missing number
-    - 1)."""
+    the fifth series' highlight beside its episode 2 and another drama's item are no episode of
+    `series_id` and stay out —, the last number served as the next `cursor`, `hasMore` while
+    episodes are left after it: a cursor as the episodes before a page, the model the gap filling
+    asks by (`cursor` = the first missing number - 1)."""
     episodes: dict[int, Any] = {}
     for page in pages.values():
         for items in _item_lists(page):
@@ -1054,8 +1054,10 @@ def short_header_media_bytes(item_id: str, index: str) -> bytes:
 def _episodes_of_items() -> dict[str, tuple[str, int]]:
     """item id -> (series id, episode number), from every fixture page the fake serves: the
     number `DramaVideoData.EpisodeNumber` gives, else — 0 there, as the fifth series' episode 3
-    has it — `dramaInfo.episodeNumber`; an item without a number (a trailer) and a highlight
-    (`IsHighlight`) are no episode and are left out."""
+    has it — `dramaInfo.episodeNumber`; an item without a number (a trailer) and the fifth
+    series' highlight (`IsHighlight`, numbered 2 beside episode 2: the merge keeps the episode) are
+    no episode and are left out — the only highlight of these fixtures comes with the episode of
+    its number (4.0.1: one alone with its number would be that number's episode)."""
     found: dict[str, tuple[str, int]] = {}
     for pages in (PAGES, SECOND_PAGES, THIRD_PAGES_LOGGED_IN, FOURTH_PAGES, FIFTH_PAGES):
         for page in pages.values():

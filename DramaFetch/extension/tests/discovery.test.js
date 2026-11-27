@@ -667,21 +667,55 @@ test("the review's case (c): no other item, TikTok counts 66, E66 never listed �
   assert.deepEqual([report.gaps, report.uncertain], [[66], false]);
 });
 
-test("a lone highlight past the last episode listed (3.0.1, D3 at the top of the list): TikTok drops E66 but lists its highlight, numbered 66 — missing, one filling request for it, named in the warnings and the line; with a count of 66, never uncertain", async () => {
+/**
+ * Episode `number` of the fake drama carrying TikTok's highlight mark (`IsHighlight` true): a full
+ * episode TikTok marks as a highlight, as on episodes 9 and 17 of the owner's drama of 2026-11-27.
+ * @param {number} number
+ * @param {number | null} numVideos
+ */
+const markedItem = (number, numVideos) => {
+  const item = listItem(number, numVideos);
+  return { ...item, dramaInfo: { ...item.dramaInfo, DramaVideoData: { ...item.dramaInfo.DramaVideoData, IsHighlight: true } } };
+};
+
+test("4.0.1, the owner's drama: TikTok lists 66 items for 66 episodes and counts 66, episodes 9 and 17 marked as highlights — every episode listed, nothing missing, no filling request, no warning, complete", async () => {
+  const marked = new Map([
+    [9, markedItem(9, 66)],
+    [17, markedItem(17, 66)],
+  ]);
+  const tab = fakeTikTok({
+    total: 66,
+    leave: (number) => marked.has(number),
+    extras: [...marked].map(([before, item]) => ({ before, item })),
+  });
+  const found = await discoverSeries(REF, paced(tab));
+  assert.deepEqual(numbersOf(found), range(1, 66));
+  assert.deepEqual(
+    [...marked.keys()].map((number) => found.episodes[number - 1]?.itemId),
+    [...marked.values()].map((item) => item.id),
+  );
+  assert.deepEqual([found.totalHint, found.itemsReceived], [66, 66]);
+  assert.deepEqual([found.missingNumbers, found.earlyEnd, found.skippedItems], [[], null, []]);
+  assert.deepEqual(found.warnings, []);
+  assert.deepEqual(fills(found), []);
+  const report = seriesReport(found, /** @type {any} */ (allDone(found)));
+  assert.deepEqual([report.complete, report.uncertain, report.gaps], [true, false, []]);
+  assert.equal(lineOf(found), "complete: 66 of 66 (66 downloaded)");
+});
+
+test("4.0.1: TikTok lists the drama's last episode (E66) only as an item it marks as a highlight — that item is episode 66: every episode listed, nothing missing, no filling request, no warning, complete; with no count and with a count of 66", async () => {
   for (const numVideos of [null, 66]) {
-    const clip = {
-      id: "7699400000000000066",
-      dramaInfo: { dramaID: SERIES_ID, ...(numVideos === null ? {} : { numVideos }), DramaVideoData: { EpisodeNumber: 66, IsHighlight: true, LinkedEpisodeID: "7699400000000500066" } },
-      video: { duration: 41 },
-    };
-    const tab = fakeTikTok({ total: 66, numVideos, leave: (number) => number === 66, extras: [{ before: 66, item: clip }] });
+    const marked = markedItem(66, numVideos);
+    const last = { ...marked, dramaInfo: { ...marked.dramaInfo, DramaVideoData: { ...marked.dramaInfo.DramaVideoData, LinkedEpisodeID: "7699400000000000066" } } };
+    const tab = fakeTikTok({ total: 66, numVideos, leave: (number) => number === 66, extras: [{ before: 66, item: last }] });
     const found = await discoverSeries(REF, paced(tab));
-    assert.deepEqual(numbersOf(found), range(1, 65));
-    assert.deepEqual([found.missingNumbers, found.highlightNumbers], [[66], [66]], `count ${numVideos}`);
-    assert.deepEqual(fills(found).map((page) => page.cursorAsked), ["65"]);
-    assert.equal(found.warnings[0], "episode 66 missing (gap)");
-    assert.ok(!found.warnings.includes(uncertainText(66, 65, 1)), found.warnings.join(" | "));
-    assert.equal(lineOf(found), "incomplete: 65 of 66 — episode 66 missing from TikTok's list");
+    const label = `count ${numVideos}`;
+    assert.deepEqual(numbersOf(found), range(1, 66), label);
+    assert.equal(found.episodes[65]?.itemId, last.id, label);
+    assert.deepEqual([found.missingNumbers, found.earlyEnd, found.skippedItems], [[], null, []], label);
+    assert.deepEqual(found.warnings, [], label);
+    assert.deepEqual(fills(found), [], label);
+    assert.equal(lineOf(found), "complete: 66 of 66 (66 downloaded)", label);
   }
 });
 

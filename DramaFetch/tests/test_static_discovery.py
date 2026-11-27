@@ -47,7 +47,14 @@ from dramafetch.errors import (
     LoginRequiredError,
     RateLimitedError,
 )
-from dramafetch.models import DiscoveryOptions, Episode, Series, SeriesRef
+from dramafetch.models import (
+    DiscoveryOptions,
+    DownloadResult,
+    DownloadStatus,
+    Episode,
+    Series,
+    SeriesRef,
+)
 
 SERIES_ID = "7699393770256782354"
 SERIES_NAME = "The Billionaire's Secret Heiress"
@@ -752,33 +759,28 @@ def test_a_whole_embedded_list_lacking_an_episode_says_so_and_auto_lists_it_agai
     item_list_pages,
 ) -> None:
     """3.0.1 (the owner's report of 2026-11-27): a list the page embeds whole (no ``hasMore``)
-    that lacks an episode — here E04, which TikTok left out while listing its highlight clip —
-    names the episode missing (``Series.highlight_numbers`` carried: a ``--strategy static`` run
-    never calls the drama complete) and says the page's list lacks it, never that only the first
-    page was read; `auto` lists the drama again with the browser, and when the browser fails it
-    shows the list the page embeds."""
-    items = list(item_list_pages[0]["itemList"])
-    clip = copy.deepcopy(next(item for item in items if item["id"] == "7699400000000000003"))
-    clip["id"] = "7699400000000000904"
-    clip["dramaInfo"]["DramaVideoData"]["EpisodeNumber"] = 4
-    clip["dramaInfo"]["DramaVideoData"]["IsHighlight"] = True
-    page = _hydration_html(_embedded([[*items, clip]], total=None, has_more=False))
+    that lacks an episode — here E02, which TikTok left out — names the episode missing (a
+    ``--strategy static`` run never calls the drama complete) and says the page's list lacks it,
+    never that only the first page was read; `auto` lists the drama again with the browser, and
+    when the browser fails it shows the list the page embeds."""
+    items = [item for item in item_list_pages[0]["itemList"] if item["id"] != "7699400000000000002"]
+    page = _hydration_html(_embedded([items], total=None, has_more=False))
     series = StaticHtmlDiscovery(fetch=FakeFetch(page)).discover(
         SeriesRef(SERIES_ID), DiscoveryOptions(strategy="static")
     )
-    assert series.numbers == [1, 2, 3]
-    assert (series.missing_numbers, series.highlight_numbers, series.early_end) == ([4], [4], None)
-    assert "episode 4 missing (gap)" in series.warnings
+    assert series.numbers == [1, 3]
+    assert (series.missing_numbers, series.early_end) == ([2], None)
+    assert "episode 2 missing (gap)" in series.warnings
     assert f"{LACKING_WARNING}; use --strategy browser to ask TikTok again" in series.warnings
     assert not any(w.startswith(PARTIAL_WARNING) for w in series.warnings)
     report = engine.series_report(series, [])
-    assert (report.gaps, report.complete) == ((4,), False)
+    assert (report.gaps, report.complete) == ((2,), False)
     # auto: listed again with the browser, said for what it was
-    browser = RecordingDiscovery(result=_series([1, 2, 3, 4]))
+    browser = RecordingDiscovery(result=_series([1, 2, 3]))
     completed = AutoDiscovery(
         static=StaticHtmlDiscovery(fetch=FakeFetch(page)), browser=browser
     ).discover(SeriesRef(SERIES_ID), DiscoveryOptions())
-    assert (browser.calls, completed.numbers) == (1, [1, 2, 3, 4])
+    assert (browser.calls, completed.numbers) == (1, [1, 2, 3])
     assert completed.warnings[0] == (
         "static strategy: the episode list the page embeds lacks an episode; listed again with "
         "the browser"
@@ -787,11 +789,43 @@ def test_a_whole_embedded_list_lacking_an_episode_says_so_and_auto_lists_it_agai
     shown = AutoDiscovery(
         static=StaticHtmlDiscovery(fetch=FakeFetch(page)), browser=failed
     ).discover(SeriesRef(SERIES_ID), DiscoveryOptions())
-    assert (failed.calls, shown.numbers, shown.missing_numbers) == (1, [1, 2, 3], [4])
+    assert (failed.calls, shown.numbers, shown.missing_numbers) == (1, [1, 3], [2])
     assert shown.warnings[-1] == (
         "browser strategy could not list it again (no episode list arrived); showing the list the "
         "page embeds"
     )
+
+
+def test_an_embedded_episode_tiktok_marks_as_a_highlight_is_listed_and_the_list_is_whole(
+    item_list_pages,
+) -> None:
+    """4.0.1 (the owner's report of 2026-11-27: TikTok marks some full episodes as highlights):
+    E04's item, the only one numbered 4, carries ``IsHighlight`` — it is episode 4. The list the
+    page embeds is whole: nothing missing, no gap, no lacking warning, the drama complete once
+    every episode is saved, and `auto` keeps the page's list without starting the browser."""
+    items = list(item_list_pages[0]["itemList"])
+    marked = copy.deepcopy(next(item for item in items if item["id"] == "7699400000000000003"))
+    marked["id"] = "7699400000000000904"
+    marked["dramaInfo"]["DramaVideoData"]["EpisodeNumber"] = 4
+    marked["dramaInfo"]["DramaVideoData"]["IsHighlight"] = True
+    page = _hydration_html(_embedded([[*items, marked]], total=4, has_more=False))
+    series = StaticHtmlDiscovery(fetch=FakeFetch(page)).discover(
+        SeriesRef(SERIES_ID), DiscoveryOptions(strategy="static")
+    )
+    assert series.numbers == [1, 2, 3, 4]
+    episode_4 = series.episode(4)
+    assert episode_4 is not None and episode_4.item_id == "7699400000000000904"
+    assert (series.missing_numbers, series.early_end) == ([], None)
+    assert not any("gap" in w or w.startswith(LACKING_WARNING) for w in series.warnings)
+    assert not _partial(series)
+    results = [DownloadResult(episode, DownloadStatus.DONE) for episode in series.episodes]
+    report = engine.series_report(series, results)
+    assert (report.gaps, report.complete) == ((), True)
+    assert engine.report_line(report) == "complete: 4 of 4 (4 downloaded)"
+    browser = RecordingDiscovery(result=_series([1, 2, 3, 4]))
+    kept = AutoDiscovery(static=StaticHtmlDiscovery(fetch=FakeFetch(page)), browser=browser)
+    assert kept.discover(SeriesRef(SERIES_ID), DiscoveryOptions()).numbers == [1, 2, 3, 4]
+    assert browser.calls == 0
 
 
 # --- helpers shared by both strategies ----------------------------------------------------------
