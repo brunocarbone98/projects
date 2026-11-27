@@ -4,15 +4,15 @@ A real headless Chromium loads the extension's test copy (`extension_harness`) a
 TikTok server, which logs, per request, the `Origin` and `Referer` it carried (their values) and
 whether it carried the session cookie (presence only, never a value):
 
-- the extension's own media, cover and thumbnail GETs carry `Referer: <base>/` and no `Origin` —
+- the extension's own media and cover GETs carry `Referer: <base>/` and no `Origin` —
   the one session declarativeNetRequest rule of the extension (`Referer` set, `Origin` removed;
   a POST of the app page, which Chrome sends with `Origin: chrome-extension://<id>`, is the control
   that the rule really removes one), while the TikTok tab's own `item_list` / `detail` requests
   carry exactly what they carry without the rule; the fake's CDN answers carry no CORS header at
   all (the host permissions give access, not CORS);
 - a redirect is followed only on the covered hosts, hop by hop, each hop with the same two header
-  changes, at most five hops; a chain that leaves the covered hosts is refused and nothing reaches
-  the host it points at;
+  changes, at most five hops; a chain that leaves the covered hosts is refused — a video's like a
+  403, a cover's at once, its video kept — and nothing reaches the host it points at;
 - the session cookie reaches the extension's own requests with `SameSite=Lax` or `Strict`, with
   third-party cookies allowed or blocked in the profile (a control proves the setting holds): the
   paid episode the account unlocked downloads with the session in every case.
@@ -23,7 +23,6 @@ from __future__ import annotations
 import http.client
 import json
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -61,7 +60,7 @@ THIRD_PARTY_COOKIES_BLOCKED = {
 
 
 def _own_requests(server: FakeTikTok) -> list[RequestRecord]:
-    """The extension's own requests: media, covers and thumbnails, and their redirect hops."""
+    """The extension's own requests: media and covers, and their redirect hops."""
     return [*server.media_requests, *server.cover_requests, *server.hop_requests]
 
 
@@ -90,24 +89,6 @@ def _page_api_requests(server: FakeTikTok, since: int) -> list[RequestRecord]:
     return [r for r in server.requests[since:] if r.path in api]
 
 
-def _each_thumbnail(ext: ExtensionHarness, asked: Callable[[str], bool]) -> None:
-    """Bring the listed episodes' cover cells into view one row at a time, as a person scrolling
-    does (the list may ask for a thumbnail only once its row is seen), and wait each time until
-    `asked(item id)` holds — the row's thumbnail requested (and shown, or refused)."""
-    rows = ext.page.locator("#episode-table tbody tr")
-    for index in range(rows.count()):
-        row = rows.nth(index)
-        item = row.get_attribute("data-item-id") or ""
-        row.locator("td.cover-cell").scroll_into_view_if_needed()
-        ext.wait_for(lambda: asked(item), 20, f"no thumbnail for item {item}")  # noqa: B023
-
-
-def _shown(ext: ExtensionHarness) -> Callable[[str], bool]:
-    """Whether a row's thumbnail is on screen."""
-    table = ext.page.locator("#episode-table tbody")
-    return lambda item: table.locator(f"tr[data-item-id='{item}'] img.cover").count() == 1
-
-
 def _cdn_headers(server: FakeTikTok, path: str) -> dict[str, str]:
     """The response headers of one GET of the fake (over loopback, not through any proxy)."""
     port = urlsplit(server.base_url).port
@@ -127,22 +108,24 @@ def _cdn_headers(server: FakeTikTok, path: str) -> dict[str, str]:
 
 
 def test_the_extension_s_own_requests_carry_the_referer_and_no_origin(tmp_path: Path) -> None:
-    """Every media, cover and thumbnail GET of the extension: `Referer: <base>/`, no `Origin`. The
-    control: before any job no rule exists and a POST of the app page carries `Origin:
-    chrome-extension://<id>`; once the rule is in force the same POST carries none — Chromium does
-    remove it. The fake CDN sends no CORS header, and every file still comes through."""
+    """Every media and cover GET of the extension: `Referer: <base>/`, no `Origin`. The control:
+    before any job no rule exists and a POST of the app page carries `Origin:
+    chrome-extension://<id>`; once a paste's job put the rule in force — before its first request —
+    the same POST carries none: Chromium does remove it. The fake CDN sends no CORS header, and
+    every file still comes through."""
     with (
         FakeTikTok(origin_probe=True) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
         base = server.base_url
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         assert ext.session_rules() == []
         before = _probe_origin(ext, server)
         assert before.origin == f"chrome-extension://{ext.extension_id}"
         assert before.referer is None
 
-        ext.see_episodes(SERIES_ID)  # the rule goes in before the job's first request
+        entry = ext.paste_and_wait(MAIN_LINK)  # the rule goes in before the job's first request
+        (series,) = entry["series"]
+        assert series["line"] == "complete: 4 of 5 (4 downloaded) — 1 locked (5)"
         (rule,) = ext.session_rules()
         assert rule["action"]["requestHeaders"] == [
             {"header": "Referer", "operation": "set", "value": f"{base}/"},
@@ -152,11 +135,6 @@ def test_the_extension_s_own_requests_carry_the_referer_and_no_origin(tmp_path: 
         assert rule["condition"]["urlFilter"] == f"|{base}/"
         after = _probe_origin(ext, server)
         assert after.origin is None and after.referer == f"{base}/"
-
-        _each_thumbnail(ext, _shown(ext))  # the list's five thumbnails, row by row
-        entry = ext.paste_and_wait(MAIN_LINK)
-        (series,) = entry["series"]
-        assert series["line"] == "complete: 4 of 5 (4 downloaded) — 1 locked (5)"
         # no CORS on the fake CDN: the extension reached it through its host permissions
         expire = int(time.time()) + 600
         item = MAIN_ITEMS[1]
@@ -168,7 +146,7 @@ def test_the_extension_s_own_requests_carry_the_referer_and_no_origin(tmp_path: 
             assert not [name for name in headers if name.startswith("access-control-")], path
     own = [r for r in _own_requests(server) if not r.query.get("probe")]  # not the CORS check's
     assert len([r for r in own if r in server.media_requests]) == 4
-    assert len([r for r in own if r in server.cover_requests]) == 5 + 4  # thumbnails, covers
+    assert len([r for r in own if r in server.cover_requests]) == 4  # the downloader's covers
     for record in own:
         assert record.origin is None, record.path
         assert record.referer == f"{base}/", record.path
@@ -180,9 +158,9 @@ def test_the_extension_s_own_requests_carry_the_referer_and_no_origin(tmp_path: 
 def test_the_tiktok_tab_s_own_requests_are_untouched_by_the_rule(tmp_path: Path) -> None:
     """The series page's own `item_list` and `detail` requests — and the list pages the extension
     fetches from inside that page — carry the same headers with the rule in force as without it:
-    a page in a normal tab before any job (no rule), the discovery's tab, a normal tab again."""
+    a page in a normal tab before any job (no rule), the discovery's tab of a paste's job, a normal
+    tab again."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         series_page = f"{server.base_url}/shortdrama/episode/{SERIES_ID}/1"
 
         def visit() -> list[RequestRecord]:
@@ -205,7 +183,7 @@ def test_the_tiktok_tab_s_own_requests_are_untouched_by_the_rule(tmp_path: Path)
         assert ext.session_rules() == []
         without = visit()
         start = len(server.requests)
-        ext.see_episodes(SERIES_ID)
+        ext.paste_and_wait(MAIN_LINK)
         assert ext.session_rules() != []
         discovery = _page_api_requests(server, start)
         with_rule = visit()
@@ -225,16 +203,12 @@ def test_the_tiktok_tab_s_own_requests_are_untouched_by_the_rule(tmp_path: Path)
 
 def test_a_redirect_on_a_covered_host_is_followed_hop_by_hop(tmp_path: Path) -> None:
     """`/cdn/…` and `/cover/…` answer a 302 to `/hop/1/…` on the same (covered) origin: every
-    episode and its cover come through, the thumbnails of **See episodes** too; both requests of
-    each are the extension's own — `Referer` set, no `Origin` — and nothing leaves the covered
-    host."""
+    episode and its cover come through; both requests of each are the extension's own —
+    `Referer` set, no `Origin` — and nothing leaves the covered host."""
     with (
         FakeTikTok(media_hops=1, cover_hops=1) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
-        ext.see_episodes(SERIES_ID)
-        _each_thumbnail(ext, _shown(ext))  # each thumbnail behind its hop, shown
         entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = {row["number"]: row for row in series["rows"]}
@@ -255,8 +229,8 @@ def test_a_redirect_on_a_covered_host_is_followed_hop_by_hop(tmp_path: Path) -> 
             r.path for r in server.hop_requests if r.path.startswith(f"/hop/1/cdn/{item}/")
         ] == [f"/hop/1/cdn/{item}/0.mp4"]
     cover_hops = [r for r in server.hop_requests if "/cover/" in r.path]
-    # the thumbnails, then the downloader's covers: each request with its hop
-    assert len(server.cover_requests) == len(cover_hops) == 5 + 4
+    # the downloader's covers: each request with its hop
+    assert len(server.cover_requests) == len(cover_hops) == 4
     for record in _own_requests(server):
         assert record.origin is None and record.referer == f"{base}/", record.path
     assert not server.elsewhere_requests
@@ -288,20 +262,15 @@ def test_five_redirects_are_followed_and_a_sixth_is_refused(tmp_path: Path) -> N
 
 
 def test_a_chain_that_leaves_the_covered_hosts_is_refused(tmp_path: Path) -> None:
-    """covered → covered → `localhost` (not covered): refused at the second redirect, like a 403 —
-    the next URL, `failed-unavailable` — for videos and thumbnails alike; not one request reaches
-    `localhost`, nothing is saved."""
+    """covered → covered → `localhost` (not covered): refused at the second redirect. For a video,
+    like a 403 — the next URL, `failed-unavailable` —, nothing saved, so no cover asked for either;
+    for a cover (the videos served as usual), at once: each episode `done`, its message noting the
+    cover's redirect that was not followed, nothing embedded. Not one request reaches `localhost`;
+    every request on the way is the extension's own."""
     with (
         FakeTikTok(media_hops=1, cover_hops=1, hops_then_elsewhere=True) as server,
-        ExtensionHarness(tmp_path, server.base_url) as ext,
+        ExtensionHarness(tmp_path / "videos", server.base_url) as ext,
     ):
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
-        ext.see_episodes(SERIES_ID)
-
-        def refused(item: str) -> bool:  # its thumbnail's hop was requested, nothing beyond it
-            return any(r.path == f"/hop/1/cover/{item}.jpg" for r in server.hop_requests)
-
-        _each_thumbnail(ext, refused)
         entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = {row["number"]: row for row in series["rows"]}
@@ -312,10 +281,35 @@ def test_a_chain_that_leaves_the_covered_hosts_is_refused(tmp_path: Path) -> Non
         for number in (1, 2, 3):
             assert rows[number]["message"].endswith("(a redirect from 127.0.0.1, not followed)")
         assert rows[4]["message"].startswith("stopped: 3 consecutive failures (last: ")
-        assert ext.page.locator("#episode-table img.cover").count() == 0
         # no video: only the report of the failures (saved by default; test_extension's test_q)
         assert [path for path in ext.saved_files() if path.suffix != ".json"] == []
     assert server.hop_requests and not server.elsewhere_requests
+    assert server.cover_requests == []  # no video, so no cover GET
+    for record in _own_requests(server):
+        assert record.origin is None and record.with_referer, record.path
+
+    # the covers alone behind such a chain: the videos saved, each cover refused at its second hop
+    with (
+        FakeTikTok(cover_hops=1, hops_then_elsewhere=True) as server,
+        ExtensionHarness(tmp_path / "covers", server.base_url) as ext,
+    ):
+        entry = ext.paste_and_wait(MAIN_LINK)
+        (series,) = entry["series"]
+        rows = {row["number"]: row for row in series["rows"]}
+        assert [rows[n]["status"] for n in range(1, 6)] == ["done"] * 4 + ["skipped-locked"]
+        for number in range(1, 5):
+            assert rows[number]["message"].endswith(
+                "; cover: a redirect from 127.0.0.1, not followed"
+            )
+            path = ext.downloads / MAIN_FOLDER / f"{SERIES_NAME} - Episode {number:02d}.mp4"
+            tags = MP4(path).tags
+            assert tags is None or "covr" not in tags  # nothing embedded
+    for number in range(1, 5):
+        item = MAIN_ITEMS[number]
+        assert [r.path for r in server.hop_requests if f"/cover/{item}" in r.path] == [
+            f"/hop/1/cover/{item}.jpg"
+        ]  # its one hop on the covered host, never the next
+    assert len(server.media_requests) == 4 and not server.elsewhere_requests
     for record in _own_requests(server):
         assert record.origin is None and record.with_referer, record.path
 

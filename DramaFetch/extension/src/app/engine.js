@@ -117,10 +117,6 @@ export const STORAGE_REFUSED_PREFIX = "the progress could not be saved: ";
  * @property {boolean} testMode whether the pacing may go below the floors
  * @property {boolean} includeLocked
  * @property {boolean} recheck
- * @property {boolean} [overwrite] download every episode again in full, even one on disk
- *   (`DownloadOptions.overwrite`; DramaFetch 3.0.0: the `selection` jobs of **See episodes** and
- *   their retries): no done skip, no existing-file skip, no complete skip — the DRM memory skip
- *   still applies unless `includeLocked`, and a locked episode stays skipped unless `includeLocked`
  * @property {PacingState} pacingState the run's pacing (one for the app page's life)
  * @property {Rng} rng
  * @property {(seconds: number) => Promise<void>} sleep
@@ -253,10 +249,7 @@ export function episodeContext(series) {
 
 /**
  * Download the given episodes of a series, one at a time, ascending, resumably, paced
- * (`engine.download_series`). With `engine.overwrite` an episode the state says is done is not
- * skipped (nor, in the downloader, one Chrome's history shows saved at its target): it is
- * downloaded again in full; an episode remembered as DRM-protected is still skipped unless
- * `includeLocked`. `state` is the series' state (loaded by the caller); every result
+ * (`engine.download_series`). `state` is the series' state (loaded by the caller); every result
  * is recorded in it and saved. `beforeNetwork` (a selection job's rest) runs right before every
  * network attempt, after its pause. Returns the results and why the run stopped, if it did — a
  * state write the storage refused among the reasons ({@link storageRefusedReason}): never thrown.
@@ -301,7 +294,6 @@ export async function downloadSeries(engine, series, episodes, state, hooks = {}
           state,
           exists,
           includeLocked: engine.includeLocked,
-          overwrite: engine.overwrite === true,
           existingResult: (candidate) => downloader.existingResult(candidate, context),
         }),
       );
@@ -322,7 +314,7 @@ export async function downloadSeries(engine, series, episodes, state, hooks = {}
       break;
     }
     const episode = /** @type {Episode} */ (ordered[index]);
-    const done = engine.overwrite === true ? null : donePath(state, episode.number, exists); // overwrite: downloaded again
+    const done = donePath(state, episode.number, exists);
     if (done !== null) {
       await emit(manifestSkip(episode, done));
       continue;
@@ -500,7 +492,7 @@ export async function runSeries(engine, ref, hooks = {}) {
   let cooldown = await checkCooldown(engine);
   if (cooldown !== null) return cooldownRefusal(ref, cooldown, engine.wallClock());
   const exists = (/** @type {import("../lib/state.js").StateEntry} */ entry) => engine.view.exists(entry);
-  if (completeSkipAllowed(null, { recheck: engine.recheck, includeLocked: engine.includeLocked, overwrite: engine.overwrite === true })) {
+  if (completeSkipAllowed(null, { recheck: engine.recheck, includeLocked: engine.includeLocked })) {
     await engine.view.refresh();
     const stored = readState(await engine.readState(ref.seriesId), ref.seriesId);
     const skipped = completeSkip(stored, { seriesId: ref.seriesId, nowS: engine.wallClock(), exists });
@@ -691,13 +683,14 @@ export async function runBatch(engine, refs, hooks = {}) {
 }
 
 /**
- * A selection of an already listed series (**Download all available** / **Download selected**,
- * the web's download job): the cooldown first (refused: no request), the job rest right before
- * the first request, the downloads, a row for every wanted number the list does not hold (3.0.1,
- * `report.notListedResults` with `again`: `failed-unavailable`, `not in TikTok's list this time`
- * — no request, never recorded in the state, passed to `onResult` after the downloads; the Python
- * selection path, `download --episodes`, does the same), and a report over the whole series
- * (`engine.report_rows`). No complete mark: only a whole-series run sets one.
+ * A selection of an already listed series (a **Retry** — the tab's, an alert's — and the automatic
+ * retry, over the fresh list {@link runSelectionJob} reads; the web's download job): the cooldown
+ * first (refused: no request), the job rest right before the first request, the downloads, a row
+ * for every wanted number the list does not hold (3.0.1, `report.notListedResults` with `again`:
+ * `failed-unavailable`, `not in TikTok's list this time` — no request, never recorded in the state,
+ * passed to `onResult` after the downloads; the Python selection path, `download --episodes`, does
+ * the same), and a report over the whole series (`engine.report_rows`). No complete mark: only a
+ * whole-series run sets one.
  * @param {Engine} engine
  * @param {Series} series
  * @param {readonly number[]} numbers
@@ -748,8 +741,8 @@ export async function runSelection(engine, series, numbers, job) {
 }
 
 /**
- * A selection job (**Download all available** / **Download selected**): never from a list an
- * earlier job resolved — whoever is logged in to TikTok in this Chrome NOW decides what may be
+ * A selection job (a **Retry** — the tab's, an alert's — and the automatic retry): never from a
+ * list an earlier job resolved — whoever is logged in to TikTok in this Chrome NOW decides what may be
  * played and with which signed URLs (the web's list cache serves a list only to the session that
  * resolved it; the extension cannot tell sessions apart, so it lists again) —, so the series is
  * listed right before its downloads: the cooldown (refused: no request), the rest between jobs or
@@ -757,11 +750,10 @@ export async function runSelection(engine, series, numbers, job) {
  * again, whether the progress can be stored (refused: no request), the resolve (a failure is the
  * run's error and a stop, as in a batch), then
  * {@link runSelection} over the fresh list, whose access decisions apply: an episode it now calls
- * locked is `skipped-locked` unless includeLocked. **See episodes**' jobs and their retries run
- * with `engine.overwrite` (DramaFetch 3.0.0): every chosen episode is downloaded again in full.
+ * locked is `skipped-locked` unless includeLocked; an episode meanwhile on disk is skipped.
  * @param {Engine} engine
  * @param {SeriesRef} ref
- * @param {readonly number[]} numbers the episodes picked from the list shown
+ * @param {readonly number[]} numbers the episodes to download again (those that did not download)
  * @param {{lastContactAt: number | null}} job when the last job contacted TikTok (the job rest)
  * @returns {Promise<SeriesRun>}
  */

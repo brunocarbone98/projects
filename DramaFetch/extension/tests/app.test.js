@@ -9,11 +9,12 @@ import { test } from "node:test";
 
 import { makeEpisode, uncertainText } from "../src/lib/catalog.js";
 import { clearCooldown, recordBlock } from "../src/lib/cooldown.js";
-import { CUT_SHORT_CAUSE_PREFIX, DRM_CAUSE, LOCKED_CAUSE_PREFIX, NOT_ATTEMPTED_CAUSE } from "../src/lib/diagnosis.js";
+import { CUT_SHORT_CAUSE_PREFIX, LOCKED_CAUSE_PREFIX, NOT_ATTEMPTED_CAUSE } from "../src/lib/diagnosis.js";
 import { displayText } from "../src/lib/display.js";
 import {
   DRM_MESSAGE,
   DRM_REMEMBERED_MESSAGE,
+  LIST_RATE_LIMIT_MESSAGE,
   MEDIA_RATE_LIMIT_MESSAGE,
   NOT_LISTED_AGAIN_MESSAGE,
   NOT_LISTED_EARLY_END_MESSAGE,
@@ -21,29 +22,29 @@ import {
   shortServedMessage,
 } from "../src/lib/messages.js";
 import { JOB_REST, LONG_REST, PACE, PacingState, REST, SERIES_REST, pacingOptions, pauseMessage } from "../src/lib/pacing.js";
-import { profileHandleOf } from "../src/lib/library.js";
 import { completeSkip, isGuessedLocked, reportLine, seriesReport } from "../src/lib/report.js";
 import { doneEntries, donePath, markComplete, missingFiles, newState, record } from "../src/lib/state.js";
 import {
   ChallengeError,
   DISCOVERY_TAB_KEY,
-  LOGIN_REDIRECT_MESSAGE,
   LoginRequiredError,
   NO_LIST_WARNING,
   RateLimitedError,
   chromeBrowser,
   closeLeftoverDiscoveryTab,
   discoverSeries,
+  fetchInPage,
   isLoginUrl,
   looksLikeChallenge,
+  pageTextInPage,
   queryParam,
+  scrollInPage,
   withQueryParams,
 } from "../src/app/discovery.js";
 import {
   ATTEMPT_ENCRYPTED,
   ATTEMPT_NOT_REQUESTED,
   ATTEMPT_SAVED,
-  CoverLoader,
   DownloadsView,
   Downloader,
   ATTEMPT_SHORT_HEADER_PREFIX,
@@ -53,7 +54,6 @@ import {
   servedShort,
 } from "../src/app/downloader.js";
 import { STORAGE_REFUSED_PREFIX, StopRequested, StorageRefusedError, downloadSeries, runBatch, runSelectionJob } from "../src/app/engine.js";
-import { FAVORITES_RATE_LIMIT_MESSAGE } from "../src/app/favorites.js";
 import { DEFAULT_SETTINGS, cooldownStore as pageCooldownStore } from "../src/app/storage.js";
 import { TabKeeper } from "../src/app/tabkeeper.js";
 
@@ -251,7 +251,7 @@ function stateWith(done, drm = []) {
   return state;
 }
 
-test("overwrite (3.0.0, See episodes' downloads): an episode the records say is on disk is downloaded again in full — a request like any other, paced, its new download in the records —; one an earlier download found encrypted is still skipped with no request unless includeLocked, and a locked one stays skipped; without overwrite both on-disk episodes are skipped", async () => {
+test("the resume: an episode the records say is on disk is skipped (`already downloaded (manifest)`), one an earlier download found encrypted is skipped with no request unless includeLocked, a locked one stays skipped — only the rest is asked for, and a skip never pauses", async () => {
   const episodes = [episode(1), episode(2), episode(3, { locked: true }), episode(4), episode(5)];
   // E01 and E04 on disk, E02 remembered as DRM-protected, E03 locked, E05 never downloaded
   const resume = fakeEngine();
@@ -264,51 +264,30 @@ test("overwrite (3.0.0, See episodes' downloads): an episode the records say is 
     [5, "done", "done 5"],
   ]);
   assert.deepEqual(resume.downloads, [5]);
-
-  const again = fakeEngine();
-  again.engine.overwrite = true;
-  const state = stateWith([1, 4], [2]);
-  const { results, stopped } = await downloadSeries(again.engine, series(episodes), episodes, state);
-  assert.equal(stopped, null);
-  assert.deepEqual(results.map((r) => [r.episode.number, r.status, r.message]), [
-    [1, "done", "done 1"],
-    [2, "skipped-locked", DRM_REMEMBERED_MESSAGE], // retrying cannot change that verdict: no request
-    [3, "skipped-locked", "looks locked"],
-    [4, "done", "done 4"],
-    [5, "done", "done 5"],
-  ]);
-  assert.deepEqual(again.downloads, [1, 4, 5]); // the two on disk asked for again, in order
-  assert.deepEqual(again.pauses.map((p) => p.kind), ["pace", "pace"]); // paced like any request (none before the first)
-  // the records hold the new downloads: their path and Chrome's id
-  assert.deepEqual(
-    [1, 4].map((number) => [state.episodes[String(number)]?.status, state.episodes[String(number)]?.path, state.episodes[String(number)]?.download_id]),
-    [["done", "/dl/E1.mp4", 1], ["done", "/dl/E4.mp4", 4]],
-  );
-  // a ticked locked or DRM row (includeLocked): the DRM memory no longer holds it back
+  assert.deepEqual(resume.pauses, []); // the skips never pause: E05 is the run's first request
+  // includeLocked (a paste with **Also ask for locked episodes**): the DRM memory no longer holds
+  // E02 back, the records on disk still skip E01 and E04
   const asked = fakeEngine();
-  asked.engine.overwrite = true;
   asked.engine.includeLocked = true;
   await downloadSeries(asked.engine, series(episodes), episodes, stateWith([1, 4], [2]));
-  assert.deepEqual(asked.downloads, [1, 2, 4, 5]);
+  assert.deepEqual(asked.downloads, [2, 5]);
 });
 
-test("overwrite (3.0.0): a stop marks the rest `stopped: …` — never the skip an episode on disk (in the records, or in Chrome's history at its target) has without overwrite —; the DRM memory and a locked episode keep theirs; the records then hold the stop's rows, as Python's `Manifest.record` does: an episode on disk the download in full did not get back is recorded as not downloaded (its old file untouched)", async () => {
+test("a stop marks the rest of the run with no request — but an episode on disk keeps its skip (in the records, or in Chrome's history at its target), and so do the DRM memory and a locked episode; a skip never downgrades an entry on disk", async () => {
   const episodes = [episode(1), episode(2), episode(3), episode(4), episode(5), episode(6, { locked: true })];
   /**
    * A 429 on E02; E03 on disk in the records, E04 in Chrome's history at its target, E05 found
    * encrypted, E06 locked: the rows after the stop, and the records it leaves.
-   * @param {boolean} overwrite
    */
-  const rest = async (overwrite) => {
+  const rest = async () => {
     const fake = fakeEngine({ results: { 2: "failed-rate-limited" } });
-    fake.engine.overwrite = overwrite;
     fake.engine.downloader.existingResult = (ep) =>
       ep.number === 4 ? { episode: ep, status: "skipped-exists", path: "/dl/old/E4.mp4", message: "already exists: E4.mp4", downloadId: 104 } : null;
     const state = stateWith([3], [5]);
     const { results, stopped } = await downloadSeries(fake.engine, series(episodes), episodes, state);
     assert.equal(stopped, "episode 2 failed-rate-limited");
     assert.deepEqual(fake.downloads, [1, 2]); // nothing after the stop
-    const onDisk = new Map(doneEntries(state, () => true)); // what See episodes calls on disk
+    const onDisk = new Map(doneEntries(state, () => true)); // the records' episodes on disk
     /** @param {number} number */
     const kept = (number) => {
       const entry = state.episodes[String(number)];
@@ -316,8 +295,7 @@ test("overwrite (3.0.0): a stop marks the rest `stopped: …` — never the skip
     };
     return { rows: results.slice(2).map((r) => [r.episode.number, r.status, r.message]), records: [3, 4].map(kept) };
   };
-  const stoppedBy429 = `stopped: episode 2 failed-rate-limited: ${MEDIA_RATE_LIMIT_MESSAGE}`;
-  const resume = await rest(false);
+  const resume = await rest();
   assert.deepEqual(resume.rows, [
     [3, "skipped-exists", "already downloaded (manifest): E3.mp4"],
     [4, "skipped-exists", "already exists: E4.mp4"],
@@ -329,43 +307,6 @@ test("overwrite (3.0.0): a stop marks the rest `stopped: …` — never the skip
     [3, "done", "/dl/old/E3.mp4", 103, "/dl/old/E3.mp4"],
     [4, "skipped-exists", "/dl/old/E4.mp4", 104, "/dl/old/E4.mp4"],
   ]);
-  const again = await rest(true);
-  assert.deepEqual(again.rows, [
-    [3, "failed-rate-limited", stoppedBy429], // not downloaded again: its retry takes it
-    [4, "failed-rate-limited", stoppedBy429],
-    [5, "skipped-locked", DRM_REMEMBERED_MESSAGE],
-    [6, "skipped-locked", "looks locked: no play address"],
-  ]);
-  // a stop's row is an attempt (`Manifest.record`): E03's download gives way to it, so See episodes
-  // shows it not on disk — ticked — until it is downloaded again, or a paste finds its file, which
-  // nothing touched, in Chrome's history
-  assert.deepEqual(again.records, [
-    [3, "failed-rate-limited", null, null, null],
-    [4, "failed-rate-limited", null, null, null],
-  ]);
-});
-
-test("overwrite (3.0.0): never the complete skip — a series found complete an hour ago, every file still there, is listed and downloaded again in full (Python's `_complete_skip_allowed`); without overwrite it costs no request", async () => {
-  const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
-  /** @param {boolean} overwrite */
-  const run = async (overwrite) => {
-    /** @type {string[]} */
-    const listed = [];
-    const fake = fakeEngine({
-      discover: async (asked) => {
-        listed.push(asked.seriesId);
-        return series([episode(1), episode(2)]);
-      },
-    });
-    fake.engine.overwrite = overwrite;
-    const state = stateWith([1, 2]);
-    markComplete(state, fake.engine.wallClock() - 3600, 2);
-    fake.states.set(SERIES_ID, JSON.parse(JSON.stringify(state)));
-    const [only] = await runBatch(fake.engine, [ref]);
-    return { skipped: only?.report.skippedComplete, contacted: only?.contacted, listed, downloads: fake.downloads, statuses: only?.results.map((r) => r.status) };
-  };
-  assert.deepEqual(await run(false), { skipped: true, contacted: false, listed: [], downloads: [], statuses: ["skipped-exists", "skipped-exists"] });
-  assert.deepEqual(await run(true), { skipped: false, contacted: true, listed: [SERIES_ID], downloads: [1, 2], statuses: ["done", "done"] });
 });
 
 test("a 429 stops the run, records the cooldown once and marks the rest without a request", async () => {
@@ -814,15 +755,12 @@ function fakeFetch(routes, log) {
 
 /**
  * A downloader over fakes: every file it saves goes to `saved` (its path below the Downloads
- * folder) and the conflict action it asked Chrome for to `conflicts`; `overwrite` as the jobs of
- * See episodes set it (3.0.0); `askGuessed` as a Retry of free episodes DramaFetch guessed were locked sets it (3.0.1).
- * @param {{fetch: typeof fetch, saved?: string[], conflicts?: string[], thumbnail?: string, view?: DownloadsView, overwrite?: boolean, askGuessed?: boolean}} options
+ * folder); `askGuessed` as a Retry of free episodes DramaFetch guessed were locked sets it (3.0.1).
+ * @param {{fetch: typeof fetch, saved?: string[], thumbnail?: string, view?: DownloadsView, askGuessed?: boolean}} options
  */
 function downloader(options) {
   /** @type {string[]} */
   const saved = options.saved ?? [];
-  /** @type {string[]} */
-  const conflicts = options.conflicts ?? [];
   let id = 0;
   return new Downloader({
     quality: "compatible",
@@ -830,16 +768,14 @@ function downloader(options) {
     nameFormat: "{series} - Episode {number}",
     includeLocked: false,
     askGuessed: options.askGuessed, // 3.0.1
-    overwrite: options.overwrite,
     hostPatterns: ["https://*.tiktok.com/*", "https://*.tiktokcdn.com/*"],
     view: options.view ?? /** @type {never} */ ({ completedAt: () => null, remember() {} }),
     rediscover: async () => {
       throw new Error("no rediscovery expected");
     },
     fetch: options.fetch,
-    save: async (_bytes, _mime, filename, conflictAction) => {
+    save: async (_bytes, _mime, filename) => {
       saved.push(filename);
-      conflicts.push(conflictAction);
       id += 1;
       return /** @type {never} */ ({ id, filename: `/home/me/Downloads/${filename}`, state: "complete", exists: true });
     },
@@ -870,7 +806,7 @@ test("download: verified bytes, one cover GET, the cover embedded, saved under i
   assert.equal(log.length, 2);
 });
 
-test("download with overwrite (3.0.0, See episodes' downloads): an episode Chrome's history shows saved at its target is not skipped — existingResult null, needsNetwork true —: it is downloaded again in full and saved with conflictAction `overwrite` under the same name, its cover file too; a locked one stays skipped; without overwrite the same episode is `skipped-exists` with no request, and a new one is saved with `uniquify`", async () => {
+test("download: an episode Chrome's history shows saved at its target is `skipped-exists` with no request (existingResult, needsNetwork false); a new one is downloaded and saved under its name, its cover file too — its result carrying the video's path and download id, which the records keep —; a locked one is skipped with no request", async () => {
   const folder = `DramaFetch/Test Series [${SERIES_ID}]`;
   const target = `${folder}/Test Series - Episode 01.mp4`;
   const old = { id: 7, filename: `/home/me/Downloads/${target}`, state: "complete", exists: true };
@@ -884,39 +820,31 @@ test("download with overwrite (3.0.0, See episodes' downloads): an episode Chrom
   const log = [];
   /** @type {string[]} */
   const saved = [];
-  /** @type {string[]} */
-  const conflicts = [];
-  // without overwrite (a paste, a card's Download): the file at its target is the episode
-  const resume = downloader({ fetch: fakeFetch(routes, log), saved, conflicts, thumbnail: "both", view });
-  assert.equal(resume.existingResult(episode(1), CONTEXT)?.status, "skipped-exists");
-  assert.equal(resume.needsNetwork(episode(1), CONTEXT), false);
-  const skipped = await resume.download(episode(1), CONTEXT);
+  const subject = downloader({ fetch: fakeFetch(routes, log), saved, thumbnail: "both", view });
+  // the file at its target is the episode: skipped, no request
+  assert.equal(subject.existingResult(episode(1), CONTEXT)?.status, "skipped-exists");
+  assert.equal(subject.needsNetwork(episode(1), CONTEXT), false);
+  const skipped = await subject.download(episode(1), CONTEXT);
   assert.deepEqual([skipped.status, skipped.message, skipped.downloadId], ["skipped-exists", "already exists: Test Series - Episode 01.mp4", 7]);
   assert.deepEqual(log, []); // no request
-  assert.equal((await resume.download(episode(2), CONTEXT)).status, "done");
-  assert.deepEqual(conflicts, ["uniquify", "uniquify"]); // the video and its cover file: never a file overwritten
-
-  // with overwrite: downloaded again in full, both files replaced under their own names
-  log.length = 0;
-  saved.length = 0;
-  conflicts.length = 0;
-  const again = downloader({ fetch: fakeFetch(routes, log), saved, conflicts, thumbnail: "both", view, overwrite: true });
-  assert.equal(again.existingResult(episode(1), CONTEXT), null);
-  assert.equal(again.needsNetwork(episode(1), CONTEXT), true);
-  const result = await again.download(episode(1), CONTEXT);
+  // a new one: its video and its cover file, each saved under its own name
+  assert.equal(subject.existingResult(episode(2), CONTEXT), null);
+  assert.equal(subject.needsNetwork(episode(2), CONTEXT), true);
+  const result = await subject.download(episode(2), CONTEXT);
   assert.equal(result.status, "done");
-  assert.equal(result.message, "saved Test Series - Episode 01.mp4 (0.1 MiB) + cover embedded + file");
-  assert.equal(result.path, `/home/me/Downloads/${target}`);
-  assert.deepEqual(saved, [target, `${folder}/Test Series - Episode 01.jpg`]);
-  assert.deepEqual(conflicts, ["overwrite", "overwrite"]);
+  assert.equal(result.message, "saved Test Series - Episode 02.mp4 (0.1 MiB) + cover embedded + file");
+  // the file Chrome saved, as the records keep it (the resume compares it with Chrome's history): the video's, never the cover file's
+  assert.equal(result.path, `/home/me/Downloads/${folder}/Test Series - Episode 02.mp4`);
+  assert.equal(result.downloadId, 1);
+  assert.deepEqual(saved, [`${folder}/Test Series - Episode 02.mp4`, `${folder}/Test Series - Episode 02.jpg`]);
   assert.equal(log.length, 2); // the video and the one cover GET
-  // a locked episode: still skipped, no request
-  assert.equal(again.needsNetwork(episode(3, { locked: true }), CONTEXT), false);
-  assert.equal((await again.download(episode(3, { locked: true }), CONTEXT)).status, "skipped-locked");
+  // a locked episode: skipped, no request
+  assert.equal(subject.needsNetwork(episode(3, { locked: true }), CONTEXT), false);
+  assert.equal((await subject.download(episode(3, { locked: true }), CONTEXT)).status, "skipped-locked");
   assert.equal(log.length, 2);
 });
 
-test("saveFile hands Chrome its conflict action: `uniquify` by default — never a file overwritten —, `overwrite` only when asked (3.0.0: See episodes' downloads again)", async () => {
+test("saveFile hands Chrome `uniquify` — never a file overwritten, the same name twice gets Chrome's ` (1)` — whatever it saves, and gives back what Chrome saved", async () => {
   /** @type {Record<string, unknown>[]} */
   const asked = [];
   const api = /** @type {typeof chrome.downloads} */ (
@@ -930,15 +858,15 @@ test("saveFile hands Chrome its conflict action: `uniquify` by default — never
     })
   );
   const bytes = new Uint8Array([0, 0, 0, 8, 0x66, 0x72, 0x65, 0x65]);
-  const first = await saveFile(bytes, "video/mp4", "DramaFetch/S [1]/S - Episode 01.mp4", undefined, api);
-  await saveFile(bytes, "video/mp4", "DramaFetch/S [1]/S - Episode 01.mp4", "overwrite", api);
-  await saveFile(bytes, "image/jpeg", "DramaFetch/S [1]/S - Episode 01.jpg", "uniquify", api);
+  const first = await saveFile(bytes, "video/mp4", "DramaFetch/S [1]/S - Episode 01.mp4", api);
+  await saveFile(bytes, "video/mp4", "DramaFetch/S [1]/S - Episode 01.mp4", api);
+  await saveFile(bytes, "image/jpeg", "DramaFetch/S [1]/S - Episode 01.jpg", api);
   assert.equal(first.filename, "/home/me/Downloads/E1.mp4");
   assert.deepEqual(
     asked.map((options) => [options["filename"], options["conflictAction"], options["saveAs"]]),
     [
       ["DramaFetch/S [1]/S - Episode 01.mp4", "uniquify", false],
-      ["DramaFetch/S [1]/S - Episode 01.mp4", "overwrite", false],
+      ["DramaFetch/S [1]/S - Episode 01.mp4", "uniquify", false],
       ["DramaFetch/S [1]/S - Episode 01.jpg", "uniquify", false],
     ],
   );
@@ -1453,16 +1381,32 @@ test("3.0.1: a selection whose fresh list lacks a wanted number gives that numbe
 });
 
 /**
- * A fake `chrome` with the tabs and the session storage the discovery's tab handling uses.
- * @param {{completeAfter?: number}} [options] how many `tabs.get` calls see the tab still loading
+ * A fake `chrome` with the tabs and the session storage the discovery's tab handling uses, and
+ * `chrome.scripting.executeScript`, which records each injection as it was given (`injections`) and
+ * answers as the injected function would: a list page for `fetchInPage`, the page's text for
+ * `pageTextInPage`, nothing for `scrollInPage`.
+ * @param {{completeAfter?: number, tab?: {url?: string, pendingUrl?: string} | null}} [options]
+ *   `completeAfter`: how many `tabs.get` calls see the tab still loading; `tab`: the addresses
+ *   `tabs.get` reports (by default `about:blank`), or null for a tab that is gone — `tabs.get`
+ *   then rejects, as Chrome does
  */
 function fakeChrome(options = {}) {
   /** @type {Map<string, unknown>} */
   const session = new Map();
   /** @type {unknown[][]} */
   const calls = [];
+  /** @type {unknown[]} */
+  const injections = [];
   let gets = 0;
   const chrome = {
+    scripting: {
+      /** @param {chrome.scripting.ScriptInjection<unknown[], unknown>} injection */
+      executeScript: async (injection) => {
+        injections.push(injection);
+        const result = injection.func === fetchInPage ? { statusCode: 0, itemList: [] } : injection.func === pageTextInPage ? "the page's text" : undefined;
+        return [{ frameId: 0, result }];
+      },
+    },
     tabs: {
       create: async (/** @type {{url: string, active: boolean}} */ props) => {
         calls.push(["create", props.url, props.active]);
@@ -1475,7 +1419,8 @@ function fakeChrome(options = {}) {
       get: async (/** @type {number} */ id) => {
         gets += 1;
         calls.push(["get", id]);
-        return { id, url: "about:blank", status: gets > (options.completeAfter ?? 0) ? "complete" : "loading" };
+        if (options.tab === null) throw new Error(`No tab with id: ${id}.`);
+        return { id, url: "about:blank", ...options.tab, status: gets > (options.completeAfter ?? 0) ? "complete" : "loading" };
       },
       remove: async (/** @type {number} */ id) => {
         calls.push(["remove", id]);
@@ -1494,10 +1439,10 @@ function fakeChrome(options = {}) {
     },
   };
   Object.assign(globalThis, { chrome });
-  return { session, calls, restore: () => Reflect.deleteProperty(globalThis, "chrome") };
+  return { session, calls, injections, restore: () => Reflect.deleteProperty(globalThis, "chrome") };
 }
 
-test("the discovery tab: muted, sent on only once about:blank has loaded, recorded until it is closed", async () => {
+test("the discovery tab: muted, sent on only once about:blank has loaded, recorded until it is closed; its address read as Chrome reports it — the committed one, else the one still loading, else nothing — and a closed tab's error passed on, never swallowed (the discovery stops on it)", async () => {
   const fake = fakeChrome({ completeAfter: 2 });
   try {
     /** @type {number[]} */
@@ -1507,6 +1452,9 @@ test("the discovery tab: muted, sent on only once about:blank has loaded, record
     assert.deepEqual(fake.calls.slice(0, 2), [["create", "about:blank", false], ["update", 42, { muted: true }]]);
     assert.deepEqual(fake.calls.filter((call) => call[0] === "get").length, 3); // loading, loading, complete
     assert.deepEqual(polls, [0.02, 0.02]);
+    // the address the discovery reads every round, to spot TikTok's login page and a closed tab
+    assert.equal(await browser.tabUrl(42), "about:blank");
+    assert.deepEqual(fake.calls.at(-1), ["get", 42]);
     assert.deepEqual(fake.session.get(DISCOVERY_TAB_KEY), { tabId: 42, appTabId: 7 });
     await browser.closeTab(42);
     assert.deepEqual(fake.calls.at(-1), ["remove", 42]);
@@ -1525,64 +1473,48 @@ test("the discovery tab: muted, sent on only once about:blank has loaded, record
   } finally {
     fake.restore();
   }
+  const login = "https://www.tiktok.com/login?redirect_url=%2Fshortdrama";
+  const series = `https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/1`;
+  /** @type {[{url?: string, pendingUrl?: string}, string][]} what Chrome reports of the tab → what the discovery reads */
+  const reports = [
+    [{ url: "", pendingUrl: login }, login], // still loading: the address it is going to
+    [{ url: series, pendingUrl: login }, series], // the committed address first
+    [{ url: "" }, ""],
+  ];
+  for (const [tab, expected] of reports) {
+    const reported = fakeChrome({ tab });
+    try {
+      assert.equal(await chromeBrowser(7).tabUrl(42), expected, JSON.stringify(tab));
+      assert.deepEqual(reported.calls, [["get", 42]]);
+    } finally {
+      reported.restore();
+    }
+  }
+  const closed = fakeChrome({ tab: null }); // the user closed it: Chrome knows no such tab
+  try {
+    await assert.rejects(chromeBrowser(7).tabUrl(42), /No tab with id: 42\./);
+  } finally {
+    closed.restore();
+  }
 });
 
-test("the list's thumbnails: one request at a time, only while allowed, only rows in view, each kept by item id", async () => {
-  /** @type {string[]} */
-  const log = [];
-  let inFlight = 0;
-  let most = 0;
-  const fetchFn = /** @type {typeof fetch} */ (
-    async (input, init) => {
-      log.push(String(input));
-      assert.equal(init?.redirect, "manual");
-      inFlight += 1;
-      most = Math.max(most, inFlight);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      inFlight -= 1;
-      if (String(input).includes("/moved/")) return opaqueRedirect();
-      return new Response(COVER, { headers: { "content-type": "image/jpeg" } });
-    }
-  );
-  let allowed = false;
-  let pauses = 0;
-  /** @type {string[]} */
-  const shown = [];
-  const loader = new CoverLoader({
-    hostPatterns: ["https://*.tiktokcdn.com/*"],
-    allowed: async () => allowed,
-    pause: async () => {
-      pauses += 1;
-    },
-    onCover: (itemId, url) => void shown.push(`${itemId} ${url}`),
-    fetch: fetchFn,
-    objectUrl: (blob) => `blob:${blob.type}:${blob.size}`,
-  });
-  const list = [
-    ...[1, 2, 3].map((n) => ({ itemId: `i${n}`, coverUrl: `https://p16.tiktokcdn.com/c/${n}.jpeg` })),
-    { itemId: "i4", coverUrl: "https://evil.example.com/4.jpeg" }, // never requested, no pause either
-    { itemId: "i5", coverUrl: "https://p16.tiktokcdn.com/moved/5.jpeg" }, // a redirect: not followed
-    { itemId: "i6", coverUrl: null },
-  ];
-  loader.show(list); // nothing is wanted before its row is in view
-  await loader.idle();
-  assert.deepEqual(log, []);
-  for (const { itemId } of list) loader.setVisible(itemId, true); // every row in view
-  await loader.idle(); // a job runs or waits, or a cooldown: nothing goes out
-  assert.deepEqual(log, []);
-  allowed = true;
-  loader.resume();
-  await loader.idle();
-  assert.equal(most, 1);
-  assert.deepEqual(log, [1, 2, 3].map((n) => `https://p16.tiktokcdn.com/c/${n}.jpeg`).concat("https://p16.tiktokcdn.com/moved/5.jpeg"));
-  assert.equal(pauses, 4);
-  assert.deepEqual(shown, ["i1 blob:image/jpeg:600", "i2 blob:image/jpeg:600", "i3 blob:image/jpeg:600"]);
-  assert.equal(loader.urlOf("i2"), "blob:image/jpeg:600");
-  assert.equal(loader.urlOf("i5"), null);
-  loader.show(list); // the list shown again: every thumbnail asked for once already
-  for (const { itemId } of list) loader.setVisible(itemId, true);
-  await loader.idle();
-  assert.equal(log.length, 4);
+test("what the discovery injects into the tab it opened — and nothing else: the list's pages read by the page's own `fetch` in the MAIN world (its address and timeout as given), the scroll and the page's text in the ISOLATED world (Chrome's default: no world given), each the discovery's own function, in that tab only", async () => {
+  const fake = fakeChrome();
+  try {
+    const browser = chromeBrowser(7);
+    const url = `https://www.tiktok.com/api/drama/episode/item_list/?dramaID=${SERIES_ID}&count=30&cursor=0`;
+    assert.deepEqual(await browser.fetchInTab(42, url, 45_000), { statusCode: 0, itemList: [] });
+    await browser.scrollTab(42);
+    assert.equal(await browser.pageText(42), "the page's text");
+    assert.deepEqual(fake.injections, [
+      { target: { tabId: 42 }, world: "MAIN", func: fetchInPage, args: [url, 45_000] },
+      { target: { tabId: 42 }, func: scrollInPage },
+      { target: { tabId: 42 }, func: pageTextInPage },
+    ]);
+    assert.deepEqual(fake.calls, []); // no tab opened, moved or closed for it
+  } finally {
+    fake.restore();
+  }
 });
 
 test("the app tab is never discarded while a job runs or waits, discardable again once nothing does", async () => {
@@ -1791,7 +1723,7 @@ let pages = 0;
 
 /**
  * app.js loaded over a fake document and a fake `chrome` (the English messages, the storage seeded
- * with `options.storage` — a cooldown, a library — else empty, the engine lock free): a FRESH
+ * with `options.storage` — a cooldown, a series' records — else empty, the engine lock free): a FRESH
  * instance each time (a module URL of its own, so `main()` runs again, over these fakes), awaited
  * to its end; `module` is that instance's exports. `hold()` then makes the next job's first
  * `chrome.tabs.getCurrent` never answer, so that the job stays running and makes no request to
@@ -1807,13 +1739,13 @@ let pages = 0;
  * page is the test harness' copy (`dramafetch_test` in its manifest) with those test settings —
  * a job then runs without Chrome's 10 s between two file checks when they say so — and keeps the
  * journal of finished jobs (`module.journal()`, DramaFetch 2.0.0: the history's entries, in memory
- * only; outside test mode nothing records jobs). With `options.session`,
- * `chrome.storage.session` holds those keys from the start (the browser session's memory: the
- * library's covers, say) and keeps what the page writes; without it, it holds nothing. With
+ * only; outside test mode nothing records jobs). `chrome.storage.session` holds nothing: what the
+ * page writes there is dropped. With
  * `options.language` `es`, Chrome's UI is Spanish: the Spanish messages, `getUILanguage()` `es-419`.
  * `tick()` runs the page's one-second tick once (its `setInterval`, never armed here).
- * With `options.refuseRemove`, `chrome.storage.local` refuses every removal (a full disk).
- * @param {{storage?: Record<string, unknown>, lockTaken?: boolean, search?: string, testSettings?: Record<string, unknown>, session?: Record<string, unknown>, language?: "en" | "es", refuseRemove?: boolean}} [options]
+ * With `options.refuseRemove`, `chrome.storage.local` refuses every removal (a full disk); `removed`
+ * is every key the page asked it to remove, in order, refused or not.
+ * @param {{storage?: Record<string, unknown>, lockTaken?: boolean, search?: string, testSettings?: Record<string, unknown>, language?: "en" | "es", refuseRemove?: boolean}} [options]
  */
 async function fakePage(options = {}) {
   const language = options.language ?? "en";
@@ -1846,8 +1778,8 @@ async function fakePage(options = {}) {
   const replaced = [];
   /** @type {unknown[]} every key the page asked `chrome.storage.session` for */
   const sessionKeys = [];
-  /** @type {Map<string, unknown> | null} chrome.storage.session, when the test seeds it */
-  const sessionStore = options.session === undefined ? null : new Map(Object.entries(options.session));
+  /** @type {string[]} every key the page asked `chrome.storage.local` to remove */
+  const removed = [];
   const address = { search: options.search ?? "", pathname: "/src/app/app.html" };
   /** @type {(() => void)[]} the page's `setInterval` callbacks (its one-second tick) */
   const intervals = [];
@@ -1903,26 +1835,21 @@ async function fakePage(options = {}) {
         set: async (items) => {
           for (const [key, value] of Object.entries(items)) local.set(key, value);
         },
-        /** @param {string} key */
-        remove: async (key) => {
+        /** @param {string | string[]} keys */
+        remove: async (keys) => {
+          const asked = Array.isArray(keys) ? keys : [keys];
+          removed.push(...asked);
           if (options.refuseRemove) throw new Error(REFUSED);
-          local.delete(key);
+          for (const key of asked) local.delete(key);
         },
       },
       session: {
         get: async (/** @type {unknown} */ keys) => {
           sessionKeys.push(keys);
-          /** @type {Record<string, unknown>} */
-          const found = {};
-          if (sessionStore === null) return found;
-          for (const key of Array.isArray(keys) ? keys : [keys]) if (typeof key === "string" && sessionStore.has(key)) found[key] = sessionStore.get(key);
-          return found;
+          return {};
         },
-        /** @param {Record<string, unknown>} items */
-        set: async (items) => {
-          if (sessionStore !== null) for (const [key, value] of Object.entries(items)) sessionStore.set(key, value);
-        },
-        remove: async (/** @type {string} */ key) => void sessionStore?.delete(key),
+        set: async () => undefined,
+        remove: async () => undefined,
       },
       onChanged: {
         /** @param {(changes: Record<string, unknown>, area: string) => void} listener */
@@ -2001,13 +1928,6 @@ async function fakePage(options = {}) {
       observe() {}
       disconnect() {}
     },
-    // the library's covers are watched as the cards come into view: nothing is ever in view here,
-    // so no cover is ever requested
-    IntersectionObserver: class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    },
     CSS: { escape: (/** @type {string} */ value) => value.replace(/["\\]/g, "\\$&") },
     // the page's one-second tick: never armed, so that the test process can exit — `tick()` runs it
     setInterval: (/** @type {() => void} */ callback) => {
@@ -2016,7 +1936,7 @@ async function fakePage(options = {}) {
     },
   });
   const restore = () => {
-    for (const name of ["document", "chrome", "location", "history", "MutationObserver", "IntersectionObserver", "CSS", "dramafetchJournal"]) Reflect.deleteProperty(globalThis, name);
+    for (const name of ["document", "chrome", "location", "history", "MutationObserver", "CSS", "dramafetchJournal"]) Reflect.deleteProperty(globalThis, name);
     Object.assign(globalThis, { setInterval: setIntervalBefore });
     if (navigatorBefore !== undefined) Object.defineProperty(globalThis, "navigator", navigatorBefore);
   };
@@ -2046,15 +1966,13 @@ async function fakePage(options = {}) {
     downloads,
     replaced,
     sessionKeys,
+    removed,
     /**
-     * `chrome.storage.local` changed `key` (the page reads it again): the cooldown ending, say — or,
-     * with `area` `session`, the browser session's memory (a TikTok tab's favorites address the
-     * worker kept, say).
+     * `chrome.storage.local` changed `key` (the page reads it again): the cooldown ending, say.
      * @param {string} key
-     * @param {"local" | "session"} [area]
      */
-    storageChanged: (key, area = "local") => {
-      for (const listener of changeListeners) listener({ [key]: {} }, area);
+    storageChanged: (key) => {
+      for (const listener of changeListeners) listener({ [key]: {} }, "local");
     },
     hold: () => {
       holding = true;
@@ -2185,6 +2103,29 @@ const dramaRow = (seriesId, name = null) => (name === null ? `${seriesId} · nam
  * @returns {string}
  */
 const whatRow = (what, seriesId, name = null) => `${what} — ${dramaRow(seriesId, name)}`;
+
+/**
+ * A series' stored progress: `numbers` saved with the downloader's message (the cover embedded),
+ * found complete with `complete` episodes (at `completeAt`, seconds since the epoch: a fixed time by
+ * default); the drama named `name` (`A drama` by default).
+ * @param {string} seriesId
+ * @param {number[]} numbers
+ * @param {{complete?: number, completeAt?: number, name?: string}} [options]
+ */
+function savedState(seriesId, numbers, options = {}) {
+  const state = newState(seriesId, options.name ?? "A drama");
+  for (const number of numbers) {
+    const message = `saved E${number}.mp4 (0.1 MiB) + cover embedded`;
+    record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message, downloadId: number }, { exists: () => true, now: 1_800_000_000 });
+  }
+  if (options.complete !== undefined) markComplete(state, options.completeAt ?? 1_800_000_100, options.complete);
+  return JSON.parse(JSON.stringify(state));
+}
+
+/** @param {Awaited<ReturnType<typeof fakePage>>} page @param {number} [rounds] */
+async function settled(page, rounds = 12) {
+  for (let turn = 0; turn < rounds; turn += 1) await page.turn();
+}
 
 test("the page: a series handed over (the popup's Download this series) is downloaded — the batch job a paste of it queues, no checkbox, the box left alone —, never twice; the engine's tab answers with its tab; a read-only tab stays silent", async () => {
   const page = await fakePage();
@@ -2521,155 +2462,6 @@ test("the page: a paste into the box downloads what was pasted — ONE batch job
   }
 });
 
-test("See episodes: an episode a download found encrypted (DRM) shows as locked, with what tries it again there, and Download all available takes exactly the episodes the list counts as available — none: disabled", async () => {
-  /**
-   * See episodes over the five-episode series (E05 paid and locked) whose stored records hold a
-   * DRM verdict for `drm`; returns the page, the list drawn.
-   * @param {number[]} drm
-   * @param {"en" | "es"} [language]
-   */
-  const seeEpisodes = async (drm, language = "en") => {
-    const state = newState(SERIES_ID, "Test Series");
-    for (const number of drm) {
-      const result = { episode: episode(number), status: /** @type {const} */ ("failed-unavailable"), path: null, message: DRM_MESSAGE };
-      record(state, result, { exists: () => true, now: 1_800_000_000 });
-    }
-    const page = await fakePage({ storage: { [`series:${SERIES_ID}`]: state }, language });
-    const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
-    /** @type {import("../src/app/app.js").Job} */
-    const job = { id: 99, kind: "load", label: `List series ${SERIES_ID}`, refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false };
-    const engine = page.module.buildEngine(job, { pauses: [], inputs: [], taking: true });
-    engine.sleep = async () => undefined;
-    engine.discover = async () => series([episode(1), episode(2), episode(3), episode(4), episode(5, { locked: true })]);
-    engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
-      /** @type {unknown} */ ({ exists: () => false, refresh: async () => undefined, completedAt: () => null, remember() {} })
-    );
-    assert.equal(await page.module.runLoad(job, engine, {}), null);
-    return page;
-  };
-  /**
-   * Each row of the list drawn: [number, data-locked, ticked, its hints].
-   * @param {Awaited<ReturnType<typeof fakePage>>} page
-   */
-  const rows = (page) =>
-    page
-      .element("episode-table")
-      .querySelector("tbody")
-      ?.children.map((row) => [
-        row.getAttribute("data-number"),
-        row.children[0]?.children[0]?.getAttribute("data-locked"),
-        row.children[0]?.children[0]?.checked,
-        (row.children[6]?.children ?? []).filter((child) => child.className === "hints").map((child) => child.textContent),
-      ]);
-  const hint = "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; tick it and press “Download selected” to try again";
-  let page = await seeEpisodes([2]);
-  try {
-    assert.equal(page.element("series-meta").textContent, "5 episodes listed, 3 available (free or unlocked by your account), 0 already on disk.");
-    assert.deepEqual(rows(page), [
-      ["1", "0", true, []],
-      ["2", "1", false, [hint]], // never the box's checkbox: See episodes' own buttons do not read it
-      ["3", "0", true, []],
-      ["4", "0", true, []],
-      ["5", "1", false, ["no play address"]],
-    ]);
-    assert.equal(page.element("download-available-button").disabled, false);
-    page.hold(); // the job's tabs.getCurrent never answers: it runs, and makes no request
-    page.element("download-available-button").fire("click");
-    await page.turn();
-    // the three the list counts as available, never the episode the engine would skip again
-    assert.deepEqual(
-      page.module.queuedJobs().map((job) => [job.kind, job.numbers, job.includeLocked]),
-      [["selection", [1, 3, 4], false]],
-    );
-  } finally {
-    page.restore();
-  }
-  page = await seeEpisodes([1, 2, 3, 4]);
-  try {
-    assert.equal(page.element("series-meta").textContent, "5 episodes listed, 0 available (free or unlocked by your account), 0 already on disk.");
-    assert.equal(page.element("download-available-button").disabled, true); // no job lists the series for nothing
-    page.element("download-available-button").fire("click");
-    await page.turn();
-    assert.deepEqual(page.module.queuedJobs(), []);
-  } finally {
-    page.restore();
-  }
-  page = await seeEpisodes([2], "es");
-  try {
-    assert.deepEqual(rows(page)?.[1]?.[3], [
-      "protegido con DRM (lo detectó una ejecución anterior): DramaFetch no lo descifra; para intentarlo de nuevo, márcalo y pulsa “Descargar selección”",
-    ]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("See episodes of drama A, then of drama B: until B's list is drawn, the page acts on A's list on screen; then on B's — the list, its counts and what its buttons take change in one step", async () => {
-  const other = "7699393770256782399";
-  /**
-   * @param {string} seriesId
-   * @param {string} name
-   * @param {number[]} drm the episodes a download found encrypted
-   */
-  const records = (seriesId, name, drm) => {
-    const state = newState(seriesId, name);
-    for (const number of drm) {
-      const result = { episode: episode(number, { seriesId }), status: /** @type {const} */ ("failed-unavailable"), path: null, message: DRM_MESSAGE };
-      record(state, result, { exists: () => true, now: 1_800_000_000 });
-    }
-    return state;
-  };
-  const page = await fakePage({ storage: { [`series:${SERIES_ID}`]: records(SERIES_ID, "Series A", [2]), [`series:${other}`]: records(other, "Series B", [1, 2, 3, 4]) } });
-  try {
-    /**
-     * See episodes of `seriesId` (E05 paid and locked), Chrome's download history answering when
-     * `refresh` resolves.
-     * @param {string} seriesId
-     * @param {string} name
-     * @param {() => Promise<void>} refresh
-     */
-    const seeEpisodes = (seriesId, name, refresh) => {
-      const ref = { kind: /** @type {const} */ ("series"), seriesId, episodeHint: null, sourceUrl: seriesId };
-      /** @type {import("../src/app/app.js").Job} */
-      const job = { id: 99, kind: "load", label: `List series ${seriesId}`, refs: [ref], series: null, numbers: [], includeLocked: false, recheck: false };
-      const engine = page.module.buildEngine(job, { pauses: [], inputs: [], taking: true });
-      engine.sleep = async () => undefined;
-      const episodes = [1, 2, 3, 4].map((number) => episode(number, { seriesId })).concat([episode(5, { locked: true, seriesId })]);
-      engine.discover = async () => series(episodes, name, seriesId);
-      engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
-        /** @type {unknown} */ ({ exists: () => false, refresh, completedAt: () => null, remember() {} })
-      );
-      return page.module.runLoad(job, engine, {});
-    };
-    const shown = () => [page.element("series-title").textContent, page.element("series-meta").textContent, page.element("download-available-button").disabled];
-    assert.equal(await seeEpisodes(SERIES_ID, "Series A", async () => undefined), null);
-    const listA = ["Series A", "5 episodes listed, 3 available (free or unlocked by your account), 0 already on disk.", false];
-    assert.deepEqual(shown(), listA);
-    /** @type {() => void} */
-    let answer = () => undefined;
-    const history = new Promise((resolve) => {
-      answer = () => resolve(undefined);
-    });
-    const drawing = seeEpisodes(other, "Series B", () => /** @type {Promise<void>} */ (history));
-    for (let turns = 0; turns < 20; turns += 1) await page.turn();
-    // B listed, its list not drawn yet (Chrome's download history not answered): A's list, counts
-    // and buttons, all of a piece — Download all available takes what A's list counts
-    assert.deepEqual(shown(), listA);
-    page.hold(); // the job's tabs.getCurrent never answers: it runs, and makes no request
-    page.element("download-available-button").fire("click");
-    await page.turn();
-    assert.deepEqual(
-      page.module.queuedJobs().map((job) => [job.kind, job.refs[0]?.seriesId, job.numbers, job.includeLocked]),
-      [["selection", SERIES_ID, [1, 3, 4], false]],
-    );
-    answer();
-    assert.equal(await drawing, null);
-    assert.deepEqual(shown(), ["Series B", "5 episodes listed, 0 available (free or unlocked by your account), 0 already on disk.", true]);
-  } finally {
-    page.restore();
-  }
-});
-
 test("the page: no paste and no Enter queues anything while a cooldown is in force, after a refused write, or in a read-only tab — the paste lands in the box, the reason on the status line (a read-only tab: its banner) —; back once the cooldown ends", async () => {
   const now = Date.now() / 1000;
   const cooldown = { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now };
@@ -2781,47 +2573,6 @@ test("the page: no paste and no Enter queues anything while a cooldown is in for
   }
 });
 
-test("the page: a second See episodes for a series being listed, or waiting to be, is refused with loadAlreadyQueued and queues nothing; a download of it is no listing and queues", async () => {
-  const other = "7699393770256782399";
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary([[SERIES_ID, "Test Series", 5], [other, "Second Chance Bride", 3]]) } });
-  try {
-    const { element } = page;
-    const refused = String(page.catalog["loadAlreadyQueued"]?.message);
-    const status = element("input-status");
-    /** @param {string} seriesId */
-    const see = (seriesId) => {
-      const browse = actionOf(page, seriesId, "browse");
-      assert.ok(browse !== undefined, `See episodes on ${seriesId}`);
-      browse.fire("click");
-    };
-    page.hold(); // the job's `tabs.getCurrent` never answers: it runs, and makes no request
-    see(SERIES_ID);
-    await page.turn();
-    assert.equal(element("app-status").dataset["state"], "running");
-    assert.equal(element("progress-current").textContent, `List series ${SERIES_ID}`);
-    assert.equal(element("queue-card").hidden, true); // it left the queue when it started
-    // the same series again
-    see(SERIES_ID);
-    assert.equal(status.textContent, refused);
-    assert.equal(status.className, "status error");
-    assert.deepEqual(waitingRows(page), []);
-    // its download — the popup's "Download this series" — is no listing: queued behind it
-    status.textContent = "";
-    page.message({ type: "dramafetch:load", input: `https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/3` });
-    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID, "Test Series")]); // named by the library's title
-    // another series waits in the queue: a second See episodes for it is refused the same way
-    see(other);
-    assert.notEqual(status.textContent, refused);
-    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID, "Test Series"), whatRow("See episodes", other, "Second Chance Bride")]);
-    see(other);
-    assert.equal(status.textContent, refused);
-    assert.equal(status.className, "status error");
-    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID, "Test Series"), whatRow("See episodes", other, "Second Chance Bride")]);
-  } finally {
-    page.restore();
-  }
-});
-
 // ------------------------------------------------------- the episodes that did not download
 
 /** The fake TikTok's second series, as the page tests name it. */
@@ -2833,8 +2584,8 @@ const RECORD_LINE = "incomplete: 1 of 2 (1 downloaded) — 1 failed (2)";
 
 /**
  * A finished job's per-series record as `runRecord` makes it, its rows from `[number, status,
- * message?]` (the message defaults to `<status> <number>`); `rows: null` leaves the rows out, as
- * a listing's record has none.
+ * message?]` (the message defaults to `<status> <number>`); `rows: null` leaves the rows out (a
+ * malformed record).
  * @param {string} seriesId
  * @param {string | null} name
  * @param {[number, string, string?][] | null} rows
@@ -2884,7 +2635,7 @@ test("retryTargets: every failure row of every series, stopped ones included, as
       ]),
       seriesRecord(OTHER_ID, "Two", [[2, "done"], [1, "failed-blocked"]]),
       seriesRecord("7699393770256782388", null, []), // a failed resolve, or a series the batch never started
-      { series_id: "7699393770256782377", name: "Four", error: null, episodes: 3 }, // a listing
+      { series_id: "7699393770256782377", name: "Four", error: null, episodes: 3 }, // no rows at all: malformed, as stored data may be
       seriesRecord("7699393770256782366", "Five", [[1, "done"], [2, "skipped-exists"], [3, "skipped-locked"]]),
       null,
     ];
@@ -2897,8 +2648,8 @@ test("retryTargets: every failure row of every series, stopped ones included, as
     // what the retry queues: one selection job per series, in order, exactly those numbers, nothing else asked
     const ref = (/** @type {string} */ seriesId) => ({ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId });
     assert.deepEqual(retryJobs(targets), [
-      { kind: "selection", label: "Retry 4 of One", refs: [ref(SERIES_ID)], series: null, numbers: [2, 4, 6, 7], includeLocked: false, recheck: false },
-      { kind: "selection", label: "Retry 1 of Two", refs: [ref(OTHER_ID)], series: null, numbers: [1], includeLocked: false, recheck: false },
+      { kind: "selection", label: "Retry 4 of One", refs: [ref(SERIES_ID)], numbers: [2, 4, 6, 7], includeLocked: false, recheck: false },
+      { kind: "selection", label: "Retry 1 of Two", refs: [ref(OTHER_ID)], numbers: [1], includeLocked: false, recheck: false },
     ]);
     // a series the job never learnt the name of goes by its id
     assert.equal(retryJobs(retryTargets([seriesRecord(OTHER_ID, null, [[3, "failed"]])]))[0]?.label, `Retry 1 of ${OTHER_ID}`);
@@ -2911,11 +2662,10 @@ test("retryTargets: every failure row of every series, stopped ones included, as
 test("the page: the retry button obeys the cooldown like every download button — disabled while it is in force, back when it ends", async () => {
   const now = Date.now() / 1000;
   const cooldown = { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now };
-  const page = await fakePage({ storage: { cooldown, favoritesLibrary: storedLibrary([[SERIES_ID, "One", 2]]) } });
+  const page = await fakePage({ storage: { cooldown } });
   try {
     const { element, module } = page;
     assert.equal(element("cooldown-banner").hidden, false);
-    assert.equal(actionOf(page, SERIES_ID, "download")?.disabled, true); // a library card's Download
     // the progress card's: a job that ended under the cooldown (a 429 stop records one)
     module.renderFailed([
       seriesRecord(SERIES_ID, "One", [
@@ -2934,7 +2684,6 @@ test("the page: the retry button obeys the cooldown like every download button �
     page.storageChanged("cooldown");
     await page.turn();
     assert.equal(element("cooldown-banner").hidden, true);
-    assert.equal(actionOf(page, SERIES_ID, "download")?.disabled, false);
     assert.equal(element("retry-button").disabled, false);
   } finally {
     page.restore();
@@ -3232,7 +2981,6 @@ const BATCH_JOB = /** @type {import("../src/app/app.js").Job} */ ({
   kind: "batch",
   label: "2 series",
   refs: [],
-  series: null,
   numbers: [],
   includeLocked: false,
   recheck: false,
@@ -3289,12 +3037,11 @@ test("the page: a series whose rows all failed leaves no bare header behind when
   }
 });
 
-test("the page: once chrome.storage.local refuses a write nothing more is asked of TikTok — no listing, no thumbnail, no job — and the page says what to do", async () => {
+test("the page: once chrome.storage.local refuses a write nothing more is asked of TikTok — no listing, no job — and the page says what to do", async () => {
   const page = await fakePage();
   try {
     const { element, module, local } = page;
     const engine = module.buildEngine({ ...BATCH_JOB }, { pauses: [], inputs: [], taking: true });
-    assert.equal(await module.coversAllowed(), true);
     assert.equal(engine.unsaved?.(), null);
     const set = chrome.storage.local.set;
     Object.assign(chrome.storage.local, {
@@ -3310,7 +3057,6 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
         engine.discover({ kind: "series", seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID }),
         (error) => error instanceof StorageRefusedError && error.message === UNSAVED,
       );
-      assert.equal(await module.coversAllowed(), false); // no thumbnail either
       // the popup's "Download this series": nothing queued, the page says why and what to do
       const finished = element("app-status").dataset["finished"];
       page.message({ type: "dramafetch:load", input: SERIES_ID });
@@ -3318,9 +3064,7 @@ test("the page: once chrome.storage.local refuses a write nothing more is asked 
       assert.equal(element("input-status").textContent, `DramaFetch stopped: ${UNSAVED}. Chrome could not write to its profile folder — usually its disk is full. Free some space, restart Chrome and run again: what is already saved is skipped.`);
       assert.deepEqual(waitingRows(page), []);
       assert.equal(element("app-status").dataset["finished"], finished);
-      for (const id of ["download-available-button", "download-selected-button", "retry-button"]) {
-        assert.equal(element(id).disabled, true, id);
-      }
+      assert.equal(element("retry-button").disabled, true);
       // a paste: nothing queued either — it lands in the box, the same advice on the status line
       element("input-status").className = "";
       assert.equal(paste(page, SERIES_ID), false);
@@ -3399,7 +3143,6 @@ test("the page: a cooldown the storage refuses is a refused write — the job's 
       // the cooldown lifted and writes working again: the noted refusal alone still keeps the page from asking anything
       Object.assign(chrome.storage.local, { set });
       await clearCooldown(engine.cooldownStore);
-      assert.equal((await module.coversAllowed()), false);
       page.message({ type: "dramafetch:load", input: SERIES_ID });
       for (let turns = 0; turns < 20 && page.element("input-status").className !== "status error"; turns += 1) await page.turn();
       assert.deepEqual(waitingRows(page), []);
@@ -3486,14 +3229,14 @@ function reportRows() {
   ];
 }
 
-test("the page: at a job's end with failures the report is saved once under DramaFetch/reports, named and parseable; nothing for a listing or a clean job", async () => {
+test("the page: at a job's end with failures the report is saved once under DramaFetch/reports, named and parseable; nothing for a job that produced no run or a clean job", async () => {
   const page = await fakePage();
   try {
     const { element, module, downloads } = page;
     assert.equal(element("setting-report").checked, true); // the setting, on by default
     assert.equal(element("report-button").disabled, true);
     const before = new Date();
-    await module.reportJobEnd({ kind: "selection", label: "4 episodes of Test Series" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", reportRows())], TRACES.of);
+    await module.reportJobEnd({ kind: "selection", label: "Retry 4 of Test Series" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", reportRows())], TRACES.of);
     assert.equal(downloads.length, 1);
     const [saved] = downloads;
     assert.ok(saved !== undefined);
@@ -3513,7 +3256,7 @@ test("the page: at a job's end with failures the report is saved once under Dram
     assert.equal(report.test_mode, false);
     assert.deepEqual(report.job, {
       kind: "selection",
-      label: "4 episodes of Test Series",
+      label: "Retry 4 of Test Series",
       started_at: OUTCOME.startedAt,
       finished_at: OUTCOME.finishedAt,
       error: null,
@@ -3600,8 +3343,7 @@ test("the page: at a job's end with failures the report is saved once under Dram
     assert.equal(downloads.length, 2);
     assert.equal(downloads[1]?.filename, saved.filename);
     assert.deepEqual(JSON.parse(/** @type {string} */ (downloads[1]?.text)), report);
-    // a listing never has a report, nor a job that produced no run; the button goes back to disabled
-    await module.reportJobEnd({ kind: "load", label: "List series" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", reportRows())], TRACES.of);
+    // a job that produced no run has no report; the button goes back to disabled
     await module.reportJobEnd({ kind: "batch", label: "2 series" }, OUTCOME, null, TRACES.of);
     assert.equal(downloads.length, 2);
     assert.equal(element("report-button").disabled, true);
@@ -3664,462 +3406,6 @@ test("the page: with the report setting off nothing is saved at a job's end, and
   }
 });
 
-// ------------------------------------------------------------- the user's TikTok favorites
-
-/** The user's TikTok tab that showed its favorites list, and that list's own first request. */
-const FAVORITES_TAB = 42;
-const FAVORITES_TEMPLATE =
-  "https://www.tiktok.com/api/user/favorite/drama_list/?WebIdLastTime=1794300000&aid=1988&count=19&cursor=0&X-Bogus=DFSzswVOxQ";
-/** @type {Record<string, unknown>} the anonymized capture: three dramas, two of the same title */
-const FAVORITES_CAPTURE = JSON.parse(readFileSync(new URL("../../tests/fixtures/drama_list_page.json", import.meta.url), "utf8"));
-const LIGHTHOUSE = "7712345678901234561";
-const SNOW_A = "7712345678901234562";
-const SNOW_B = "7712345678901234563";
-const PAPER = "7712345678901234564";
-const MOON = "7712345678901234565";
-
-/**
- * The favorites list TikTok serves the tab, by cursor: the capture's page, then a last one.
- * @returns {Record<string, unknown>}
- */
-function favoritesPages() {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  /** @param {string} seriesId @param {string} title @param {number} episodes @param {string} seconds */
-  const item = (seriesId, title, episodes, seconds) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: seconds });
-  return {
-    "0": FAVORITES_CAPTURE,
-    "1794351568": { ...FAVORITES_CAPTURE, cursor: "1794350100", hasMore: false, total: "5", dramaList: [item(PAPER, "Paper Crowns", 30, "1500"), item(MOON, "Moonlight Over the Harbor", 12, "")] },
-  };
-}
-
-/**
- * The user's TikTok tab on the page's fake chrome: `tabs.get` (its address: the profile, or
- * `options.tabUrl` — TikTok's login page, say), `scripting.executeScript` (the list's pages by
- * cursor in the MAIN world, its text in the ISOLATED world), and `storage.session`, where the
- * worker keeps the tab's favorites address (`remember(at)`) with the `@handle` of the page that
- * asked for it — the tab's address then (`profile`: another one when given).
- * @param {{pages?: Record<string, unknown>, tabUrl?: string}} [options]
- */
-function favoritesTab(options = {}) {
-  const pages = options.pages ?? favoritesPages();
-  /** @type {string[]} the URLs fetched from inside the tab */
-  const fetched = [];
-  /** @type {Map<string, unknown>} */
-  const session = new Map();
-  const fake = /** @type {Record<string, Record<string, unknown>>} */ (/** @type {unknown} */ (globalThis.chrome));
-  const tabUrl = options.tabUrl ?? "https://www.tiktok.com/@invented_viewer";
-  Object.assign(fake["tabs"] ?? {}, {
-    get: async (/** @type {number} */ tabId) => ({ id: tabId, index: 0, windowId: 1, active: false, url: tabUrl }),
-  });
-  fake["scripting"] = {
-    executeScript: async (/** @type {chrome.scripting.ScriptInjection<unknown[], unknown>} */ injection) => {
-      if (injection.world !== "MAIN") return [{ frameId: 0, result: "Invented Viewer" }];
-      const [url] = /** @type {[string]} */ (injection.args);
-      fetched.push(url);
-      const cursor = /[?&]cursor=([^&]*)/.exec(url)?.[1] ?? "";
-      return [{ frameId: 0, result: JSON.parse(JSON.stringify(pages[cursor] ?? { __dramafetch_status: 404, __dramafetch_text: "" })) }];
-    },
-  };
-  fake["storage"] = {
-    ...fake["storage"],
-    session: {
-      get: async (/** @type {string} */ key) => (session.has(key) ? { [key]: session.get(key) } : {}),
-      set: async (/** @type {Record<string, unknown>} */ items) => {
-        for (const [key, value] of Object.entries(items)) session.set(key, value);
-      },
-      remove: async (/** @type {string} */ key) => void session.delete(key),
-    },
-  };
-  return {
-    fetched,
-    /** the browser session's memory (`chrome.storage.session`): the favorites address, the library's covers */
-    session,
-    /**
-     * @param {number} at when the tab's own drama_list request completed (seconds)
-     * @param {string | null} [profile] whose list it reads, as the worker recorded it: the tab's address's handle by default
-     */
-    remember: (at, profile = profileHandleOf(tabUrl)) => session.set(`favoritesTemplate:${FAVORITES_TAB}`, { url: FAVORITES_TEMPLATE, at, profile }),
-  };
-}
-
-/**
- * A job's engine as the page builds it, with the pauses recorded instead of slept, the rng at its
- * floor, a fake listing of a series (what it was asked to list) and a view of Chrome's downloads
- * that knows no file.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {import("../src/app/app.js").Job} job
- */
-function favoritesEngine(page, job) {
-  const engine = page.module.buildEngine(job, { pauses: [], inputs: [], taking: true });
-  /** @type {number[]} */
-  const pauses = [];
-  /** @type {string[]} */
-  const listed = [];
-  engine.sleep = async (seconds) => void pauses.push(seconds);
-  engine.rng = { uniform: (low) => low };
-  engine.discover = async (ref) => {
-    listed.push(ref.seriesId);
-    /** @param {number} number */
-    const plain = (number) => makeEpisode({ number, itemId: `${ref.seriesId.slice(-4)}0${number}`, title: `Episode ${number}`, seriesId: ref.seriesId, durationS: 3, coverUrl: null, raw: {} });
-    return series([plain(1), plain(2), plain(3)], `Series ${ref.seriesId}`, ref.seriesId);
-  };
-  engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
-    /** @type {unknown} */ ({ exists: () => false, refresh: async () => undefined, completedAt: () => null, remember() {} })
-  );
-  return { engine, pauses, listed };
-}
-
-/**
- * A List favorites job as the page queues it (the popup's hand-over, **Update from TikTok**).
- * @returns {import("../src/app/app.js").Job}
- */
-const favoritesJob = () => ({ id: 1, kind: "favorites", label: "favorites", refs: [], series: null, numbers: [], includeLocked: false, recheck: false, favoritesTab: FAVORITES_TAB });
-
-/**
- * An element and everything appended under it, depth first.
- * @param {FakeElement} element
- * @returns {FakeElement[]}
- */
-const descendants = (element) => [element, ...element.children.flatMap(descendants)];
-
-/**
- * The part of `element` (itself or below it) whose class list holds `className`.
- * @param {FakeElement} element
- * @param {string} className
- * @returns {FakeElement | undefined}
- */
-const partOf = (element, className) => descendants(element).find((part) => ` ${part.className} `.includes(` ${className} `));
-
-/**
- * The library's cards the grid shows (1.5.0's panel rows, on the 1.6.0 card grid): `[series id,
- * title, episodes and length, state, ticked, shown]` — the state the card's `data-status` carries
- * (3.0.0: `queued`, `running` or `idle`, from the jobs alone), `shown` true for every card drawn:
- * a drama the search leaves out has no card at all.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- */
-const favoriteRows = (page) =>
-  page.element("favorites-grid").children.map((card) => [
-    card.getAttribute("data-series-id"),
-    partOf(card, "favorite-title")?.textContent,
-    partOf(card, "favorite-meta")?.textContent,
-    card.getAttribute("data-status"),
-    descendants(card).find((part) => part.tagName === "INPUT")?.checked ?? false,
-    true,
-  ]);
-
-/**
- * A drama's tick in the library's grid, when its card is drawn.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- * @returns {FakeElement | undefined}
- */
-const tickOf = (page, seriesId) => {
-  const card = page.element("favorites-grid").children.find((article) => article.getAttribute("data-series-id") === seriesId);
-  return card === undefined ? undefined : descendants(card).find((part) => part.tagName === "INPUT");
-};
-
-test("the page: List favorites reads every page of the tab's list after a pause each, fills the panel as pages arrive — episodes and length, no status from the records (3.0.0) —, filters and selects the shown ones, with nothing downloaded until asked; nothing asked of TikTok without the tab's favorites address", async () => {
-  const complete = newState(LIGHTHOUSE, "The Lighthouse Keeper's Promise");
-  const partly = newState(SNOW_B, "Snowfall in Two Cities");
-  for (const [state, numbers] of /** @type {[import("../src/lib/state.js").SeriesState, number[]][]} */ ([[complete, Array.from({ length: 60 }, (_, index) => index + 1)], [partly, [1]]])) {
-    for (const number of numbers) {
-      record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: "done", downloadId: number }, { exists: () => true, now: 1_800_000_000 });
-    }
-  }
-  markComplete(complete, 1_800_000_100, 60); // a whole-series run saved all 60 the list names
-  const page = await fakePage({ storage: { [`series:${LIGHTHOUSE}`]: complete, [`series:${SNOW_B}`]: partly } });
-  try {
-    const { element, module } = page;
-    element("favorites-card").hidden = true; // as app.html has it (the fake's elements start shown)
-    const tab = favoritesTab();
-    const job = favoritesJob();
-    // the worker saw no favorites list in that tab: the page says what to do, and asks nothing
-    let { engine, pauses } = favoritesEngine(page, job);
-    /** @type {Record<string, unknown>} */
-    let entry = {};
-    assert.equal(await module.runFavorites(job, engine, entry), null);
-    assert.deepEqual(tab.fetched, []);
-    assert.deepEqual(pauses, []);
-    const noTemplate = String(page.catalog["favoritesNoTemplate"]?.message);
-    assert.equal(element("input-status").textContent, noTemplate);
-    assert.equal(element("input-status").className, "status error");
-    assert.equal(entry["error"], noTemplate);
-    assert.equal(element("favorites-card").hidden, true); // nothing listed: the panel stays hidden, empty
-    assert.equal(element("favorites-count").textContent, "");
-    assert.equal(element("favorites-grid").children.length, 0);
-
-    // seen: every page, each after its pause, the template with only its cursor changed
-    tab.remember(1_794_351_500);
-    ({ engine, pauses } = favoritesEngine(page, job));
-    entry = {};
-    assert.equal(await module.runFavorites(job, engine, entry), null);
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE, FAVORITES_TEMPLATE.replace("cursor=0", "cursor=1794351568")]);
-    assert.deepEqual(pauses, [0.8, 0.8]);
-    assert.equal(job.contacted, true); // the rest between jobs counts this job
-    assert.equal(element("favorites-card").hidden, false); // shown by the listing
-    for (let turns = 0; turns < 10; turns += 1) await page.turn(); // the records read
-    // one saved whole, one in part, three never run: no card says so (3.0.0) — idle, no status badge
-    assert.deepEqual(favoriteRows(page), [
-      [LIGHTHOUSE, "The Lighthouse Keeper's Promise", "60 episodes · 1h 19m", "idle", false, true],
-      [SNOW_A, "Snowfall in Two Cities", "60 episodes · 1h 37m", "idle", false, true],
-      [SNOW_B, "Snowfall in Two Cities", "60 episodes · 1h 37m", "idle", false, true],
-      [PAPER, "Paper Crowns", "30 episodes · 25m", "idle", false, true],
-      [MOON, "Moonlight Over the Harbor", "12 episodes", "idle", false, true],
-    ]);
-    for (const card of element("favorites-grid").children) assert.equal(partOf(card, "favorite-status"), undefined);
-    assert.equal(element("favorites-count").textContent, "5 favorite dramas listed.");
-    // the guidance (`favoritesLoaded`): a card's own Download, or several ticked and Download selected dramas
-    assert.equal(element("input-status").textContent, "5 favorite dramas listed: press Download on a drama, or tick several and press Download selected dramas.");
-    assert.equal(entry["favorites"], 5);
-    assert.equal(entry["error"], undefined);
-    assert.equal(element("library-download").disabled, true); // nothing ticked yet
-
-    // the search (letter case aside), then "select all shown": only the two shown are ticked — the
-    // library still holds all five
-    element("favorites-filter").value = "SNOWFALL";
-    element("favorites-filter").fire("input");
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [SNOW_A, SNOW_B]);
-    assert.equal(element("library-shown").textContent, "Showing 2 of 2");
-    assert.equal(element("favorites-count").textContent, "5 favorite dramas listed."); // the library still holds all five
-    element("favorites-select-all").checked = true;
-    element("favorites-select-all").fire("change");
-    assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [SNOW_A, SNOW_B]);
-    assert.equal(element("favorites-selection").textContent, "2 selected · 120 episodes");
-    assert.equal(element("library-download").disabled, false);
-    // one more ticked by hand, with the search cleared
-    element("favorites-filter").value = "";
-    element("favorites-filter").fire("input");
-    assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [SNOW_A, SNOW_B]); // the ticks are the dramas'
-    const paper = tickOf(page, PAPER);
-    assert.ok(paper !== undefined);
-    paper.checked = true;
-    paper.fire("change");
-    // the ticks, the bar's sum — nothing downloaded until asked: no job, the box left alone
-    assert.equal(element("favorites-selection").textContent, "3 selected · 150 episodes");
-    assert.equal(element("links").value, "");
-    assert.deepEqual(page.downloads, []);
-    assert.equal(element("app-status").dataset["state"], "idle"); // nothing queued
-    assert.deepEqual(module.queuedJobs(), []);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a favorites hand-over is taken by the engine's tab only — the popup's Open my library on a profile (that tab alone, DramaFetch 2.0.0: no card, no menu) is the List favorites job —, never twice — while its listing runs, or while it waits behind a download —, and never a card's job; a read-only tab stays silent", async () => {
-  const page = await fakePage();
-  try {
-    const { element, module } = page;
-    const queued = () => waitingRows(page);
-    const status = element("input-status");
-    const tab = favoritesTab();
-    tab.remember(1_794_351_500);
-    page.hold(); // the job's `tabs.getCurrent` never answers: it runs, and makes no request
-    // the popup's Open my library on the profile: the List favorites job of that tab
-    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), [{ ok: true, tabId: 1 }]);
-    await page.turn();
-    assert.equal(status.textContent, page.catalog["favoritesChoose"]?.message);
-    assert.equal(element("progress-current").textContent, "List your favorites");
-    assert.deepEqual(module.queuedJobs().map((job) => [job.kind, job.favoritesTab, Object.hasOwn(job, "card")]), [["favorites", FAVORITES_TAB, false]]);
-    // the same tab again while its listing runs: not twice
-    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), [{ ok: true, tabId: 1 }]);
-    assert.equal(status.textContent, page.catalog["favoritesAlreadyQueued"]?.message);
-    assert.equal(status.className, "status error");
-    assert.deepEqual(queued(), []);
-    // what 1.x's right-click added to a hand-over (a card, `menu`, `script`) is read no more: the
-    // tab alone, the same listing — never a job that resolves a card
-    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB, card: { title: "Snowfall in Two Cities", index: 2 }, menu: true, script: true }), [{ ok: true, tabId: 1 }]);
-    assert.equal(status.textContent, page.catalog["favoritesAlreadyQueued"]?.message);
-    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["favorites"]);
-    // junk, another extension: not heard
-    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: -1 }), []);
-    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: 7 }, "another-extension-id"), []);
-    assert.deepEqual(queued(), []);
-    assert.deepEqual(tab.fetched, []);
-  } finally {
-    page.restore();
-  }
-  // the same tab handed over while its listing WAITS behind a download (a paste running): queued
-  // once — what the 1.x test proved with a card's job running —, never a second listing of that list
-  const waiting = await fakePage();
-  try {
-    const { element, module } = waiting;
-    const status = element("input-status");
-    const tab = favoritesTab();
-    tab.remember(1_794_351_500);
-    waiting.hold(); // the paste's job runs, and makes no request
-    assert.equal(paste(waiting, SERIES_ID), true);
-    await waiting.turn();
-    assert.deepEqual(waiting.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), [{ ok: true, tabId: 1 }]);
-    assert.equal(status.textContent, waiting.catalog["favoritesChoose"]?.message);
-    assert.deepEqual(module.queuedJobs().map((job) => [job.kind, job.favoritesTab ?? null]), [["batch", null], ["favorites", FAVORITES_TAB]]);
-    assert.deepEqual(waitingRows(waiting), [dramaRow(SERIES_ID), "Update from TikTok"]);
-    assert.deepEqual(waiting.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), [{ ok: true, tabId: 1 }]);
-    assert.equal(status.textContent, waiting.catalog["favoritesAlreadyQueued"]?.message);
-    assert.equal(status.className, "status error");
-    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["batch", "favorites"]);
-    assert.deepEqual(waitingRows(waiting), [dramaRow(SERIES_ID), "Update from TikTok"]);
-    // junk, another extension: not heard
-    assert.deepEqual(waiting.message({ type: "dramafetch:favorites", tabId: -1 }), []);
-    assert.deepEqual(waiting.message({ type: "dramafetch:favorites", tabId: 7 }, "another-extension-id"), []);
-    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["batch", "favorites"]);
-    assert.deepEqual(tab.fetched, []);
-  } finally {
-    waiting.restore();
-  }
-  const readonly = await fakePage({ lockTaken: true });
-  try {
-    assert.deepEqual(readonly.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), []);
-    assert.equal(readonly.element("queue-card").hidden, true);
-  } finally {
-    readonly.restore();
-  }
-});
-
-test("the page: TikTok refusing the favorites list (HTTP 429) is a full stop — the cooldown recorded with its reason, the page says so, the dramas listed before it stay", async () => {
-  const page = await fakePage();
-  try {
-    const { element, module, local } = page;
-    const tab = favoritesTab({ pages: { "0": FAVORITES_CAPTURE, "1794351568": { __dramafetch_status: 429, __dramafetch_text: '{"statusCode": 429}' } } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    const { engine } = favoritesEngine(page, job);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    try {
-      assert.equal(await module.runFavorites(job, engine, entry), FAVORITES_RATE_LIMIT_MESSAGE); // the job's stop: the waiting jobs end unstarted
-      assert.equal(tab.fetched.length, 2); // nothing after the refusal
-      const cooldown = /** @type {Record<string, unknown>} */ (local.get("cooldown"));
-      assert.equal(cooldown["reason"], FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(cooldown["source"], "discovery");
-      assert.equal(element("input-status").textContent, FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(element("input-status").className, "status error");
-      assert.equal(entry["error"], FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(entry["favorites"], undefined);
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE, SNOW_A, SNOW_B]);
-      assert.equal(element("favorites-count").textContent, "3 of 946 favorite dramas listed.");
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a favorites hand-over in its address (no running page took it, so the worker opened or reloaded the tab with it) is taken once — the popup's List favorites of that tab; an address of 1.x's right-click (`menu`, `card`) is read as the tab alone, never a card's job — and the address cleared; a read-only tab takes nothing", async () => {
-  const card = encodeURIComponent(JSON.stringify({ title: "Snowfall in Two Cities", index: 2 })).replace(/%20/g, "+");
-  for (const search of [`?favorites=${FAVORITES_TAB}`, `?favorites=${FAVORITES_TAB}&menu=1&card=${card}`, `?favorites=${FAVORITES_TAB}&menu=1&script=0`]) {
-    const page = await fakePage({ search, testSettings: {} }); // loaded once its job ended: no address seen for that tab, so no request
-    try {
-      const noTemplate = String(page.catalog["favoritesNoTemplate"]?.message);
-      assert.deepEqual(page.replaced, ["/src/app/app.html"], search);
-      for (let turns = 0; turns < 50 && page.module.journal().length === 0; turns += 1) await page.turn();
-      assert.deepEqual(page.module.journal().map((entry) => [entry["kind"], entry["label"], entry["error"]]), [["favorites", "List your favorites", noTemplate]], search);
-      assert.deepEqual(page.sessionKeys.filter((key) => String(key).startsWith("favoritesTemplate:")), [`favoritesTemplate:${FAVORITES_TAB}`], search);
-      assert.equal(page.element("input-status").textContent, noTemplate, search);
-    } finally {
-      page.restore();
-    }
-  }
-  const readonly = await fakePage({ search: `?favorites=${FAVORITES_TAB}`, lockTaken: true, testSettings: {} });
-  try {
-    assert.deepEqual(readonly.replaced, ["/src/app/app.html"]);
-    assert.deepEqual(readonly.module.journal(), []);
-    assert.equal(readonly.element("queue-card").hidden, true);
-  } finally {
-    readonly.restore();
-  }
-});
-
-/**
- * Another TikTok tab (43) whose own favorites address the worker kept too; returns the tabs every
- * page of a favorites list was read from (`chrome.scripting.executeScript`'s MAIN-world target).
- * @returns {Promise<number[]>}
- */
-async function secondFavoritesTab() {
-  /** @type {number[]} */
-  const readFrom = [];
-  const fake = /** @type {{scripting: {executeScript: (injection: chrome.scripting.ScriptInjection<unknown[], unknown>) => Promise<unknown>}}} */ (
-    /** @type {unknown} */ (globalThis.chrome)
-  );
-  const execute = fake.scripting.executeScript;
-  fake.scripting.executeScript = async (injection) => {
-    if (injection.world === "MAIN") readFrom.push(injection.target.tabId);
-    return execute(injection);
-  };
-  await chrome.storage.session.set({ "favoritesTemplate:43": { url: FAVORITES_TEMPLATE, at: 1_794_351_500, profile: "@invented_viewer" } });
-  return readFrom;
-}
-
-test("the page: the library's ticks survive every listing but a complete one, which prunes them — a listing TikTok cut short leaves the library as it was, another tab's complete list that holds them keeps them", async () => {
-  // ticks survive a partial listing (here one TikTok cut short, without a ticked drama: it leaves the
-  // library as it was) and another tab's complete list that holds them; only a complete list without
-  // them prunes them
-  const page = await fakePage();
-  try {
-    const { module } = page;
-    const pages = favoritesPages();
-    const tab = favoritesTab({ pages });
-    tab.remember(1_794_351_500);
-    await secondFavoritesTab();
-    const ticked = () => favoriteRows(page).filter(([, , , , checked]) => checked).map(([id]) => id);
-    /** @param {number} tabId */
-    const list = async (tabId) => {
-      const job = { ...favoritesJob(), favoritesTab: tabId };
-      await module.runFavorites(job, favoritesEngine(page, job).engine, {});
-    };
-    await list(FAVORITES_TAB);
-    const box = tickOf(page, PAPER);
-    assert.ok(box !== undefined);
-    box.checked = true;
-    box.fire("change");
-    const second = /** @type {Record<string, unknown>} */ (pages["1794351568"]);
-    pages["1794351568"] = { dramaList: [], hasMore: false, statusCode: 0 }; // TikTok stops after the first page
-    await list(FAVORITES_TAB);
-    // a listing cut short over a library that holds dramas leaves the library as it was — all five
-    // (1.6.0's review: what is kept across sessions never shrinks to a partial read; before, the three
-    // TikTok sent took its place); the tick of a drama past what TikTok sent is kept either way
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER, MOON]);
-    pages["1794351568"] = second;
-    await list(FAVORITES_TAB);
-    assert.deepEqual(ticked(), [PAPER]); // kept through the partial list
-    await list(43); // another tab's complete list, PAPER in it: kept
-    assert.deepEqual(ticked(), [PAPER]);
-    pages["1794351568"] = { ...second, dramaList: /** @type {unknown[]} */ (second["dramaList"]).slice(1) }; // PAPER unfavorited
-    await list(FAVORITES_TAB);
-    pages["1794351568"] = second;
-    await list(FAVORITES_TAB);
-    assert.deepEqual(ticked(), []); // pruned by the complete list that lacked it
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: TikTok's login page in the TikTok tab before the favorites list's first request is the job's stop — the popup's List favorites —: the job waiting behind ends without a request", async () => {
-  const login = "https://www.tiktok.com/login?redirect_url=%2F%40invented_viewer";
-  const label = "List your favorites";
-  const page = await fakePage({ testSettings: {} }); // the test copy: its journal of finished jobs
-  try {
-    const tab = favoritesTab({ tabUrl: login });
-    tab.remember(1_794_351_500);
-    // the favorites job, and a series handed over (its download) queued behind it while it runs
-    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }), [{ ok: true, tabId: 1 }]);
-    assert.deepEqual(page.message({ type: "dramafetch:load", input: SERIES_ID }), [{ ok: true, tabId: 1 }]);
-    const journal = () => page.module.journal();
-    for (let turns = 0; turns < 400 && !(journal().length === 2 && page.element("app-status").dataset["state"] === "idle"); turns += 1) await page.turn();
-    assert.deepEqual(
-      journal().map((entry) => [entry["label"], entry["error"], entry["stopped"]]),
-      [
-        [label, LOGIN_REDIRECT_MESSAGE, LOGIN_REDIRECT_MESSAGE], // the job's stop
-        [`Series ${SERIES_ID}`, `not started: batch stopped in ${label} (${LOGIN_REDIRECT_MESSAGE})`, null], // never started
-      ],
-    );
-    assert.deepEqual(tab.fetched, []); // no favorites page asked for
-    assert.equal(page.element("input-status").textContent, LOGIN_REDIRECT_MESSAGE);
-  } finally {
-    page.restore();
-  }
-});
-
 test("the page hears only the extension's own pages and worker: the popup, the DramaFetch tab, the worker with or without its address — never a TikTok page carrying the extension's id (no content script is declared since 2.0.0, but the functions DramaFetch injects into a TikTok tab run there with its id), nor another extension", async () => {
   const page = await fakePage();
   try {
@@ -4127,7 +3413,7 @@ test("the page hears only the extension's own pages and worker: the popup, the D
     page.hold(); // a job queued here runs and makes no request
     const queued = () => waitingRows(page);
     const profile = "https://www.tiktok.com/@invented_viewer";
-    const tiktokTab = { id: FAVORITES_TAB, index: 0, windowId: 2, active: true, url: profile };
+    const tiktokTab = { id: 42, index: 0, windowId: 2, active: true, url: profile };
     const ours = [
       { id: "dramafetch-test-id", url: `${EXTENSION_ROOT}src/app/popup.html` }, // the popup
       { id: "dramafetch-test-id", url: `${EXTENSION_ROOT}src/app/app.html`, tab: { id: 3, index: 0, windowId: 1, active: true, url: `${EXTENSION_ROOT}src/app/app.html` } }, // a DramaFetch tab
@@ -4143,8 +3429,6 @@ test("the page hears only the extension's own pages and worker: the popup, the D
     ];
     for (const sender of theirs) {
       assert.deepEqual(page.message({ type: "dramafetch:load", input: SERIES_ID }, sender), [], JSON.stringify(sender));
-      assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB }, sender), [], JSON.stringify(sender));
-      assert.deepEqual(page.message({ type: "dramafetch:library" }, sender), [], JSON.stringify(sender));
     }
     assert.equal(element("links").value, "");
     assert.equal(element("queue-card").hidden, true);
@@ -4160,557 +3444,244 @@ test("the page hears only the extension's own pages and worker: the popup, the D
   }
 });
 
-test("the page: a cooldown met before a page of the favorites list is the job's stop; Stop keeps the count of what was listed in the job's record", async () => {
-  const page = await fakePage();
-  try {
-    const { element, module } = page;
-    const tab = favoritesTab();
-    tab.remember(1_794_351_500);
-    // a cooldown recorded during the second page's pause: that page is never asked for, the job stops the queue
-    let job = favoritesJob();
-    let { engine } = favoritesEngine(page, job);
-    const store = engine.cooldownStore;
-    engine.sleep = async () => {
-      if (tab.fetched.length === 1) await recordBlock(store, "rate limited (HTTP 429) by the video server", "browser", { now: Date.now() / 1000 });
-    };
-    /** @type {Record<string, unknown>} */
-    let entry = {};
-    try {
-      const stop = await module.runFavorites(job, engine, entry);
-      assert.ok(stop !== null && stop.startsWith("TikTok refused a request at "), String(stop));
-      assert.equal(entry["error"], stop);
-      assert.equal(element("input-status").className, "status error");
-      assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]);
-    } finally {
-      await clearCooldown(store);
-    }
-    // Stop pressed once the first page was read: the job ends, and its record keeps the 3 listed
-    tab.fetched.length = 0;
-    job = favoritesJob();
-    ({ engine } = favoritesEngine(page, job));
-    engine.stopRequested = () => tab.fetched.length > 0;
-    entry = {};
-    await assert.rejects(module.runFavorites(job, engine, entry), StopRequested);
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]);
-    assert.equal(entry["favorites"], 3);
-  } finally {
-    page.restore();
-  }
-});
+// ---------------------------------- DramaFetch 4.0.0: no library, nothing read of the Favorites
 
-test("the page: the panel's ticks are series — kept when the same tab, or another tab, is listed again (a row built for a ticked drama shows ticked) — and a drama that left the list loses its tick", async () => {
-  const page = await fakePage();
-  try {
-    const { module } = page;
-    const pages = favoritesPages();
-    const tab = favoritesTab({ pages });
-    tab.remember(1_794_351_500);
-    await secondFavoritesTab();
-    /** @param {number} tabId */
-    const list = async (tabId) => {
-      const job = { ...favoritesJob(), favoritesTab: tabId };
-      assert.equal(await module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    };
-    const ticked = () => favoriteRows(page).filter(([, , , , checked]) => checked).map(([id]) => id);
-    /** @param {string} seriesId */
-    const tick = (seriesId) => {
-      const box = tickOf(page, seriesId);
-      assert.ok(box !== undefined);
-      box.checked = true;
-      box.fire("change");
-    };
-    await list(FAVORITES_TAB);
-    tick(SNOW_A);
-    await list(FAVORITES_TAB); // the same tab's list again: the tick stays
-    assert.deepEqual(ticked(), [SNOW_A]);
-    await list(43); // another tab's list holding the same drama: still ticked (never cleared by a tab change)
-    assert.deepEqual(ticked(), [SNOW_A]);
-    await list(FAVORITES_TAB);
-    assert.deepEqual(ticked(), [SNOW_A]);
-    tick(PAPER);
-    // PAPER left the list (unfavorited), then came back: its tick is gone
-    const last = /** @type {Record<string, unknown>} */ (pages["1794351568"]);
-    pages["1794351568"] = { ...last, dramaList: /** @type {unknown[]} */ (last["dramaList"]).slice(1) };
-    await list(FAVORITES_TAB);
-    pages["1794351568"] = last;
-    await list(FAVORITES_TAB);
-    assert.deepEqual(ticked(), [SNOW_A]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: TikTok stopping before the list's end is said — the count keeps TikTok's total, the status and the job's record say why", async () => {
-  const page = await fakePage();
-  try {
-    const { element, module } = page;
-    const tab = favoritesTab({ pages: { "0": FAVORITES_CAPTURE, "1794351568": { dramaList: [], hasMore: false, statusCode: 0, status_code: 0, status_msg: "" } } });
-    tab.remember(1_794_351_500);
-    const cutShortText = String(page.catalog["favoritesCutShort"]?.message).replace("$count$", "3");
-    const job = favoritesJob();
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await module.runFavorites(job, favoritesEngine(page, job).engine, entry), null); // TikTok refused nothing: no stop
-    assert.equal(tab.fetched.length, 2);
-    assert.equal(element("favorites-count").textContent, `3 of 946 favorite dramas listed. ${page.catalog["favoritesCutShortNote"]?.message}`);
-    assert.equal(element("input-status").textContent, cutShortText);
-    assert.equal(element("input-status").className, "status error");
-    assert.deepEqual(entry, { favorites: 3, error: cutShortText });
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a listing stopped at the page cap says so on the count line", async () => {
-  const page = await fakePage();
-  try {
-    const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-    /** @type {Record<string, unknown>} */
-    const pages = {};
-    for (let index = 0; index <= 100; index += 1) {
-      pages[index === 0 ? "0" : String(1000 + index)] = { ...FAVORITES_CAPTURE, cursor: String(1001 + index), dramaList: [{ ...shape, dramaID: String(7712345678901300000n + BigInt(index)), dramaName: `Drama ${index}` }] };
-    }
-    const tab = favoritesTab({ pages });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    assert.equal(tab.fetched.length, 100);
-    const capped = String(page.catalog["favoritesCapped"]?.message).replace("$pages$", "100");
-    assert.equal(page.element("favorites-count").textContent, `100 of 946 favorite dramas listed. ${capped}`);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: dramas TikTok sent without a readable series id are left out and said — on the count line and in the listing's record", async () => {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  const numeric = { ...shape, dramaID: 7712345678901234000 }; // a JSON number: 19 digits are no exact id
-  const skipped = (/** @type {Awaited<ReturnType<typeof fakePage>>} */ page) => String(page.catalog["favoritesSkipped"]?.message).replace("$count$", "2");
-  const page = await fakePage();
-  try {
-    const { element, module } = page;
-    const dramas = /** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"]);
-    const tab = favoritesTab({ pages: { "0": { ...FAVORITES_CAPTURE, hasMore: false, total: "5", dramaList: [...dramas, numeric, numeric] } } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await module.runFavorites(job, favoritesEngine(page, job).engine, entry), null);
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE, SNOW_A, SNOW_B]);
-    assert.equal(element("favorites-count").textContent, `3 favorite dramas listed. ${skipped(page)}`);
-    assert.deepEqual(entry, { favorites: 3, favorites_skipped: 2 });
-  } finally {
-    page.restore();
-  }
-});
-
-// --------------------------------------------------------------- the library (DramaFetch 1.6.0)
-
-/** The fake profile's handle: the library's `profile`. */
-const PROFILE = "@invented_viewer";
-/** A sixth drama of the library tests. */
-const LANTERN_ID = "7712345678901234566";
-
-/**
- * A library as `chrome.storage.local` keeps it (`favoritesLibrary`), read two hours ago from the
- * profile — the whole list, every drama's episode count with it (`fullReadAt`) —: `items` as
- * `[series id, title, episodes]`, in the list's order.
- * @param {[string, string, number | null][]} items
- * @param {Record<string, unknown>} [changes]
- * @returns {Record<string, unknown>}
- */
-function storedLibrary(items, changes = {}) {
-  const readAt = Date.now() / 1000 - 2 * 3600 - 30;
-  return {
-    v: 1,
-    listedAt: readAt,
-    total: items.length,
-    countedAt: null,
-    fullReadAt: readAt,
-    complete: true,
-    short: false,
-    ended: null,
-    profile: PROFILE,
-    items: items.map(([seriesId, title, episodes]) => ({ seriesId, title, episodes, durationS: episodes === null ? null : episodes * 79 })),
-    ...changes,
-  };
-}
-
-/**
- * A series' stored progress: `numbers` saved with the downloader's message (the cover embedded),
- * found complete with `complete` episodes (at `completeAt`, seconds since the epoch: a fixed time by
- * default).
- * @param {string} seriesId
- * @param {number[]} numbers
- * @param {{complete?: number, completeAt?: number}} [options]
- */
-function savedState(seriesId, numbers, options = {}) {
-  const state = newState(seriesId, "A drama");
-  for (const number of numbers) {
-    const message = `saved E${number}.mp4 (0.1 MiB) + cover embedded`;
-    record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message, downloadId: number }, { exists: () => true, now: 1_800_000_000 });
-  }
-  if (options.complete !== undefined) markComplete(state, options.completeAt ?? 1_800_000_100, options.complete);
-  return JSON.parse(JSON.stringify(state));
-}
-
-/** The five dramas of the page tests' favorites list, as the library keeps them. @type {[string, string, number][]} */
-const FIVE = [
-  [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 60],
-  [SNOW_A, "Snowfall in Two Cities", 60],
-  [SNOW_B, "Snowfall in Two Cities", 60],
-  [PAPER, "Paper Crowns", 30],
-  [MOON, "Moonlight Over the Harbor", 12],
-];
-
-/**
- * A card of the library's grid, when it is drawn.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- */
-const cardOf = (page, seriesId) => page.element("favorites-grid").children.find((card) => card.getAttribute("data-series-id") === seriesId);
-
-/**
- * A card's button by its action (`download`, `browse`, `open`), when it has one.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- * @param {string} action
- */
-const actionOf = (page, seriesId, action) => {
-  const card = cardOf(page, seriesId);
-  return card === undefined ? undefined : descendants(card).find((part) => part.getAttribute("data-action") === action);
-};
-
-/**
- * The cards' `[series id, status text]` — the text of the card's status badge, which it has only
- * while a job holds its drama (`Queued`, `Downloading · S/N`); `undefined` for an idle card (3.0.0:
- * no status from the records).
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- */
-const statusTexts = (page) => page.element("favorites-grid").children.map((card) => [card.getAttribute("data-series-id"), partOf(card, "favorite-status")?.textContent]);
-
-/**
- * A card's episodes and length line (`60 episodes · 1h 19m`), when the card is drawn.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- */
-const metaOf = (page, seriesId) => {
-  const card = page.element("favorites-grid").children.find((article) => article.getAttribute("data-series-id") === seriesId);
-  return card === undefined ? undefined : partOf(card, "favorite-meta")?.textContent;
-};
-
-/** @param {Awaited<ReturnType<typeof fakePage>>} page @param {number} [rounds] */
-async function settled(page, rounds = 12) {
-  for (let turn = 0; turn < rounds; turn += 1) await page.turn();
-}
-
-test("the page: the library kept from an earlier session is shown at once with no request — the connection line with TikTok's count, the twins, 60 cards at a time, no status from the records and no status filters (3.0.0) —; the search and the sort narrow and order what is shown", async () => {
-  /** @type {[string, string, number][]} */
-  const many = Array.from({ length: 130 }, (_, n) => [String(7712345678901300000n + BigInt(n)), `Drama ${String(n).padStart(3, "0")}`, 10]);
-  const page = await fakePage({
-    storage: {
-      favoritesLibrary: storedLibrary([...FIVE, ...many], { total: 135 }),
-      [`series:${LIGHTHOUSE}`]: savedState(LIGHTHOUSE, Array.from({ length: 60 }, (_, n) => n + 1), { complete: 60 }),
-      [`series:${SNOW_B}`]: savedState(SNOW_B, [1]),
-    },
-  });
-  try {
-    const { element } = page;
-    // shown at once, from storage: no TikTok tab asked for anything (the fake has no scripting at all)
-    assert.equal(element("favorites-card").hidden, false);
-    assert.equal(element("library-empty").hidden, true);
-    assert.equal(element("library-source").textContent, "Read from your TikTok tab (@invented_viewer)");
-    assert.equal(element("library-age").textContent, "2 h ago");
-    assert.equal(element("library-total").textContent, "TikTok counts 135 dramas");
-    assert.equal(element("library-stale").hidden, true); // the library holds what TikTok counts
-    assert.equal(element("favorites-count").textContent, "135 favorite dramas listed.");
-    assert.deepEqual(page.sessionKeys.filter((key) => String(key).startsWith("favoritesTemplate:")), []);
-    // the first 60 cards, in the list's order, with the twins' badge — and no status: the one saved
-    // whole, the one saved in part and the ones never run look alike (3.0.0), no badge, no bar
-    assert.equal(element("favorites-grid").children.length, 60);
-    assert.deepEqual(statusTexts(page).slice(0, 6), [
-      [LIGHTHOUSE, undefined],
-      [SNOW_A, undefined],
-      [SNOW_B, undefined],
-      [PAPER, undefined],
-      [MOON, undefined],
-      [many[0]?.[0], undefined],
-    ]);
-    assert.deepEqual(favoriteRows(page).slice(0, 3), [
-      [LIGHTHOUSE, "The Lighthouse Keeper's Promise", "60 episodes · 1h 19m", "idle", false, true],
-      [SNOW_A, "Snowfall in Two Cities", "60 episodes · 1h 19m", "idle", false, true],
-      [SNOW_B, "Snowfall in Two Cities", "60 episodes · 1h 19m", "idle", false, true],
-    ]);
-    for (const card of element("favorites-grid").children) {
-      assert.equal(card.getAttribute("data-status"), "idle");
-      assert.equal(card.className, "drama-card idle");
-      assert.equal(descendants(card).some((part) => part.tagName === "PROGRESS"), false); // a bar only while its drama downloads
-    }
-    const twins = page.element("favorites-grid").children.filter((card) => partOf(card, "twin") !== undefined).map((card) => card.getAttribute("data-series-id"));
-    assert.deepEqual(twins, [SNOW_A, SNOW_B]);
-    for (const seriesId of [LIGHTHOUSE, SNOW_B, MOON]) assert.ok(tickOf(page, seriesId) !== undefined, seriesId); // every card can be ticked
-    // the actions: Download (1.7.0), See episodes and Open on TikTok on every card, on disk or not —
-    // See episodes is the one way left to list a drama's episodes; 3.0.0: nothing removes a drama
-    // from the Favorites
-    /** @param {string} seriesId @returns {(string | null)[]} */
-    const actions = (seriesId) => descendants(/** @type {FakeElement} */ (cardOf(page, seriesId))).filter((part) => part.tagName === "BUTTON").map((part) => part.getAttribute("data-action"));
-    for (const seriesId of [LIGHTHOUSE, SNOW_B, MOON]) assert.deepEqual(actions(seriesId), ["download", "browse", "open"], seriesId);
-    assert.equal(actionOf(page, LIGHTHOUSE, "download")?.textContent, "Download");
-    assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, false);
-    // 60 more at a time
-    assert.equal(element("library-shown").textContent, "Showing 60 of 135");
-    assert.equal(element("library-more").hidden, false);
-    assert.equal(element("library-more").textContent, "Show 60 more");
-    element("library-more").fire("click");
-    assert.equal(element("favorites-grid").children.length, 120);
-    assert.equal(element("library-more").textContent, "Show 15 more");
-    element("library-more").fire("click");
-    assert.equal(element("favorites-grid").children.length, 135);
-    assert.equal(element("library-more").hidden, true);
-    // the search (letter case aside) starts again from the first 60 of what matches
-    element("favorites-filter").value = "DRAMA 12";
-    element("favorites-filter").fire("input");
-    assert.deepEqual(favoriteRows(page).map(([, title]) => title), Array.from({ length: 10 }, (_, n) => `Drama ${120 + n}`));
-    element("favorites-filter").value = "";
-    element("favorites-filter").fire("input");
-    assert.equal(element("favorites-grid").children.length, 60);
-    assert.equal(element("library-shown").textContent, "Showing 60 of 135"); // every drama, whatever its records hold
-    // the sort: title A–Z, most episodes first, back to the list's own order
-    element("library-sort").value = "title";
-    element("library-sort").fire("change");
-    assert.deepEqual(favoriteRows(page).slice(0, 2).map(([, title]) => title), ["Drama 000", "Drama 001"]);
-    element("favorites-filter").value = "o"; // the five's titles all hold an "o"; "Drama …" do not
-    element("favorites-filter").fire("input");
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [MOON, PAPER, SNOW_A, SNOW_B, LIGHTHOUSE]);
-    element("library-sort").value = "episodes";
-    element("library-sort").fire("change");
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER, MOON]);
-    element("library-sort").value = "recent";
-    element("library-sort").fire("change");
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER, MOON]);
-    assert.equal(page.local.get("librarySort"), "recent"); // each pick kept for the next sessions
-    assert.deepEqual(page.downloads, []);
-    assert.equal(element("app-status").dataset["state"], "idle");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the cards' lasting statuses, their filters and the locked count are gone (DramaFetch 3.0.0, the owner's decision of 2026-11-25): no chip in the page, no handler, no rule, no text in either language — Queued and Downloading stay", () => {
+test("the library, every read of the user's TikTok Favorites and their hand-overs are gone (DramaFetch 4.0.0, the owner's decision of 2026-11-27): no element, no handler, no message, no key, no style — and a 3.x hand-over, a message or an address, is ignored: nothing queued, nothing said, the address cleared, in a read-only tab too", async () => {
   const html = readFileSync(new URL("../src/app/app.html", import.meta.url), "utf8");
-  for (const removed of ["library-chip", "chips", "libraryChips", "Filter by status", "“On disk” =", "with what is already on disk"]) assert.equal(html.includes(removed), false, removed);
-  const source = readFileSync(new URL("../src/app/app.js", import.meta.url), "utf8");
-  for (const removed of ["library-chip", "setLibraryFilter", "library.filter", "chipCounts", "inFilter", "libraryChip", "libraryOnDisk", "libraryPartly", "libraryNone", "libraryLocked", "progress.locked", "progress.status"]) {
-    assert.equal(source.includes(removed), false, removed);
-  }
   const css = readFileSync(new URL("../src/app/app.css", import.meta.url), "utf8");
-  for (const removed of [".chip", ".badge.on-disk", ".badge.partly", ".badge.none"]) assert.equal(css.includes(removed), false, removed);
+  const source = readFileSync(new URL("../src/app/app.js", import.meta.url), "utf8");
+  for (const removed of ['id="library', 'href="#library"', "favorites-", "library-", "navLibrary", "drama-grid"]) assert.ok(!html.includes(removed), `app.html: ${removed}`);
+  for (const removed of [
+    "runFavorites",
+    "favoritesFromOutside",
+    "showLibrarySection",
+    "renderLibrary",
+    "libraryCovers",
+    "queueDramas",
+    "onLibraryDownload",
+    "openOnTikTok",
+    "dramafetch:favorites",
+    "dramafetch:library",
+    "favoritesOfQuery",
+    "readLibrary",
+    "writeLibrary",
+    "favoritesLibrary",
+    "librarySort",
+    "chrome.tabs.query",
+    "chrome.tabs.create",
+  ]) {
+    assert.ok(!source.includes(removed), `app.js: ${removed}`);
+  }
+  for (const removed of [".drama-", ".selection-bar", ".connection", ".library", "--conn-bg", "--bar-", "--ph-", "--pick-", "--link-hover", ".queue-row.favorites", ".badge.twin", ".badge.queued", "#favorites-card"]) {
+    assert.ok(!css.includes(removed), `app.css: ${removed}`);
+  }
+  for (const language of ["en", "es"]) {
+    /** @type {Record<string, unknown>} */
+    const catalog = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
+    for (const key of Object.keys(catalog)) assert.ok(!/^(favorites|library|popupLibrary|popupFavorites|navLibrary|jobFavorites|queueFavorites)/.test(key), `${language}: ${key}`);
+    assert.ok(Object.hasOwn(catalog, "queuedSeveral"), `${language}: the paste's several-series line, renamed`);
+  }
+  // a 3.x hand-over handed to this page: no answer, no job, nothing said — and nothing of the
+  // browser session's memory read for it, at the page's start or since
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    page.hold();
+    assert.deepEqual(page.message({ type: "dramafetch:favorites", tabId: 42 }), []);
+    assert.deepEqual(page.message({ type: "dramafetch:library" }), []);
+    await page.turn();
+    assert.deepEqual(module.queuedJobs(), []);
+    assert.equal(element("input-status").textContent, "");
+    const asked = page.sessionKeys.flatMap((keys) => (Array.isArray(keys) ? keys : [keys])).map(String);
+    assert.ok(asked.length > 0, "the page reads its session keys (the discovery tab's record)");
+    for (const key of asked) assert.doesNotMatch(key, /favorit|librar/i, key);
+  } finally {
+    page.restore();
+  }
+  // a tab a 3.x worker reloaded with a hand-over in its address, restored or bookmarked since: the
+  // address cleared, nothing queued, nothing said, never an error
+  for (const search of ["?favorites=42", "?library=1"]) {
+    const opened = await fakePage({ search });
+    try {
+      assert.deepEqual(opened.replaced, ["/src/app/app.html"], search);
+      await opened.turn();
+      assert.deepEqual(opened.module.queuedJobs(), [], search);
+      assert.equal(opened.element("input-status").textContent, "", search);
+      assert.equal(opened.element("app-status").dataset["state"], "idle", search);
+    } finally {
+      opened.restore();
+    }
+    // the same in a read-only tab (another DramaFetch tab holds the engine): cleared all the same,
+    // so that a reload once it holds the engine finds nothing in its address
+    const readonly = await fakePage({ search, lockTaken: true, testSettings: {} });
+    try {
+      assert.equal(readonly.element("duplicate-banner").hidden, false, search); // read-only indeed
+      assert.deepEqual(readonly.replaced, ["/src/app/app.html"], search);
+      for (let turns = 0; turns < 5; turns += 1) await readonly.turn();
+      assert.deepEqual(readonly.module.queuedJobs(), [], search);
+      assert.deepEqual(readonly.module.journal(), [], search);
+      assert.equal(readonly.element("input-status").textContent, "", search);
+    } finally {
+      readonly.restore();
+    }
+  }
+});
+
+test("See episodes, its downloads again in full and the page's thumbnails are gone (DramaFetch 4.0.0, the owner's decision of 2026-11-27: no library, no See episodes): no episode list to pick from, no job that lists a drama without downloading it, no job that replaces a file — no element, no handler, no export, no key, no style; the jobs left are a batch (a paste, Enter, the popup's hand-over) and a Retry's selection", async () => {
+  const read = (/** @type {string} */ path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  const html = read("src/app/app.html");
+  const css = read("src/app/app.css");
+  const source = read("src/app/app.js");
+  for (const removed of ["series-card", "series-title", "series-meta", "series-warnings", "episode-table", "download-available-button", "download-selected-button", "selection-count", "select-all"]) {
+    assert.ok(!html.includes(removed), `app.html: ${removed}`);
+    assert.ok(!source.includes(removed), `app.js: ${removed}`);
+  }
+  for (const removed of ["runLoad", "listSeries", "loadPending", "startSelection", "availableNumbers", "renderSeries", "redrawListed", "listedDrm", "coversAllowed", "coverLoaders", "CoverLoader", "CoverLane", "overwrite", "job.pick", "job.series"]) {
+    assert.ok(!source.includes(removed), `app.js: ${removed}`);
+  }
+  assert.doesNotMatch(source, /kind\s*(?:===|!==|:)\s*"(?:load|favorites)"/); // no listing job (the `?load=` hand-over is a paste's batch)
+  assert.match(source, /@property \{"batch" \| "selection"\} kind/); // the two kinds of job left
+  // the downloader: no thumbnail loader, and every save `uniquify` — nothing that could replace a file
+  const downloader = read("src/app/downloader.js");
+  for (const removed of ["CoverLoader", "CoverLane", "COVER_MARGIN_PX", "IntersectionObserver", '"overwrite"', ".overwrite", "ConflictAction"]) {
+    assert.ok(!downloader.includes(removed), `downloader.js: ${removed}`);
+  }
+  assert.deepEqual([...downloader.matchAll(/conflictAction\b[^,}]*/g)].map((match) => match[0]), ['conflictAction: "uniquify"']);
+  assert.ok(!/\boverwrite\b/.test(read("src/app/engine.js")), "engine.js: overwrite");
+  for (const removed of [".cover", ".hints", ".warnings", "#episode-table", "#series-card", ".badge.free", ".badge.ondisk", ".badge.unlocked", ".badge.locked", ".queue-row.load", ".queue-row.selected", ".queue-row.available", "--queue-list-", "--pink-", "--chip"]) {
+    assert.ok(!css.includes(removed), `app.css: ${removed}`);
+  }
+  const seeEpisodesKeys = [
+    "badgeFree",
+    "badgeFreeTitle",
+    "badgeUnlocked",
+    "badgeUnlockedTitle",
+    "badgeLocked",
+    "badgeLockedTitle",
+    "badgeOnDisk",
+    "badgeOnDiskTitle",
+    "downloadAvailableButton",
+    "downloadSelectedButton",
+    "seriesMeta",
+    "seriesDrmHint",
+    "selectionCount",
+    "selectionLocked",
+    "loading",
+    "loaded",
+    "loadAlreadyQueued",
+    "jobLoad",
+    "jobSelection",
+    "selectAll",
+    "colCover",
+    "colTitle",
+    "colDuration",
+    "colQuality",
+    "colAccess",
+    "queueSelected",
+    "queueAvailable",
+    "queueSeeEpisodes",
+  ];
   for (const language of ["en", "es"]) {
     /** @type {Record<string, {message: string}>} */
-    const catalog = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
-    for (const key of Object.keys(catalog)) assert.ok(!/^libraryChip|^libraryOnDisk$|^libraryPartly$|^libraryNone$|^libraryLocked/.test(key), `${language}: ${key}`);
-    // no hint explains a status any more
-    for (const key of ["favoritesHint", "libraryEmpty"]) assert.doesNotMatch(String(catalog[key]?.message), /“On disk”|“En disco”|with what is already on disk|con lo que ya está en disco/, `${language}: ${key}`);
-    // kept: the two statuses a card shows while a job holds its drama
-    for (const key of ["libraryQueued", "libraryRunning"]) assert.ok(Object.hasOwn(catalog, key), `${language}: ${key}`);
+    const catalog = JSON.parse(read(`_locales/${language}/messages.json`));
+    for (const key of seeEpisodesKeys) assert.ok(!Object.hasOwn(catalog, key), `${language}: ${key}`);
+    // the keys these features shared with what stays: a drama skipped as complete (its header row),
+    // the paste's several-series line, the tables' # column
+    for (const kept of ["seriesSkippedComplete", "queuedSeveral", "colNumber"]) assert.ok(Object.hasOwn(catalog, kept), `${language}: ${kept}`);
+    for (const key of ["linksLabel", "linksHint"]) assert.doesNotMatch(String(catalog[key]?.message), /See episodes|Ver episodios|library|biblioteca/, `${language}: ${key}`);
+  }
+  // and at run time: none of the exports the tests of See episodes and the thumbnails read
+  const page = await fakePage();
+  try {
+    const exported = Object.keys(page.module);
+    for (const removed of ["runLoad", "coversAllowed", "coverLoaders"]) assert.ok(!exported.includes(removed), removed);
+    for (const kept of ["buildEngine", "retryTargets", "retryJobs", "queueRows", "queuedJobs", "renderFailed", "reportJobEnd"]) assert.ok(exported.includes(kept), kept);
+  } finally {
+    page.restore();
   }
 });
 
-test("the page: with no library kept the section says how to fill it; once TikTok's count and the list differ, a second line says so", async () => {
-  const empty = await fakePage();
-  try {
-    assert.equal(empty.element("favorites-card").hidden, true);
-    assert.equal(empty.element("library-empty").hidden, false);
-    assert.equal(empty.element("favorites-grid").children.length, 0);
-  } finally {
-    empty.restore();
-  }
-  const partial = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE.slice(0, 3), { total: 946, complete: false }) } });
-  try {
-    assert.equal(partial.element("library-total").textContent, "TikTok counts 946 dramas");
-    assert.equal(partial.element("library-stale").hidden, false);
-    // the reviewed wording (`libraryStale`): the button to press, named as such
-    assert.equal(partial.element("library-stale").textContent, "This list has 3: press Update from TikTok to bring it up to date");
-    assert.equal(partial.element("favorites-count").textContent, "3 of 946 favorite dramas listed.");
-  } finally {
-    partial.restore();
-  }
-});
+// ---------------------------------------------------- DramaFetch 1.7.0: the box downloads
 
-test("the page: Download selected dramas queues ONE batch job over exactly the ticked dramas, in the order the library shows them — what a paste of those ids queues —, leaves the box alone, clears the ticks, and the cards say Queued; nothing for an empty selection; Add selected to the box is gone", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
+test("the page: the duplicate guard follows the running batch drama by drama — a paste, Enter or the popup's hand-over of a drama it has not finished is refused (named, nothing queued twice); one it has finished queues again, behind it —; a waiting Retry holds its drama the same way; and a finished drama is the running batch's only: the next batch holds it afresh", async () => {
+  const refused = (/** @type {string} */ id) => `Already being downloaded, or waiting to be — not queued twice: ${id}.`;
+  const page = await fakePage();
   try {
     const { element, module } = page;
-    assert.equal(element("favorites-add-button").listeners.size, 0); // 1.7.0: no such button (nothing wires it)
-    element("links").value = "a box typed by hand";
-    // nothing ticked: nothing queued
-    assert.equal(element("library-download").disabled, true);
-    element("library-download").fire("click");
-    assert.equal(element("app-status").dataset["state"], "idle");
-    // two ticked, the library sorted by title: Paper Crowns comes first
-    for (const seriesId of [LIGHTHOUSE, PAPER]) {
-      const box = tickOf(page, seriesId);
-      assert.ok(box !== undefined);
-      box.checked = true;
-      box.fire("change");
-    }
-    assert.equal(element("favorites-selection").textContent, "2 selected · 90 episodes");
-    assert.equal(element("library-download").disabled, false);
-    element("library-sort").value = "title";
-    element("library-sort").fire("change");
+    fakeNotifications();
     page.hold(); // the job's `tabs.getCurrent` never answers: it runs, and makes no request
-    element("library-download").fire("click");
+    assert.equal(paste(page, `${SERIES_ID}\n${OTHER_ID}`), true); // ONE batch of the two: running
     await page.turn();
-    assert.equal(element("progress-current").textContent, "2 series"); // a paste's label
-    // the job a paste of those ids, in that order, queues with both checkboxes unticked
-    assert.deepEqual(module.queuedJobs().map(jobSummary), [["batch", "2 series", [PAPER, LIGHTHOUSE], false, false]]);
-    assert.deepEqual(waitingRows(page), [dramaRow(PAPER, "Paper Crowns"), dramaRow(LIGHTHOUSE, "The Lighthouse Keeper's Promise")]); // one job, running: its two dramas wait, by the library's titles, until their lists are read
-    assert.equal(element("links").value, "a box typed by hand"); // the box untouched
-    assert.equal(element("favorites-selection").textContent, "0 selected · 0 episodes");
-    assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked), []);
-    assert.equal(element("favorites-status").textContent, "2 series queued: they download one after the other, with the usual pauses.");
-    // the cards of the job's series say Queued; the others nothing (idle)
-    element("library-sort").value = "recent";
-    element("library-sort").fire("change");
-    assert.deepEqual(favoriteRows(page).map(([id, , , status]) => [id, status]), [
-      [LIGHTHOUSE, "queued"],
-      [SNOW_A, "idle"],
-      [SNOW_B, "idle"],
-      [PAPER, "queued"],
-      [MOON, "idle"],
-    ]);
-    assert.deepEqual(statusTexts(page), [
-      [LIGHTHOUSE, "Queued"],
-      [SNOW_A, undefined],
-      [SNOW_B, undefined],
-      [PAPER, "Queued"],
-      [MOON, undefined],
-    ]);
-  } finally {
-    page.restore();
-  }
-  // the same, run to its end — the discovery can open no tab here, so no request is ever made —: its
-  // journal entry is a batch over exactly those series, in the order shown
-  const run = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) }, testSettings: { existenceRateLimitS: 0, existenceDelayMs: 0 } });
-  try {
-    const { element } = run;
-    for (const seriesId of [LIGHTHOUSE, PAPER]) {
-      const box = tickOf(run, seriesId);
-      assert.ok(box !== undefined);
-      box.checked = true;
-      box.fire("change");
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined && running.kind === "batch");
+    // before its first drama's list: both of its dramas are being downloaded — a paste, Enter, the hand-over
+    for (const id of [SERIES_ID, OTHER_ID]) {
+      assert.equal(paste(page, id), true); // taken: never lands in the box
+      assert.equal(element("input-status").textContent, refused(id));
     }
-    element("library-sort").value = "title";
-    element("library-sort").fire("change");
-    element("library-download").fire("click");
-    for (let turn = 0; turn < 500 && (run.module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await run.turn();
-    const [entry] = run.module.journal();
-    assert.ok(entry !== undefined);
-    assert.equal(entry["kind"], "batch");
-    assert.equal(entry["label"], "2 series");
-    assert.deepEqual(/** @type {Record<string, unknown>[]} */ (entry["series"]).map((series) => series["series_id"]), [PAPER, LIGHTHOUSE]);
-  } finally {
-    run.restore();
-  }
-});
-
-test("the page: while a write was refused (app.unsaved) Download selected dramas queues nothing and says why; the job buttons of the library are disabled", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const { element, module } = page;
-    const box = tickOf(page, PAPER);
-    assert.ok(box !== undefined);
-    box.checked = true;
-    box.fire("change");
-    const engine = module.buildEngine({ ...BATCH_JOB }, { pauses: [], inputs: [], taking: true });
-    Object.assign(chrome.storage.local, {
-      set: async () => {
-        throw new Error(REFUSED);
-      },
-    });
-    await engine.persist?.(); // a save of the pacing, refused: remembered
-    assert.equal(element("library-download").disabled, true);
-    assert.equal(actionOf(page, PAPER, "browse")?.disabled, true);
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, true); // a card's Download (1.7.0) too
-    element("library-download").fire("click");
-    await settled(page);
-    assert.equal(element("app-status").dataset["state"], "idle");
-    assert.equal(element("app-status").dataset["finished"], "0");
-    assert.match(String(element("input-status").textContent), /^DramaFetch stopped: /);
-  } finally {
-    page.restore();
-  }
-});
-
-// ------------------------------------- DramaFetch 1.7.0: the card's Download, the sort kept, the counts
-
-test("the page: a card's Download queues exactly the job one tick and Download selected dramas queue for that drama — the ticks left alone —, and is disabled while that drama is queued or downloading; another card's still works; a click that slips through queues nothing twice", async () => {
-  // the job one tick and Download selected dramas queue, on a page of its own
-  const selected = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  /** @type {unknown[]} */
-  let viaSelection = [];
-  try {
-    selected.hold();
-    const box = tickOf(selected, PAPER);
-    assert.ok(box !== undefined);
-    box.checked = true;
-    box.fire("change");
-    selected.element("library-download").fire("click");
-    await selected.turn();
-    viaSelection = selected.module.queuedJobs().map(jobSummary);
-  } finally {
-    selected.restore();
-  }
-  assert.deepEqual(viaSelection, [["batch", `Series ${PAPER}`, [PAPER], false, false]]);
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const { element, module } = page;
-    page.hold(); // the job's `tabs.getCurrent` never answers: it runs, and makes no request
-    // a tick elsewhere, and the box's checkboxes: a card's Download leaves both alone
-    const tick = tickOf(page, MOON);
-    assert.ok(tick !== undefined);
-    tick.checked = true;
-    tick.fire("change");
-    element("include-locked").checked = true;
-    const download = actionOf(page, PAPER, "download");
-    assert.ok(download !== undefined && download.disabled === false);
-    download.fire("click");
-    await page.turn();
-    assert.deepEqual(module.queuedJobs().map(jobSummary), viaSelection); // the same job, through the same path
-    assert.equal(element("favorites-status").textContent, "“Paper Crowns” queued: it downloads whole, with the usual pauses.");
-    assert.equal(element("favorites-status").className, "status ok");
-    assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [MOON]); // the ticks as they were
-    assert.equal(element("include-locked").checked, true); // the box's, untouched
-    assert.equal(element("links").value, "");
-    // its card says Queued and its Download is disabled; the others' are not
-    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "queued");
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
-    assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, false);
-    // another card's: queued behind it, disabled in turn — the library drawn again, the tick still there
-    actionOf(page, LIGHTHOUSE, "download")?.fire("click");
-    assert.deepEqual(module.queuedJobs().map(jobSummary), [...viaSelection, ["batch", `Series ${LIGHTHOUSE}`, [LIGHTHOUSE], false, false]]);
-    assert.equal(actionOf(page, LIGHTHOUSE, "download")?.disabled, true);
-    assert.deepEqual(waitingRows(page), [dramaRow(PAPER, "Paper Crowns"), dramaRow(LIGHTHOUSE, "The Lighthouse Keeper's Promise")]); // the running one's list not read yet: it waits too
-    assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [MOON]);
-    assert.equal(element("favorites-selection").textContent, "1 selected · 12 episodes");
-    // a click that slips through anyway (the button disabled): nothing queued twice, the page says why
-    actionOf(page, PAPER, "download")?.fire("click");
-    assert.equal(module.queuedJobs().length, 2);
-    assert.equal(element("favorites-status").textContent, "Already being downloaded, or waiting to be — not queued twice: “Paper Crowns”.");
-    assert.equal(element("favorites-status").className, "status error");
-    // downloading now (the engine's hook for the series it starts): Downloading, still disabled
-    const engine = module.buildEngine({ ...BATCH_JOB, refs: [refOf(PAPER)] }, { pauses: [], inputs: [], taking: true });
-    engine.onSeriesStart?.(1, 1, refOf(PAPER));
-    assert.equal(cardOf(page, PAPER)?.getAttribute("data-status"), "running");
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
-    actionOf(page, PAPER, "download")?.fire("click");
-    assert.equal(module.queuedJobs().length, 2);
+    element("links").value = OTHER_ID;
+    assert.equal(press(page), true);
+    assert.equal(element("input-status").textContent, refused(OTHER_ID));
+    assert.equal(element("links").value, ""); // taken (refused, named): Enter empties the box
+    assert.deepEqual(page.message({ type: "dramafetch:load", input: SERIES_ID }), [{ ok: true, tabId: 1 }]);
+    assert.equal(element("input-status").textContent, refused(SERIES_ID));
+    assert.equal(module.queuedJobs().length, 1);
+    // the batch runs on through the page's own hooks (its engine is the running job's): its first
+    // drama downloads — still refused —, then is done
+    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
+    engine.onSeriesStart?.(1, 2, refOf(SERIES_ID));
+    assert.equal(paste(page, SERIES_ID), true);
+    assert.equal(element("input-status").textContent, refused(SERIES_ID));
+    const done = { episode: episode(1), status: /** @type {const} */ ("done"), path: "/dl/E01.mp4", message: "saved E01.mp4 (0.1 MiB) + cover embedded", downloadId: 1 };
+    engine.onSeriesDone?.(1, 2, finishedRun(SERIES_ID, "Test Series", [done]));
+    // done with it: a paste of it queues it again — a batch of its own, behind the running one —;
+    // the drama it has not finished is still refused, and so is the one just queued
+    assert.equal(paste(page, SERIES_ID), true);
+    assert.equal(element("input-status").textContent, `Series ${SERIES_ID} queued: it downloads whole, with the usual pauses.`);
+    assert.deepEqual(module.queuedJobs().map(jobSummary), [
+      ["batch", "2 series", [SERIES_ID, OTHER_ID], false, false],
+      ["batch", `Series ${SERIES_ID}`, [SERIES_ID], false, false],
+    ]);
+    for (const id of [OTHER_ID, SERIES_ID]) {
+      assert.equal(paste(page, id), true);
+      assert.equal(element("input-status").textContent, refused(id));
+    }
+    // a Retry waiting in the queue (a selection job) holds its drama: a paste and the hand-over of it are refused
+    module.renderFailed([seriesRecord(THIRD_ID, "Drama 2388", [[2, "failed"]])]);
+    element("retry-button").fire("click");
+    assert.deepEqual(module.queuedJobs().map((job) => [job.kind, job.refs.map((ref) => ref.seriesId)]).at(-1), ["selection", [THIRD_ID]]);
+    assert.equal(paste(page, THIRD_ID), true);
+    assert.equal(element("input-status").textContent, refused(THIRD_ID));
+    assert.deepEqual(page.message({ type: "dramafetch:load", input: THIRD_ID }), [{ ok: true, tabId: 1 }]);
+    assert.equal(element("input-status").textContent, refused(THIRD_ID));
+    assert.equal(module.queuedJobs().length, 3); // nothing queued twice
   } finally {
     page.restore();
   }
+  // a drama a batch finished counts as finished for that batch alone: once it ends, the next batch
+  // that names it holds it until it is done with it (each job starts with none finished)
+  const next = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = next;
+    fakeNotifications();
+    const journal = () => module.journal();
+    assert.equal(paste(next, SERIES_ID), true); // job 1: its list cannot be read here (no tab can open) — done with it, and ended
+    for (let turn = 0; turn < 500 && (journal().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await next.turn();
+    assert.equal(journal().length, 1);
+    const open = gateJobs();
+    assert.equal(paste(next, `${SERIES_ID}\n${OTHER_ID}`), true); // job 2, started: held at its gate
+    await next.turn();
+    assert.equal(paste(next, SERIES_ID), true);
+    assert.equal(element("input-status").textContent, refused(SERIES_ID));
+    assert.equal(module.queuedJobs().length, 1);
+    open();
+    for (let turn = 0; turn < 500 && (journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await next.turn();
+  } finally {
+    next.restore();
+  }
 });
 
-test("the page: a paste of three lines on a fresh page is ONE batch of the three, in their order — the checkboxes' values for that run, then cleared —; the series a hand-over gives in the tab's address (`?load=`, no running page took it) is downloaded the same way, the address cleared", async () => {
+test("the page: a paste of three lines on a fresh page is ONE batch of the three, in their order — the checkboxes' values for that run, then cleared —; the series a hand-over gives in the tab's address (`?load=`, no running page took it) is downloaded the same way, the address cleared; a read-only tab takes nothing, its address cleared too", async () => {
   const page = await fakePage();
   try {
     const { element, module } = page;
@@ -4729,7 +3700,8 @@ test("the page: a paste of three lines on a fresh page is ONE batch of the three
     page.restore();
   }
   // the address: taken once (the job runs to its end here — the discovery can open no tab, so no request)
-  const opened = await fakePage({ search: `?load=${encodeURIComponent(`https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/2`)}`, testSettings: QUICK });
+  const link = `?load=${encodeURIComponent(`https://www.tiktok.com/shortdrama/episode/${SERIES_ID}/2`)}`;
+  const opened = await fakePage({ search: link, testSettings: QUICK });
   try {
     assert.deepEqual(opened.replaced, ["/src/app/app.html"]);
     for (let turn = 0; turn < 200 && opened.module.journal().length === 0; turn += 1) await opened.turn();
@@ -4738,9 +3710,93 @@ test("the page: a paste of three lines on a fresh page is ONE batch of the three
   } finally {
     opened.restore();
   }
+  // a read-only tab (another DramaFetch tab holds the engine) takes nothing, its address cleared too:
+  // reloaded once the engine is free, it never queues that series again
+  for (const search of [link, `?load=${SERIES_ID}`]) {
+    const readonly = await fakePage({ search, lockTaken: true, testSettings: QUICK });
+    try {
+      assert.equal(readonly.element("duplicate-banner").hidden, false, search); // read-only indeed
+      assert.deepEqual(readonly.replaced, ["/src/app/app.html"], search);
+      for (let turns = 0; turns < 5; turns += 1) await readonly.turn();
+      assert.deepEqual(readonly.module.queuedJobs(), [], search);
+      assert.deepEqual(readonly.module.journal(), [], search); // nothing ran, nothing was refused
+      assert.equal(readonly.element("queue-card").hidden, true, search);
+      assert.equal(readonly.element("input-status").textContent, "", search);
+      assert.equal(readonly.element("links").value, "", search);
+    } finally {
+      readonly.restore();
+    }
+  }
 });
 
-test("the page: Load list, Download all and Add selected to the box are gone — no element, no handler, no message —; the box's paste and Enter, the cards' Download, See episodes and Download selected dramas take their place", async () => {
+test("the box (DramaFetch 4.0.0, the owner's request of 2026-11-27: “que las descargas se hagan automáticamente al pegar el link o el id … que se vayan acumulando en la cola”): an ID pasted — not a link — downloads its whole drama at once, no button: ONE batch job, running; pasted while it runs, a link queues a second job behind it, two lines in one paste a third, typed IDs and Enter a fourth — one job at a time, every drama in Waiting in the order it will run —; the running drama leaves Waiting once its list is read; the box's label and hint say so in both languages", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    page.hold(); // the first job's tabs.getCurrent never answers: it runs, asking nothing; the others wait
+    // an ID pasted: its whole drama queued at once, and running
+    assert.equal(paste(page, SERIES_ID), true);
+    await page.turn();
+    assert.deepEqual(module.queuedJobs().map(jobSummary), [["batch", `Series ${SERIES_ID}`, [SERIES_ID], false, false]]);
+    assert.equal(element("app-status").dataset["state"], "running");
+    assert.equal(element("progress-current").textContent, `Series ${SERIES_ID}`);
+    assert.equal(element("input-status").textContent, `Series ${SERIES_ID} queued: it downloads whole, with the usual pauses.`);
+    assert.deepEqual(waitingRows(page), [dramaRow(SERIES_ID)]); // its list not read yet: it waits too
+    // pasted while it runs: a link — a second job, behind it —, then two lines in one paste — a third
+    assert.equal(paste(page, `https://www.tiktok.com/shortdrama/episode/${OTHER_ID}/3`), true);
+    assert.equal(element("input-status").textContent, `Series ${OTHER_ID} queued: it downloads whole, with the usual pauses.`);
+    assert.equal(paste(page, `${THIRD_ID}\n${FOURTH_ID}`), true);
+    assert.equal(element("input-status").textContent, "2 series queued: they download one after the other, with the usual pauses.");
+    // typed IDs, then Enter: a fourth, the box emptied
+    const typed = "7699393770256782366";
+    element("links").value = typed;
+    assert.equal(press(page), true);
+    assert.equal(element("links").value, "");
+    await page.turn();
+    assert.deepEqual(module.queuedJobs().map(jobSummary), [
+      ["batch", `Series ${SERIES_ID}`, [SERIES_ID], false, false],
+      ["batch", `Series ${OTHER_ID}`, [OTHER_ID], false, false],
+      ["batch", "2 series", [THIRD_ID, FOURTH_ID], false, false],
+      ["batch", `Series ${typed}`, [typed], false, false],
+    ]);
+    assert.equal(element("progress-current").textContent, `Series ${SERIES_ID}`); // still the first: one job at a time
+    assert.equal(element("queue-card").hidden, false);
+    assert.deepEqual(waitingRows(page), [SERIES_ID, OTHER_ID, THIRD_ID, FOURTH_ID, typed].map((id) => dramaRow(id)));
+    // the running job reads its drama's list (the page's own hooks: its engine is the running job's):
+    // that drama leaves Waiting, the others wait in their order
+    const [running] = module.queuedJobs();
+    assert.ok(running !== undefined);
+    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
+    engine.onSeriesStart?.(1, 1, refOf(SERIES_ID));
+    engine.onStart?.({ ref: refOf(SERIES_ID), series: null, name: "Test Series", episodes: [], skippedComplete: false });
+    assert.deepEqual(waitingRows(page), [OTHER_ID, THIRD_ID, FOURTH_ID, typed].map((id) => dramaRow(id)));
+    assert.equal(module.queuedJobs().length, 4);
+  } finally {
+    page.restore();
+  }
+  // the box says it: one or many links or IDs, one per line, at once and one after the other; what
+  // is pasted while DramaFetch works joins Waiting (the card's own heading) — in both languages, the
+  // page's English fallback the English text
+  const html = readFileSync(new URL("../src/app/app.html", import.meta.url), "utf8");
+  for (const [language, words] of /** @type {const} */ ([
+    ["en", { label: [/one or more/, /IDs/, /one per line/, /at once/, /one after the other/], hint: [/Keep pasting while DramaFetch works/, /joins the queue/] }],
+    ["es", { label: [/uno o varios/, /IDs/, /uno por línea/, /sin pulsar nada más/, /uno tras otro/], hint: [/Sigue pegando mientras DramaFetch trabaja/, /se suma a la cola/] }],
+  ])) {
+    /** @type {Record<string, {message: string}>} */
+    const catalog = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
+    const label = String(catalog["linksLabel"]?.message);
+    const hint = String(catalog["linksHint"]?.message);
+    for (const word of words.label) assert.match(label, word, `${language}: linksLabel`);
+    for (const word of words.hint) assert.match(hint, word, `${language}: linksHint`);
+    assert.ok(hint.includes(`(${catalog["queueHeading"]?.message})`), `${language}: the hint names the Waiting card by its heading`);
+    if (language === "en") {
+      assert.ok(html.includes(`>${label}</label>`), "app.html: the label's English fallback");
+      assert.ok(html.includes(`>${hint}</p>`), "app.html: the hint's English fallback");
+    }
+  }
+});
+
+test("the page: Load list, Download all and Add selected to the box are gone — no element, no handler, no message —; the box's paste and Enter take their place", async () => {
   const html = readFileSync(new URL("../src/app/app.html", import.meta.url), "utf8");
   const source = readFileSync(new URL("../src/app/app.js", import.meta.url), "utf8");
   for (const removed of ["load-button", "download-all-button", "favorites-add-button"]) {
@@ -4753,1084 +3809,12 @@ test("the page: Load list, Download all and Add selected to the box are gone —
     const messages = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
     for (const key of ["loadButton", "downloadAllButton", "favoritesAddButton", "favoritesAdded", "favoritesNoneAdded", "loadOneOnly", "favoritesEpisodesLength"]) assert.ok(!Object.hasOwn(messages, key), `${language}: ${key}`);
   }
-  assert.ok(html.includes('id="library-download"') && html.includes('id="links"'));
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    assert.ok(page.element("links").listeners.has("paste") && page.element("links").listeners.has("keydown"));
-    assert.ok(page.element("library-download").listeners.has("click"));
-    assert.equal(actionOf(page, PAPER, "download")?.textContent, "Download");
-    assert.equal(actionOf(page, PAPER, "browse")?.textContent, "See episodes");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: the library's sort is kept across sessions — the order picked last restored before the first cards are drawn —; a write the storage refuses changes nothing else: no refused write remembered, nothing stopped", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), librarySort: "title" } });
-  try {
-    const { element, local } = page;
-    assert.equal(element("library-sort").value, "title");
-    // drawn A–Z from the first render: Moonlight, Paper Crowns, the two Snowfalls (the list's order between them), The Lighthouse
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [MOON, PAPER, SNOW_A, SNOW_B, LIGHTHOUSE]);
-    element("library-sort").value = "episodes";
-    element("library-sort").fire("change");
-    await page.turn();
-    assert.equal(local.get("librarySort"), "episodes");
-    // a write the storage refuses: the order shown all the same, no stop, no refused write remembered
-    const set = chrome.storage.local.set;
-    Object.assign(chrome.storage.local, {
-      set: async (/** @type {Record<string, unknown>} */ items) => {
-        if ("librarySort" in items) throw new Error(REFUSED);
-        return set(items);
-      },
-    });
-    element("library-sort").value = "recent";
-    element("library-sort").fire("change");
-    await settled(page);
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
-    assert.equal(local.get("librarySort"), "episodes"); // what was kept stays
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, false); // no refused write remembered: jobs may start
-    assert.equal(element("input-status").textContent, "");
-    assert.equal(element("favorites-status").textContent, "");
-  } finally {
-    page.restore();
-  }
-  // a stored value that is no sort order: the list's own
-  const junk = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), librarySort: "by colour" } });
-  try {
-    assert.equal(junk.element("library-sort").value, "recent");
-    assert.deepEqual(favoriteRows(junk).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
-  } finally {
-    junk.restore();
-  }
-});
-
-/**
- * A series' stored progress with `done` episodes saved and `locked` ones recorded `skipped-locked`
- * (paid episodes a run listed and skipped), optionally found complete.
- * @param {string} seriesId
- * @param {number[]} done
- * @param {number[]} locked
- * @param {number} [complete] the episodes a complete run saw on disk
- */
-function lockedState(seriesId, done, locked, complete) {
-  const state = newState(seriesId, "A drama");
-  for (const number of done) record(state, { episode: { number, itemId: `i${number}` }, status: "done", path: `/dl/E${number}.mp4`, message: `saved E${number}.mp4 (0.1 MiB) + cover embedded`, downloadId: number }, { exists: () => true, now: 1_800_000_000 });
-  for (const number of locked) record(state, { episode: { number, itemId: `i${number}` }, status: "skipped-locked", path: null, message: "looks locked: price=1" }, { exists: () => true, now: 1_800_000_000 });
-  if (complete !== undefined) markComplete(state, 1_800_000_100, complete);
-  return JSON.parse(JSON.stringify(state));
-}
-
-test("the page: a card's episode count — TikTok's count raised to what the records hold — and its length, nothing more: no locked count and no tooltip (3.0.0); Downloading · saved/total counts against the same number; Most episodes and the selection's sum count the same; in Spanish too", async () => {
-  const storage = {
-    // TikTok's favorites entry says 12; a run listed 55 — 10 saved, 45 locked: 55 episodes
-    favoritesLibrary: storedLibrary(FIVE),
-    [`series:${MOON}`]: lockedState(MOON, Array.from({ length: 10 }, (_, n) => n + 1), Array.from({ length: 45 }, (_, n) => n + 11), 10),
-    // 30 by TikTok's count, 3 saved, none locked: 30 episodes
-    [`series:${PAPER}`]: lockedState(PAPER, [1, 2, 3], []),
-  };
-  const page = await fakePage({ storage });
-  try {
-    const { element, module } = page;
-    await settled(page);
-    const moon = favoriteRows(page).find(([id]) => id === MOON);
-    assert.deepEqual(moon?.slice(2, 4), ["55 episodes · 16m", "idle"]); // the 45 locked ones counted among its episodes, never named
-    const meta = partOf(/** @type {FakeElement} */ (cardOf(page, MOON)), "favorite-meta");
-    assert.equal(meta?.getAttribute("data-locked"), null);
-    assert.equal(meta?.title, "");
-    assert.equal(partOf(/** @type {FakeElement} */ (cardOf(page, MOON)), "favorite-status"), undefined); // no status from the records
-    const paper = partOf(/** @type {FakeElement} */ (cardOf(page, PAPER)), "favorite-meta");
-    assert.equal(paper?.textContent, "30 episodes · 40m");
-    assert.equal(paper?.getAttribute("data-locked"), null);
-    assert.equal(paper?.title, "");
-    assert.equal(statusTexts(page).find(([id]) => id === PAPER)?.[1], undefined);
-    // a drama DramaFetch never ran: TikTok's count alone — nothing asked of TikTok to learn more
-    assert.equal(partOf(/** @type {FakeElement} */ (cardOf(page, LIGHTHOUSE)), "favorite-meta")?.textContent, "60 episodes · 1h 19m");
-    // Most episodes by that number: Moonlight's 55 above Paper Crowns' 30 (by TikTok's 12 it would be last)
-    element("library-sort").value = "episodes";
-    element("library-sort").fire("change");
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE, SNOW_A, SNOW_B, MOON, PAPER]);
-    // the selection's sum: 55 for Moonlight, not TikTok's 12
-    for (const seriesId of [MOON, PAPER]) {
-      const box = tickOf(page, seriesId);
-      assert.ok(box !== undefined);
-      box.checked = true;
-      box.fire("change");
-    }
-    assert.equal(element("favorites-selection").textContent, "2 selected · 85 episodes");
-    // downloading it: the card agrees with itself — Downloading · 10/55, the bar out of 55
-    const engine = module.buildEngine({ ...BATCH_JOB, refs: [refOf(MOON)] }, { pauses: [], inputs: [], taking: true });
-    engine.onSeriesStart?.(1, 1, refOf(MOON));
-    assert.equal(statusTexts(page).find(([id]) => id === MOON)?.[1], "Downloading · 10/55");
-    const bar = descendants(/** @type {FakeElement} */ (cardOf(page, MOON))).find((part) => part.tagName === "PROGRESS");
-    assert.deepEqual([bar?.getAttribute("max"), bar?.getAttribute("value")], ["55", "10"]);
-    assert.equal(metaOf(page, MOON), "55 episodes · 16m");
-  } finally {
-    page.restore();
-  }
-  // in Spanish, with one more drama whose records hold ONE locked episode: its count and length
-  // only, never `1 bloqueado`
-  const spanish = await fakePage({ storage: { ...storage, [`series:${SNOW_A}`]: lockedState(SNOW_A, [1], [2]) }, language: "es" });
-  try {
-    await settled(spanish);
-    const meta = partOf(/** @type {FakeElement} */ (cardOf(spanish, MOON)), "favorite-meta");
-    assert.equal(meta?.textContent, "55 episodios · 16 min");
-    assert.equal(meta?.title, "");
-    const one = partOf(/** @type {FakeElement} */ (cardOf(spanish, SNOW_A)), "favorite-meta");
-    assert.equal(one?.textContent, "60 episodios · 1 h 19 min");
-    assert.equal(one?.getAttribute("data-locked"), null);
-    assert.equal(one?.title, "");
-    assert.equal(statusTexts(spanish).find(([id]) => id === MOON)?.[1], undefined);
-    // downloading it, in Spanish: Descargando · 10/55
-    const engine = spanish.module.buildEngine({ ...BATCH_JOB, refs: [refOf(MOON)] }, { pauses: [], inputs: [], taking: true });
-    engine.onSeriesStart?.(1, 1, refOf(MOON));
-    assert.equal(statusTexts(spanish).find(([id]) => id === MOON)?.[1], "Descargando · 10/55");
-  } finally {
-    spanish.restore();
-  }
-  // in English, one locked episode: no locked count either
-  const english = await fakePage({ storage: { ...storage, [`series:${SNOW_A}`]: lockedState(SNOW_A, [1], [2]) } });
-  try {
-    await settled(english);
-    const one = partOf(/** @type {FakeElement} */ (cardOf(english, SNOW_A)), "favorite-meta");
-    assert.equal(one?.textContent, "60 episodes · 1h 19m");
-    assert.equal(one?.title, "");
-  } finally {
-    english.restore();
-  }
-  // a drama TikTok's list gives no episode count and no length for, never run: `–`, and no status
-  const UNKNOWN = "7712345678901234577";
-  const bare = await fakePage({ storage: { favoritesLibrary: storedLibrary([...FIVE, [UNKNOWN, "No Count Yet", null]]) } });
-  try {
-    await settled(bare);
-    assert.equal(metaOf(bare, UNKNOWN), "–");
-    assert.equal(cardOf(bare, UNKNOWN)?.getAttribute("data-status"), "idle");
-    assert.equal(statusTexts(bare).find(([id]) => id === UNKNOWN)?.[1], undefined);
-  } finally {
-    bare.restore();
-  }
-});
-
-test("the page: Download selected dramas pressed while Update from TikTok still reads the list queues what the bar counts — the ticked dramas read so far — and unticks only those: a ticked drama the update has not reached yet stays ticked, its card ticked again once TikTok's whole list is read, or once the library comes back as it was (an update cut short), for the next press", async () => {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  const NEW_ID = "7712345678901234568";
-  // TikTok's list now: a favorite added since on top — the smart refresh's first page differs, so the
-  // update reads the whole list, the library refilling page by page
-  const first = { ...FAVORITES_CAPTURE, total: "6", dramaList: [{ ...shape, dramaID: NEW_ID, dramaName: "A New Favorite" }, .../** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"])] };
-  for (const [why, secondPage, after] of /** @type {[string, Record<string, unknown>, string[]][]} */ ([
-    ["TikTok's whole list read", { .../** @type {Record<string, unknown>} */ (favoritesPages()["1794351568"]), total: "6" }, [NEW_ID, ...FIVE.map(([seriesId]) => seriesId)]],
-    ["page 2 answered HTTP 404: the library as it was", { __dramafetch_status: 404, __dramafetch_text: "" }, FIVE.map(([seriesId]) => seriesId)],
-  ])) {
-    const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) }, testSettings: { pageDelayS: 0.001 } });
-    try {
-      const { element } = page;
-      // The Lighthouse Keeper's Promise (on TikTok's page 1) and Moonlight Over the Harbor (on page 2) ticked
-      for (const seriesId of [LIGHTHOUSE, MOON]) {
-        const box = tickOf(page, seriesId);
-        assert.ok(box !== undefined, why);
-        box.checked = true;
-        box.fire("change");
-      }
-      assert.equal(element("favorites-selection").textContent, "2 selected · 72 episodes", why);
-      const tab = favoritesTab({ pages: { "0": first, "1794351568": secondPage } });
-      tab.remember(1_794_351_500);
-      // page 2 held until released: the update is between its two pages
-      let asked = false;
-      /** @type {() => void} */
-      let release = () => undefined;
-      const held = new Promise((resolve) => (release = () => resolve(undefined)));
-      const fake = /** @type {{scripting: {executeScript: (injection: chrome.scripting.ScriptInjection<unknown[], unknown>) => Promise<unknown>}}} */ (
-        /** @type {unknown} */ (globalThis.chrome)
-      );
-      const read = fake.scripting.executeScript;
-      fake.scripting.executeScript = async (injection) => {
-        if (injection.world === "MAIN" && /[?&]cursor=1794351568/.test(String(injection.args?.[0]))) {
-          asked = true;
-          await held;
-        }
-        return read(injection);
-      };
-      Object.assign(chrome.tabs, { query: async () => [{ id: FAVORITES_TAB, index: 0, windowId: 1, active: false, url: "https://www.tiktok.com/@invented_viewer" }] });
-      element("library-refresh").fire("click");
-      for (let turn = 0; turn < 500 && !asked; turn += 1) await page.turn();
-      assert.ok(asked, why);
-      await settled(page);
-      // the library shows page 1's dramas so far: the bar counts the one ticked drama among them
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), [NEW_ID, LIGHTHOUSE, SNOW_A, SNOW_B], why);
-      assert.equal(element("favorites-selection").textContent, "1 selected · 60 episodes", why);
-      element("library-download").fire("click");
-      await settled(page);
-      // ONE job, waiting behind the update, over what the bar counted; that drama's tick cleared
-      assert.deepEqual(waitingRows(page), [dramaRow(LIGHTHOUSE, "The Lighthouse Keeper's Promise")], why); // the running update has no row
-      assert.equal(element("favorites-status").textContent, "1 series queued: they download one after the other, with the usual pauses.", why);
-      assert.equal(element("favorites-selection").textContent, "0 selected · 0 episodes", why);
-      page.hold(); // the batch's tabs.getCurrent never answers: it starts, and asks nothing of TikTok
-      release();
-      for (let turn = 0; turn < 500 && element("progress-current").textContent !== `Series ${LIGHTHOUSE}`; turn += 1) await page.turn();
-      await settled(page);
-      assert.equal(element("progress-current").textContent, `Series ${LIGHTHOUSE}`, why);
-      // the update over: the drama it had not reached when the button was pressed is still ticked
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), after, why);
-      assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [MOON], why);
-      assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "queued", why);
-      assert.equal(element("favorites-selection").textContent, "1 selected · 12 episodes", why);
-      // the next press queues it: its own job, behind the running one
-      element("library-download").fire("click");
-      await settled(page);
-      assert.deepEqual(waitingRows(page), [dramaRow(LIGHTHOUSE, "The Lighthouse Keeper's Promise"), dramaRow(MOON, "Moonlight Over the Harbor")], why); // the running one's list not read yet
-      assert.equal(element("favorites-selection").textContent, "0 selected · 0 episodes", why);
-      assert.equal(cardOf(page, MOON)?.getAttribute("data-status"), "queued", why);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("the page: a card's status follows a batch job — Queued while it waits, Downloading S/N with its bar after every episode, then nothing once its series is done (3.0.0: no status from the records — its count stays)", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const { element, module, local } = page;
-    const status = () => Object.fromEntries(statusTexts(page));
-    /** @returns {(string | null | undefined)[]} the card's state, its badge's class and its bar `[value, max]`, or none */
-    const card = () => {
-      const article = /** @type {FakeElement} */ (cardOf(page, PAPER));
-      const bar = descendants(article).find((part) => part.tagName === "PROGRESS");
-      return [article.getAttribute("data-status"), partOf(article, "favorite-status")?.className, bar?.getAttribute("value"), bar?.getAttribute("max")];
-    };
-    assert.equal(status()[PAPER], undefined); // nothing to say while no job holds it
-    assert.deepEqual(card(), ["idle", undefined, undefined, undefined]);
-    page.hold();
-    const box = tickOf(page, PAPER);
-    assert.ok(box !== undefined);
-    box.checked = true;
-    box.fire("change");
-    element("library-download").fire("click");
-    await page.turn();
-    assert.equal(status()[PAPER], "Queued");
-    assert.deepEqual(card(), ["queued", "badge favorite-status queued", undefined, undefined]); // no bar while it waits
-    // the running job's hooks, as the engine calls them
-    const job = /** @type {import("../src/app/app.js").Job} */ ({ ...BATCH_JOB, label: "Series", refs: [{ kind: "series", seriesId: PAPER, episodeHint: null, sourceUrl: PAPER }] });
-    const engine = module.buildEngine(job, { pauses: [], inputs: [], taking: true });
-    engine.onSeriesStart?.(1, 1, { kind: "series", seriesId: PAPER, episodeHint: null, sourceUrl: PAPER });
-    assert.equal(status()[PAPER], "Downloading · 0/30");
-    assert.deepEqual(card(), ["running", "badge favorite-status running", "0", "30"]);
-    local.set(`series:${PAPER}`, savedState(PAPER, [1, 2]));
-    const ep = makeEpisode({ number: 2, itemId: "i2", title: "Episode 2", seriesId: PAPER, durationS: 3, coverUrl: null, raw: {} });
-    engine.onResult?.({ episode: ep, status: "done", path: "/dl/E2.mp4", message: "saved E2.mp4 (0.1 MiB) + cover embedded", downloadId: 2 });
-    await settled(page);
-    assert.equal(status()[PAPER], "Downloading · 2/30");
-    assert.deepEqual(card(), ["running", "badge favorite-status running", "2", "30"]);
-    local.set(`series:${PAPER}`, savedState(PAPER, Array.from({ length: 30 }, (_, n) => n + 1), { complete: 30 }));
-    engine.onSeriesDone?.(1, 1, finishedRun(PAPER, "Paper Crowns", []));
-    await settled(page);
-    // done — every episode on disk — and the card says nothing: no On disk, no bar; its count as before
-    assert.equal(status()[PAPER], undefined);
-    assert.deepEqual(card(), ["idle", undefined, undefined, undefined]);
-    assert.equal(metaOf(page, PAPER), "30 episodes · 40m");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a drama whose records hold episodes beyond the library's count that did not download (TikTok added them after the list was read, and the run failed on them) counts them: its card says 5 episodes, and Downloading · 3/5 while it downloads — never a status of its own (3.0.0)", async () => {
-  const state = JSON.parse(JSON.stringify(savedState(LIGHTHOUSE, [1, 2, 3])));
-  for (const number of [4, 5]) {
-    state.episodes[String(number)] = { number, item_id: `i${number}`, status: "failed", path: null, message: "download looks incomplete or wrong: truncated body (60 %)", updated_at: "2027-01-15T08:00:00Z", download_id: null };
-  }
-  const page = await fakePage({
-    storage: {
-      favoritesLibrary: storedLibrary([[LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3], [SNOW_A, "Snowfall in Two Cities", 60]], { total: 946 }),
-      [`series:${LIGHTHOUSE}`]: state,
-    },
-  });
-  try {
-    assert.equal(cardOf(page, LIGHTHOUSE)?.getAttribute("data-status"), "idle");
-    assert.equal(Object.fromEntries(statusTexts(page))[LIGHTHOUSE], undefined);
-    assert.equal(metaOf(page, LIGHTHOUSE), "5 episodes · 4m"); // the records know 5 episodes, TikTok's entry said 3
-    const engine = page.module.buildEngine({ ...BATCH_JOB, refs: [refOf(LIGHTHOUSE)] }, { pauses: [], inputs: [], taking: true });
-    engine.onSeriesStart?.(1, 1, refOf(LIGHTHOUSE));
-    assert.equal(Object.fromEntries(statusTexts(page))[LIGHTHOUSE], "Downloading · 3/5");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: the smart refresh — a library read from this TikTok profile and still TikTok's list costs ONE request (a library 2.x kept: the dramas it had removed from the Favorites leave it as it is read back, never written again); otherwise the whole list is read and becomes the library; nothing kept signed", async () => {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  /** @param {string} seriesId @param {string} title @param {number} episodes */
-  const entryOf = (seriesId, title, episodes) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 79) });
-  const list = FIVE.map(([seriesId, title, episodes]) => entryOf(seriesId, title, episodes));
-  /** @param {Record<string, unknown>[]} dramas @returns {Record<string, unknown>} TikTok's list in two pages: three, then the rest */
-  const pagesOf = (dramas) => ({
-    "0": { ...FAVORITES_CAPTURE, total: String(dramas.length), cursor: "1794351568", hasMore: true, dramaList: dramas.slice(0, 3) },
-    "1794351568": { ...FAVORITES_CAPTURE, total: String(dramas.length), cursor: "1794350100", hasMore: false, dramaList: dramas.slice(3) },
-  });
-  // unchanged: one request; TikTok's count — over a library 2.x kept after it removed a sixth drama
-  // from the Favorites (its count the last one minus one, not confirmed): that drama left the
-  // library as it was read back (3.0.0), its count is unknown until TikTok says it again (2.x's
-  // estimate, never TikTok's), and 2.x's marks are never written again
-  let page = await fakePage({ storage: { favoritesLibrary: storedLibrary([...FIVE, [LANTERN_ID, "The Last Lantern", 24]], { total: 5, unconfirmed: true, removed: [{ seriesId: LANTERN_ID, at: 1 }] }) } });
-  try {
-    const { element, module, local } = page;
-    const tab = favoritesTab({ pages: pagesOf(list) });
-    tab.remember(1_794_351_500);
-    assert.equal(cardOf(page, LANTERN_ID), undefined); // gone at once: no card, no count
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
-    assert.equal(element("favorites-count").textContent, "5 favorite dramas listed.");
-    assert.equal(element("library-total").textContent, "TikTok did not say how many dramas it counts");
-    assert.equal(element("library-stale").hidden, true);
-    const job = favoritesJob();
-    const { engine, pauses } = favoritesEngine(page, job);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await module.runFavorites(job, engine, entry), null);
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]); // the first page only
-    assert.deepEqual(pauses, [0.8]);
-    assert.equal(element("input-status").textContent, "No changes: TikTok counts 5 dramas.");
-    assert.equal(entry["favorites"], 5);
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
-    assert.equal(element("library-total").textContent, "TikTok counts 5 dramas");
-    const kept = /** @type {Record<string, unknown>} */ (local.get("favoritesLibrary"));
-    assert.equal(Object.hasOwn(kept, "removed"), false); // 2.x's marks never written again
-    assert.equal(Object.hasOwn(kept, "unconfirmed"), false);
-    assert.equal(/** @type {unknown[]} */ (kept["items"]).length, 5);
-    assert.doesNotMatch(JSON.stringify(kept), /http/);
-  } finally {
-    page.restore();
-  }
-  // a favorite added since (newest first): the first page differs — the whole list read, it becomes the library
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const { element, module, local } = page;
-    const added = [entryOf(LANTERN_ID, "The Last Lantern", 24), ...list];
-    const tab = favoritesTab({ pages: pagesOf(added) });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    assert.equal(await module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    assert.equal(tab.fetched.length, 2);
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), [LANTERN_ID, ...FIVE.map(([seriesId]) => seriesId)]);
-    assert.equal(element("library-total").textContent, "TikTok counts 6 dramas");
-    // 1.6.0's guidance (`favoritesLoaded`): the library's own Download selected dramas first, the box second
-    assert.equal(element("input-status").textContent, "6 favorite dramas listed: press Download on a drama, or tick several and press Download selected dramas.");
-    const kept = /** @type {Record<string, unknown>} */ (local.get("favoritesLibrary"));
-    assert.equal(kept["profile"], PROFILE);
-    assert.equal(/** @type {unknown[]} */ (kept["items"]).length, 6);
-    assert.doesNotMatch(JSON.stringify(kept), /http/);
-  } finally {
-    page.restore();
-  }
-  // a library read from another profile: never taken for this one's — the whole list read
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { profile: "@someone_else" }) } });
-  try {
-    const tab = favoritesTab({ pages: pagesOf(list) });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    assert.equal(tab.fetched.length, 2);
-    assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"))["profile"], PROFILE);
-  } finally {
-    page.restore();
-  }
-  // a refusal before the first page leaves the library as it was — shown and kept
-  page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const tab = favoritesTab({ pages: { "0": { __dramafetch_status: 429, __dramafetch_text: "" } } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    const { engine } = favoritesEngine(page, job);
-    try {
-      assert.equal(await page.module.runFavorites(job, engine, {}), FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
-      assert.equal(/** @type {unknown[]} */ (/** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"))["items"]).length, 5);
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: an update that does not reach TikTok's end never shrinks the library kept — page 2 answered HTTP 429, Stop after page 1, TikTok sending no more after page 1: the library in the page and on disk is the one it was, only TikTok's count of page 1 taken (the library's own profile), the time of its whole read kept; the status line, the job's record, the cooldown and the job's stop as before", async () => {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  const NEW_ID = "7712345678901234568";
-  // TikTok's list now: a favorite added since on top — so the smart refresh's first page differs and
-  // the listing reads on —, seven in all
-  const first = {
-    ...FAVORITES_CAPTURE,
-    total: "7",
-    cursor: "1794351568",
-    hasMore: true,
-    dramaList: [{ ...shape, dramaID: NEW_ID, dramaName: "A New Favorite" }, .../** @type {unknown[]} */ (FAVORITES_CAPTURE["dramaList"]).slice(0, 2)],
-  };
-  /** the library kept: the five and a sixth, its whole list read two hours ago */
-  const keptSix = () => storedLibrary([...FIVE, [LANTERN_ID, "The Last Lantern", 24]], { total: 6 });
-  const sixIds = [...FIVE.map(([seriesId]) => seriesId), LANTERN_ID];
-  /**
-   * The library as it was, in the page and on disk — but for TikTok's count of page 1, read now.
-   * @param {Awaited<ReturnType<typeof fakePage>>} page
-   * @param {Record<string, unknown>} stored what the page was seeded with
-   */
-  const keptAsItWas = (page, stored) => {
-    assert.deepEqual(favoriteRows(page).map(([id]) => id), sixIds); // its dramas, in its order
-    assert.equal(cardOf(page, NEW_ID), undefined); // nothing of the partial read
-    assert.equal(page.element("library-total").textContent, "TikTok counts 7 dramas"); // page 1's count
-    assert.equal(page.element("library-stale").textContent, "This list has 6: press Update from TikTok to bring it up to date");
-    const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-    assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), sixIds);
-    assert.equal(kept["total"], 7);
-    assert.ok(Math.abs(Number(kept["countedAt"]) - Date.now() / 1000) < 60, "TikTok's count read now");
-    for (const key of ["fullReadAt", "listedAt", "complete", "profile"]) assert.deepEqual(kept[key], stored[key], key); // the whole read's
-  };
-  // page 2 answered HTTP 429: the job's stop, the cooldown recorded with its reason, nothing counted in the job's record
-  let stored = keptSix();
-  let page = await fakePage({ storage: { favoritesLibrary: stored } });
-  try {
-    const tab = favoritesTab({ pages: { "0": first, "1794351568": { __dramafetch_status: 429, __dramafetch_text: "" } } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    const { engine } = favoritesEngine(page, job);
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    try {
-      assert.equal(await page.module.runFavorites(job, engine, entry), FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(tab.fetched.length, 2); // nothing after the refusal
-      assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("cooldown"))["reason"], FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(page.element("input-status").textContent, FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.deepEqual(entry, { error: FAVORITES_RATE_LIMIT_MESSAGE });
-      keptAsItWas(page, stored);
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-  // Stop once page 1 was read: the job stopped, the job's record keeps the three it listed
-  stored = keptSix();
-  page = await fakePage({ storage: { favoritesLibrary: stored } });
-  try {
-    const tab = favoritesTab({ pages: { "0": first } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    const { engine } = favoritesEngine(page, job);
-    engine.stopRequested = () => tab.fetched.length > 0;
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    await assert.rejects(page.module.runFavorites(job, engine, entry), StopRequested);
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]);
-    assert.deepEqual(entry, { favorites: 3 });
-    keptAsItWas(page, stored);
-  } finally {
-    page.restore();
-  }
-  // TikTok sends no more after page 1 (`favorites.cutShort`): no stop; the status line and the job's
-  // record say how many TikTok sent, as before
-  stored = keptSix();
-  page = await fakePage({ storage: { favoritesLibrary: stored } });
-  try {
-    const tab = favoritesTab({ pages: { "0": first, "1794351568": { dramaList: [], hasMore: false, statusCode: 0 } } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    /** @type {Record<string, unknown>} */
-    const entry = {};
-    assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, entry), null);
-    assert.equal(tab.fetched.length, 2);
-    const cutShortText = String(page.catalog["favoritesCutShort"]?.message).replace("$count$", "3");
-    // the status line says the library was kept as it was (1.6.0's review: 1.5.0's "the rest of the
-    // list is not shown" was said next to every drama the library kept); the job's record keeps why, as before
-    assert.equal(page.element("input-status").textContent, String(page.catalog["libraryKept"]?.message).replace("$count$", "3"));
-    assert.equal(page.element("input-status").className, "status error");
-    assert.deepEqual(entry, { favorites: 3, error: cutShortText });
-    keptAsItWas(page, stored);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: an empty first page never wipes the library kept — TikTok counting dramas it did not send, or giving no count (a replay it no longer accepts may come back so): the library as it was, its ticks too, only a count TikTok gave taken; TikTok's whole list counting none is adopted — no favorites left", async () => {
-  for (const [why, firstPage, total] of /** @type {[string, Record<string, unknown>, number | null][]} */ ([
-    ["TikTok counting 12", { ...FAVORITES_CAPTURE, total: "12", hasMore: false, dramaList: [] }, 12],
-    ["no count", { dramaList: [], hasMore: false, statusCode: 0 }, null],
-  ])) {
-    const stored = storedLibrary(FIVE);
-    const page = await fakePage({ storage: { favoritesLibrary: stored } });
-    try {
-      const tick = tickOf(page, PAPER);
-      assert.ok(tick !== undefined, why);
-      tick.checked = true;
-      tick.fire("change");
-      const tab = favoritesTab({ pages: { "0": firstPage } });
-      tab.remember(1_794_351_500);
-      const job = favoritesJob();
-      /** @type {Record<string, unknown>} */
-      const entry = {};
-      assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, entry), null, why);
-      assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE], why);
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId), why);
-      // the status line says the library was not updated — never "0 favorite dramas listed", as success —;
-      // the job's record keeps why: TikTok cutting the list short when it counted more, else that text
-      const keptText = String(page.catalog["libraryKeptEmpty"]?.message);
-      assert.equal(page.element("input-status").textContent, keptText, why);
-      assert.equal(page.element("input-status").className, "status error", why);
-      assert.deepEqual(entry, { favorites: 0, error: total === null ? keptText : String(page.catalog["favoritesCutShort"]?.message).replace("$count$", "0") }, why);
-      assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked).map(([id]) => id), [PAPER], why); // never pruned by a list not kept
-      assert.equal(page.element("favorites-selection").textContent, "1 selected · 30 episodes", why);
-      const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-      assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), FIVE.map(([seriesId]) => seriesId), why);
-      assert.equal(kept["total"], total ?? 5, why); // TikTok's count when it gave one: the library's own profile
-      assert.equal(kept["fullReadAt"], stored["fullReadAt"], why);
-      if (total === null) assert.equal(kept, stored, why); // nothing to take: not even written
-    } finally {
-      page.restore();
-    }
-  }
-  // TikTok's whole list, counting none: the user has no favorites left — the library says so
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const tab = favoritesTab({ pages: { "0": { ...FAVORITES_CAPTURE, total: "0", hasMore: false, dramaList: [] } } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    assert.deepEqual(favoriteRows(page), []);
-    assert.equal(page.element("library-total").textContent, "TikTok counts 0 dramas");
-    const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-    assert.deepEqual(kept["items"], []);
-    assert.equal(kept["total"], 0);
-    assert.equal(kept["complete"], true);
-    assert.ok(Math.abs(Number(kept["fullReadAt"]) - Date.now() / 1000) < 60, "TikTok's whole list, read now");
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: an update read partially from a tab of another TikTok profile leaves the library exactly as it was — that account's count never taken —; with no library yet, the dramas read before a refusal become the library, kept as before", async () => {
-  const refusedAfterPage1 = { "0": FAVORITES_CAPTURE, "1794351568": { __dramafetch_status: 429, __dramafetch_text: "" } };
-  const stored = storedLibrary(FIVE); // read from @invented_viewer
-  let page = await fakePage({ storage: { favoritesLibrary: stored } });
-  try {
-    const tab = favoritesTab({ tabUrl: "https://www.tiktok.com/@someone_else", pages: refusedAfterPage1 });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    const { engine } = favoritesEngine(page, job);
-    try {
-      assert.equal(await page.module.runFavorites(job, engine, {}), FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.equal(tab.fetched.length, 2); // another profile: no smart refresh, its list read from the top
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId));
-      assert.equal(page.element("library-total").textContent, "TikTok counts 5 dramas"); // not the other account's 946
-      assert.equal(page.local.get("favoritesLibrary"), stored); // the very object it was seeded with: not one write
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-  // no library yet: what was read before the refusal becomes the library — kept, with the tab's
-  // profile and TikTok's count, its whole list never read
-  page = await fakePage();
-  try {
-    const tab = favoritesTab({ pages: refusedAfterPage1 });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    const { engine } = favoritesEngine(page, job);
-    try {
-      assert.equal(await page.module.runFavorites(job, engine, {}), FAVORITES_RATE_LIMIT_MESSAGE);
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), [LIGHTHOUSE, SNOW_A, SNOW_B]);
-      const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-      assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), [LIGHTHOUSE, SNOW_A, SNOW_B]);
-      assert.equal(kept["total"], 946);
-      assert.equal(kept["complete"], false);
-      assert.equal(kept["fullReadAt"], null);
-      assert.equal(kept["profile"], PROFILE);
-    } finally {
-      await clearCooldown(engine.cooldownStore);
-    }
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: the popup's Open my library away from a TikTok profile shows the library — the engine's tab answers, no job, no request —; a read-only tab stays silent; with no page running, the tab the worker opens at ?library=1 shows it", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) }, testSettings: {} }); // the test copy: its journal of jobs
-  /** how often a page that was handed nothing scrolled its library into view while it started */
-  let atStart = 0;
-  try {
-    const before = page.element("library").scrolledIntoView ?? 0;
-    atStart = before;
-    assert.deepEqual(page.message({ type: "dramafetch:library" }), [{ ok: true, tabId: 1 }]);
-    assert.equal(page.element("library").scrolledIntoView, before + 1);
-    assert.equal(page.element("app-status").dataset["state"], "idle");
-    assert.deepEqual(page.module.journal(), []); // no job
-    assert.deepEqual(page.message({ type: "dramafetch:library" }, "another-extension-id"), []);
-  } finally {
-    page.restore();
-  }
-  const readonly = await fakePage({ lockTaken: true, storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    assert.deepEqual(readonly.message({ type: "dramafetch:library" }), []);
-  } finally {
-    readonly.restore();
-  }
-  // no page was running to answer: the worker opened (or reloaded) the DramaFetch tab at ?library=1 —
-  // the library shown once, the address back to the page's own, no job, nothing kept
-  const opened = await fakePage({ search: "?library=1", storage: { favoritesLibrary: storedLibrary(FIVE) }, testSettings: {} });
-  try {
-    assert.equal(opened.element("library").scrolledIntoView ?? 0, atStart + 1);
-    assert.deepEqual(opened.replaced, ["/src/app/app.html"]);
-    assert.equal(opened.element("app-status").dataset["state"], "idle");
-    assert.deepEqual(opened.module.journal(), []); // no job
-    assert.equal(favoriteRows(opened).length, 5);
-  } finally {
-    opened.restore();
-  }
-});
-
-test("the page: the episode list's thumbnails and the library's covers share the page's one lane — never two cover requests in flight at once — and the same gate: never during a job or a cooldown, nor after a refused write", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const { list, library } = page.module.coverLoaders();
-    assert.notEqual(list, library);
-    assert.ok(list.options.lane !== undefined, "the episode list's loader takes its turns in a lane");
-    assert.equal(list.options.lane, library.options.lane, "one lane for both loaders");
-    // both asked, before each pause and again right before each request, whether a request may go out
-    assert.equal(list.options.allowed, page.module.coversAllowed);
-    assert.equal(library.options.allowed, page.module.coversAllowed);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: the library's episode counts — the numbers its cards show — are trusted for 24 hours after its whole list was read — the smart refresh then costs one request; older, the whole list is read again and a series that gained episodes says so on its card", async () => {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  /** @param {string} seriesId @param {string} title @param {number} episodes */
-  const entryOf = (seriesId, title, episodes) => ({ ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 79) });
-  // TikTok's list: the same five dramas in the same order — Paper Crowns now has 40 episodes, not 30
-  const grown = FIVE.map(([seriesId, title, episodes]) => entryOf(seriesId, title, seriesId === PAPER ? 40 : episodes));
-  const pages = {
-    "0": { ...FAVORITES_CAPTURE, total: "5", cursor: "1794351568", hasMore: true, dramaList: grown.slice(0, 3) },
-    "1794351568": { ...FAVORITES_CAPTURE, total: "5", cursor: "1794350100", hasMore: false, dramaList: grown.slice(3) },
-  };
-  const stale = Date.now() / 1000 - 25 * 3600;
-  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { fullReadAt: stale }), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) } });
-  try {
-    await settled(page);
-    assert.equal(metaOf(page, PAPER), "30 episodes · 40m"); // what the old count says
-    let tab = favoritesTab({ pages });
-    tab.remember(1_794_351_500);
-    let job = favoritesJob();
-    assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    assert.equal(tab.fetched.length, 2); // the whole list: its first page could not tell
-    await settled(page);
-    assert.equal(metaOf(page, PAPER), "40 episodes · 53m");
-    assert.equal(Object.fromEntries(statusTexts(page))[PAPER], undefined); // its count, never a status
-    const read = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-    assert.ok(Math.abs(Number(read["fullReadAt"]) - Date.now() / 1000) < 60, "the whole list read now");
-    // read whole a moment ago: nothing changed — one request, and the whole read stays the earlier one
-    tab = favoritesTab({ pages });
-    tab.remember(1_794_351_500);
-    job = favoritesJob();
-    assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]);
-    assert.equal(/** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"))["fullReadAt"], read["fullReadAt"]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a cover whose signed address has expired is never asked for — restored from the browser session's memory, or one the page still shows past its signature (asked right before each request) —, while a fresh one is", async () => {
-  /** @param {string} seriesId @param {number} expires */
-  const signed = (seriesId, expires) => `https://p16-common-sign.tiktokcdn.com/c/${seriesId}.avif?x-expires=${expires}&x-signature=INVENTED%3D`;
-  const past = Math.floor(Date.now() / 1000) - 86_400;
-  const future = Math.floor(Date.now() / 1000) + 86_400;
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) }, session: { favoritesCovers: { [LIGHTHOUSE]: signed(LIGHTHOUSE, past), [SNOW_A]: signed(SNOW_A, future) } } });
-  try {
-    const { library } = page.module.coverLoaders();
-    assert.equal(library.urls.has(LIGHTHOUSE), false); // expired: its card shows the title, no request
-    assert.equal(library.urls.get(SNOW_A), signed(SNOW_A, future));
-    assert.equal(library.options.usable?.(signed(SNOW_A, future)), true);
-    assert.equal(library.options.usable?.(signed(SNOW_A, past)), false);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: Update from TikTok reads only the library's own profile — with only a tab of another account showing its favorites the button stays disabled, its hint naming the library's profile, and a click queues nothing; a tab of the library's profile enables it; a library that does not know its profile takes any profile's tab, its hint the general one", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) }, testSettings: {} }); // read from @invented_viewer; the test copy: its journal of jobs
-  try {
-    const { element, module } = page;
-    const tab = favoritesTab({ tabUrl: "https://www.tiktok.com/@someone_else" });
-    tab.remember(1_794_351_500); // the worker kept that tab's favorites address
-    /** @param {number} id @param {string} url a TikTok tab as `chrome.tabs.query` lists it */
-    const tabOf = (id, url) => ({ id, index: 0, windowId: 1, active: false, url });
-    const open = [tabOf(FAVORITES_TAB, "https://www.tiktok.com/@someone_else")];
-    Object.assign(chrome.tabs, { query: async () => open });
-    page.storageChanged(`favoritesTemplate:${FAVORITES_TAB}`, "session");
-    await settled(page);
-    assert.equal(element("library-refresh").disabled, true);
-    assert.equal(element("library-refresh-hint").hidden, false);
-    assert.equal(element("library-refresh-hint").textContent, "To update, open your TikTok profile (@invented_viewer) → Favorites → Drama in a tab of this Chrome.");
-    assert.equal(element("library-dot").className, "dot");
-    element("library-refresh").fire("click"); // nothing to read from: nothing queued, nothing asked
-    await settled(page);
-    assert.equal(element("app-status").dataset["state"], "idle");
-    assert.deepEqual(module.journal(), []); // no job
-    assert.deepEqual(tab.fetched, []);
-    // the library's own profile shows its favorites in another tab — whose address the worker kept
-    // before the other account's —: enabled, the hint gone
-    open.push(tabOf(43, "https://www.tiktok.com/@invented_viewer"));
-    tab.session.set("favoritesTemplate:43", { url: FAVORITES_TEMPLATE, at: 1_794_351_400, profile: "@invented_viewer" });
-    page.storageChanged("favoritesTemplate:43", "session");
-    await settled(page);
-    assert.equal(element("library-refresh").disabled, false);
-    assert.equal(element("library-refresh-hint").hidden, true);
-    assert.equal(element("library-dot").className, "dot connected");
-  } finally {
-    page.restore();
-  }
-  // a library that does not know the profile it was read from: the general hint, and any profile's tab enables it
-  const unknown = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE, { profile: null }) } });
-  try {
-    const { element } = unknown;
-    assert.equal(element("library-refresh").disabled, true);
-    assert.equal(element("library-refresh-hint").textContent, unknown.catalog["libraryRefreshHint"]?.message);
-    const tab = favoritesTab({ tabUrl: "https://www.tiktok.com/@someone_else" });
-    tab.remember(1_794_351_500);
-    Object.assign(chrome.tabs, { query: async () => [{ id: FAVORITES_TAB, index: 0, windowId: 1, active: false, url: "https://www.tiktok.com/@someone_else" }] });
-    unknown.storageChanged(`favoritesTemplate:${FAVORITES_TAB}`, "session");
-    await settled(unknown);
-    assert.equal(element("library-refresh").disabled, false);
-    assert.equal(element("library-refresh-hint").hidden, true);
-  } finally {
-    unknown.restore();
-  }
-});
-
-test("the page: Update from TikTok — disabled with its hint while no TikTok tab shows the favorites list; then enabled, its click the smart refresh of that tab (one request when nothing changed) —; Open on TikTok opens the drama's first episode in a tab in front; Clear selection unticks every drama; See episodes queues the listing of that series", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) }, testSettings: { pageDelayS: 0.001 } });
-  try {
-    const { element, local, module } = page;
-    // no TikTok tab with the list: disabled, the hint shown — and a click queues nothing
-    assert.equal(element("library-refresh").disabled, true);
-    assert.equal(element("library-refresh-hint").hidden, false);
-    element("library-refresh").fire("click");
-    await settled(page);
-    assert.equal(element("app-status").dataset["state"], "idle");
-    assert.deepEqual(module.journal(), []); // no job
-    // the profile's tab shows the list (its favorites address kept): enabled, the hint gone; one request
-    const tab = favoritesTab({ pages: { "0": { ...FAVORITES_CAPTURE, total: "5" } } });
-    tab.remember(1_794_351_500);
-    Object.assign(chrome.tabs, { query: async () => [{ id: FAVORITES_TAB, index: 0, windowId: 1, active: false, url: "https://www.tiktok.com/@invented_viewer" }] });
-    element("library-refresh").fire("click");
-    for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    assert.equal(element("library-refresh").disabled, false);
-    assert.equal(element("library-refresh-hint").hidden, true);
-    const [entry] = module.journal();
-    assert.equal(entry?.["kind"], "favorites");
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]); // that tab's list, its first page: nothing changed
-    assert.equal(element("input-status").textContent, "No changes: TikTok counts 5 dramas.");
-    // Open on TikTok: the drama's first episode, a normal tab in front
-    /** @type {chrome.tabs.CreateProperties[]} */
-    const created = [];
-    Object.assign(chrome.tabs, {
-      create: async (/** @type {chrome.tabs.CreateProperties} */ properties) => {
-        created.push(properties);
-        return { id: 99, index: 2, windowId: 1, active: true };
-      },
-    });
-    actionOf(page, PAPER, "open")?.fire("click");
-    await page.turn();
-    assert.deepEqual(created, [{ url: `https://www.tiktok.com/shortdrama/episode/${PAPER}/1`, active: true }]);
-    // Clear selection: no drama ticked
-    for (const seriesId of [PAPER, MOON]) {
-      const box = tickOf(page, seriesId);
-      assert.ok(box !== undefined);
-      box.checked = true;
-      box.fire("change");
-    }
-    assert.equal(element("favorites-selection").textContent, "2 selected · 42 episodes");
-    element("library-clear").fire("click");
-    assert.equal(element("favorites-selection").textContent, "0 selected · 0 episodes");
-    assert.deepEqual(favoriteRows(page).filter(([, , , , ticked]) => ticked), []);
-    // See episodes: the listing of that series, one job
-    page.hold();
-    actionOf(page, PAPER, "browse")?.fire("click");
-    await page.turn();
-    assert.equal(element("progress-current").textContent, `List series ${PAPER}`); // the listing's own job
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a listing keeps its covers' signed addresses in the browser session's memory only — never in chrome.storage.local —; a library write the storage refuses is said once and stops nothing: the listing ends, no refused write is remembered, the next listing runs", async () => {
+  assert.ok(html.includes('id="links"'));
   const page = await fakePage();
   try {
-    const { element, module, local } = page;
-    const tab = favoritesTab();
-    tab.remember(1_794_351_500);
-    let job = favoritesJob();
-    assert.equal(await module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    const covers = /** @type {Record<string, string>} */ (tab.session.get("favoritesCovers"));
-    assert.deepEqual(Object.keys(covers).sort(), [LIGHTHOUSE, SNOW_A, SNOW_B, PAPER, MOON].sort());
-    assert.ok(Object.values(covers).every((url) => url.startsWith("https://") && url.includes("x-signature=")));
-    for (const [key, value] of local) assert.doesNotMatch(JSON.stringify(value), /x-signature|tiktokcdn|https?:/, key); // not one address on disk
+    assert.ok(page.element("links").listeners.has("paste") && page.element("links").listeners.has("keydown"));
   } finally {
     page.restore();
-  }
-  const refused = await fakePage();
-  try {
-    const { element, module } = refused;
-    const tab = favoritesTab();
-    tab.remember(1_794_351_500);
-    const set = chrome.storage.local.set;
-    Object.assign(chrome.storage.local, {
-      set: async (/** @type {Record<string, unknown>} */ items) => {
-        if ("favoritesLibrary" in items) throw new Error(REFUSED); // only the library's write
-        return set(items);
-      },
-    });
-    let job = favoritesJob();
-    assert.equal(await module.runFavorites(job, favoritesEngine(refused, job).engine, {}), null); // no stop
-    assert.equal(element("favorites-status").textContent, `The library could not be kept on this computer (${REFUSED}): it is read from TikTok again next time.`);
-    assert.equal(await module.coversAllowed(), true); // nothing remembered as refused: the page goes on asking
-    assert.equal(actionOf(refused, LIGHTHOUSE, "download")?.disabled, false); // the job buttons too
-    job = favoritesJob();
-    assert.equal(await module.runFavorites(job, favoritesEngine(refused, job).engine, {}), null);
-    assert.equal(tab.fetched.length, 4); // the next listing ran: its two pages too
-    assert.equal(element("favorites-status").textContent, ""); // said once in this page
-  } finally {
-    refused.restore();
-  }
-});
-
-// ------------------------------------------------- 1.6.0's review: what a listing becomes in the library
-
-/** @param {string} seriesId @param {string} title @param {number} [episodes] @returns {Record<string, unknown>} a drama of TikTok's list */
-const listed = (seriesId, title, episodes = 60) => {
-  const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-  return { ...shape, dramaID: seriesId, dramaName: title, numVideos: episodes, totalDuration: String(episodes * 97) };
-};
-
-/**
- * TikTok tab 42 shows `url` from now on (`chrome.tabs.get`, `chrome.tabs.query`): the user browsed on in it.
- * @param {string | (() => string)} url
- */
-function tabShows(url) {
-  const at = typeof url === "string" ? () => url : url;
-  Object.assign(chrome.tabs, {
-    get: async (/** @type {number} */ tabId) => ({ id: tabId, index: 0, windowId: 1, active: false, url: at() }),
-    query: async () => [{ id: FAVORITES_TAB, index: 0, windowId: 1, active: false, url: at() }],
-  });
-}
-
-test("the page: the library's profile is whose favorites the listing's address reads — the worker records it with the address —, never the page the tab shows by the listing's end: an update during which the tab moves on to another creator's video, or a drama's page, keeps @invented_viewer (on disk, on the connection line) and Update from TikTok stays enabled on that profile's tab; the popup's Open my library from a tab that moved on to another creator's page since its address was recorded labels a first library so too; an address recorded for another account is never the source", async () => {
-  const NEW_ID = "7712345678901234568";
-  const pages = {
-    "0": { ...FAVORITES_CAPTURE, total: "6", cursor: "1794351568", hasMore: true, dramaList: [listed(NEW_ID, "A New Favorite"), ...FIVE.slice(0, 3).map(([seriesId, title, episodes]) => listed(seriesId, title, episodes))] },
-    "1794351568": { ...FAVORITES_CAPTURE, total: "6", cursor: "1794350100", hasMore: false, dramaList: FIVE.slice(3).map(([seriesId, title, episodes]) => listed(seriesId, title, episodes)) },
-  };
-  for (const moved of ["https://www.tiktok.com/@some_creator/video/7412345678901234567", `https://www.tiktok.com/shortdrama/episode/${PAPER}/1`]) {
-    const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-    try {
-      const tab = favoritesTab({ pages });
-      tab.remember(1_794_351_500); // recorded while the tab showed @invented_viewer → Favorites → Drama
-      tabShows(() => (tab.fetched.length > 0 ? moved : "https://www.tiktok.com/@invented_viewer")); // the user clicked on after page 1
-      const job = favoritesJob();
-      assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null, moved);
-      assert.equal(tab.fetched.length, 2, moved); // the whole list read: it became the library
-      const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-      assert.equal(/** @type {unknown[]} */ (kept["items"]).length, 6, moved);
-      assert.equal(kept["profile"], PROFILE, moved); // whose list was read — never the page the tab shows now
-      assert.equal(page.element("library-source").textContent, "Read from your TikTok tab (@invented_viewer)", moved);
-      // back on the profile: that tab is Update from TikTok's source — its address reads @invented_viewer's list
-      tabShows("https://www.tiktok.com/@invented_viewer");
-      page.storageChanged(`favoritesTemplate:${FAVORITES_TAB}`, "session");
-      await settled(page);
-      assert.equal(page.element("library-refresh").disabled, false, moved);
-      assert.equal(page.element("library-refresh-hint").hidden, true, moved);
-    } finally {
-      page.restore();
-    }
-  }
-  // the popup's Open my library in a tab that moved on to another creator's profile after its
-  // address was recorded: that address still reads @invented_viewer's list — the library says so
-  const first = await fakePage();
-  try {
-    const tab = favoritesTab({ tabUrl: "https://www.tiktok.com/@a_creator", pages });
-    tab.remember(1_794_351_500, PROFILE);
-    const job = favoritesJob();
-    assert.equal(await first.module.runFavorites(job, favoritesEngine(first, job).engine, {}), null);
-    assert.equal(/** @type {Record<string, unknown>} */ (first.local.get("favoritesLibrary"))["profile"], PROFILE);
-    assert.equal(first.element("library-source").textContent, "Read from your TikTok tab (@invented_viewer)");
-  } finally {
-    first.restore();
-  }
-  // a tab on the library's profile page whose address was recorded on another account's profile is no source
-  const other = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const tab = favoritesTab();
-    tab.remember(1_794_351_500, "@someone_else");
-    tabShows("https://www.tiktok.com/@invented_viewer");
-    other.storageChanged(`favoritesTemplate:${FAVORITES_TAB}`, "session");
-    await settled(other);
-    assert.equal(other.element("library-refresh").disabled, true);
-    assert.equal(other.element("library-refresh-hint").textContent, "To update, open your TikTok profile (@invented_viewer) → Favorites → Drama in a tab of this Chrome.");
-  } finally {
-    other.restore();
-  }
-});
-
-test("the page: an update that received every drama TikTok counts is TikTok's whole list though it ended at a page served again, a cursor that does not move or two empty pages — it becomes the library (a drama removed on TikTok itself leaves it), its whole read dated now, and the status line's \"listed\" is true —; one that received fewer, or an empty answer with TikTok counting none, leaves the library as it was", async () => {
-  const NEW_ID = "7712345678901234568";
-  const all = [listed(NEW_ID, "A New Favorite"), ...FIVE.map(([seriesId, title, episodes]) => listed(seriesId, title, episodes))];
-  /** @param {unknown[]} dramas @param {Record<string, unknown>} more */
-  const pageOf = (dramas, more) => ({ ...FAVORITES_CAPTURE, ...more, dramaList: dramas });
-  const withoutMoon = all.slice(0, 5); // TikTok's list once MOON was removed on TikTok itself: NEW_ID and four
-  /** @type {[string, Record<string, unknown>, string[]][]} */
-  const whole = [
-    [
-      "the last page served again",
-      { "0": pageOf(all.slice(0, 4), { total: "6", cursor: "11", hasMore: true }), "11": pageOf(all.slice(4), { total: "6", cursor: "12", hasMore: true }), "12": pageOf(all.slice(4), { total: "6", cursor: "13", hasMore: true }) },
-      [NEW_ID, ...FIVE.map(([seriesId]) => seriesId)],
-    ],
-    ["a cursor that does not move — MOON removed on TikTok", { "0": pageOf(withoutMoon, { total: "5", cursor: "0", hasMore: true }) }, [NEW_ID, ...FIVE.slice(0, 4).map(([seriesId]) => seriesId)]],
-    [
-      "two empty pages — MOON removed on TikTok",
-      { "0": pageOf(withoutMoon, { total: "5", cursor: "11", hasMore: true }), "11": pageOf([], { total: "5", cursor: "12", hasMore: true }), "12": pageOf([], { total: "5", cursor: "13", hasMore: true }) },
-      [NEW_ID, ...FIVE.slice(0, 4).map(([seriesId]) => seriesId)],
-    ],
-  ];
-  for (const [why, pages, ids] of whole) {
-    const stored = storedLibrary(FIVE, { fullReadAt: Date.now() / 1000 - 30 * 3600 }); // its whole read a day and more ago
-    const page = await fakePage({ storage: { favoritesLibrary: stored } });
-    try {
-      const tab = favoritesTab({ pages });
-      tab.remember(1_794_351_500);
-      const job = favoritesJob();
-      assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null, why);
-      const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-      assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), ids, why);
-      assert.equal(kept["complete"], true, why);
-      assert.ok(Math.abs(Number(kept["fullReadAt"]) - Date.now() / 1000) < 60, `${why}: TikTok's whole list, read now`);
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), ids, why);
-      assert.equal(page.element("input-status").textContent, String(page.catalog["favoritesLoaded"]?.message).replace("$count$", String(ids.length)), why);
-      assert.equal(page.element("library-stale").hidden, true, why);
-    } finally {
-      page.restore();
-    }
-  }
-  /** @type {[string, Record<string, unknown>][]} */
-  const short = [
-    ["six of seven, then a page served again", { "0": pageOf(all.slice(0, 4), { total: "7", cursor: "11", hasMore: true }), "11": pageOf(all.slice(4), { total: "7", cursor: "12", hasMore: true }), "12": pageOf(all.slice(4), { total: "7", cursor: "13", hasMore: true }) }],
-    ["an empty answer whose cursor does not move, TikTok counting none", { "0": pageOf([], { total: "0", cursor: "0", hasMore: true }) }],
-  ];
-  for (const [why, pages] of short) {
-    const stored = storedLibrary(FIVE);
-    const page = await fakePage({ storage: { favoritesLibrary: stored } });
-    try {
-      const tab = favoritesTab({ pages });
-      tab.remember(1_794_351_500);
-      const job = favoritesJob();
-      assert.equal(await page.module.runFavorites(job, favoritesEngine(page, job).engine, {}), null, why);
-      const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-      assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), FIVE.map(([seriesId]) => seriesId), why);
-      assert.equal(kept["fullReadAt"], stored["fullReadAt"], why);
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId), why);
-      // said so: never "listed" as if the library had become that read
-      const kept6 = String(page.catalog["libraryKept"]?.message).replace("$count$", "6");
-      assert.equal(page.element("input-status").textContent, why.startsWith("six") ? kept6 : String(page.catalog["libraryKeptEmpty"]?.message), why);
-      assert.equal(page.element("input-status").className, "status error", why);
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-test("the page: an update that stops before TikTok's end keeps the library's dramas and order but takes the episode counts it read from the library's own profile — Paper Crowns, saved whole at 30, listed with 40 now, says 40 episodes (TikTok page 2 cut short, answered HTTP 429, or Stop); another account's listing renews nothing", async () => {
-  const NEW_ID = "7712345678901234568";
-  // TikTok's list now: a favorite added on top (so the smart refresh reads on), Paper Crowns grown to 40 episodes
-  const first = { ...FAVORITES_CAPTURE, total: "6", cursor: "1794351568", hasMore: true, dramaList: [listed(NEW_ID, "A New Favorite"), listed(PAPER, "Paper Crowns", 40), listed(LIGHTHOUSE, "The Lighthouse Keeper's Promise", 60)] };
-  const storage = () => ({ favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, Array.from({ length: 30 }, (_, n) => n + 1), { complete: 30, completeAt: Date.now() / 1000 - 3600 }) });
-  for (const [why, page2] of /** @type {[string, Record<string, unknown> | null][]} */ ([
-    ["TikTok sends no more after page 1", { dramaList: [], hasMore: false, statusCode: 0 }],
-    ["page 2 answered HTTP 429", { __dramafetch_status: 429, __dramafetch_text: "" }],
-    ["Stop after page 1", null],
-  ])) {
-    const page = await fakePage({ storage: storage() });
-    try {
-      assert.equal(metaOf(page, PAPER), "30 episodes · 40m", why);
-      const tab = favoritesTab({ pages: page2 === null ? { "0": first } : { "0": first, "1794351568": page2 } });
-      tab.remember(1_794_351_500);
-      const job = favoritesJob();
-      const { engine } = favoritesEngine(page, job);
-      if (page2 === null) engine.stopRequested = () => tab.fetched.length > 0;
-      try {
-        if (page2 === null) await assert.rejects(page.module.runFavorites(job, engine, {}), StopRequested);
-        else await page.module.runFavorites(job, engine, {});
-      } finally {
-        await clearCooldown(engine.cooldownStore);
-      }
-      await settled(page);
-      // the library as it was — its dramas, its order, its whole read's time —, Paper Crowns' count TikTok's now
-      assert.deepEqual(favoriteRows(page).map(([id]) => id), FIVE.map(([seriesId]) => seriesId), why);
-      assert.equal(metaOf(page, PAPER), "40 episodes · 1h 5m", why); // the listing's entry: 40 episodes, its length too
-      assert.equal(statusTexts(page).find(([id]) => id === PAPER)?.[1], undefined, why); // its count, never a status
-      const kept = /** @type {Record<string, unknown>} */ (page.local.get("favoritesLibrary"));
-      assert.deepEqual(/** @type {{seriesId: string}[]} */ (kept["items"]).map((item) => item.seriesId), FIVE.map(([seriesId]) => seriesId), why);
-      assert.equal(/** @type {{seriesId: string, episodes: number}[]} */ (kept["items"]).find((item) => item.seriesId === PAPER)?.episodes, 40, why);
-    } finally {
-      page.restore();
-    }
-  }
-  // another account's partial listing: nothing of it enters the library — its counts neither
-  const other = await fakePage({ storage: storage() });
-  try {
-    const tab = favoritesTab({ tabUrl: "https://www.tiktok.com/@someone_else", pages: { "0": first, "1794351568": { dramaList: [], hasMore: false, statusCode: 0 } } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    await other.module.runFavorites(job, favoritesEngine(other, job).engine, {});
-    await settled(other);
-    assert.equal(metaOf(other, PAPER), "30 episodes · 40m");
-    assert.equal(/** @type {{seriesId: string, episodes: number}[]} */ (/** @type {Record<string, unknown>} */ (other.local.get("favoritesLibrary"))["items"]).find((item) => item.seriesId === PAPER)?.episodes, 30);
-  } finally {
-    other.restore();
-  }
-});
-
-test("the page: an update that leaves the library as it was puts back everything of it — how many cards the grid drew —; with no library yet, an empty answer with no count is not kept", async () => {
-  const NEW_ID = "7712345678901234568";
-  /** @type {[string, string, number][]} */
-  const many = Array.from({ length: 130 }, (_, n) => [String(7712345678901300000n + BigInt(n)), `Drama ${String(n).padStart(3, "0")}`, 10]);
-  const first = { ...FAVORITES_CAPTURE, total: "136", cursor: "1794351568", hasMore: true, dramaList: [listed(NEW_ID, "A New Favorite"), ...FIVE.slice(0, 2).map(([seriesId, title, episodes]) => listed(seriesId, title, episodes))] };
-  const cutShort = { dramaList: [], hasMore: false, statusCode: 0 };
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary([...FIVE, ...many]) } });
-  try {
-    const { element, module } = page;
-    const tab = favoritesTab({ pages: { "0": first, "1794351568": cutShort } });
-    tab.remember(1_794_351_500);
-    // 120 cards drawn
-    element("library-more").fire("click");
-    await settled(page);
-    assert.equal(element("favorites-grid").children.length, 120);
-    // an update from that tab TikTok cuts short: the library as it was
-    const job = favoritesJob();
-    assert.equal(await module.runFavorites(job, favoritesEngine(page, job).engine, {}), null);
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE, FAVORITES_TEMPLATE.replace("cursor=0", "cursor=1794351568")]);
-    await settled(page);
-    assert.equal(element("favorites-grid").children.length, 120); // as many cards as it drew
-    assert.equal(element("library-more").textContent, "Show 15 more");
-  } finally {
-    page.restore();
-  }
-  // no library yet: an empty first page with no count is no list to keep
-  const empty = await fakePage();
-  try {
-    const tab = favoritesTab({ pages: { "0": cutShort } });
-    tab.remember(1_794_351_500);
-    const job = favoritesJob();
-    assert.equal(await empty.module.runFavorites(job, favoritesEngine(empty, job).engine, {}), null);
-    assert.deepEqual(tab.fetched, [FAVORITES_TEMPLATE]);
-    assert.equal(empty.local.get("favoritesLibrary"), undefined);
-  } finally {
-    empty.restore();
   }
 });
 
@@ -6101,7 +4085,7 @@ test("the alert's Retry, handed over by the worker: the page that made it queues
   }
 });
 
-test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopped in — its stopped episodes retryable, the stop's reason the context —, and at the job's end ONE more: DramaFetch stopped, how many dramas were never started — those of the jobs the stop took out of the queue counted too; Stop in the middle of a batch counts the dramas after the one it ran; a listing that stops says so only for the download jobs it took out of the queue", async () => {
+test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopped in — its stopped episodes retryable, the stop's reason the context —, and at the job's end ONE more: DramaFetch stopped, how many dramas were never started — those of the jobs the stop took out of the queue counted too; Stop in the middle of a batch counts the dramas after the one it ran; a Retry that stops says so for the download jobs it took out of the queue", async () => {
   const page = await fakePage();
   try {
     const { module } = page;
@@ -6131,7 +4115,7 @@ test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopp
     // the job's end: one more, and a batch the stop took out of the queue counts its dramas too
     assert.equal(job.contacted, true); // it made requests (the page's own `persist` noted them)
     const waiting = { kind: /** @type {const} */ ("batch"), refs: [refOf("7699393770256782366"), refOf(THIRD_ID)] };
-    module.alertJobEnd(job, stop, runs, jobRecord, [waiting, { kind: "load", refs: [refOf("7699393770256782377")] }]);
+    module.alertJobEnd(job, stop, runs, jobRecord, [waiting]);
     assert.deepEqual(notes.created.at(-1), `${page5}:stopped`);
     assert.deepEqual(notes.shown.get(`${page5}:stopped`), {
       type: "basic",
@@ -6160,24 +4144,21 @@ test("the alert of a batch TikTok stopped with a 429: ⚠ for the drama it stopp
     assert.equal(notes.shown.get(`${page6}:stopped`)?.["title"], "DramaFetch stopped: stopped by you");
     assert.equal(notes.shown.get(`${page6}:stopped`)?.["message"], "1 drama was not started — download it again later");
     // nothing when no drama was left unstarted, when the job asked TikTok for nothing (refused at
-    // its gate), or for a job that downloads nothing (a listing) when its stop cancelled no
-    // download: its own series are no downloads
+    // its gate), or for a Retry that ended before its run (Stop) when its stop cancelled nothing:
+    // its own drama gets its own alert, never a count
     notes.created.length = 0;
     module.alertJobEnd({ ...job, id: 8 }, "stopped by you", null, { begun: 3 }, []);
     module.alertJobEnd({ ...job, id: 9, contacted: false }, "cooldown until 12:30", null, {}, [waiting]);
-    const listingLoad = { kind: /** @type {const} */ ("load"), refs: [refOf("7699393770256782377")] };
-    for (const kind of /** @type {const} */ (["load", "favorites"])) module.alertJobEnd({ id: 10, kind, refs: [refOf(SERIES_ID)], contacted: true }, FAVORITES_RATE_LIMIT_MESSAGE, null, {}, [listingLoad]);
+    module.alertJobEnd({ id: 10, kind: "selection", refs: [refOf(SERIES_ID)], contacted: true }, LIST_RATE_LIMIT_MESSAGE, null, {}, []);
     assert.deepEqual(notes.created, []);
-    // ... but the download jobs a listing's stop took out of the queue are said, as a batch's would
+    // ... but the download jobs a Retry's stop took out of the queue are said, as a batch's would
     // be (an alert's Retry may wait behind one): their dramas only
-    for (const [id, kind] of /** @type {const} */ ([[11, "load"], [12, "favorites"]])) {
-      module.alertJobEnd({ id, kind, refs: [refOf(SERIES_ID)], contacted: true }, FAVORITES_RATE_LIMIT_MESSAGE, null, {}, [waiting, listingLoad]);
-    }
-    assert.deepEqual(notes.created, [11, 12].map((id) => `dramafetch-alert:${module.alerts.page}:${id}:stopped`));
-    assert.deepEqual(notes.shown.get(`dramafetch-alert:${module.alerts.page}:12:stopped`), {
+    module.alertJobEnd({ id: 11, kind: "selection", refs: [refOf(SERIES_ID)], contacted: true }, LIST_RATE_LIMIT_MESSAGE, null, {}, [waiting]);
+    assert.deepEqual(notes.created, [`dramafetch-alert:${module.alerts.page}:11:stopped`]);
+    assert.deepEqual(notes.shown.get(`dramafetch-alert:${module.alerts.page}:11:stopped`), {
       type: "basic",
       iconUrl: ALERT_ICON_URL,
-      title: `DramaFetch stopped: ${FAVORITES_RATE_LIMIT_MESSAGE}`,
+      title: `DramaFetch stopped: ${LIST_RATE_LIMIT_MESSAGE}`,
       message: "2 dramas were not started — download them again later",
       priority: 0,
       requireInteraction: false,
@@ -6265,7 +4246,7 @@ test("the alert setting: Alert me when a drama finishes, on by default, saved wi
   }
 });
 
-test("the alert: nothing for a drama skipped as complete (no request), nothing of their own for a listing or a listing of the favorites, nothing for a batch refused at its gate; a listing TikTok stops with a 429 while a batch and an alert's Retry wait behind it says once how many dramas that left unstarted; each job run to its end through the page's own queue", async () => {
+test("the alert: nothing for a drama skipped as complete (no request), nothing for a batch refused at its gate; a batch whose drama's list cannot be read while another batch and an alert's Retry wait behind it says once how many dramas its stop left unstarted, beside that drama's own; each job run to its end through the page's own queue", async () => {
   // a drama found complete less than 24 hours ago, every file still there: skipped, no request
   let page = await fakePage();
   try {
@@ -6283,24 +4264,13 @@ test("the alert: nothing for a drama skipped as complete (no request), nothing o
   } finally {
     page.restore();
   }
-  // a listing (See episodes on a library card): run to its end
-  page = await fakePage({ testSettings: QUICK, storage: { favoritesLibrary: storedLibrary([[SERIES_ID, "Drama 2354", 3]]) } });
-  try {
-    const notes = fakeNotifications();
-    actionOf(page, SERIES_ID, "browse")?.fire("click");
-    for (let turn = 0; turn < 500 && (page.module.journal().length === 0 || page.element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    assert.equal(page.module.journal()[0]?.["kind"], "load");
-    assert.deepEqual(notes.created, []);
-  } finally {
-    page.restore();
-  }
-  // the favorites listed (the popup's Open my library), then a listing TikTok stops with a 429 while
-  // a batch and an alert's Retry wait behind it: both are cancelled, the listing gets no alert of its
-  // own, and ONE says how many dramas its stop left unstarted — the retry's among them (the earlier
+  // a batch whose one drama's list cannot be read here (no tab can open: a stop) while another batch
+  // and an alert's Retry wait behind it: both are cancelled, and ONE alert says how many dramas its
+  // stop left unstarted — the retry's among them —, beside the stopped drama's own (the earlier
   // batch's plain failure keeps its ⚠ alert: the automatic retry off)
   page = await fakePage({ testSettings: QUICK, storage: NO_AUTO_RETRY });
   try {
-    const { element, catalog, module } = page;
+    const { element, module } = page;
     const notes = fakeNotifications();
     // a ⚠ alert this page holds: a drama of an earlier batch whose episode 2 did not download
     const THIRD_ID = "7699393770256782388";
@@ -6308,34 +4278,28 @@ test("the alert: nothing for a drama skipped as complete (no request), nothing o
     await runBatch(scriptedEngine(page, earlier, { statuses: { [`${THIRD_ID}:2`]: "failed" } }).engine, earlier.refs);
     const [retryAlert] = notes.created;
     assert.equal(retryAlert, `dramafetch-alert:${module.alerts.page}:90:${THIRD_ID}:retry`);
-    const tab = favoritesTab();
-    tab.remember(1_794_351_500);
     const journal = () => page.module.journal();
-    page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
-    for (let turn = 0; turn < 500 && (journal().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    assert.equal(journal()[0]?.["kind"], "favorites");
-    assert.equal(journal()[0]?.["favorites"], 5);
-    assert.deepEqual(notes.created, [retryAlert]); // a listing that ends well: nothing
-    const refused = favoritesTab({ pages: { "0": FAVORITES_CAPTURE, "1794351568": { __dramafetch_status: 429, __dramafetch_text: '{"statusCode": 429}' } } });
-    refused.remember(1_794_351_600);
-    page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
-    assert.equal(paste(page, `${SERIES_ID}\n${OTHER_ID}`), true); // a download, waiting behind the listing
+    const open = gateJobs();
+    assert.equal(paste(page, SERIES_ID), true); // job 1, started: held at its gate
+    await page.turn();
+    assert.equal(paste(page, OTHER_ID), true); // job 2, a download waiting behind it
     // the alert's Retry, pressed meanwhile: queued behind them, the alert taken away
     assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: retryAlert }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
     assert.deepEqual(notes.cleared, [retryAlert]);
-    for (let turn = 0; turn < 1000 && (journal().length < 4 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    const notStarted = `not started: batch stopped in ${catalog["jobFavorites"]?.message} (${FAVORITES_RATE_LIMIT_MESSAGE})`;
-    assert.deepEqual(journal().slice(0, 3).map((entry) => [entry["kind"], entry["error"]]), [
-      ["favorites", FAVORITES_RATE_LIMIT_MESSAGE],
-      ["selection", notStarted],
-      ["batch", notStarted],
+    open(); // job 1's list cannot be read: a stop, which takes both out of the queue
+    for (let turn = 0; turn < 1000 && (journal().length < 3 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const notStarted = `not started: batch stopped in ${SERIES_ID} (the episode list could not be fetched)`;
+    assert.deepEqual(journal().slice(0, 3).map((entry) => [entry["kind"], entry["stopped"], entry["error"]]), [
+      ["batch", "the episode list could not be fetched", null],
+      ["selection", null, notStarted],
+      ["batch", null, notStarted],
     ]);
     assert.equal(journal()[1]?.["label"], "Retry 1 of Drama 2388");
-    const stopped = `dramafetch-alert:${module.alerts.page}:2:stopped`;
-    assert.deepEqual(notes.created, [retryAlert, stopped]);
-    assert.equal(notes.shown.get(stopped)?.["title"], `DramaFetch stopped: ${FAVORITES_RATE_LIMIT_MESSAGE}`);
-    assert.equal(notes.shown.get(stopped)?.["message"], "3 dramas were not started — download them again later");
-    assert.equal(notes.shown.get(stopped)?.["buttons"], undefined);
+    const job1 = `dramafetch-alert:${module.alerts.page}:1`;
+    assert.deepEqual(notes.created, [retryAlert, `${job1}:${SERIES_ID}:incomplete`, `${job1}:stopped`]);
+    assert.equal(notes.shown.get(`${job1}:stopped`)?.["title"], "DramaFetch stopped: the episode list could not be fetched");
+    assert.equal(notes.shown.get(`${job1}:stopped`)?.["message"], "2 dramas were not started — download them again later");
+    assert.equal(notes.shown.get(`${job1}:stopped`)?.["buttons"], undefined);
   } finally {
     await clearCooldown(pageCooldownStore());
     page.restore();
@@ -6519,7 +4483,6 @@ test("the automatic retry (1.8.0): a drama of a batch done with plain failures �
         kind: "selection",
         label: "Automatic retry: 2 of Drama 2399",
         refs: [refOf(OTHER_ID)],
-        series: null,
         numbers: [3, 12],
         includeLocked: false,
         recheck: false,
@@ -6677,7 +4640,7 @@ test("a selection job's drama the same (1.8.0): a retry the user asked for (the 
     await page.turn();
     const alertId = `dramafetch-alert:${module.alerts.page}:${running.id}:${OTHER_ID}:retry`;
     assert.deepEqual(jobsOf(page).slice(1), [
-      { kind: "selection", label: "Automatic retry: 1 of Drama 2399", refs: [refOf(OTHER_ID)], series: null, numbers: [2], includeLocked: false, recheck: false, autoRetry: { alertId, name: "Drama 2399" } },
+      { kind: "selection", label: "Automatic retry: 1 of Drama 2399", refs: [refOf(OTHER_ID)], numbers: [2], includeLocked: false, recheck: false, autoRetry: { alertId, name: "Drama 2399" } },
     ]);
     assert.deepEqual(notes.created, [alertId]);
     assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2399 — retrying 1 episode");
@@ -7823,20 +5786,25 @@ test("the test journal (DramaFetch 2.0.0, in place of the stored history): in th
   }
 });
 
-test("the history 1.x kept is removed once at the page's start (DramaFetch 2.0.0) — that key alone: the settings, the series' records, the pacing, the cooldown and the library stay —; a removal the storage refuses is ignored: the page starts, no refused write remembered, jobs still run", async () => {
+test("what an earlier DramaFetch kept and this one never uses is removed once at the page's start, in one call — 1.x's history (DramaFetch 2.0.0) and 3.x's library and its sort (4.0.0) —, those keys alone: the settings, the series' records, the pacing and the cooldown stay —; a removal the storage refuses is ignored: the page starts, no refused write remembered, jobs still run", async () => {
   const now = Date.now() / 1000;
   const kept = {
     settings: { ...DEFAULT_SETTINGS, quality: "best" },
     [`series:${SERIES_ID}`]: savedState(SERIES_ID, [1, 2]),
     pacing: { runAttempts: 2, lastNetworkAt: null, consecutiveFailures: 0, lastContactAt: null },
-    favoritesLibrary: storedLibrary([[SERIES_ID, "Test Series", 2]]),
+  };
+  const retired = {
+    history: [{ id: 1, kind: "batch", label: `Series ${SERIES_ID}`, series: [] }],
+    // the library 3.x kept (its dramas' ids, titles and counts, the profile's handle) and its sort
+    favoritesLibrary: { v: 1, listedAt: now - 7200, total: 1, countedAt: null, fullReadAt: now - 7200, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: SERIES_ID, title: "Test Series", episodes: 2, durationS: 158 }] },
     librarySort: "title",
   };
-  const page = await fakePage({ storage: { ...kept, history: [{ id: 1, kind: "batch", label: `Series ${SERIES_ID}`, series: [] }] } });
+  const page = await fakePage({ storage: { ...kept, ...retired } });
   try {
-    assert.equal(page.local.has("history"), false);
+    for (const key of Object.keys(retired)) assert.equal(page.local.has(key), false, key);
     for (const [key, value] of Object.entries(kept)) assert.deepEqual(page.local.get(key), value, key);
-    assert.equal(favoriteRows(page).length, 1); // the library shown as it was kept
+    assert.deepEqual([...page.local.keys()].sort(), Object.keys(kept).sort()); // nothing else removed, nothing added
+    assert.deepEqual(page.removed, ["history", "favoritesLibrary", "librarySort"]); // asked once, those keys alone
   } finally {
     page.restore();
   }
@@ -7852,10 +5820,10 @@ test("the history 1.x kept is removed once at the page's start (DramaFetch 2.0.0
   }
   // the storage refuses the removal (a full disk): ignored — the page starts all the same, nothing
   // remembered as a refused write, a paste still queues its job
-  const refusing = await fakePage({ storage: { history: [] }, refuseRemove: true });
+  const refusing = await fakePage({ storage: { history: [], favoritesLibrary: { v: 1, items: [] }, librarySort: "title" }, refuseRemove: true });
   try {
     const { element, module } = refusing;
-    assert.equal(refusing.local.has("history"), true); // left for the next start
+    for (const key of ["history", "favoritesLibrary", "librarySort"]) assert.equal(refusing.local.has(key), true, key); // left for the next start
     assert.equal(element("app-status").dataset["state"], "idle");
     refusing.hold();
     assert.equal(paste(refusing, SERIES_ID), true);
@@ -8004,52 +5972,17 @@ test("the cooldown banner counts down in minutes and seconds too (2.0.0): `30 mi
   });
 });
 
-/** Dramas of the Waiting card's tests: two the library holds, one only the stored records name, one nothing names. */
+/** Dramas of the Waiting card's tests: three their stored records name (ALPHA, BETA, STORED), one nothing names (GAMMA). */
 const ALPHA = "7712345678901234571";
 const BETA = "7712345678901234572";
 const GAMMA = "7712345678901234573";
 const STORED = "7712345678901234574";
 
-/**
- * **See episodes** of `seriesId` run through the page's own `runLoad` — a listing job of its own
- * (id 99), never the queue's —: its list on screen (five episodes, E05 locked), named `name`.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- * @param {string} name
- */
-async function listOnScreen(page, seriesId, name) {
-  /** @type {import("../src/app/app.js").Job} */
-  const job = { id: 99, kind: "load", label: `List series ${seriesId}`, refs: [refOf(seriesId)], series: null, numbers: [], includeLocked: false, recheck: false };
-  const engine = page.module.buildEngine(job, { pauses: [], inputs: [], taking: true });
-  engine.sleep = async () => undefined;
-  engine.discover = async () => series([1, 2, 3, 4].map((number) => episode(number, { seriesId })).concat([episode(5, { locked: true, seriesId })]), name, seriesId);
-  engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
-    /** @type {unknown} */ ({ exists: () => false, refresh: async () => undefined, completedAt: () => null, remember() {} })
-  );
-  assert.equal(await page.module.runLoad(job, engine, {}), null);
-}
-
-/**
- * The episode list's checkboxes as Chrome would give them to the page (`querySelectorAll` of the
- * table): the rows' boxes, their `data-*` read back as Chrome reflects them; `ticked` checked.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {number[]} ticked
- */
-function tickEpisodes(page, ticked) {
-  const table = page.element("episode-table");
-  const boxes = table.querySelector("tbody").children.map((row) => /** @type {FakeElement} */ (row.children[0]?.children[0]));
-  for (const box of boxes) {
-    box.dataset["number"] = box.getAttribute("data-number") ?? "";
-    box.dataset["locked"] = box.getAttribute("data-locked") ?? "";
-    box.checked = ticked.includes(Number(box.dataset["number"]));
-  }
-  table.querySelectorAll = () => boxes;
-}
-
-test("the Waiting card (2.0.0): one row per drama still to run, in the order they will run — the running batch's dramas not begun yet, then every waiting job's —, each by its name when DramaFetch knows it without asking TikTok (the library's title, its stored records', a name a run of this page read) and its WHOLE id, else its id and `name shown once its list is read`; every other kind of row says what it is — a Retry and an automatic retry of E02, E07 (ten at most, then `and N more`), Download all available, Download selected, See episodes, Update from TikTok (no drama)", async () => {
+test("the Waiting card (2.0.0): one row per drama still to run, in the order they will run — the running batch's dramas not begun yet, then every waiting job's —, each by its name when DramaFetch knows it without asking TikTok (its stored records', a name a run of this page read, a retry's records' — 4.0.0: no library title) and its WHOLE id, else its id and `name shown once its list is read`; every other kind of row says what it is — a Retry and an automatic retry of E02, E07 (ten at most, then `and N more`) — DramaFetch 4.0.0: no See episodes row", async () => {
   const page = await fakePage({
     storage: {
-      favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [BETA, "Beta Heir", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]),
+      [`series:${ALPHA}`]: savedState(ALPHA, [], { name: "Alpha Bride" }),
+      [`series:${BETA}`]: savedState(BETA, [], { name: "Beta Heir" }),
       [`series:${STORED}`]: savedState(STORED, [1]), // named `A drama` by its records alone
     },
   });
@@ -8065,12 +5998,11 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
     page.hold(); // the batch's tabs.getCurrent never answers: it runs, and asks nothing of anything
     assert.equal(paste(page, `${ALPHA}\n${BETA}\n${GAMMA}`), true); // running: never begun, all three wait
     assert.equal(paste(page, STORED), true); // waiting
-    assert.deepEqual(waitingRows(page), [dramaRow(ALPHA, "Alpha Bride"), dramaRow(BETA, "Beta Heir"), dramaRow(GAMMA), dramaRow(STORED)]);
-    await settled(page); // the records of the two unnamed ones read, once: STORED's names it
+    assert.deepEqual(waitingRows(page), [dramaRow(ALPHA), dramaRow(BETA), dramaRow(GAMMA), dramaRow(STORED)]); // none named yet
+    await settled(page); // the records of the four read, once: three name their dramas
     assert.deepEqual(waitingRows(page), [dramaRow(ALPHA, "Alpha Bride"), dramaRow(BETA, "Beta Heir"), dramaRow(GAMMA), dramaRow(STORED, "A drama")]);
     const readsOf = (/** @type {string} */ key) => asked.filter((keys) => (Array.isArray(keys) ? keys : [keys]).includes(key)).length;
-    assert.equal(readsOf(`series:${GAMMA}`), 1);
-    assert.equal(readsOf(`series:${STORED}`), 1);
+    for (const id of [ALPHA, BETA, GAMMA, STORED]) assert.equal(readsOf(`series:${id}`), 1, id);
     assert.equal(element("queue-card").hidden, false);
     // the whole id, every digit, in a part of its own one click selects; the note muted apart
     const list = element("queue-list");
@@ -8091,14 +6023,6 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
     element("retry-button").fire("click");
     // an automatic retry of E03: a drama of a batch run through the page's own hooks
     await batchOfOther(page, 7, { statuses: { [`${THIRD_ID}:3`]: "failed" } }, undefined, THIRD_ID);
-    // See episodes on a card; Download all available and Download selected of the list on screen
-    actionOf(page, LIGHTHOUSE, "browse")?.fire("click");
-    await listOnScreen(page, SERIES_ID, "Test Series");
-    element("download-available-button").fire("click");
-    tickEpisodes(page, [1, 2, 4]);
-    element("download-selected-button").fire("click");
-    // Update from TikTok (the popup's hand-over of a TikTok tab's favorites): no drama
-    page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
     await settled(page);
     const twelve = "E01, E02, E03, E04, E05, E06, E07, E08, E09, E10 and 2 more";
     assert.deepEqual(waitingRows(page), [
@@ -8109,16 +6033,12 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
       whatRow("Retry E02, E07", OTHER_ID, "Drama 2399"),
       whatRow(`Retry ${twelve}`, FOURTH_ID, "Drama 2377"),
       whatRow("Automatic retry E03", THIRD_ID, "Drama 2388"),
-      whatRow("See episodes", LIGHTHOUSE, "The Lighthouse Keeper's Promise"),
-      whatRow("Download all available", SERIES_ID, "Test Series"),
-      whatRow("Download selected E01, E02, E04", SERIES_ID, "Test Series"),
-      "Update from TikTok",
     ]);
     assert.deepEqual(
       list.children.map((row) => row.getAttribute("data-kind")),
-      ["download", "download", "download", "download", "retry", "retry", "autoretry", "load", "available", "selected", "favorites"],
+      ["download", "download", "download", "download", "retry", "retry", "autoretry"],
     );
-    assert.equal(list.children.at(-1)?.getAttribute("data-series-id"), null); // the favorites' listing names no drama
+    assert.ok(list.children.every((row) => row.getAttribute("data-series-id") !== null)); // every row names its drama
     // the rows as the page holds them: the episodes only where a row names them
     assert.deepEqual(
       module.queueRows().map((row) => [row.kind, row.seriesId, row.numbers]),
@@ -8130,16 +6050,18 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
         ["retry", OTHER_ID, [2, 7]],
         ["retry", FOURTH_ID, Array.from({ length: 12 }, (_, index) => index + 1)],
         ["autoretry", THIRD_ID, [3]],
-        ["load", LIGHTHOUSE, []],
-        ["available", SERIES_ID, []],
-        ["selected", SERIES_ID, [1, 2, 4]],
-        ["favorites", null, []],
       ],
     );
-    // exactly what the jobs are: the See episodes buttons' own picks, nothing else changed
+    // the jobs behind those rows: the batches, then a selection job per Retry and automatic retry
     assert.deepEqual(
-      jobsOf(page).filter((job) => job.pick !== undefined).map((job) => [job.kind, job.pick, job.numbers]),
-      [["selection", "available", [1, 2, 3, 4]], ["selection", "selected", [1, 2, 4]]],
+      jobsOf(page).map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.numbers]),
+      [
+        ["batch", [ALPHA, BETA, GAMMA], []],
+        ["batch", [STORED], []],
+        ["selection", [OTHER_ID], [2, 7]],
+        ["selection", [FOURTH_ID], Array.from({ length: 12 }, (_, index) => index + 1)],
+        ["selection", [THIRD_ID], [3]],
+      ],
     );
     // only a drama nothing names is looked up in its records — once —; a name is never asked of TikTok
     assert.equal(readsOf(`series:${GAMMA}`), 1); // never read twice
@@ -8149,10 +6071,11 @@ test("the Waiting card (2.0.0): one row per drama still to run, in the order the
   }
 });
 
-test("the Waiting card (2.0.0): hidden while nothing waits; the running batch's dramas leave it as each one's list is read — the next one to run first —; a name a run of this page read names a drama that waits, and so does the library's title the moment a listing running ahead of it reads it; a read-only tab shows none", async () => {
+test("the Waiting card (2.0.0): hidden while nothing waits; the running batch's dramas leave it as each one's list is read — the next one to run first —; a name a run of this page read — its own list of that drama — names a drama that waits; a read-only tab shows none", async () => {
   const page = await fakePage({
     storage: {
-      favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [BETA, "Beta Heir", 3]]),
+      [`series:${ALPHA}`]: savedState(ALPHA, [], { name: "Alpha Bride" }),
+      [`series:${BETA}`]: savedState(BETA, [], { name: "Beta Heir" }),
     },
   });
   try {
@@ -8186,79 +6109,17 @@ test("the Waiting card (2.0.0): hidden while nothing waits; the running batch's 
       [dramaRow(GAMMA), dramaRow(OTHER_ID)],
       [dramaRow(OTHER_ID)],
     ]);
-    // See episodes of the drama that waits: the name its list carries names its row at once
-    await listOnScreen(page, OTHER_ID, "Second Chance Bride");
-    assert.deepEqual(waitingRows(page), [dramaRow(OTHER_ID, "Second Chance Bride")]);
+    // a run of this page that reads the waiting drama's list — an earlier batch of it, run through
+    // the page's own hooks — names its row at once (its list calls it `Drama 2399`)
+    await batchOfOther(page, 8);
+    assert.deepEqual(waitingRows(page), [dramaRow(OTHER_ID, "Drama 2399")]);
     // a drama whose list carried no name is queued again (a Retry): still by its id, never `series-<id>`
     module.renderFailed([seriesRecord(GAMMA, null, [[2, "failed"]])]);
     element("retry-button").fire("click");
     await settled(page);
-    assert.deepEqual(waitingRows(page), [dramaRow(OTHER_ID, "Second Chance Bride"), whatRow("Retry E02", GAMMA)]);
+    assert.deepEqual(waitingRows(page), [dramaRow(OTHER_ID, "Drama 2399"), whatRow("Retry E02", GAMMA)]);
   } finally {
     page.restore();
-  }
-  // a drama pasted while Update from TikTok (the popup's Open my library) reads the list: named the
-  // moment the page of TikTok's list that holds it arrives — the library's title —, while the listing
-  // still reads the rest, never only once it ends
-  const listing = await fakePage({ testSettings: { pageDelayS: 0.001 } });
-  try {
-    const { module } = listing;
-    const [shape] = /** @type {Record<string, unknown>[]} */ (FAVORITES_CAPTURE["dramaList"]);
-    const pages = favoritesPages();
-    const tab = favoritesTab({
-      pages: {
-        "0": pages["0"],
-        "1794351568": { .../** @type {Record<string, unknown>} */ (pages["1794351568"]), cursor: "1794350100", hasMore: true, total: "6" },
-        "1794350100": { ...FAVORITES_CAPTURE, cursor: "1794349000", hasMore: false, total: "6", dramaList: [{ ...shape, dramaID: BETA, dramaName: "Beta Heir", numVideos: 3, totalDuration: "300" }] },
-      },
-    });
-    tab.remember(1_794_351_500);
-    // TikTok's pages 2 and 3 held until released: the listing is between its pages
-    /** @type {Map<string, {asked: boolean, release: () => void}>} */
-    const held = new Map();
-    /** @type {Map<string, Promise<unknown>>} */
-    const answers = new Map();
-    for (const cursor of ["1794351568", "1794350100"]) {
-      /** @type {() => void} */
-      let release = () => undefined;
-      answers.set(cursor, new Promise((resolve) => (release = () => resolve(undefined))));
-      held.set(cursor, { asked: false, release: () => release() });
-    }
-    const fake = /** @type {{scripting: {executeScript: (injection: chrome.scripting.ScriptInjection<unknown[], unknown>) => Promise<unknown>}}} */ (
-      /** @type {unknown} */ (globalThis.chrome)
-    );
-    const read = fake.scripting.executeScript;
-    fake.scripting.executeScript = async (injection) => {
-      const cursor = /[?&]cursor=([^&]*)/.exec(String(injection.args?.[0]))?.[1] ?? "";
-      const hold = injection.world === "MAIN" ? held.get(cursor) : undefined;
-      if (hold !== undefined) {
-        hold.asked = true;
-        await answers.get(cursor);
-      }
-      return read(injection);
-    };
-    /** @param {string} cursor */
-    const asked = async (cursor) => {
-      for (let turn = 0; turn < 500 && held.get(cursor)?.asked !== true; turn += 1) await listing.turn();
-      assert.equal(held.get(cursor)?.asked, true, `page ${cursor} never asked`);
-      await settled(listing);
-    };
-    listing.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
-    await asked("1794351568");
-    assert.equal(paste(listing, PAPER), true); // waits behind the listing: nothing names it yet
-    await settled(listing);
-    assert.deepEqual(waitingRows(listing), [dramaRow(PAPER)]);
-    listing.hold(); // the paste's job, once it starts, asks nothing of anything
-    held.get("1794351568")?.release(); // the page that lists Paper Crowns
-    await asked("1794350100");
-    assert.deepEqual(module.queuedJobs().map((job) => job.kind), ["favorites", "batch"]); // the listing still reads its last page
-    assert.deepEqual(waitingRows(listing), [dramaRow(PAPER, "Paper Crowns")]);
-    held.get("1794350100")?.release();
-    for (let turn = 0; turn < 500 && listing.element("progress-current").textContent !== `Series ${PAPER}`; turn += 1) await listing.turn();
-    assert.equal(listing.element("progress-current").textContent, `Series ${PAPER}`); // the listing over, the paste running
-    assert.deepEqual(waitingRows(listing), [dramaRow(PAPER, "Paper Crowns")]); // its drama, not begun, by the library's name
-  } finally {
-    listing.restore();
   }
   const readonly = await fakePage({ lockTaken: true });
   try {
@@ -8271,7 +6132,7 @@ test("the Waiting card (2.0.0): hidden while nothing waits; the running batch's 
 });
 
 test("the Waiting card in Spanish under a Spanish Chrome (2.0.0): what each row is, the note of a drama whose name is not known yet, the id whole", async () => {
-  const page = await fakePage({ language: "es", storage: { favoritesLibrary: storedLibrary([[ALPHA, "Alpha Bride", 3], [LIGHTHOUSE, "The Lighthouse Keeper's Promise", 3]]) } });
+  const page = await fakePage({ language: "es", storage: { [`series:${ALPHA}`]: savedState(ALPHA, [], { name: "Alpha Bride" }) } });
   try {
     const { element, module } = page;
     fakeNotifications();
@@ -8280,22 +6141,12 @@ test("the Waiting card in Spanish under a Spanish Chrome (2.0.0): what each row 
     module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[2, "failed"], [7, "failed"]])]);
     element("retry-button").fire("click");
     await batchOfOther(page, 7, { statuses: { [`${THIRD_ID}:3`]: "failed" } }, undefined, THIRD_ID);
-    actionOf(page, LIGHTHOUSE, "browse")?.fire("click");
-    await listOnScreen(page, SERIES_ID, "Test Series");
-    element("download-available-button").fire("click");
-    tickEpisodes(page, [1, 2]);
-    element("download-selected-button").fire("click");
-    page.message({ type: "dramafetch:favorites", tabId: FAVORITES_TAB });
     await settled(page);
     assert.deepEqual(waitingRows(page), [
       `Alpha Bride · ${ALPHA}`,
       `${GAMMA} · el nombre aparece al leer su lista`,
       `Reintentar E02, E07 — Drama 2399 · ${OTHER_ID}`,
       `Reintento automático E03 — Drama 2388 · ${THIRD_ID}`,
-      `Ver episodios — The Lighthouse Keeper's Promise · ${LIGHTHOUSE}`,
-      `Descargar todo lo disponible — Test Series · ${SERIES_ID}`,
-      `Descargar selección E01, E02 — Test Series · ${SERIES_ID}`,
-      "Actualizar desde TikTok",
     ]);
     assert.equal(element("queue-list").children[1]?.children[0]?.title, "El ID completo del drama: un clic lo selecciona y Ctrl+C lo copia.");
   } finally {
@@ -8303,438 +6154,70 @@ test("the Waiting card in Spanish under a Spanish Chrome (2.0.0): what each row 
   }
 });
 
-// ------------------------------------------------- See episodes downloads again in full (3.0.0)
+// ------------------------------------------ DramaFetch 4.0.0: nothing is downloaded again in full
 
-test("See episodes downloads again in full (DramaFetch 3.0.0, the owner's decision of 2026-11-25): Download all available and Download selected queue `selection` jobs with `overwrite` — the engine built for one carries it to its run and to its downloader, whose saves ask Chrome to replace the file —; a paste, a card's Download, Download selected dramas and the popup's hand-over keep what is on disk: no `overwrite`", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
+test("every download keeps what is on disk (DramaFetch 4.0.0: no See episodes, so nothing is downloaded again in full) — the engine a paste's batch, the popup's hand-over and the tab's Retry get asks Chrome to `uniquify` every file it saves, never to replace one; a Retry's run skips an episode meanwhile on disk with no request; a job's record says nothing of an overwrite", async () => {
+  const page = await fakePage();
   try {
     const { element, module } = page;
     page.hold(); // the first job's tabs.getCurrent never answers: it runs, asking nothing; the others wait
-    await listOnScreen(page, SERIES_ID, "Test Series");
-    element("download-available-button").fire("click");
-    tickEpisodes(page, [1, 3]);
-    element("download-selected-button").fire("click");
-    assert.equal(paste(page, OTHER_ID), true); // a paste
-    actionOf(page, MOON, "download")?.fire("click"); // a card's Download
-    const box = tickOf(page, PAPER);
-    assert.ok(box !== undefined);
-    box.checked = true;
-    box.fire("change");
-    element("library-download").fire("click"); // Download selected dramas
-    page.message({ type: "dramafetch:load", input: THIRD_ID }); // the popup's Download this series
+    assert.equal(paste(page, OTHER_ID), true); // a paste: a batch
+    page.message({ type: "dramafetch:load", input: THIRD_ID }); // the popup's Download this series: a batch
+    module.renderFailed([seriesRecord(SERIES_ID, "Test Series", [[1, "done"], [2, "failed"]])]);
+    element("retry-button").fire("click"); // the tab's Retry: a selection job of E02
     await settled(page);
+    const jobs = module.queuedJobs();
     assert.deepEqual(
-      jobsOf(page).map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.pick, job.numbers, job.overwrite]),
+      jobs.map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.numbers]),
       [
-        ["selection", [SERIES_ID], "available", [1, 2, 3, 4], true],
-        ["selection", [SERIES_ID], "selected", [1, 3], true],
-        ["batch", [OTHER_ID], undefined, [], undefined],
-        ["batch", [MOON], undefined, [], undefined],
-        ["batch", [PAPER], undefined, [], undefined],
-        ["batch", [THIRD_ID], undefined, [], undefined],
+        ["batch", [OTHER_ID], []],
+        ["batch", [THIRD_ID], []],
+        ["selection", [SERIES_ID], [2]],
       ],
     );
-    // the engine of such a job: no done skip, and a downloader with no existing-file skip whose
-    // saves replace the file at its target (the page's own chrome.downloads)
-    const [available] = module.queuedJobs();
-    assert.ok(available !== undefined);
-    const engine = module.buildEngine({ ...available, id: 990 }, { pauses: [], inputs: [], taking: true });
-    assert.equal(engine.overwrite, true);
-    assert.equal(engine.downloader.config.overwrite, true);
-    await engine.downloader.save(new Uint8Array([0, 0, 0, 8, 0x66, 0x72, 0x65, 0x65]), "video/mp4", `DramaFetch/Test Series [${SERIES_ID}]/Test Series - Episode 01.mp4`, "overwrite");
-    assert.deepEqual(page.downloads.map((saved) => [saved.filename, saved.conflictAction]), [[`DramaFetch/Test Series [${SERIES_ID}]/Test Series - Episode 01.mp4`, "overwrite"]]);
-    // any other job's: the resume (what is on disk is skipped)
-    const batch = module.buildEngine({ ...BATCH_JOB, id: 991, refs: [refOf(OTHER_ID)] }, { pauses: [], inputs: [], taking: true });
-    assert.equal(batch.overwrite, false);
-    assert.equal(batch.downloader.config.overwrite, false);
+    const bytes = new Uint8Array([0, 0, 0, 8, 0x66, 0x72, 0x65, 0x65]);
+    for (const [index, job] of jobs.entries()) {
+      for (const gone of ["overwrite", "pick", "series"]) assert.equal(Object.hasOwn(job, gone), false, `${job.label}: ${gone}`);
+      // its engine (another id: the running job's record stays its own) and its downloader's own save
+      const engine = module.buildEngine({ ...job, id: 990 + index }, { pauses: [], inputs: [], taking: true });
+      assert.equal(Object.hasOwn(engine, "overwrite"), false, job.label);
+      assert.equal(Object.hasOwn(engine.downloader.config, "overwrite"), false, job.label);
+      await engine.downloader.save(bytes, "video/mp4", `DramaFetch/Test Series [${SERIES_ID}]/Test Series - Episode 0${index + 1}.mp4`);
+    }
+    assert.deepEqual(
+      page.downloads.map((saved) => saved.conflictAction),
+      ["uniquify", "uniquify", "uniquify"],
+    );
+    // the Retry's run, through the page's own engine: E02 — on disk meanwhile, its records say — is
+    // skipped with no request, as every retry before DramaFetch 3.0.0 skipped it
+    const retry = /** @type {import("../src/app/app.js").Job} */ (jobs[2]);
+    /** @type {number[]} */
+    const asked = [];
+    const scripted = scriptedEngine(page, { ...retry, id: 995 }, { onDownload: (ep) => void asked.push(ep.number) });
+    scripted.states.set(SERIES_ID, savedState(SERIES_ID, [2], { name: "Test Series" }));
+    const run = await runSelectionJob(scripted.engine, refOf(SERIES_ID), retry.numbers, { lastContactAt: null });
+    assert.deepEqual(
+      run.results.map((result) => [result.episode.number, result.status, result.message]),
+      [[2, "skipped-exists", "already downloaded (manifest): E2.mp4"]],
+    );
+    assert.deepEqual(asked, []);
   } finally {
     page.restore();
   }
-  // run through the page's own queue to its end: the job's record says it downloaded again in full
-  // (what every retry of it reads); a paste's does not
+  // run through the page's own queue to its end: the job's record holds its rows and what the
+  // retries read — and nothing that would make a retry of it download again in full
   const queued = await fakePage({ testSettings: QUICK });
   try {
     const { element, module } = queued;
-    const ended = async (/** @type {number} */ count) => {
-      for (let turn = 0; turn < 500 && (module.journal().length < count || element("app-status").dataset["state"] !== "idle"); turn += 1) await queued.turn();
-    };
-    await listOnScreen(queued, SERIES_ID, "Test Series");
-    element("download-available-button").fire("click"); // the discovery can open no tab here: no request at all
-    await ended(1);
-    const [selection] = module.journal();
-    assert.equal(selection?.["kind"], "selection");
-    const [record] = /** @type {Record<string, unknown>[]} */ (selection?.["series"]);
-    assert.deepEqual([record?.["series_id"], record?.["overwrite"]], [SERIES_ID, true]);
-    assert.equal(paste(queued, SERIES_ID), true);
-    await ended(2);
-    const [pasted] = module.journal();
-    assert.equal(pasted?.["kind"], "batch");
-    const [batchRecord] = /** @type {Record<string, unknown>[]} */ (pasted?.["series"]);
-    assert.deepEqual([batchRecord?.["series_id"], Object.hasOwn(batchRecord ?? {}, "overwrite")], [SERIES_ID, false]);
+    assert.equal(paste(queued, SERIES_ID), true); // the discovery can open no tab here: no request at all
+    for (let turn = 0; turn < 500 && (module.journal().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await queued.turn();
+    const [entry] = module.journal();
+    assert.equal(entry?.["kind"], "batch");
+    const [record] = /** @type {Record<string, unknown>[]} */ (entry?.["series"]);
+    // 3.0.1: the list's warnings too (`warnings`) — and still no `overwrite`
+    assert.deepEqual(Object.keys(record ?? {}).sort(), ["contacted", "error", "error_kind", "line", "name", "report", "rows", "series_id", "status", "stop", "warnings"]);
   } finally {
     queued.restore();
-  }
-});
-
-test("the retries of a job that downloaded again in full do too (3.0.0): its records say `overwrite`, and so does each retry read from them — the tab's Retry, its one automatic retry, the alert's Retry, the ⚠ alert of an automatic retry that did not run —, so that an episode whose download again failed is never skipped for the old copy on disk; a retry of any other job keeps the resume", async () => {
-  const again = { ...seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed-unavailable"]]), overwrite: true };
-  const kept = seriesRecord(THIRD_ID, "Drama 2388", [[1, "failed"]]);
-  /**
-   * A See episodes job over `THIRD_ID`'s three episodes (Download all available).
-   * @param {number} id
-   * @returns {import("../src/app/app.js").Job}
-   */
-  const seeEpisodesJob = (id) => ({ id, kind: "selection", label: "3 episodes of Drama 2388", refs: [refOf(THIRD_ID)], series: null, numbers: [1, 2, 3], includeLocked: false, recheck: false, overwrite: true, pick: "available" });
-  let page = await fakePage();
-  try {
-    const { element, module } = page;
-    // what a retry takes from the records, and the jobs it queues
-    assert.deepEqual(module.retryTargets([again, kept]), [
-      { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2, 3], overwrite: true },
-      { seriesId: THIRD_ID, name: "Drama 2388", numbers: [1] },
-    ]);
-    assert.deepEqual(
-      module.retryJobs(module.retryTargets([again, kept])).map((job) => [job.kind, job.label, job.numbers, job.includeLocked, job.overwrite]),
-      [
-        ["selection", "Retry 2 of Drama 2399", [2, 3], false, true],
-        ["selection", "Retry 1 of Drama 2388", [1], false, undefined],
-      ],
-    );
-    // the tab's Retry over them
-    page.hold();
-    module.renderFailed([again, kept]);
-    element("retry-button").fire("click");
-    await page.turn();
-    assert.deepEqual(jobsOf(page).map((job) => [job.refs[0]?.seriesId, job.numbers, job.overwrite]), [
-      [OTHER_ID, [2, 3], true],
-      [THIRD_ID, [1], undefined],
-    ]);
-  } finally {
-    page.restore();
-  }
-  // the automatic retry of a See episodes job's plain failure, and the ⚠ alert it gets when it
-  // does not run (Stop): both download again in full
-  page = await fakePage();
-  try {
-    const { module } = page;
-    const notes = fakeNotifications();
-    page.hold();
-    const job = seeEpisodesJob(5);
-    const scripted = scriptedEngine(page, job, { statuses: { [`${THIRD_ID}:2`]: "failed" } });
-    assert.equal(scripted.engine.overwrite, true);
-    const run = await runSelectionJob(scripted.engine, refOf(THIRD_ID), job.numbers, { lastContactAt: null });
-    assert.deepEqual(run.results.map((result) => [result.episode.number, result.status]), [[1, "done"], [2, "failed"], [3, "done"]]);
-    module.dramaDone(job, run, scripted.jobRecord); // where runJob makes the drama's alert
-    await page.turn();
-    const alertId = `dramafetch-alert:${module.alerts.page}:5:${THIRD_ID}:retry`;
-    assert.deepEqual(jobsOf(page), [
-      { kind: "selection", label: "Automatic retry: 1 of Drama 2388", refs: [refOf(THIRD_ID)], series: null, numbers: [2], includeLocked: false, recheck: false, overwrite: true, autoRetry: { alertId, name: "Drama 2388" } },
-    ]);
-    assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2388 — retrying 1 episode");
-    const [automatic] = module.queuedJobs();
-    assert.ok(automatic !== undefined);
-    module.alertNotRetried(automatic, "stopped by you");
-    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: THIRD_ID, name: "Drama 2388", numbers: [2], overwrite: true });
-    module.alertNotRetried({ ...automatic, overwrite: undefined }, "stopped by you"); // an automatic retry of a paste's drama
-    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: THIRD_ID, name: "Drama 2388", numbers: [2] });
-  } finally {
-    page.restore();
-  }
-  // the automatic retry off: the ⚠ alert's Retry, handed over by the worker
-  page = await fakePage({ storage: NO_AUTO_RETRY });
-  try {
-    const { module } = page;
-    const notes = fakeNotifications();
-    const job = seeEpisodesJob(6);
-    const scripted = scriptedEngine(page, job, { statuses: { [`${THIRD_ID}:2`]: "failed" } });
-    const run = await runSelectionJob(scripted.engine, refOf(THIRD_ID), job.numbers, { lastContactAt: null });
-    module.dramaDone(job, run, scripted.jobRecord);
-    const alertId = `dramafetch-alert:${module.alerts.page}:6:${THIRD_ID}:retry`;
-    assert.deepEqual(notes.created, [alertId]);
-    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: THIRD_ID, name: "Drama 2388", numbers: [2], overwrite: true });
-    page.hold();
-    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: alertId }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
-    await page.turn();
-    assert.deepEqual(jobsOf(page).map((queued) => [queued.label, queued.numbers, queued.overwrite]), [["Retry 1 of Drama 2388", [2], true]]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("See episodes (3.0.0): an episode on disk keeps its On disk badge and comes unticked; its tooltip says that the list's buttons download it again in full and replace the file — in English and in Spanish —; Download all available takes it with the rest", async () => {
-  /** @type {["en" | "es", string][]} */
-  const languages = [
-    ["en", "Already downloaded: “Download all available”, or “Download selected” with it ticked, downloads it again in full and replaces the file"],
-    ["es", "Ya descargado: “Descargar todo lo disponible”, o “Descargar selección” con él marcado, lo vuelve a descargar completo y reemplaza el archivo"],
-  ];
-  for (const [language, title] of languages) {
-    const page = await fakePage({ storage: { [`series:${SERIES_ID}`]: savedState(SERIES_ID, [1, 2]) }, language });
-    try {
-      const { element, module } = page;
-      // See episodes over the five-episode list (E05 locked), Chrome's history showing E01 and E02's files
-      /** @type {import("../src/app/app.js").Job} */
-      const job = { id: 99, kind: "load", label: `List series ${SERIES_ID}`, refs: [refOf(SERIES_ID)], series: null, numbers: [], includeLocked: false, recheck: false };
-      const engine = module.buildEngine(job, { pauses: [], inputs: [], taking: true });
-      engine.sleep = async () => undefined;
-      engine.discover = async () => series([episode(1), episode(2), episode(3), episode(4), episode(5, { locked: true })]);
-      engine.view = /** @type {import("../src/app/downloader.js").DownloadsView} */ (
-        /** @type {unknown} */ ({ exists: () => true, refresh: async () => undefined, completedAt: () => null, remember() {} })
-      );
-      assert.equal(await module.runLoad(job, engine, {}), null);
-      const rows = element("episode-table").querySelector("tbody")?.children ?? [];
-      assert.deepEqual(
-        rows.map((row) => [row.getAttribute("data-number"), row.children[0]?.children[0]?.checked, descendants(row).find((part) => part.className === "badge ondisk")?.title ?? null]),
-        [
-          ["1", false, title],
-          ["2", false, title],
-          ["3", true, null],
-          ["4", true, null],
-          ["5", false, null],
-        ],
-        language,
-      );
-      page.hold();
-      element("download-available-button").fire("click");
-      await page.turn();
-      assert.deepEqual(jobsOf(page).map((queued) => [queued.numbers, queued.overwrite]), [[[1, 2, 3, 4], true]]); // on disk or not
-    } finally {
-      page.restore();
-    }
-  }
-});
-
-/**
- * A library card's state as the tests compare it: its `data-status`, its badge's text and its bar's
- * `[value, max]` — no badge and no bar while it is idle.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- */
-const cardState = (page, seriesId) => {
-  const article = /** @type {FakeElement} */ (cardOf(page, seriesId));
-  const bar = descendants(article).find((part) => part.tagName === "PROGRESS");
-  return [article.getAttribute("data-status"), partOf(article, "favorite-status")?.textContent, bar?.getAttribute("value"), bar?.getAttribute("max")];
-};
-
-/**
- * Every text a library card's badge shows from now on, in order, one entry per change — `(idle)`
- * for no badge: what a user sees between the samples a test takes, every redraw of the grid read.
- * @param {Awaited<ReturnType<typeof fakePage>>} page
- * @param {string} seriesId
- * @returns {string[]}
- */
-function recordCard(page, seriesId) {
-  const grid = page.element("favorites-grid");
-  /** @type {string[]} */
-  const seen = [];
-  const draw = grid.replaceChildren.bind(grid);
-  grid.replaceChildren = (/** @type {FakeElement[]} */ ...cards) => {
-    draw(...cards);
-    const card = cardOf(page, seriesId);
-    const text = card === undefined ? "(no card)" : (partOf(card, "favorite-status")?.textContent ?? "(idle)");
-    if (seen.at(-1) !== text) seen.push(text);
-  };
-  return seen;
-}
-
-test("the page: See episodes' download (a `selection` job — 3.0.0: in full) waiting behind another drama's batch holds its drama like any download: its card says Queued, its Download is disabled, and a paste or the popup's hand-over of it queues nothing", async () => {
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE) } });
-  try {
-    const { element, module } = page;
-    page.hold(); // the running job's tabs.getCurrent never answers: it runs, asking nothing; the next one waits
-    await listOnScreen(page, PAPER, "Paper Crowns");
-    assert.equal(paste(page, MOON), true); // another drama's batch: it runs
-    await page.turn();
-    tickEpisodes(page, [2]);
-    element("download-selected-button").fire("click"); // waits behind it
-    await settled(page);
-    assert.deepEqual(jobsOf(page).map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.overwrite === true]), [
-      ["batch", [MOON], false],
-      ["selection", [PAPER], true],
-    ]);
-    assert.deepEqual(cardState(page, PAPER), ["queued", "Queued", undefined, undefined]);
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
-    assert.equal(paste(page, PAPER), true);
-    assert.equal(element("input-status").textContent, `Already being downloaded, or waiting to be — not queued twice: ${PAPER}.`);
-    element("input-status").textContent = "";
-    assert.deepEqual(page.message({ type: "dramafetch:load", input: PAPER }), [{ ok: true, tabId: 1 }]); // the popup's Download this series
-    assert.equal(element("input-status").textContent, `Already being downloaded, or waiting to be — not queued twice: ${PAPER}.`);
-    assert.equal(module.queuedJobs().length, 2); // nothing queued twice
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: See episodes' download in full of a drama already on disk (3.0.0) holds its drama like any download — Queued while it waits, Downloading with its bar while it runs, its Download disabled and a paste of it refused throughout — and its count follows the job: the episodes it takes again count once saved anew, against the drama's own 30, never going down; at its end the card says nothing and its Download is back", async () => {
-  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) }, testSettings: QUICK });
-  try {
-    const { element, module, local } = page;
-    const refused = `Already being downloaded, or waiting to be — not queued twice: ${PAPER}.`;
-    const open = gateJobs(); // the job starts and waits at its first step, asking nothing
-    await listOnScreen(page, PAPER, "Paper Crowns");
-    tickEpisodes(page, [1, 3]); // both on disk: ticked, they download again in full
-    const seen = recordCard(page, PAPER);
-    element("download-selected-button").fire("click");
-    await settled(page);
-    assert.deepEqual(jobsOf(page).map((job) => [job.kind, job.refs.map((ref) => ref.seriesId), job.numbers, job.overwrite]), [["selection", [PAPER], [1, 3], true]]);
-    // not begun yet: Queued, no bar
-    assert.deepEqual(cardState(page, PAPER), ["queued", "Queued", undefined, undefined]);
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
-    assert.equal(paste(page, PAPER), true);
-    assert.equal(element("input-status").textContent, refused);
-    assert.equal(module.queuedJobs().length, 1);
-    // its drama begins (the engine's hooks, as it calls them): Downloading, the two it takes again not counted
-    const [running] = module.queuedJobs();
-    assert.ok(running !== undefined);
-    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
-    /** @param {number} number */
-    const ep = (number) => makeEpisode({ number, itemId: `i${number}`, title: `Episode ${number}`, seriesId: PAPER, durationS: 3, coverUrl: null, raw: {} });
-    engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: [ep(1), ep(3)], skippedComplete: false });
-    await settled(page);
-    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 28/30", "28", "30"]);
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, true);
-    element("input-status").textContent = "";
-    assert.equal(paste(page, PAPER), true);
-    assert.equal(element("input-status").textContent, refused);
-    assert.equal(module.queuedJobs().length, 1);
-    // E01 saved anew (the records hold its new download): counted again
-    local.set(`series:${PAPER}`, savedState(PAPER, thirty));
-    engine.onResult?.({ episode: ep(1), status: "done", path: "/dl/E1.mp4", message: "saved E1.mp4 (0.1 MiB) + cover embedded", downloadId: 201 });
-    await settled(page);
-    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 29/30", "29", "30"]);
-    // E03's download again failed (its record says so; its old file untouched): not counted, the count unchanged
-    const failed = savedState(PAPER, thirty.filter((number) => number !== 3));
-    failed.episodes["3"] = { number: 3, item_id: "i3", status: "failed", path: null, message: "download failed: HTTP 500", updated_at: "2027-01-15T08:00:00Z", download_id: null };
-    local.set(`series:${PAPER}`, failed);
-    engine.onResult?.({ episode: ep(3), status: "failed", path: null, message: "download failed: HTTP 500" });
-    await settled(page);
-    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 29/30", "29", "30"]);
-    // the job ends (its listing can open no tab here: no request at all): nothing on the card, its Download back
-    open();
-    for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    assert.equal(module.journal().length, 1);
-    await settled(page);
-    assert.deepEqual(cardState(page, PAPER), ["idle", undefined, undefined, undefined]);
-    assert.equal(actionOf(page, PAPER, "download")?.disabled, false);
-    assert.equal(metaOf(page, PAPER), "30 episodes · 40m");
-    // everything the card showed, every redraw: its count only went up
-    assert.deepEqual(seen, ["Queued", "Downloading · 28/30", "Downloading · 29/30", "(idle)"]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a download in full (3.0.0) counts again each episode it takes once that one is done — saved anew, or skipped as locked with its earlier download kept, no request — and takes only what its fresh list holds: an episode ticked on the list on screen that the fresh list lacks keeps counting as on disk; its first count is exact — also when it takes episodes not on disk, as a Retry of its failures does —, the count only goes up and ends at the drama's 30", async () => {
-  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
-  for (const fourth of ["missing", "locked"]) {
-    const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) }, testSettings: QUICK });
-    try {
-      const { element, module } = page;
-      const open = gateJobs(); // the job starts and waits at its first step, asking nothing
-      await listOnScreen(page, PAPER, "Paper Crowns");
-      tickEpisodes(page, [1, 2, 3, 4]); // all four on disk: ticked, they download again in full
-      const seen = recordCard(page, PAPER);
-      element("download-selected-button").fire("click");
-      await settled(page);
-      const [running] = module.queuedJobs();
-      assert.ok(running !== undefined);
-      assert.deepEqual([running.numbers, running.overwrite], [[1, 2, 3, 4], true], fourth);
-      const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
-      // the fresh list: E04 gone from it, or listed locked now (an entitlement that lapsed)
-      const taken = [1, 2, 3].map((number) => episode(number, { seriesId: PAPER })).concat(fourth === "locked" ? [episode(4, { locked: true, seriesId: PAPER })] : []);
-      engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: taken, skippedComplete: false });
-      await settled(page);
-      const first = fourth === "missing" ? 27 : 26;
-      assert.deepEqual(cardState(page, PAPER), ["running", `Downloading · ${first}/30`, String(first), "30"], fourth);
-      // E01–E03 saved anew (the records hold a done entry each, as before)
-      for (const ep of taken.slice(0, 3)) {
-        engine.onResult?.({ episode: ep, status: "done", path: `/dl/E${ep.number}.mp4`, message: `saved E${ep.number}.mp4 (0.1 MiB) + cover embedded`, downloadId: 200 + ep.number });
-        await settled(page);
-      }
-      if (fourth === "locked") {
-        // no request: the locked skip, which never replaces an entry on disk — its earlier download counts again
-        engine.onResult?.({ episode: /** @type {import("../src/lib/catalog.js").Episode} */ (taken[3]), status: "skipped-locked", path: null, message: "looks locked: no play address" });
-        await settled(page);
-      }
-      assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 30/30", "30", "30"], fourth);
-      open();
-      for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-      await settled(page);
-      assert.deepEqual(cardState(page, PAPER), ["idle", undefined, undefined, undefined], fourth);
-      const counts = seen.flatMap((text) => /Downloading · (\d+)\/30$/.exec(text)?.[1] ?? []).map(Number);
-      assert.deepEqual(counts, fourth === "missing" ? [27, 28, 29, 30] : [26, 27, 28, 29, 30], `${fourth}: ${JSON.stringify(seen)}`);
-      assert.deepEqual([seen[0], seen.at(-1)], ["Queued", "(idle)"], fourth);
-    } finally {
-      page.restore();
-    }
-  }
-  // E02 and E04 not on disk (an earlier download in full's failures): 28 at once — never 26, the 28
-  // lowered by two episodes the records do not count anyway —, then 29 and 30 as each is saved
-  const missing = thirty.filter((number) => number !== 2 && number !== 4);
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, missing) }, testSettings: QUICK });
-  try {
-    const { element, module, local } = page;
-    const open = gateJobs();
-    await listOnScreen(page, PAPER, "Paper Crowns");
-    tickEpisodes(page, [2, 4]);
-    const seen = recordCard(page, PAPER);
-    element("download-selected-button").fire("click");
-    await settled(page);
-    const [running] = module.queuedJobs();
-    assert.ok(running !== undefined);
-    assert.deepEqual([running.numbers, running.overwrite], [[2, 4], true]);
-    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
-    const [two, four] = [2, 4].map((number) => episode(number, { seriesId: PAPER }));
-    assert.ok(two !== undefined && four !== undefined);
-    engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: [two, four], skippedComplete: false });
-    await settled(page);
-    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 28/30", "28", "30"]);
-    local.set(`series:${PAPER}`, savedState(PAPER, thirty.filter((number) => number !== 4)));
-    engine.onResult?.({ episode: two, status: "done", path: "/dl/E2.mp4", message: "saved E2.mp4 (0.1 MiB) + cover embedded", downloadId: 202 });
-    await settled(page);
-    local.set(`series:${PAPER}`, savedState(PAPER, thirty));
-    engine.onResult?.({ episode: four, status: "done", path: "/dl/E4.mp4", message: "saved E4.mp4 (0.1 MiB) + cover embedded", downloadId: 204 });
-    await settled(page);
-    open();
-    for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    await settled(page);
-    assert.deepEqual(seen, ["Queued", "Downloading · 28/30", "Downloading · 29/30", "Downloading · 30/30", "(idle)"]);
-  } finally {
-    page.restore();
-  }
-});
-
-test("the page: a download in full (3.0.0) whose drama's records the storage refuses to read as it begins still says Downloading on its card — at most the count it would have read (the stored one less the episodes it takes again), never more", async () => {
-  const thirty = Array.from({ length: 30 }, (_, n) => n + 1);
-  const page = await fakePage({ storage: { favoritesLibrary: storedLibrary(FIVE), [`series:${PAPER}`]: savedState(PAPER, thirty, { complete: 30 }) }, testSettings: QUICK });
-  const local = /** @type {{get: (keys: unknown) => unknown}} */ (/** @type {unknown} */ (chrome.storage.local));
-  const get = local.get;
-  try {
-    const { element, module } = page;
-    const open = gateJobs();
-    await listOnScreen(page, PAPER, "Paper Crowns");
-    tickEpisodes(page, [1, 3]);
-    const seen = recordCard(page, PAPER);
-    element("download-selected-button").fire("click");
-    await settled(page);
-    const [running] = module.queuedJobs();
-    assert.ok(running !== undefined);
-    const engine = module.buildEngine(running, { pauses: [], inputs: [], taking: true });
-    local.get = async () => {
-      throw new Error("IO error: the profile's storage refused the read");
-    };
-    engine.onStart?.({ ref: refOf(PAPER), series: null, name: "Paper Crowns", episodes: [1, 3].map((number) => episode(number, { seriesId: PAPER })), skippedComplete: false });
-    await settled(page);
-    assert.deepEqual(cardState(page, PAPER), ["running", "Downloading · 28/30", "28", "30"]);
-    assert.deepEqual(seen, ["Queued", "Downloading · 28/30"]);
-    local.get = get;
-    open();
-    for (let turn = 0; turn < 500 && (module.journal().length === 0 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
-    await settled(page);
-    assert.deepEqual(cardState(page, PAPER), ["idle", undefined, undefined, undefined]);
-  } finally {
-    local.get = get;
-    page.restore();
   }
 });
 
@@ -8849,7 +6332,7 @@ test("3.0.1, the page: a paste whose list still lacks episodes gives each its ro
     element("retry-button").fire("click");
     await page.turn();
     assert.deepEqual(jobsOf(page), [
-      { kind: "selection", label: "Retry 3 of Drama 2399", refs: [refOf(OTHER_ID)], series: null, numbers: [2, 4, 6], includeLocked: false, recheck: false, missing: [2, 6] },
+      { kind: "selection", label: "Retry 3 of Drama 2399", refs: [refOf(OTHER_ID)], numbers: [2, 4, 6], includeLocked: false, recheck: false, missing: [2, 6] },
     ]);
   } finally {
     page.restore();
@@ -8867,7 +6350,7 @@ test("3.0.1, the automatic retry takes the episodes TikTok's list lacked too —
     const [auto] = module.queuedJobs();
     assert.ok(auto !== undefined);
     assert.deepEqual(jobsOf(page), [
-      { kind: "selection", label: "Automatic retry: 1 of Drama 2399", refs: [refOf(OTHER_ID)], series: null, numbers: [5], includeLocked: false, recheck: false, missing: [5], autoRetry: { alertId, name: "Drama 2399" } },
+      { kind: "selection", label: "Automatic retry: 1 of Drama 2399", refs: [refOf(OTHER_ID)], numbers: [5], includeLocked: false, recheck: false, missing: [5], autoRetry: { alertId, name: "Drama 2399" } },
     ]);
     assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2399 — retrying 1 episode");
     assert.equal(notes.shown.get(alertId)?.["message"], "E05 is not in TikTok's list. DramaFetch tries once more on its own.");
@@ -9396,7 +6879,6 @@ test("3.0.1 (the lead's D8, the review's V1 = M2): the automatic retry of a dram
         kind: "selection",
         label: "Automatic retry: 1 of Drama 2399",
         refs: [refOf(OTHER_ID)],
-        series: null,
         numbers: [5],
         includeLocked: false,
         recheck: false,
@@ -9482,7 +6964,7 @@ test("3.0.1 (the lead's D8, the review's V1 = M2): the automatic retry of a dram
   }
 });
 
-test("3.0.1 (the lead's D11, the review's M1): Stop keeps the Did not download block true — a stopped retry's saved episodes leave it and the ones it never reached keep their rows; a stopped batch's finished dramas get their rows, and the drama Stop interrupted loses only the rows of what it saved (no new row: a run Stop cuts short keeps none)", async () => {
+test("3.0.1 (the lead's D11, the review's M1): Stop keeps the Did not download block true — a stopped retry's saved episodes leave it, one that failed again before the Stop keeps its row with its new message (or gets one, in a block that had none) and the ones it never reached keep their rows; a stopped batch's finished dramas get their rows, and the drama Stop interrupted loses only the rows of what it saved (no new row: a run Stop cuts short keeps none)", async () => {
   const blockRows = (/** @type {Awaited<ReturnType<typeof fakePage>>} */ page) =>
     page.element("failed-table").querySelector("tbody").children.map((row) => [row.getAttribute("data-series-id"), row.getAttribute("data-number")]);
   // a retry of E02 and E03 that Stop ends after it saved E02
@@ -9512,6 +6994,47 @@ test("3.0.1 (the lead's D11, the review's M1): Stop keeps the Did not download b
   } finally {
     retry.restore();
   }
+  /**
+   * A retry of E02 and E03 whose E02 fails again (`failed 2`: a new message) and that Stop ends
+   * before E03, in a page whose block holds `before` of the drama (null: no row): its record is
+   * every row the retry had — never a batch's rule, only what is on disk —, and the block after it,
+   * `[number, message]` per row, with its heading.
+   * @param {[number, string, string?][] | null} before
+   */
+  const failedAgain = async (before) => {
+    const page = await fakePage({ storage: NO_AUTO_RETRY });
+    try {
+      const { element, module } = page;
+      fakeNotifications();
+      page.hold();
+      if (before !== null) module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", before)]);
+      const job = { ...BATCH_JOB, id: 9, kind: /** @type {const} */ ("selection"), label: "Retry 2 of Drama 2399", refs: [refOf(OTHER_ID)], numbers: [2, 3] };
+      const scripted = scriptedEngine(page, job, {
+        statuses: { [`${OTHER_ID}:2`]: "failed" },
+        onDownload: (ep) => {
+          if (ep.number === 2) element("stop-button").fire("click"); // the engine meets it before E03
+        },
+      });
+      await assert.rejects(runSelectionJob(scripted.engine, refOf(OTHER_ID), job.numbers, { lastContactAt: null }), StopRequested);
+      const records = module.stoppedRecords(job, scripted.jobRecord);
+      assert.deepEqual(
+        records.map((record) => [record["series_id"], /** @type {Record<string, unknown>[]} */ (record["rows"]).map((row) => [row["number"], row["status"], row["message"]])]),
+        [[OTHER_ID, [[2, "failed", "failed 2"]]]],
+      );
+      module.renderFailed(records);
+      const rows = element("failed-table").querySelector("tbody").children.map((row) => [row.getAttribute("data-number"), row.children[3]?.textContent]);
+      return { rows, heading: element("failed-heading").textContent };
+    } finally {
+      page.restore();
+    }
+  };
+  // the block held E02 and E03 from an earlier run: E02 keeps its row with its new message, E03 its old one
+  assert.deepEqual(await failedAgain([[1, "done"], [2, "failed", "old message 2"], [3, "failed", "old message 3"]]), {
+    rows: [["2", "failed 2"], ["3", "old message 3"]],
+    heading: "Did not download (2)",
+  });
+  // the block held no row of the drama (an alert's Retry in a tab reloaded since): E02 gets one
+  assert.deepEqual(await failedAgain(null), { rows: [["2", "failed 2"]], heading: "Did not download (1)" });
   // a batch of two dramas that Stop ends in the second — its E01 failed, its E02 saved, Stop met before E03
   const batch = await fakePage({ storage: NO_AUTO_RETRY });
   try {

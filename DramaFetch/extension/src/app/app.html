@@ -17,7 +17,6 @@
   </div>
   <nav class="sections" data-i18n-aria-label="navLabel" aria-label="Sections">
     <a href="#input-card" data-i18n="navDownload">Download</a>
-    <a href="#library" data-i18n="navLibrary">Library</a>
     <a href="#settings-card" data-i18n="navSettings">Settings</a>
   </nav>
   <span id="app-status" class="badge idle" data-state="idle" data-finished="0" data-i18n="statusIdle">idle</span>
@@ -36,82 +35,14 @@
 
   <section class="card" id="input-card">
     <h2 data-i18n="linksHeading">Series to download</h2>
-    <label for="links" data-i18n="linksLabel">Paste a series link (any episode of it) or a series id: the whole drama downloads at once</label>
+    <label for="links" data-i18n="linksLabel">Paste one or more series links (any episode of each) or series IDs, one per line: each whole drama downloads at once, one after the other</label>
     <textarea id="links" rows="4" spellcheck="false" autocomplete="off" data-i18n-placeholder="linksPlaceholder"></textarea>
     <div class="options">
       <label><input type="checkbox" id="include-locked"> <span data-i18n="includeLockedLabel">Also ask for locked episodes (TikTok decides; usually they fail)</span></label>
       <label><input type="checkbox" id="recheck"> <span data-i18n="recheckLabel">Look again at series found complete in the last 24 hours</span></label>
     </div>
-    <p class="hint" data-i18n="linksHint">Several at once: one per line, in one paste — they download one after the other, each listed right before its own downloads. Typed ids: press Enter (Shift+Enter for a new line). The two boxes above count for the next paste or Enter, then clear. To pick episodes, use See episodes on a drama of your library. Keep this tab open while DramaFetch works.</p>
+    <p class="hint" data-i18n="linksHint">Keep pasting while DramaFetch works: what you paste joins the queue (Waiting) and downloads in its turn, with the usual pauses — each drama listed right before its own downloads. Typed IDs: press Enter (Shift+Enter for a new line). The two boxes above count for the next paste or Enter, then clear. Keep this tab open while DramaFetch works.</p>
     <p id="input-status" class="status" role="status"></p>
-  </section>
-
-  <div id="library" class="library">
-    <p id="library-empty" class="card hint" data-i18n="libraryEmpty">Your library is empty: open your TikTok profile → Favorites → Drama, then DramaFetch's toolbar button → Open my library. DramaFetch then shows every drama you keep there.</p>
-    <section class="card" id="favorites-card" hidden aria-labelledby="favorites-heading">
-      <h2 id="favorites-heading" data-i18n="favoritesHeading">Your TikTok library</h2>
-      <div class="connection">
-        <span id="library-dot" class="dot" aria-hidden="true"></span>
-        <div class="connection-text">
-          <p id="library-connection" class="connection-line"><span id="library-source"></span> · <span id="library-age"></span> · <span id="library-total"></span></p>
-          <p id="favorites-count" class="meta"></p>
-          <p id="library-stale" class="meta stale" hidden></p>
-          <p id="library-refresh-hint" class="meta" hidden data-i18n="libraryRefreshHint">To update, open your TikTok profile → Favorites → Drama in a tab of this Chrome.</p>
-        </div>
-        <button type="button" id="library-refresh" class="refresh"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 4v5h-5"></path></svg><span data-i18n="libraryRefresh">Update from TikTok</span></button>
-      </div>
-      <p class="hint" data-i18n="libraryHint">No password and no separate API: DramaFetch reads the same list your profile shows, from your own TikTok tab, with pauses. Nothing downloads until you ask.</p>
-      <div class="library-tools">
-        <input type="search" id="favorites-filter" spellcheck="false" autocomplete="off" data-i18n-placeholder="favoritesFilterPlaceholder" data-i18n-aria-label="favoritesFilterPlaceholder">
-        <select id="library-sort" data-i18n-aria-label="librarySortLabel" aria-label="Sort">
-          <option value="recent" data-i18n="librarySortRecent">Most recent first</option>
-          <option value="title" data-i18n="librarySortTitle">Title A–Z</option>
-          <option value="episodes" data-i18n="librarySortEpisodes">Most episodes</option>
-        </select>
-        <label class="select-shown"><input type="checkbox" id="favorites-select-all"> <span data-i18n="favoritesSelectShown">Select all shown</span></label>
-      </div>
-      <div class="selection-bar">
-        <span id="favorites-selection" class="selection-count"></span>
-        <span class="selection-note" data-i18n="librarySelectionNote">downloaded one after the other, with the usual pauses</span>
-        <span class="spacer"></span>
-        <button type="button" id="library-clear" data-i18n="libraryClear">Clear selection</button>
-        <button type="button" id="library-download" class="primary"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"></path><path d="M7 10l5 5 5-5"></path><path d="M5 20h14"></path></svg><span data-i18n="libraryDownload">Download selected</span></button>
-      </div>
-      <p id="favorites-status" class="status" role="status"></p>
-      <div id="favorites-grid" class="drama-grid"></div>
-      <div class="library-foot">
-        <span id="library-shown" class="meta"></span>
-        <button type="button" id="library-more" hidden></button>
-      </div>
-      <p class="hint" data-i18n="favoritesHint">Reading the whole list takes 1–2 minutes (about 50 pages, a pause before each). Download on a card downloads that drama; Download selected dramas downloads the ticked ones one after the other — exactly as pasting their links would, skipping the episodes already on disk.</p>
-    </section>
-  </div>
-
-  <section class="card" id="series-card" hidden>
-    <h2 id="series-title"></h2>
-    <p id="series-meta" class="meta"></p>
-    <ul id="series-warnings" class="warnings"></ul>
-    <div class="buttons">
-      <button type="button" id="download-available-button" class="primary" data-i18n="downloadAvailableButton">Download all available</button>
-      <button type="button" id="download-selected-button" data-i18n="downloadSelectedButton">Download selected</button>
-      <span id="selection-count" class="meta"></span>
-    </div>
-    <div class="table-wrap">
-      <table id="episode-table">
-        <thead>
-          <tr>
-            <th><input type="checkbox" id="select-all" data-i18n-aria-label="selectAll"></th>
-            <th data-i18n="colCover">Cover</th>
-            <th data-i18n="colNumber">#</th>
-            <th data-i18n="colTitle">Title</th>
-            <th data-i18n="colDuration">Length</th>
-            <th data-i18n="colQuality">Quality</th>
-            <th data-i18n="colAccess">Access</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
   </section>
 
   <section class="card" id="progress-card" hidden>

@@ -68,7 +68,6 @@ import {
 import { Downloader, SaveError } from "../src/app/downloader.js";
 import { RedirectTracker, fetchFollowing } from "../src/app/redirects.js";
 import { STORAGE_REFUSED_PREFIX, StopRequested, resolve, storageRefusedReason } from "../src/app/engine.js";
-import { FAVORITES_CHALLENGE_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE } from "../src/app/favorites.js";
 import { settingsProblem, DEFAULT_SETTINGS } from "../src/app/storage.js";
 
 /** @param {string} relative @returns {URL} */
@@ -435,8 +434,6 @@ function cooldownTexts() {
     messages.MEDIA_RATE_LIMIT_MESSAGE,
     messages.LIST_RATE_LIMIT_MESSAGE,
     CHALLENGE_MESSAGE,
-    FAVORITES_RATE_LIMIT_MESSAGE,
-    FAVORITES_CHALLENGE_MESSAGE,
     "",
     "failed-blocked",
   ]) {
@@ -709,7 +706,7 @@ async function discoveryTexts() {
     })
   );
   texts.push(await failure(resolve(engine, ref)));
-  texts.push(LOGIN_REDIRECT_MESSAGE, CHALLENGE_MESSAGE, EMPTY_LIST_MESSAGE, FAVORITES_RATE_LIMIT_MESSAGE, FAVORITES_CHALLENGE_MESSAGE);
+  texts.push(LOGIN_REDIRECT_MESSAGE, CHALLENGE_MESSAGE, EMPTY_LIST_MESSAGE);
   return texts;
 }
 

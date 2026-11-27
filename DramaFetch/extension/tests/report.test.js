@@ -125,6 +125,46 @@ test("the stopped row keeps every skip an episode would have had", () => {
   });
 });
 
+test("`overwrite` — Python's `DownloadOptions.overwrite`, which the CLI's --overwrite sets (the extension sets it nowhere since 4.0.0) —: a stopped row has no done skip and no existing-file skip, the stop's row instead, while the DRM memory and a locked episode keep theirs unless includeLocked (`engine._stopped_result`); and no complete skip (`_complete_skip_allowed`)", () => {
+  const state = newState("S1");
+  const exists = () => true;
+  record(state, { episode: { number: 1, itemId: "id-1" }, status: "done", path: "/d/E01.mp4", message: "saved" }, { exists, now: 1 });
+  record(state, { episode: { number: 2, itemId: "id-2" }, status: "skipped-locked", message: DRM_REMEMBERED_MESSAGE }, { exists, now: 1 });
+  /** @type {number[]} the episodes whose file at its target was looked for */
+  const looked = [];
+  /** @param {import("../src/lib/catalog.js").Episode} episode @returns {DownloadResult} its file found at its target */
+  const existingResult = (episode) => {
+    looked.push(episode.number);
+    return /** @type {DownloadResult} */ (row(episode, "skipped-exists", `already exists: E0${episode.number}.mp4`));
+  };
+  const overwrite = { state, exists, existingResult, overwrite: true };
+  // on disk in the state, or at its target: the stop's row — never asked whether a file is there
+  assert.deepEqual(stoppedResult(ep(1), "failed-rate-limited", "episode 3 failed-rate-limited", overwrite), {
+    episode: ep(1),
+    status: "failed-rate-limited",
+    path: null,
+    message: "stopped: episode 3 failed-rate-limited",
+  });
+  assert.equal(stoppedResult(ep(5), "failed", "x", overwrite).message, "stopped: x");
+  assert.deepEqual(looked, []);
+  // the DRM memory and the lock stay, as without overwrite; includeLocked lifts both
+  assert.equal(stoppedResult(ep(2), "failed-rate-limited", "x", overwrite).message, DRM_REMEMBERED_MESSAGE);
+  assert.equal(stoppedResult(ep(4, "locked", ["isLocked=True"]), "failed", "x", overwrite).status, "skipped-locked");
+  const asking = { ...overwrite, includeLocked: true };
+  assert.equal(stoppedResult(ep(2), "failed", "x", asking).message, "stopped: x");
+  assert.equal(stoppedResult(ep(4, "locked", ["isLocked=True"]), "failed", "x", asking).message, "stopped: x");
+  // without it, the same episodes keep their skips (the resume every extension job has)
+  const resume = { state, exists, existingResult };
+  assert.equal(stoppedResult(ep(1), "failed", "x", resume).message, "already downloaded (manifest): E01.mp4");
+  assert.equal(stoppedResult(ep(5), "failed", "x", resume).message, "already exists: E05.mp4");
+  assert.deepEqual(looked, [5]);
+  // the complete skip: a whole-series run only, never with overwrite (nor a dry run)
+  assert.equal(completeSkipAllowed(null, { overwrite: true }), false);
+  assert.equal(completeSkipAllowed(null, { overwrite: false }), true);
+  assert.equal(completeSkipAllowed(undefined, { overwrite: true, recheck: false, includeLocked: false }), false);
+  assert.equal(completeSkipAllowed(null, { dryRun: true }), false);
+});
+
 test("the complete skip: 24 h, every counted file there, the locked ones and RECHECK_HINT", () => {
   const state = newState("S1", "Paid Love Story");
   const present = new Set(["/d/E01.mp4", "/d/E02.mp4", "/d/E03.mp4"]);

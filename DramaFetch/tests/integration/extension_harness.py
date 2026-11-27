@@ -17,35 +17,24 @@ with a string predicate is blocked by the extension page's CSP, so the harness p
 A series starts downloading the way the owner starts it (DramaFetch 1.7.0, the owner's decision of
 2026-11-20): a REAL paste into the box (`paste`: the text on the browser's clipboard, then Ctrl+V —
 Chromium fires the box's own trusted `paste` event with the clipboard's `text/plain`; no button),
-or a library card's **Download** (`download_card`); a series' episodes are listed with its library
-card's **See episodes** (`see_episodes`, over a library `keep_library` put in place as a listing of
-the favorites would have kept it).
+Enter in the box, or the popup's **Download this series**. Since DramaFetch 4.0.0 (the owner's
+decision of 2026-11-27) those are the only ways: no library, no **See episodes**, nothing read of
+the user's Favorites. The episodes a job did not download are retried with the progress card's
+**Retry** (`#retry-button`, `_run`) or an alert's.
 
-Element ids it relies on: `#links`, `#download-available-button`, `#download-selected-button`,
-`#include-locked`, `#recheck`, `#input-status`,
+Element ids it relies on: `#links`, `#include-locked`, `#recheck`, `#input-status`,
 `#app-status` (`data-state` idle|running, `data-finished` = finished jobs), `#test-settings`,
-`#test-settings-save`, `#test-settings-status`, `#cooldown-banner`, `#episode-table` (one
-`tr[data-number]` per listed episode with `data-access` free|unlocked|locked, its checkbox, the
-`.badge` and the `.hints` span of a locked one — `plays 2 s of 10 s`, say — and the
-`td.cover-cell` whose thumbnail arrives once the row is in view), `#result-table`,
+`#test-settings-save`, `#test-settings-status`, `#cooldown-banner`, `#result-table`,
 `#result-trimmed`, `#report-lines`, `#batch-table`, `#failed-block`, `#failed-heading`,
 `#failed-table` (rows with `data-number`, `data-status`, a `.badge` and a `td.message`),
-`#failed-auto`, `#retry-button`, `#report-button`,
-`#failed-report`, `#settings-card`, `#setting-report`, `#setting-auto-retry`, `#settings-save`,
-`#settings-status`, the library
-(`#favorites-card`, `#favorites-count`, `#favorites-filter`, `#favorites-select-all`,
-`#favorites-status`, `#favorites-grid` with one `article[data-series-id]` per drama — its
-`data-status` (`queued` while a download job of it waits, `running` while one downloads it, else
-`idle`: DramaFetch 3.0.0 shows no lasting status on a card), the `.favorite-status` badge and the
-`progress.drama-progress` bar it shows only then, its `.favorite-title`, `.favorite-meta`, its tick
-and its `[data-action]` buttons: `download`, `browse` (**See episodes**), `open` —,
-`#library-total`, `#library-shown`, `#library-download`, `#library-refresh`) and the popup's
-`#popup-favorites` / `#popup-favorites-hint` / `#popup-library`. The finished jobs it reads from the
-app page's test-mode journal (`globalThis.dramafetchJournal`, most recent first: DramaFetch 2.0.0
-stores no history, and the journal lives in that page's memory only — a reloaded or reopened page
-starts an empty one); storage keys it reads: `cooldown`, `series:<id>` (DramaFetch's records of a
-series: `episode_records`), `pacing`, `favoritesLibrary`, and in `chrome.storage.session`
-`favoritesTemplate:<tab id>`. A cookie value is never printed, logged or asserted on.
+`#failed-auto`, `#retry-button`, `#report-button`, `#failed-report`, `#queue-card` and
+`#queue-list` (the **Waiting** card: one `li[data-kind][data-series-id]` per drama still to run),
+`#settings-card`, `#setting-report`, `#setting-auto-retry`, `#settings-save`, `#settings-status`.
+The finished jobs it reads from the app page's test-mode journal (`globalThis.dramafetchJournal`,
+most recent first: DramaFetch 2.0.0 stores no history, and the journal lives in that page's memory
+only — a reloaded or reopened page starts an empty one); storage keys it reads: `cooldown`,
+`series:<id>` (DramaFetch's records of a series: `episode_records`), `pacing`, `settings`. A cookie
+value is never printed, logged or asserted on.
 """
 
 from __future__ import annotations
@@ -319,10 +308,8 @@ class ExtensionHarness:
         first: its test-mode journal (`globalThis.dramafetchJournal` — DramaFetch 2.0.0 took the
         stored history away), each entry in the shape the history's had (`kind`, `label`,
         `started_at`, `finished_at`, `error`, `stopped`, `refreshes`, `pauses`, `series` with each
-        series' rows — and `overwrite: true` on the series of a job that downloaded its episodes
-        again in full: **See episodes**' (3.0.0) —, a listing's `favorites`), the jobs a stop took
-        out of the queue included (`not started: …`). In that page's memory only: a reloaded or
-        reopened page starts with an empty one."""
+        series' rows), the jobs a stop took out of the queue included (`not started: …`). In that
+        page's memory only: a reloaded or reopened page starts with an empty one."""
         found = (page or self.page).evaluate("() => globalThis.dramafetchJournal ?? []")
         assert isinstance(found, list)
         return found
@@ -345,8 +332,7 @@ class ExtensionHarness:
         self, series_id: str, statuses: dict[int, str], timeout_s: float = 10
     ) -> dict[int, dict[str, Any]]:
         """Wait until DramaFetch's records of `series_id` hold exactly `statuses` (episode number →
-        status) — what a job wrote of the drama, the one signal of it that outlives the job since
-        DramaFetch 3.0.0 (a library card shows nothing once no job holds its drama) —; the
+        status) — what a job wrote of the drama, which outlives the job and the page —; the
         records."""
 
         def recorded() -> dict[int, str]:
@@ -410,25 +396,25 @@ class ExtensionHarness:
             "the test settings were not saved",
         )
 
-    def _turn_off(self, checkbox: str, key: str) -> None:
-        """**Settings** → untick the checkbox `checkbox` (on by default) → **Save settings**, waited
-        for until the stored settings hold `key` false and the page says so; the card is folded
-        again."""
+    def _switch(self, checkbox: str, key: str, *, on: bool) -> None:
+        """**Settings** → tick (`on`) or untick the checkbox `checkbox`, the other way until now →
+        **Save settings**, waited for until the stored settings hold `key` so and the page says
+        so; the card is folded again."""
         page = self.page
         page.click("#settings-card > summary")
-        assert page.locator(checkbox).is_checked()  # on by default
-        page.uncheck(checkbox)
+        assert page.locator(checkbox).is_checked() is not on  # the other way until now
+        page.set_checked(checkbox, on)
         page.click("#settings-save")
 
         def saved() -> bool:
             stored = self.storage("settings").get("settings")
             return (
                 isinstance(stored, dict)
-                and stored.get(key) is False
+                and stored.get(key) is on
                 and page.locator("#settings-status").text_content() == "Settings saved."
             )
 
-        self.wait_for(saved, 10, f"the settings were not saved with {key} off")
+        self.wait_for(saved, 10, f"the settings were not saved with {key} {'on' if on else 'off'}")
         page.click("#settings-card > summary")
 
     def turn_off_auto_retry(self) -> None:
@@ -437,7 +423,13 @@ class ExtensionHarness:
         settings hold it; the card is folded again. A scenario that proves the manual **Retry**
         after a plain failure does this first: with the setting on, DramaFetch would queue that
         retry itself."""
-        self._turn_off("#setting-auto-retry", "autoRetry")
+        self._switch("#setting-auto-retry", "autoRetry", on=False)
+
+    def turn_on_auto_retry(self) -> None:
+        """**Settings** → tick **Retry on its own what did not download** again (after
+        `turn_off_auto_retry`) → **Save settings**, waited for the same way: from then on a
+        download job — the tab's own **Retry** too — queues its one automatic retry again."""
+        self._switch("#setting-auto-retry", "autoRetry", on=True)
 
     def reopen_app(self) -> Page:
         """Open the app page in a new tab (the test closed the old one) and make it `page`, once
@@ -517,64 +509,6 @@ class ExtensionHarness:
         if recheck:
             page.check("#recheck")
         return self._after(lambda: self.paste(links), "a paste", timeout_s)
-
-    def keep_library(self, *dramas: tuple[str, str, int | None]) -> None:
-        """Put `dramas` — `(series id, title, episode count)`, the count None for a drama TikTok's
-        list gives none for — in the library as a listing of the
-        user's TikTok favorites would have kept it (`favoritesLibrary` in `chrome.storage.local`,
-        in the shape DramaFetch 3.0.0 writes: ids, titles and counts only — no cover, no address,
-        nothing signed), then reload the app page, which shows it at its start with no request:
-        each drama's card with its **See episodes** (`see_episodes`) and **Download**
-        (`download_card`)."""
-        now = time.time()
-        library = {
-            "v": 1,
-            "listedAt": now,
-            "total": len(dramas),
-            "countedAt": None,
-            "fullReadAt": None,
-            "complete": True,
-            "short": False,
-            "ended": None,
-            "profile": None,
-            "items": [
-                {"seriesId": series_id, "title": title, "episodes": episodes, "durationS": None}
-                for series_id, title, episodes in dramas
-            ],
-        }
-        page = self.page
-        page.evaluate("(library) => chrome.storage.local.set({favoritesLibrary: library})", library)
-        page.reload()
-        cards = page.locator("#favorites-grid article[data-series-id]")
-        self.wait_for(
-            lambda: self.idle() and cards.count() == len(dramas),
-            20,
-            "the reloaded tab did not show the library",
-        )
-
-    def card_button(self, series_id: str, action: str) -> str:
-        """The selector of a library card's button: `download`, `browse` (**See episodes**),
-        `open` (**Open on TikTok**)."""
-        return f"#favorites-grid article[data-series-id='{series_id}'] [data-action='{action}']"
-
-    def see_episodes(self, series_id: str, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
-        """**See episodes** on the drama's library card (`keep_library` puts it there): its episode
-        list with the covers, as **Load list** showed it until 1.7.0; the listing job's journal
-        entry."""
-        return self._run(self.card_button(series_id, "browse"), timeout_s)
-
-    def download_card(self, series_id: str, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
-        """**Download** on the drama's library card: the whole drama, the job **Download selected
-        dramas** queues for it alone; its journal entry."""
-        return self._run(self.card_button(series_id, "download"), timeout_s)
-
-    def download_available(self, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
-        """**Download all available** of the loaded series; its journal entry."""
-        return self._run("#download-available-button", timeout_s)
-
-    def download_selected(self, timeout_s: float = JOB_TIMEOUT_S) -> dict[str, Any]:
-        """**Download selected** of the loaded series (the ticked rows); its journal entry."""
-        return self._run("#download-selected-button", timeout_s)
 
     def saved_files(self) -> list[Path]:
         """Every file under the download directory, relative to it, sorted."""

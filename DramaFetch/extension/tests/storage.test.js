@@ -1,8 +1,8 @@
 // @ts-check
-// What the extension stores, and how it gives way: DramaFetch 2.0.0 keeps no history of past runs —
-// the one 1.x stored is removed at the page's start, best effort, that key alone. A refusal's
-// cooldown the storage will not take stays in force from memory. A TikTok tab's favorites address
-// lives in the session's memory only, and is read back only as the first page of a favorites list.
+// What the extension stores, and how it gives way: what an earlier DramaFetch kept and this one never
+// uses — 1.x's history of past runs (DramaFetch 2.0.0), 3.x's library and its sort (4.0.0) — is
+// removed at the page's start, best effort, in one call, those keys alone. A refusal's cooldown the
+// storage will not take stays in force from memory.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -10,26 +10,14 @@ import { activeCooldown, clearCooldown, recordBlock } from "../src/lib/cooldown.
 import { MEDIA_RATE_LIMIT_MESSAGE } from "../src/lib/messages.js";
 import {
   DEFAULT_SETTINGS,
-  RETIRED_HISTORY_KEY,
+  RETIRED_KEYS,
   cooldownStore,
-  favoritesTemplateKey,
-  forgetFavoritesTemplate,
   loadSettings,
   normalizeSettings,
-  readFavoritesTemplate,
-  LIBRARY_SORT_KEY,
-  readLibrary,
-  readLibraryCovers,
-  readLibrarySort,
-  rememberFavoritesTemplate,
-  removeStoredHistory,
+  removeRetiredKeys,
   saveSettings,
   settingsProblem,
-  writeLibrary,
-  writeLibraryCovers,
-  writeLibrarySort,
 } from "../src/app/storage.js";
-import { libraryRecord } from "../src/lib/library.js";
 
 /** What Chrome 153 rejects a `chrome.storage.local.set` with when the disk under its profile is full. */
 const REFUSED = "IO error: .../000003.log: FILE_ERROR_NO_SPACE (ChromeMethodBFE: 3::WritableFileAppend::8)";
@@ -37,12 +25,14 @@ const REFUSED = "IO error: .../000003.log: FILE_ERROR_NO_SPACE (ChromeMethodBFE:
 /**
  * A `chrome.storage.local` whose writes (`set`, `remove`) and reads (`get`) can be made to reject,
  * installed as the global `chrome` with a `chrome.storage.session` (the browser session's memory:
- * `session`, never refused).
+ * `session`, never refused). `removals` is every call of `remove`, with the keys it was given.
  * @param {Record<string, unknown>} [stored]
  * @param {Record<string, unknown>} [session]
  */
 function fakeLocal(stored = {}, session = {}) {
   const switches = { refuseWrites: false, refuseReads: false };
+  /** @type {(string | string[])[]} */
+  const removals = [];
   const local = {
     /** @param {string} key */
     async get(key) {
@@ -54,10 +44,11 @@ function fakeLocal(stored = {}, session = {}) {
       if (switches.refuseWrites) throw new Error(REFUSED);
       Object.assign(stored, items);
     },
-    /** @param {string} key */
-    async remove(key) {
+    /** @param {string | string[]} keys */
+    async remove(keys) {
+      removals.push(keys);
       if (switches.refuseWrites) throw new Error(REFUSED);
-      delete stored[key];
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
     },
   };
   const sessionArea = {
@@ -69,29 +60,34 @@ function fakeLocal(stored = {}, session = {}) {
     remove: async (key) => void delete session[key],
   };
   Object.assign(globalThis, { chrome: { storage: { local, session: sessionArea } } });
-  return { stored, session, switches };
+  return { stored, session, switches, removals };
 }
 
-test("the history 1.x kept of its past runs is removed at the page's start (DramaFetch 2.0.0: no history any more) — that key alone: the settings, the series' records, the pacing, the cooldown and the library stay —; best effort: a refusal never throws, and a key no longer there costs nothing", async () => {
+test("what an earlier DramaFetch kept and this one never uses is removed at the page's start, in ONE call — 1.x's history of past runs (DramaFetch 2.0.0) and 3.x's library and its sort (4.0.0: no library) —, those keys alone: the settings, the series' records, the pacing and the cooldown stay —; best effort: a refusal never throws, and keys no longer there cost nothing", async () => {
+  assert.deepEqual([...RETIRED_KEYS], ["history", "favoritesLibrary", "librarySort"]); // the keys 1.x kept Past runs under, and 3.x its library and its sort
   const kept = {
     settings: { ...DEFAULT_SETTINGS },
     "series:7699393770256782354": { series_id: "7699393770256782354", episodes: {} },
     pacing: { runAttempts: 3, lastNetworkAt: 1_800_000_000, consecutiveFailures: 0, lastContactAt: 1_800_000_000 },
     cooldown: { until: 1_800_001_800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: 1_800_000_000 },
-    favoritesLibrary: { version: 1 },
-    [LIBRARY_SORT_KEY]: "title",
   };
-  const { stored, switches } = fakeLocal({ ...kept, [RETIRED_HISTORY_KEY]: [{ id: 1, label: "Series 7699393770256782354" }] });
-  assert.equal(RETIRED_HISTORY_KEY, "history"); // the key 1.x stored Past runs under
+  const retired = {
+    history: [{ id: 1, label: "Series 7699393770256782354" }],
+    favoritesLibrary: { v: 1, listedAt: 1_800_000_000, total: 1, complete: true, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A drama", episodes: 3, durationS: 237 }] },
+    librarySort: "title",
+  };
+  const { stored, switches, removals } = fakeLocal({ ...kept, ...retired });
   // a refusal (a full disk) is ignored: nothing thrown, nothing removed — the next start tries again
   switches.refuseWrites = true;
-  assert.equal(await removeStoredHistory(), false);
-  assert.ok(Object.hasOwn(stored, RETIRED_HISTORY_KEY));
+  assert.equal(await removeRetiredKeys(), false);
+  assert.deepEqual(stored, { ...kept, ...retired });
   switches.refuseWrites = false;
-  assert.equal(await removeStoredHistory(), true);
+  assert.equal(await removeRetiredKeys(), true);
   assert.deepEqual(stored, kept);
-  // a key no longer there: nothing to do, nothing else touched
-  assert.equal(await removeStoredHistory(), true);
+  // each call one removal of exactly those keys
+  assert.deepEqual(removals, [[...RETIRED_KEYS], [...RETIRED_KEYS]]);
+  // keys no longer there: nothing to do, nothing else touched
+  assert.equal(await removeRetiredKeys(), true);
   assert.deepEqual(stored, kept);
 });
 
@@ -181,64 +177,6 @@ test("the report switch: on by default, a stored non-boolean falls back to it, a
   assert.equal(settingsProblem({ ...DEFAULT_SETTINGS, report: /** @type {never} */ (1), delayMinS: 0 }, false), "the report switch must be on or off");
 });
 
-test("the favorites address: kept per TikTok tab in the session's memory with whose list it reads (an @handle, else null), read back only when it is the first page of a favorites list — anything else is no address", async () => {
-  const { stored, session } = fakeLocal();
-  const first = "https://www.tiktok.com/api/user/favorite/drama_list/?WebIdLastTime=1794300000&aid=1988&count=19&cursor=0&X-Bogus=DFSzswVOxQ";
-  // the stored record carries the profile since 1.6.0's review (it was `{url, at}`)
-  await rememberFavoritesTemplate(42, first, 1_794_351_568, "@invented_viewer");
-  assert.deepEqual(session[favoritesTemplateKey(42)], { url: first, at: 1_794_351_568, profile: "@invented_viewer" });
-  assert.deepEqual(stored, {}); // never chrome.storage.local
-  assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_568, profile: "@invented_viewer" });
-  assert.equal(await readFavoritesTemplate(43), null); // none seen in that tab
-  // whose list it reads not known (the tab on no profile page): null; anything but an @handle read back as null
-  await rememberFavoritesTemplate(42, first, 1_794_351_569);
-  assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_569, profile: null });
-  for (const profile of ["invented_viewer", "@", "@a b", "@a/b", 5, null, undefined]) {
-    session[favoritesTemplateKey(42)] = { url: first, at: 1_794_351_568, profile };
-    assert.deepEqual(await readFavoritesTemplate(42), { url: first, at: 1_794_351_568, profile: null }, String(profile));
-  }
-  // a stored address that is no first page of a favorites list — a later page, another list, junk —
-  // is no address: the list is only ever read from its first page, replayed as the page asked for it
-  for (const url of [
-    first.replace("cursor=0", "cursor=1794351568"),
-    "https://www.tiktok.com/api/drama/recommend/drama_list/?aid=1988&cursor=0",
-    "https://www.tiktok.com/api/drama/episode/item_list/?dramaID=7699393770256782354&cursor=0",
-  ]) {
-    session[favoritesTemplateKey(42)] = { url, at: 1_794_351_568 };
-    assert.equal(await readFavoritesTemplate(42), null, url);
-  }
-  for (const junk of [{ url: first }, { url: 5, at: 1 }, "x", null]) {
-    session[favoritesTemplateKey(42)] = junk;
-    assert.equal(await readFavoritesTemplate(42), null, JSON.stringify(junk));
-  }
-  // forgotten when the tab closes
-  session[favoritesTemplateKey(42)] = { url: first, at: 1 };
-  await forgetFavoritesTemplate(42);
-  assert.equal(Object.hasOwn(session, favoritesTemplateKey(42)), false);
-});
-
-test("the library's covers: signed addresses kept in the browser session's memory only — never chrome.storage.local —, read back as http(s) addresses only; the library itself, nothing signed in it, kept on disk — a refused write thrown for its caller to say", async () => {
-  const { stored, session, switches } = fakeLocal();
-  const signed = "https://p16-common-sign.tiktokcdn.com/c/1.avif?x-expires=1794895200&x-signature=INVENTED%3D";
-  await writeLibraryCovers(new Map([["7712345678901234561", signed]]));
-  assert.deepEqual(stored, {}); // never chrome.storage.local
-  assert.deepEqual(session["favoritesCovers"], { "7712345678901234561": signed });
-  assert.deepEqual(await readLibraryCovers(), new Map([["7712345678901234561", signed]]));
-  // anything else stored there is no cover address
-  session["favoritesCovers"] = { "7712345678901234561": signed, "7712345678901234562": "javascript:alert(1)", "7712345678901234563": 5 };
-  assert.deepEqual(await readLibraryCovers(), new Map([["7712345678901234561", signed]]));
-  session["favoritesCovers"] = "junk";
-  assert.deepEqual(await readLibraryCovers(), new Map());
-  // the library: on disk, read back checked; a write the storage refuses is thrown — a cache, the caller says so once
-  const record = libraryRecord({ listedAt: 1_800_000_000, total: 1, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A drama", episodes: 3, durationS: 237, coverUrl: signed }] });
-  await writeLibrary(record);
-  assert.doesNotMatch(JSON.stringify(stored["favoritesLibrary"]), /https?:|x-signature/);
-  assert.deepEqual(await readLibrary(), record);
-  switches.refuseWrites = true;
-  await assert.rejects(writeLibrary(record), new RegExp("FILE_ERROR_NO_SPACE"));
-  switches.refuseWrites = false;
-});
-
 test("the alert switch: on by default, a stored non-boolean falls back to it, and it must be a boolean to save", () => {
   assert.equal(DEFAULT_SETTINGS.alerts, true);
   assert.equal(normalizeSettings({ alerts: false }, false).alerts, false);
@@ -295,28 +233,3 @@ test("a 2.x install's settings that still carry the automatic removal switch (3.
   assert.equal(Object.hasOwn(/** @type {Record<string, unknown>} */ (stored["settings"]), "autoRemove"), false);
 });
 
-test("the library's sort order: kept in chrome.storage.local under its own key and read back checked; best effort — a refused write or read never throws (the list's own order then)", async () => {
-  const { stored, switches } = fakeLocal();
-  assert.equal(LIBRARY_SORT_KEY, "librarySort");
-  assert.equal(await readLibrarySort(), "recent"); // nothing kept yet: the list's own
-  assert.equal(await writeLibrarySort("title"), true);
-  assert.deepEqual(stored, { librarySort: "title" }); // its own small key: nothing else written
-  assert.equal(await readLibrarySort(), "title");
-  assert.equal(await writeLibrarySort("episodes"), true);
-  assert.equal(await readLibrarySort(), "episodes");
-  // anything else stored there is no sort order
-  stored["librarySort"] = "by colour";
-  assert.equal(await readLibrarySort(), "recent");
-  stored["librarySort"] = { sort: "title" };
-  assert.equal(await readLibrarySort(), "recent");
-  // a refused write: false, nothing thrown, what was kept stays; a refused read: the list's own order
-  stored["librarySort"] = "title";
-  switches.refuseWrites = true;
-  assert.equal(await writeLibrarySort("episodes"), false);
-  assert.equal(stored["librarySort"], "title");
-  switches.refuseWrites = false;
-  switches.refuseReads = true;
-  assert.equal(await readLibrarySort(), "recent");
-  switches.refuseReads = false;
-  assert.equal(await readLibrarySort(), "title");
-});

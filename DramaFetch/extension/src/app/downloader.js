@@ -384,8 +384,8 @@ export async function readBody(response, limits = {}) {
  */
 
 /**
- * One image GET of the extension's own (the downloader's cover, a thumbnail of the episode list):
- * only to a host the manifest covers, a redirect followed only the safe way (`./redirects.js`:
+ * One image GET of the extension's own (the downloader's cover of an episode): only to a host the
+ * manifest covers, a redirect followed only the safe way (`./redirects.js`:
  * a known, allowed target, at most five hops, each requested like the first), with the session's
  * cookies; at most {@link MAX_COVER_BYTES} read, accepted per `thumbnails.image_kind` (the bytes
  * first) from {@link MIN_IMAGE_BYTES} on. Never throws: a failure is `{ok: false, note: "; cover:
@@ -645,28 +645,18 @@ function waitForDownload(id, api) {
 }
 
 /**
- * What Chrome does when a file is already at the target: `uniquify` never overwrites it (the new
- * file gets ` (1)` before its extension); `overwrite` replaces it under the same name — only a
- * download that is meant to replace it (DramaFetch 3.0.0: **See episodes**' downloads again in
- * full, {@link DownloaderConfig}.overwrite), and only once its body passed every check in memory.
- * @typedef {"uniquify" | "overwrite"} ConflictAction
- */
-
-/**
  * Save bytes through `chrome.downloads` at `filename` (relative to the Downloads folder;
- * `conflictAction` `uniquify` by default: never overwrite a file), wait for it to complete, and
- * return what Chrome saved.
+ * `uniquify`: never overwrite a file), wait for it to complete, and return what Chrome saved.
  * @param {Uint8Array} bytes
  * @param {string} mime
  * @param {string} filename
- * @param {ConflictAction} [conflictAction]
  * @param {typeof chrome.downloads} [api]
  * @returns {Promise<chrome.downloads.DownloadItem>}
  */
-export async function saveFile(bytes, mime, filename, conflictAction = "uniquify", api = chrome.downloads) {
+export async function saveFile(bytes, mime, filename, api = chrome.downloads) {
   const url = URL.createObjectURL(new Blob([/** @type {Uint8Array<ArrayBuffer>} */ (bytes)], { type: mime }));
   try {
-    const id = await api.download({ url, filename, conflictAction, saveAs: false });
+    const id = await api.download({ url, filename, conflictAction: "uniquify", saveAs: false });
     const item = await waitForDownload(id, api);
     if (item.state !== "complete") throw new SaveError(item.error || "INTERRUPTED");
     return item;
@@ -689,16 +679,12 @@ export async function saveFile(bytes, mime, filename, conflictAction = "uniquify
  *   entitlement, TikTok lock or DRM clue) — 3.0.1, the `selection` job a **Retry** of such
  *   episodes queues: what `includeLocked` does, for those episodes only; one the list now shows
  *   with a price, a TikTok lock flag or DRM stays skipped as locked, no request
- * @property {boolean} [overwrite] download an episode again in full even when Chrome's history
- *   shows it saved at its target (`DownloadOptions.overwrite`; DramaFetch 3.0.0: **See episodes**'
- *   jobs and their retries): no existing-file skip, and its files are saved with `conflictAction`
- *   `overwrite` — the old file replaced under the same name, never a ` (1)` copy
  * @property {readonly string[]} hostPatterns the manifest's host permissions
  * @property {DownloadsView} view
  * @property {(ref: SeriesRef) => Promise<Series>} rediscover the in-run re-discovery
  * @property {() => number} [now] wall-clock seconds (play URL expiry)
  * @property {typeof fetch} [fetch]
- * @property {(bytes: Uint8Array, mime: string, filename: string, conflictAction: ConflictAction) => Promise<chrome.downloads.DownloadItem>} [save]
+ * @property {(bytes: Uint8Array, mime: string, filename: string) => Promise<chrome.downloads.DownloadItem>} [save]
  * @property {(text: string) => void} [onStatus] what the downloader is doing (for the UI)
  * @property {number} [idleMs]
  * @property {import("./redirects.js").RedirectTracker | null} [redirects] where the redirects of its
@@ -712,7 +698,7 @@ export class Downloader {
     this.config = config;
     this.now = config.now ?? (() => Date.now() / 1000);
     this.fetch = config.fetch ?? ((input, init) => fetch(input, init));
-    this.save = config.save ?? ((bytes, mime, filename, conflictAction) => saveFile(bytes, mime, filename, conflictAction));
+    this.save = config.save ?? ((bytes, mime, filename) => saveFile(bytes, mime, filename));
     this.redirects = config.redirects === undefined ? pageRedirects() : config.redirects;
     /** @type {Map<string, Map<string, Record<string, unknown>>>} series id → item id → its newest fresh item */
     this.freshItems = new Map();
@@ -785,14 +771,12 @@ export class Downloader {
 
   /**
    * The SKIPPED_EXISTS result of an episode whose video Chrome's history shows completed at
-   * exactly its target path and still there (`existing_file_result`), or null. No request. Always
-   * null with `overwrite`: the episode is downloaded again in full, whatever is on disk.
+   * exactly its target path and still there (`existing_file_result`), or null. No request.
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @returns {DownloadResult | null}
    */
   existingResult(episode, context) {
-    if (this.config.overwrite === true) return null;
     const item = this.config.view.completedAt(this.target(episode, context));
     if (item === null) return null;
     return {
@@ -819,8 +803,7 @@ export class Downloader {
   /**
    * Whether the episode needs the network (`engine._needs_network`): not locked (unless
    * includeLocked, or — `askGuessed` — a lock DramaFetch only guessed: {@link asks}) and not
-   * already saved — with `overwrite`, every episode the session may play ({@link existingResult}
-   * is null then).
+   * already saved.
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @returns {boolean}
@@ -1036,10 +1019,7 @@ export class Downloader {
 
   /**
    * The verified video: the cover (one GET, unless `none`), embedded and/or kept as a file per
-   * the cover mode, then the save; DONE with `saved <name> (<n> MiB)` and the cover note. With
-   * `overwrite` both files are saved with `conflictAction` `overwrite`: an earlier download's file
-   * at the same name is replaced — never a ` (1)` copy next to it —, and only by a body that passed
-   * every check (a failed download never gets here, so the old file stays as it is).
+   * the cover mode, then the save; DONE with `saved <name> (<n> MiB)` and the cover note.
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @param {Uint8Array} body
@@ -1047,8 +1027,6 @@ export class Downloader {
    */
   async keep(episode, context, body) {
     const stem = this.stem(episode, context);
-    /** @type {ConflictAction} */
-    const conflictAction = this.config.overwrite === true ? "overwrite" : "uniquify";
     let video = body;
     let note = "";
     /** @type {{data: Uint8Array, kind: import("../lib/mp4.js").ImageKind} | null} */
@@ -1087,7 +1065,7 @@ export class Downloader {
     /** @type {chrome.downloads.DownloadItem} */
     let saved;
     try {
-      saved = await this.save(video, "video/mp4", downloadFilename(context.folder, stem, "mp4"), conflictAction);
+      saved = await this.save(video, "video/mp4", downloadFilename(context.folder, stem, "mp4"));
     } catch (error) {
       return failure(episode, FAILED, `could not save ${stem}.mp4: ${oneLine(error)}`);
     }
@@ -1099,7 +1077,6 @@ export class Downloader {
           coverFile.data,
           mimeTypeFor(coverFile.kind),
           downloadFilename(context.folder, stem, extension),
-          conflictAction,
         );
         this.config.view.remember(coverSaved);
       } catch (error) {
@@ -1278,265 +1255,3 @@ function refreshRecord() {
   return { outcome: "refused", fresh_list: false, access: null, hints: null, listed_url_count: null };
 }
 
-// ---------------------------------------------------------------- the list's thumbnails
-
-/**
- * How far outside the window a cover cell already counts as in view, in CSS pixels, above and
- * below (the `rootMargin` of the loader's IntersectionObserver): about one row ahead, so a slow
- * scroll finds the next thumbnail there — no more, so nobody's unseen rows cost a request.
- */
-export const COVER_MARGIN_PX = 64;
-
-/**
- * @typedef {object} CoverWatcher What {@link CoverLoader} needs of an IntersectionObserver.
- * @property {(target: Element) => void} observe
- * @property {(target: Element) => void} unobserve
- * @property {() => void} disconnect
- *
- * @typedef {(callback: (entries: readonly {target: Element, isIntersecting: boolean}[]) => void,
- *   init: {rootMargin: string}) => CoverWatcher} CoverWatcherFactory
- *
- * @typedef {object} CoverLoaderOptions
- * @property {readonly string[]} hostPatterns the manifest's host permissions
- * @property {() => Promise<boolean>} allowed whether a request may go out now — no job running or
- *   waiting, no cooldown in force — asked before each pause and again right before each request
- * @property {() => Promise<void>} pause the pause before each request (the list-page pause)
- * @property {(itemId: string, url: string) => void} onCover a thumbnail is ready (an object URL)
- * @property {() => string} [baseUrl] TikTok's origin (the test server's in test mode): a redirect
- *   is followed only where the rule of the extension's own requests applies ({@link fetchImage})
- * @property {typeof fetch} [fetch]
- * @property {(blob: Blob) => string} [objectUrl] `URL.createObjectURL`
- * @property {CoverWatcherFactory} [watcher] how cover cells are watched: an IntersectionObserver
- *   with a {@link COVER_MARGIN_PX} root margin by default
- * @property {CoverLane} [lane] the page's one lane for thumbnail requests, shared by every loader
- *   of the page (the episode list's and the library's): one request at a time across them all
- * @property {(url: string) => boolean} [usable] whether a thumbnail's URL may be asked for now —
- *   the library's: its signature not expired —, asked right before each request; one that may not
- *   is skipped without a request and without being marked asked, so that a fresh URL shown later
- *   for that item still loads
- */
-
-/**
- * One thumbnail request at a time across the loaders of a page — the episode list's and the
- * library's (DramaFetch 1.6.0) —, each after its own pause: a loader's turn (`allowed()`, its
- * pause, `allowed()` again, its one request) starts only once the turn before it, of whichever
- * loader, has ended. Without it two loaders resumed together (a job's end resumes both) would
- * have two requests in flight at once.
- */
-export class CoverLane {
-  constructor() {
-    /** @type {Promise<void>} the end of the last turn handed out */
-    this.tail = Promise.resolve();
-  }
-
-  /**
-   * Run `turn` once every turn handed out before it has ended (a turn that fails ends too).
-   * @template T
-   * @param {() => Promise<T>} turn
-   * @returns {Promise<T>}
-   */
-  run(turn) {
-    const result = this.tail.then(turn);
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
-}
-
-/**
- * The cover thumbnails of the episode list (**See episodes**), fetched by the extension itself — not
- * by the page's own `<img>` loads, which go out all at once, follow a redirect to any host and know
- * nothing of a cooldown or a running job — and only for the rows someone can see: a row's
- * thumbnail is wanted once its cover cell comes into view ({@link watch}: an IntersectionObserver,
- * {@link COVER_MARGIN_PX} around the window), and no longer once it leaves before its request went
- * out. The wanted ones go out in the list's order, ONE request at a time — across every loader of
- * the page when they share a {@link CoverLane}, as the episode list's and the library's do —, each
- * after its pause, only while `allowed()` — asked before the pause and again right before the
- * request, so nothing goes out during a job or a cooldown — through {@link fetchImage} (the
- * manifest's hosts, the extension's own request rule). Each thumbnail is kept by item id for the page's life, so showing
- * the list again costs no request; one that failed is not asked for again.
- */
-export class CoverLoader {
-  /** @param {CoverLoaderOptions} options */
-  constructor(options) {
-    this.options = options;
-    this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
-    this.objectUrl = options.objectUrl ?? ((blob) => URL.createObjectURL(blob));
-    /** @type {CoverWatcherFactory} */
-    this.makeWatcher = options.watcher ?? ((callback, init) => new IntersectionObserver(callback, init));
-    /** @type {Map<string, string>} item id → object URL, for the page's life */
-    this.loaded = new Map();
-    /** @type {Set<string>} item ids asked for already (shown or failed): never twice */
-    this.asked = new Set();
-    /** @type {string[]} the item ids of the list shown that have a cover URL, in its order */
-    this.order = [];
-    /** @type {Map<string, string>} item id → cover URL, of the list shown */
-    this.urls = new Map();
-    /** @type {Set<string>} the item ids whose cover cell is in view now */
-    this.visible = new Set();
-    /** @type {Map<string, Element>} item id → its cover cell, while watched */
-    this.cells = new Map();
-    /** @type {WeakMap<Element, string>} cover cell → item id */
-    this.itemOf = new WeakMap();
-    /** @type {CoverWatcher | null} the list's watcher, once a cell is watched */
-    this.watcher = null;
-    /** @type {Promise<void> | null} the loop, while it runs */
-    this.running = null;
-  }
-
-  /**
-   * The list shown now (instead of an earlier one's): its covers, in order. Nothing is wanted
-   * until a row's cover cell comes into view ({@link watch}).
-   * @param {readonly {itemId: string, coverUrl: string | null}[]} episodes
-   */
-  show(episodes) {
-    this.watcher?.disconnect();
-    this.watcher = null;
-    this.order = [];
-    this.urls = new Map();
-    this.visible = new Set();
-    this.cells = new Map();
-    this.itemOf = new WeakMap();
-    for (const episode of episodes) {
-      if (!episode.coverUrl || this.urls.has(episode.itemId)) continue;
-      this.urls.set(episode.itemId, episode.coverUrl);
-      this.order.push(episode.itemId);
-    }
-  }
-
-  /**
-   * Watch a row's cover cell: its thumbnail is wanted while the cell is in view. A thumbnail
-   * fetched already, asked for already, or without a URL needs no watching.
-   * @param {Element} cell
-   * @param {string} itemId
-   */
-  watch(cell, itemId) {
-    if (!this.urls.has(itemId) || this.loaded.has(itemId) || this.asked.has(itemId)) return;
-    if (this.watcher === null) {
-      this.watcher = this.makeWatcher(
-        (entries) => {
-          for (const entry of entries) {
-            const id = this.itemOf.get(entry.target);
-            if (id !== undefined) this.setVisible(id, entry.isIntersecting);
-          }
-        },
-        { rootMargin: `${COVER_MARGIN_PX}px 0px` },
-      );
-    }
-    this.cells.set(itemId, cell);
-    this.itemOf.set(cell, itemId);
-    this.watcher.observe(cell);
-  }
-
-  /**
-   * A row's cover cell came into view (or left it): wanted, and fetching goes on — or no longer.
-   * @param {string} itemId
-   * @param {boolean} visible
-   */
-  setVisible(itemId, visible) {
-    if (!this.urls.has(itemId)) return;
-    if (!visible) {
-      this.visible.delete(itemId);
-      return;
-    }
-    this.visible.add(itemId);
-    this.resume();
-  }
-
-  /**
-   * The thumbnails wanted now, in the order they go out: the rows in view, in the list's order,
-   * not asked for yet.
-   * @returns {string[]} item ids
-   */
-  wanted() {
-    return this.order.filter((id) => this.visible.has(id) && !this.asked.has(id));
-  }
-
-  /**
-   * @param {string} itemId
-   * @returns {string | null} the item's thumbnail (an object URL), once fetched
-   */
-  urlOf(itemId) {
-    return this.loaded.get(itemId) ?? null;
-  }
-
-  /** Go on fetching what is wanted (a row came into view, a job ended, a cooldown ran out); one loop at a time. */
-  resume() {
-    if (this.running !== null || this.next() === null) return;
-    this.running = this.loop()
-      .catch(() => undefined)
-      .finally(() => {
-        this.running = null;
-      });
-  }
-
-  /** @returns {Promise<void>} once no thumbnail request is in flight (a job waits for it) */
-  async idle() {
-    while (this.running !== null) await this.running;
-  }
-
-  /**
-   * The next thumbnail to ask for, or null; one whose host the manifest does not cover is marked
-   * asked on the way (never requested, so no pause either), one the loader may not use now
-   * (`usable`: an expired signature) is passed over — not requested, not marked asked.
-   * @returns {string | null}
-   */
-  next() {
-    for (const id of this.wanted()) {
-      const url = /** @type {string} */ (this.urls.get(id));
-      if (this.options.usable !== undefined && !this.options.usable(url)) continue;
-      if (hostCovered(url, this.options.hostPatterns)) return id;
-      this.asked.add(id);
-      this.forget(id);
-    }
-    return null;
-  }
-
-  /**
-   * Stop watching a row whose thumbnail needs no more looking at.
-   * @param {string} itemId
-   */
-  forget(itemId) {
-    const cell = this.cells.get(itemId);
-    if (cell === undefined) return;
-    this.cells.delete(itemId);
-    this.watcher?.unobserve(cell);
-  }
-
-  /** @returns {Promise<void>} */
-  async loop() {
-    while (this.next() !== null) {
-      const lane = this.options.lane;
-      const goOn = lane === undefined ? await this.turn() : await lane.run(() => this.turn());
-      if (!goOn) return;
-    }
-  }
-
-  /**
-   * One turn: `allowed()`, the pause, `allowed()` again right before the request, then the one
-   * request for what is in view now — inside the page's lane when the loader has one.
-   * @returns {Promise<boolean>} whether the loop goes on
-   */
-  async turn() {
-    if (!(await this.options.allowed())) return false;
-    await this.options.pause();
-    if (!(await this.options.allowed())) return false; // asked again right before the request
-    const id = this.next(); // what is in view NOW: the list may have scrolled during the pause
-    if (id === null) return false;
-    const url = /** @type {string} */ (this.urls.get(id));
-    this.asked.add(id);
-    this.forget(id);
-    /** @type {ImageOptions} */
-    const request = { fetch: this.fetch, hostPatterns: this.options.hostPatterns };
-    if (this.options.baseUrl !== undefined) request.baseUrl = this.options.baseUrl();
-    const image = await fetchImage(url, request);
-    if (!image.ok) return true;
-    const blob = new Blob([/** @type {Uint8Array<ArrayBuffer>} */ (image.data)], { type: mimeTypeFor(image.kind) });
-    const objectUrl = this.objectUrl(blob);
-    this.loaded.set(id, objectUrl);
-    this.options.onCover(id, objectUrl);
-    return true;
-  }
-}

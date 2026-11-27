@@ -3,36 +3,28 @@
 A real headless Chromium loads the extension's TEST copy (`extension_harness.ExtensionHarness`)
 against the fake TikTok server:
 
-- the list's thumbnails go out only for the rows in view — counted in the fake's log — one at a
-  time (the app page's own Resource Timing: no two of its requests overlap), and none while a job
-  runs;
 - the DramaFetch tab is never discardable while a job runs or waits, and is again once nothing
   does (after the queue, after a Stop) — `chrome.tabs` of the app page itself —, and meanwhile a
   paste over a refused paste's wrong line keeps the rest of the box, which Enter later downloads
-  (1.7.0); a second, read-only DramaFetch tab never queues the popup's request, and stays
-  discardable;
-- with no DramaFetch tab open, the popup's **Download this series** on a TikTok series tab opens
-  the DramaFetch tab, which downloads that series (DramaFetch 1.7.0: the batch job a paste of it
-  queues — one listing, right before its downloads; no button pressed there) — read through
-  `chrome.extension.getViews`, since Playwright never sees a tab the extension opens;
+  (1.7.0); every request of the app page's own — the videos and covers of those jobs — goes out
+  one at a time (its Resource Timing: no two of them overlap); a second, read-only DramaFetch tab
+  never queues the popup's request, and stays discardable;
+- the popup offers **Download this series** on a TikTok drama page only — on any other page
+  **Open DramaFetch** and its hint alone —, and with no DramaFetch tab open its **Download this
+  series** opens the DramaFetch tab, which downloads that series (DramaFetch 1.7.0: the batch job
+  a paste of it queues — one listing, right before its downloads; no button pressed there) —
+  read through `chrome.extension.getViews`, since Playwright never sees a tab the extension
+  opens;
 - a series handed to the worker (the popup's **Download this series**): the engine's tab takes it
   — the box left as it is — downloads it and answers, and no other tab opens; with no page taking
   it (a read-only tab left alone once the engine's tab is closed; a tab whose page is not running
   — restored but not loaded yet, discarded — is the same), the open tab reloads with the series in
   its address, takes the engine and downloads it (here the complete skip: no request);
-- the user's TikTok favorites (the profile's **Favorites** → **Drama**): the worker keeps the
-  page's own FIRST `drama_list` request — the page's later pages, loaded as the user asks for more,
-  never replace it — (the popup then offers **Open my library**, and before it a hint), the List
-  favorites job reads every page from inside that tab — the first page that request replayed byte
-  for byte, the later ones the same request with only its `cursor`'s value changed, paced, one at a
-  time — into the DramaFetch tab's library (hidden until then: one card per drama, each with its
-  **Download**), whose search and **Select all shown** tick the dramas shown, with nothing
-  downloaded and nothing asked of TikTok but the covers in view (DramaFetch 2.0.0 took the
-  right-click items and their favorites card reader away: no menu, no content script);
 - the Waiting card (2.0.0, the owner's request of 2026-11-22): two pastes — the second drama
-  waits under its name (the library's) and its WHOLE id, which one click selects to copy —, a third
-  that nothing names under its id and `name shown once its list is read`, no request made for a
-  name; each drama leaves the card as its own list is read (h);
+  waits under its name, which DramaFetch knows without asking TikTok (the records an earlier run
+  stored: DramaFetch 4.0.0 has no library to take a title from), and its WHOLE id, which one click
+  selects to copy —, a third that nothing names under its id and `name shown once its list is
+  read`, no request made for a name; each drama leaves the card as its own list is read (h);
 - the countdown in minutes and seconds (2.0.0): a pause of 65 s between two episodes reads
   `Pausing 1 min 05 s before the next episode — 1 min 05 s left`, counts down every second and,
   below a minute, reads in seconds; the job keeps the engine's English text (i);
@@ -56,24 +48,15 @@ import pytest
 
 from dramafetch.models import DRM_MESSAGE, DRM_REMEMBERED_MESSAGE
 
-from .extension_harness import CHROMIUM, EXTENSION_DIR, ExtensionHarness
+from .extension_harness import CHROMIUM, ExtensionHarness
 from .fake_tiktok import (
-    DRAMA_LIST_PATH,
-    DRAMA_LIST_QUERY,
-    FAVORITES,
-    FAVORITES_CURSORS,
-    LIGHTHOUSE_ID,
-    PROFILE_PATH,
-    SECOND_ITEMS,
     SECOND_SERIES_ID,
     SECOND_SERIES_NAME,
     SERIES_ID,
     SERIES_NAME,
-    SNOWFALL_IDS,
     THIRD_SERIES_ID,
     THIRD_SERIES_NAME,
     FakeTikTok,
-    RequestRecord,
 )
 
 if TYPE_CHECKING:
@@ -90,23 +73,11 @@ MAIN_LINK = f"https://www.tiktok.com/shortdrama/episode/{SERIES_ID}/1"
 SECOND_LINK = f"https://www.tiktok.com/shortdrama/episode/{SECOND_SERIES_ID}/2"
 THIRD_LINK = THIRD_SERIES_ID
 MAIN_ITEMS = {n: f"769940000000000000{n}" for n in range(1, 6)}
-#: `COVER_MARGIN_PX` of `src/app/downloader.js`: how far outside the window a row already counts
-#: as in view (read from the source, so the test follows the extension).
-_MARGIN = re.search(
-    r"export const COVER_MARGIN_PX = (\d+);",
-    (EXTENSION_DIR / "src" / "app" / "downloader.js").read_text(encoding="utf-8"),
-)
-assert _MARGIN is not None, "COVER_MARGIN_PX is not in src/app/downloader.js"
-COVER_MARGIN_PX = int(_MARGIN.group(1))
-#: Rows this close to the edge of the watched area are neither asserted in nor out.
-EDGE_PX = 4
 #: The "did not download" report's file name (`Informe guardado: <Series> - did not download
 #: 2026-11-06 1930.json`), ` (1)` and up when a minute saw several.
 _REPORT_FILE_RE = re.compile(
     r"[^\n:]+ - did not download \d{4}-\d{2}-\d{2} \d{4}(?: \(\d+\))?\.json"
 )
-#: A width at which the page's layout no longer depends on the window (`main` is 980 px at most).
-WIDE_PX = 1100
 #: The English template words no Spanish text may keep outside its data.
 ENGLISH_WORDS = (
     "downloaded",
@@ -126,20 +97,21 @@ ENGLISH_WORDS = (
     "tries again",
     "--",
 )
-#: What the worker kept of a TikTok tab's favorites list (`chrome.storage.session`), or null.
-TEMPLATE_JS = "async (key) => (await chrome.storage.session.get(key))[key] ?? null"
-#: The tabs whose address starts with a prefix, as `chrome.tabs` sees them (an extension page asks).
-TAB_IDS_JS = (
-    "async (prefix) => (await chrome.tabs.query({}))"
-    ".filter((tab) => (tab.url || tab.pendingUrl || '').startsWith(prefix)).map((tab) => tab.id)"
-)
-#: The favorites list's requests a page made, from its own Resource Timing: the page's own and the
-#: ones the extension replayed from inside it (`chrome.scripting`, the page's own `fetch`).
-DRAMA_LIST_TIMING_JS = """() => performance.getEntriesByType('resource')
-  .filter((entry) => new URL(entry.name).pathname.endsWith('/drama_list/'))
-  .map((entry) => ({query: new URL(entry.name).search, start: entry.startTime,
-                    end: entry.responseEnd}))
-  .sort((a, b) => a.start - b.start)"""
+#: In the popup page: what it shows once its own start-up has read the active tab — it reads the
+#: test settings, then the active tab; the same two calls made here after its own are answered
+#: after them, in order — as `{series, download, open}` (each element's `hidden`) and the hint's
+#: text.
+POPUP_SHOWN_JS = """async () => {
+  await chrome.storage.local.get("testSettings");
+  await chrome.tabs.query({ active: true, currentWindow: true });
+  const hidden = (id) => document.getElementById(id).hidden;
+  return {
+    series: hidden("popup-series"),
+    download: hidden("popup-download"),
+    open: hidden("popup-open"),
+    hint: document.querySelector(".popup .hint").textContent,
+  };
+}"""
 
 STATUSES = {
     "done",
@@ -156,59 +128,9 @@ STATUSES = {
 # ------------------------------------------------------------------------------- helpers
 
 
-def _cover_cells(ext: ExtensionHarness) -> tuple[list[tuple[int, float, float]], float]:
-    """Every row's cover cell as `(episode number, top, bottom)` in window coordinates, and the
-    window's height."""
-    found: dict[str, Any] = ext.page.evaluate(
-        """() => ({
-          height: innerHeight,
-          cells: [...document.querySelectorAll('#episode-table tbody td.cover-cell')].map((td) => {
-            const box = td.getBoundingClientRect();
-            return [Number(td.parentElement.dataset.number), box.top, box.bottom];
-          }),
-        })"""
-    )
-    cells = [(int(n), float(top), float(bottom)) for n, top, bottom in found["cells"]]
-    return cells, float(found["height"])
-
-
-def _in_view(ext: ExtensionHarness) -> tuple[list[int], list[int]]:
-    """The rows clearly inside the watched area (the window and `COVER_MARGIN_PX` above and
-    below it) and the rows clearly outside it; rows on its very edge are in neither list."""
-    cells, height = _cover_cells(ext)
-    inside: list[int] = []
-    outside: list[int] = []
-    low, high = -COVER_MARGIN_PX, height + COVER_MARGIN_PX
-    for number, top, bottom in cells:
-        if top < high - EDGE_PX and bottom > low + EDGE_PX:
-            inside.append(number)
-        elif top > high + EDGE_PX or bottom < low - EDGE_PX:
-            outside.append(number)
-    return inside, outside
-
-
-def _thumbnails(server: FakeTikTok, items: dict[int, str]) -> list[int]:
-    """The episodes (by number) whose cover the extension itself asked for, in order."""
-    numbers = {f"/cover/{item}.jpg": n for n, item in items.items()}
-    return [numbers[r.path] for r in server.cover_requests if r.with_referer and r.path in numbers]
-
-
-def _positions(server: FakeTikTok, wanted: Any) -> list[int]:
-    """The positions in the fake's request log of the records `wanted(record)` picks."""
-    return [index for index, record in enumerate(server.requests) if wanted(record)]
-
-
-def _of_second_series(record: RequestRecord) -> bool:
-    return (
-        SECOND_SERIES_ID in record.path
-        or record.query.get("dramaID") == SECOND_SERIES_ID
-        or any(f"/{item}" in record.path for item in SECOND_ITEMS)
-    )
-
-
 def _own_fetches(ext: ExtensionHarness, base_url: str) -> list[dict[str, Any]]:
-    """The app page's own requests to the fake server (its downloads and thumbnails: the discovery
-    fetches from inside the TikTok tab, not from here), from its Resource Timing."""
+    """The app page's own requests to the fake server — its videos and covers: the discovery
+    fetches from inside the TikTok tab, not from here —, from its Resource Timing."""
     entries: list[dict[str, Any]] = ext.page.evaluate(
         """(base) => performance.getEntriesByType('resource')
           .filter((entry) => entry.name.startsWith(base))
@@ -325,59 +247,6 @@ def _badges(ext: ExtensionHarness) -> dict[int, tuple[str, str, str]]:
 # ------------------------------------------------------------------------------ scenarios
 
 
-def test_thumbnails_only_for_rows_in_view_one_at_a_time_and_never_during_a_job(
-    tmp_path: Path,
-) -> None:
-    """**See episodes** in a window that shows only some rows asks for those rows' thumbnails
-    only; a job started next gets every request to itself — the rows scrolled into view meanwhile
-    wait — and once it is over the rest come, one at a time."""
-    with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
-        page = ext.page
-        page.set_viewport_size({"width": WIDE_PX, "height": 800})
-        page.evaluate("() => window.scrollTo(0, 0)")
-        ext.see_episodes(SERIES_ID)
-        # the list below the library: its first row at the window's bottom, the rest below it
-        page.evaluate(
-            "() => document.querySelector('#episode-table tbody tr').scrollIntoView({block: 'end'})"
-        )
-        table = page.locator("#episode-table tbody")
-        inside, outside = _in_view(ext)
-        assert inside and outside, f"the window shows every row or none: {_cover_cells(ext)}"
-        ext.wait_for(
-            lambda: table.locator("img.cover").count() >= len(inside), 20, "no thumbnail shown"
-        )
-        time.sleep(1.0)  # nothing more goes out: the other rows are out of view
-        asked = _thumbnails(server, MAIN_ITEMS)
-        assert set(inside) <= set(asked), (inside, asked)
-        assert not set(outside) & set(asked), (outside, asked)
-        assert len(asked) == len(set(asked)) == table.locator("img.cover").count()
-        assert table.locator("span.cover.placeholder").count() == 5 - len(asked)
-
-        # a job: the list's rows scrolled into view meanwhile wait for its end
-        jobs = ext.finished_jobs()
-        ext.paste(SECOND_LINK)
-        page.evaluate(
-            "() => document.querySelector('#episode-table tbody tr:last-child')"
-            ".scrollIntoView({block: 'end'})"
-        )
-        assert not ext.idle()  # scrolled while the job runs
-        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "no job end")
-        ext.wait_for(lambda: table.locator("img.cover").count() == 5, 20, "the rest not shown")
-        assert sorted(_thumbnails(server, MAIN_ITEMS)) == [1, 2, 3, 4, 5]  # each asked once
-        job_end = max(_positions(server, _of_second_series))
-        later = _positions(
-            server,
-            lambda r: (
-                r.path in {f"/cover/{MAIN_ITEMS[n]}.jpg" for n in range(1, 6) if n not in asked}
-            ),
-        )
-        assert later and min(later) > job_end, "a thumbnail went out while the job ran"
-        own = _own_fetches(ext, server.base_url)
-        assert len([e for e in own if e["name"].startswith("/cover/76994")]) >= 5
-        _assert_one_at_a_time(own)  # thumbnails, videos and covers: never two at once
-
-
 def test_the_app_tab_is_never_discarded_while_a_job_runs_or_waits(tmp_path: Path) -> None:
     """`autoDiscardable` is false from the moment a job is queued until the queue is empty and
     nothing runs — a second job waiting included — and true again after it, also after a Stop.
@@ -385,7 +254,8 @@ def test_the_app_tab_is_never_discarded_while_a_job_runs_or_waits(tmp_path: Path
     the right link pasted over its wrong line — Chrome's own selection — is taken (here a series
     already waiting: nothing queued twice), that line gone, the rest kept and said; Enter later
     downloads what the box kept — Ctrl+Z gives it back, Ctrl+Shift+Z empties it again —, and
-    Enter in the emptied box changes nothing."""
+    Enter in the emptied box changes nothing. Every request the app page made itself through
+    those jobs — their videos and covers — went out one at a time (its Resource Timing)."""
     settings = {"delayMinS": 1, "delayMaxS": 1}  # a pause between episodes to look during
     with (
         FakeTikTok() as server,
@@ -447,6 +317,11 @@ def test_the_app_tab_is_never_discarded_while_a_job_runs_or_waits(tmp_path: Path
         assert ext.journal()[0]["stopped"] == "stopped by you"  # stored in English
         ext.wait_for(lambda: _auto_discardable(ext) is True, 5, "not discardable after a Stop")
         assert server.media_requests  # the jobs really ran
+        # the app page's own requests, the three jobs' videos and covers: never two at once
+        own = _own_fetches(ext, server.base_url)
+        assert len([entry for entry in own if entry["name"].startswith("/cdn/")]) >= 4 + 3
+        assert len([entry for entry in own if entry["name"].startswith("/cover/")]) >= 4 + 3
+        _assert_one_at_a_time(own)
 
 
 def test_a_read_only_dramafetch_tab_queues_nothing_and_stays_discardable(tmp_path: Path) -> None:
@@ -478,17 +353,18 @@ def test_a_read_only_dramafetch_tab_queues_nothing_and_stays_discardable(tmp_pat
 def test_the_popup_opens_the_dramafetch_tab_with_the_series_downloading_when_none_is_open(
     tmp_path: Path,
 ) -> None:
-    """No DramaFetch tab open — a first click: on a TikTok series tab, the popup's **Download this
-    series** opens the DramaFetch tab (`app.html?load=<series id>`), which takes the engine and
-    downloads that series — the batch job a paste of it queues, no button pressed there: ONE
-    listing, in a tab of its own that it closes again, right before the downloads."""
+    """On a TikTok page that is no drama's, the popup shows **Open DramaFetch** and its hint alone —
+    no series, no **Download this series**. No DramaFetch tab open — a first click: on a TikTok
+    series tab, the popup's **Download this series** opens the DramaFetch tab
+    (`app.html?load=<series id>`), which takes the engine and downloads that series — the batch job
+    a paste of it queues, no button pressed there: ONE listing, in a tab of its own that it closes
+    again, right before the downloads."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         pages = f"chrome-extension://{ext.extension_id}/src/app"
         series_tab = f"{server.base_url}/shortdrama/episode/{SERIES_ID}/3"
+        other_tab = f"{server.base_url}/login"  # a TikTok page that is no drama's
         tiktok = ext.context.new_page()
-        tiktok.goto(series_tab)
-        # the user's own tab has listed its episodes: its requests are over before the count
-        ext.wait_for(lambda: tiktok.locator("#detail a.ep").count() > 0, 20, "no TikTok page")
+        tiktok.goto(other_tab)
         popup = ext.context.new_page()
         popup.goto(f"{pages}/popup.html")
         ext.page.close()  # the harness's DramaFetch tab (the test settings are stored already)
@@ -500,6 +376,21 @@ def test_the_popup_opens_the_dramafetch_tab_with_the_series_downloading_when_non
             )
             return urls
 
+        tiktok.bring_to_front()  # the popup reads the active tab of its window
+        ext.wait_for(lambda: active_tabs() == [other_tab], 10, "the TikTok tab is not active")
+        popup.reload()
+        assert popup.evaluate(POPUP_SHOWN_JS) == {
+            "series": True,
+            "download": True,
+            "open": False,
+            "hint": (
+                "Open a TikTok short drama to download its whole series, or paste links in the "
+                "DramaFetch tab."
+            ),
+        }
+        tiktok.goto(series_tab)
+        # the user's own tab has listed its episodes: its requests are over before the count
+        ext.wait_for(lambda: tiktok.locator("#detail a.ep").count() > 0, 20, "no TikTok page")
         tiktok.bring_to_front()  # the popup reads the active tab of its window: the series tab
         ext.wait_for(lambda: active_tabs() == [series_tab], 10, "the series tab is not active")
         popup.reload()
@@ -528,8 +419,6 @@ def test_the_popup_opens_the_dramafetch_tab_with_the_series_downloading_when_non
                       finished: Number(status.dataset.finished || 0),
                       engine: doc.querySelector('#duplicate-banner').hidden,
                       links: doc.querySelector('#links').value,
-                      rows: [...doc.querySelectorAll('#episode-table tbody tr')]
-                        .map((row) => Number(row.dataset.number)),
                     };
                   })"""
             )
@@ -545,7 +434,6 @@ def test_the_popup_opens_the_dramafetch_tab_with_the_series_downloading_when_non
         assert app["engine"] is True  # it holds the engine: no "already open" banner
         assert app["links"] == ""  # the box left as it was: the hand-over is no paste of its own
         assert app["search"] == ""  # `?load=` consumed: reloading the tab downloads nothing again
-        assert app["rows"] == []  # no episode list: nothing to pick, the whole series downloaded
         # that tab's journal of finished jobs (test mode: in its memory), read through getViews
         journals: list[list[dict[str, Any]]] = watcher.evaluate(
             """() => chrome.extension.getViews({type: 'tab'})
@@ -633,171 +521,31 @@ def test_a_series_handed_over_reaches_the_engines_tab_or_reloads_a_tab_nobody_ru
         assert len(server.media_requests) == 4
 
 
-def test_the_favorites_list_is_observed_listed_paced_and_ticked(tmp_path: Path) -> None:
-    """The profile's **Favorites** → **Drama**: before the page asked for the list the popup shows
-    a hint; once it did, the worker has the list's FIRST page's URL (session storage, never local)
-    — the page's own later pages, loaded with **More**, never replace it — and the popup offers
-    **Open my library**. Its click lists every favorite in the DramaFetch tab's library — every
-    page fetched from inside the profile's tab, the first one the page's own first request
-    replayed byte for byte, the later ones that request with only `cursor` changed, one at a time,
-    each after the list-page pause — and the library's search and **Select all shown** tick the
-    dramas shown, every card with its own **Download** (1.7.0). Nothing is downloaded, no series
-    listed."""
-    settings = {"pageDelayS": 0.3}  # the list-page pause long enough to measure: 0.3 to 0.6 s
-    with (
-        FakeTikTok() as server,
-        ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
-    ):
-        profile = ext.context.new_page()
-        profile.goto(f"{server.base_url}{PROFILE_PATH}")
-        popup = ext.context.new_page()
-        popup.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
-
-        def active_tabs() -> list[str]:
-            urls: list[str] = popup.evaluate(
-                "async () => (await chrome.tabs.query({active: true, currentWindow: true}))"
-                ".map((tab) => tab.url || '')"
-            )
-            return urls
-
-        profile.bring_to_front()  # the popup reads the active tab of its window: the profile
-        ext.wait_for(
-            lambda: active_tabs() == [f"{server.base_url}{PROFILE_PATH}"], 10, "no active profile"
-        )
-        popup.reload()
-        hint = popup.locator("#popup-favorites-hint")
-        ext.wait_for(hint.is_visible, 10, "no hint on a profile whose favorites were not shown")
-        assert popup.locator("#popup-favorites").is_hidden()
-        assert popup.locator("#popup-download").is_hidden()
-
-        # the user opens Favorites → Drama: the page's own request, which the worker observes
-        profile.click("#tab-favorites")
-        profile.click("#favorites-drama")
-        ext.wait_for(lambda: profile.locator("#drama-grid button").count() == 3, 10, "no cards")
-        tab_ids: list[int] = popup.evaluate(TAB_IDS_JS, f"{server.base_url}{PROFILE_PATH}")
-        (tab_id,) = tab_ids
-        key = f"favoritesTemplate:{tab_id}"
-        ext.wait_for(lambda: popup.evaluate(TEMPLATE_JS, key) is not None, 10, "nothing kept")
-        template = popup.evaluate(TEMPLATE_JS, key)
-        assert template["url"].startswith(f"{server.base_url}{DRAMA_LIST_PATH}?")
-        assert "cursor=0" in template["url"]
-        # with whose list it reads: the handle of the profile page that asked for it
-        assert template["profile"] == PROFILE_PATH.removeprefix("/")
-        assert "drama_list" not in str(ext.storage())  # in the session's memory, never on disk
-        # the user scrolls the grid for more: the page's own later pages, which the worker observes
-        # too — they never replace the first page it keeps
-        for cards in (6, len(FAVORITES)):
-            profile.click("#more-dramas")
-            ext.wait_for(
-                lambda cards=cards: profile.locator("#drama-grid button").count() == cards,
-                10,
-                "no more cards",
-            )
-        assert [r.query["cursor"] for r in server.drama_list_requests] == list(FAVORITES_CURSORS)
-        deadline = time.monotonic() + 1.5  # the later pages' completions reach the worker meanwhile
-        while time.monotonic() < deadline:
-            assert popup.evaluate(TEMPLATE_JS, key) == template, "a later page replaced the first"
-            time.sleep(0.1)
-        page_own = server.drama_list_requests[0].raw_query  # the page's own first request
-        assert template["url"].split("?", 1)[1] == page_own
-        popup.reload()
-        choose = popup.locator("#popup-favorites")
-        ext.wait_for(choose.is_visible, 10, "no Open my library")
-        assert hint.is_hidden()
-        own = len(server.drama_list_requests)
-        assert own == len(FAVORITES_CURSORS)  # the page's own three pages
-        assert ext.page.locator("#favorites-card").is_hidden()  # the library: hidden until listed
-        jobs = ext.finished_jobs()
-        choose.click()  # the popup's dramafetch:open with the tab: the engine's tab takes it
-        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 60, "nothing listed")
-
-        page = ext.page
-        assert page.locator("#favorites-card").is_visible()  # shown by the listing
-        rows = page.locator("#favorites-grid article[data-series-id]")
-        assert rows.count() == len(FAVORITES)
-        titles = page.locator("#favorites-grid .favorite-title").all_inner_texts()
-        assert titles == [title for _, title, _, _ in FAVORITES]  # the list's order
-        ids = [rows.nth(n).get_attribute("data-series-id") for n in range(rows.count())]
-        assert ids == [series_id for series_id, _, _, _ in FAVORITES]
-        lighthouse = page.locator(f"#favorites-grid article[data-series-id='{LIGHTHOUSE_ID}']")
-        assert lighthouse.locator(".favorite-meta").inner_text() == "60 episodes · 1h 19m"
-        assert page.locator("#favorites-count").inner_text() == "8 favorite dramas listed."
-        assert page.locator("#input-status").inner_text().startswith("8 favorite dramas listed")
-        entry = ext.journal()[0]
-        assert (entry["kind"], entry["favorites"], entry["error"]) == ("favorites", 8, None)
-        assert "drama_list" not in str(entry)
-
-        # every page from inside the profile's tab: the page's own first request replayed, then
-        # `cursor` alone changed, from 0 to the last page
-        ours = server.drama_list_requests[own:]
-        assert [r.query["cursor"] for r in ours] == list(FAVORITES_CURSORS)
-        for record in server.drama_list_requests:
-            assert {k: v for k, v in record.query.items() if k != "cursor"} == DRAMA_LIST_QUERY
-        # byte for byte: DramaFetch's first request IS the page's own first request; the later ones
-        # its query with only the cursor's value changed — no parameter added, dropped, repeated,
-        # reordered or re-encoded (`browser_version` is percent-encoded)
-        assert "browser_version=5.0%20%28Windows%29" in page_own
-        assert ours[0].raw_query == page_own
-        for record in ours:
-            cursor = record.query["cursor"]
-            assert record.raw_query == page_own.replace("cursor=0", f"cursor={cursor}")
-        # one at a time, each after its pause (the profile page's own Resource Timing)
-        timing: list[dict[str, Any]] = profile.evaluate(DRAMA_LIST_TIMING_JS)
-        replayed = timing[own:]
-        assert len(replayed) == len(FAVORITES_CURSORS)
-        for earlier, later in itertools.pairwise(replayed):
-            assert later["start"] - earlier["end"] >= 280, (earlier, later)  # 0.3 s at least
-
-        # every card has its own Download; the search and Select all shown tick the shown ones
-        assert page.locator("#favorites-grid [data-action='download']").count() == len(FAVORITES)
-        before = len(server.requests)
-        page.fill("#favorites-filter", "SNOWFALL")
-        shown = [rows.nth(n).get_attribute("data-series-id") for n in range(rows.count())]
-        assert shown == list(SNOWFALL_IDS)  # only the dramas the search matches are drawn
-        assert page.locator("#library-shown").inner_text() == "Showing 2 of 2"
-        assert (
-            page.locator("#library-total").inner_text() == f"TikTok counts {len(FAVORITES)} dramas"
-        )
-        page.check("#favorites-select-all")
-        assert page.locator("#favorites-selection").inner_text() == "2 selected · 120 episodes"
-        assert page.locator("#library-download").is_enabled()
-        assert page.input_value("#links") == ""  # nothing goes into the box
-        # the library asks nothing of TikTok but the covers of the cards in view (the fake's image
-        # CDN, one at a time, never during a job): no list, no series, no media
-        asked = [r.path for r in server.requests[before:]]
-        favorite_covers = {f"/cover/{series_id}.jpg" for series_id, _, _, _ in FAVORITES}
-        assert set(asked) <= favorite_covers, asked
-        assert ext.idle()
-        assert not server.item_list_requests and not server.media_requests
-        assert ext.saved_files() == []
-        # the search narrows what is shown, never the library: emptied, every drama is back, the
-        # two ticked still ticked
-        page.fill("#favorites-filter", "")
-        ext.wait_for(lambda: rows.count() == len(FAVORITES), 10, "the search did not clear")
-        everything = len(FAVORITES)
-        assert (
-            page.locator("#library-shown").inner_text() == f"Showing {everything} of {everything}"
-        )
-        assert page.locator("#favorites-selection").inner_text() == "2 selected · 120 episodes"
-
-
 def test_h_the_waiting_card_names_each_drama_still_to_run_by_its_name_and_whole_id(
     tmp_path: Path,
 ) -> None:
-    """(h) Two pastes, a third behind them: while the first downloads, the Waiting card lists the
-    second drama by the name the library holds (DramaFetch knows it without asking TikTok) and its
-    WHOLE id — nineteen digits, never cut, one click selects it all —, then the third, which nothing
-    names, by its id and `name shown once its list is read`; the first drama, whose list is read,
-    is not there; no request names a drama that waits. **Stop**: the card goes."""
+    """(h) The second drama downloaded once — DramaFetch's records of it keep its name —, then the
+    DramaFetch tab reopened: a new page, which has read no list yet. Two pastes, a third behind
+    them: while the first downloads, the Waiting card lists the second drama by the name its
+    records hold (DramaFetch knows it without asking TikTok; 4.0.0 has no library to take a title
+    from) and its WHOLE id — nineteen digits, never cut, one click selects it all —, then the
+    third, which nothing names, by its id and `name shown once its list is read`; the first drama,
+    whose list is read, is not there; no request names a drama that waits. **Stop**: the card
+    goes."""
     settings = {"delayMinS": 1, "delayMaxS": 1}  # the first drama takes a few seconds
     with (
         FakeTikTok() as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
     ):
-        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))
-        page = ext.page
+        earlier = ext.paste_and_wait(SECOND_LINK)
+        assert earlier["series"][0]["name"] == SECOND_SERIES_NAME
+        state = ext.series_state(SECOND_SERIES_ID)
+        assert state is not None and state["series_name"] == SECOND_SERIES_NAME
+        ext.page.close()
+        page = ext.reopen_app()  # a new page: no list read in it, nothing learned of any name
         rows = page.locator("#queue-list li")
         assert page.locator("#queue-card").is_hidden()  # nothing waits
+        start = len(server.requests)
         jobs = ext.finished_jobs()
         ext.paste(MAIN_LINK)
         ext.paste(SECOND_LINK)
@@ -831,7 +579,7 @@ def test_h_the_waiting_card_names_each_drama_still_to_run_by_its_name_and_whole_
         assert note.inner_text() == "name shown once its list is read"
         assert note.evaluate("(element) => getComputedStyle(element).fontStyle") == "italic"
         # no request was made to learn a name: nothing names the dramas that wait
-        for record in server.requests:
+        for record in server.requests[start:]:
             for waiting in (SECOND_SERIES_ID, THIRD_SERIES_ID):
                 assert waiting not in record.path and waiting not in record.raw_query, record
         page.click("#stop-button")
@@ -886,12 +634,12 @@ def test_i_a_pause_of_a_minute_or_more_reads_in_minutes_and_seconds(tmp_path: Pa
 def test_the_spanish_ui_shows_every_outcome_in_spanish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Chrome in Spanish: done, an episode found encrypted, a locked one, the series rest, episodes
-    already on disk, the remembered DRM verdict, the complete skip with its hint, the list's
-    warnings and hints, a 429 with its stop, cooldown and not-started series, the episodes a job
-    did not download shown apart with their retry button, the report of them saved (its line and
-    button), the report setting — all on screen in Spanish, the status codes in the
-    badges' titles; the texts the journal of finished jobs keeps stay English."""
+    """Chrome in Spanish: done, an episode found encrypted, a locked one with its lock hints, the
+    series rest, episodes already on disk, the remembered DRM verdict, the complete skip with its
+    hint, a 429 with its stop, cooldown and not-started series, the episodes a job did not download
+    shown apart with their retry button, the report of them saved (its line and button), the
+    report setting and the pacing line of the settings — all on screen in Spanish, the status codes
+    in the badges' titles; the texts the journal of finished jobs keeps stay English."""
     monkeypatch.setenv("LANGUAGE", "es")  # Chrome on Linux takes its UI language from it
     drm = frozenset({(SERIES_ID, 2)})
     settings = {"restMinS": 1.5, "restMaxS": 2}  # the series rest long enough to be read
@@ -899,7 +647,6 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         FakeTikTok(drm_media=drm) as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
     ):
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         page = ext.page
         assert page.evaluate("() => document.documentElement.lang") == "es"
         assert page.locator("#app-status").text_content() == "en espera"
@@ -927,6 +674,10 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         )
         assert badges[2][1] == "failed-unavailable"
         assert "protegido con DRM (pistas cifradas)" in badges[2][2]
+        # the locked episode: skipped, its lock hints in Spanish (the payload's own words aside)
+        assert badges[5][:2] == ("bloqueado, omitido", "skipped-locked")
+        assert badges[5][2].startswith("parece bloqueado: ")
+        assert "sin dirección de reproducción" in badges[5][2]
         failed_row = f"tbody tr[data-series-id='{SERIES_ID}'][data-number='2']"
         assert page.locator("#failed-table tbody tr").count() == 1
         assert page.locator(f"#failed-table {failed_row}").count() == 1
@@ -972,22 +723,8 @@ def test_the_spanish_ui_shows_every_outcome_in_spanish(
         assert ext.journal()[0]["series"][0]["line"].endswith("--recheck looks again")
         seen += _engine_texts(ext)
 
-        # the list (See episodes): its warnings, the lock hints, the badges
-        ext.see_episodes(SERIES_ID)
-        warnings = _texts(ext, "#series-warnings li")
-        assert "1 episodio parece bloqueado" in warnings
-        hints = _texts(ext, "#episode-table .hints")
-        # E2's remembered DRM verdict (TikTok's list calls it free) and E5's lock hints, in Spanish
-        drm_hint, lock_hint = hints
-        # what tries it again THERE: tick it and Download selected — never the box's checkbox
-        selected = page.locator("#download-selected-button").inner_text()
-        assert drm_hint == (
-            "protegido con DRM (lo detectó una ejecución anterior): DramaFetch no lo descifra; "
-            f"para intentarlo de nuevo, márcalo y pulsa “{selected}”"
-        )
-        assert include_locked not in drm_hint
-        assert "sin dirección de reproducción" in lock_hint
-        seen += warnings + hints + _texts(ext, "#series-meta") + _texts(ext, "#pacing-line")
+        # the settings' pacing line, in Spanish too
+        seen += _texts(ext, "#pacing-line")
 
         # a 429 from the video server: the stop, the rest stopped, the next series not started,
         # the cooldown banner

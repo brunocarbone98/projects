@@ -82,9 +82,9 @@ NOT_LISTED_MESSAGE = NOT_LISTED_PREFIX
 #: The same row for a number past the highest one listed when the listing ended before TikTok said
 #: the list was over (``Series.early_end``).
 NOT_LISTED_EARLY_END_MESSAGE = f"{NOT_LISTED_PREFIX}: it ended early"
-#: The row of a number a SELECTION wanted that its fresh list does not hold (a **Retry**, an
-#: automatic retry, **See episodes**' downloads in the extension; ``download --episodes`` for a
-#: number up to the series' last episode as far as anyone knows: ``engine.unlisted_requested``).
+#: The row of a number a SELECTION wanted that its fresh list does not hold (a **Retry** or an
+#: automatic retry in the extension; ``download --episodes`` for a number up to the series' last
+#: episode as far as anyone knows: ``engine.unlisted_requested``).
 NOT_LISTED_AGAIN_MESSAGE = f"{NOT_LISTED_PREFIX} this time"
 
 

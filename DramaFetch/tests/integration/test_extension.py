@@ -6,13 +6,13 @@ TikTok server through the extension's own app page — discovery through the pag
 a background tab, downloads with the Referer rule, verification, DRM, covers, naming, the
 per-series state, pacing, cooldown and stops, batches, the free series with conditions and its
 short header. A download starts as the owner starts it since DramaFetch 1.7.0: a real paste of
-the links into the box (`ExtensionHarness.paste`, Ctrl+V; no button), and a series' episodes are
-listed with **See episodes** on its library card — whose **Download all available** and
-**Download selected** download what they take again in full, under the same names (the cover kept
-as a file included; a failed one keeps the old file, and its retry downloads in full too), since
-3.0.0 (`test_t`, `test_u`, `test_v`), while a paste skips what is on disk. Every scenario counts
-the requests the fake server saw. No cookie value is ever printed or asserted on, beyond checking
-that it is stored nowhere.
+the links into the box (`ExtensionHarness.paste`, Ctrl+V; no button). Since 4.0.0 (the owner's
+decision of 2026-11-27: no library, no **See episodes**) a paste, Enter or the popup's **Download
+this series** is the only way to start one: a pasted drama downloads whole, skipping what is on
+disk, and what is pasted while DramaFetch works joins the queue — **Waiting** — and downloads in
+its turn (`test_w`); the episodes a job did not download are retried with the progress card's
+**Retry**. Every scenario counts the requests the fake server saw. No cookie value is ever printed
+or asserted on, beyond checking that it is stored nowhere.
 """
 
 from __future__ import annotations
@@ -129,9 +129,9 @@ def _media_of(server: FakeTikTok, item_id: str) -> list[Any]:
 
 
 def _downloader_covers(server: FakeTikTok, item_id: str | None = None) -> list[Any]:
-    """Cover requests the extension made with its Referer rule: the downloader's — and, once
-    **See episodes** shows a series, the list's thumbnails, which the extension fetches itself, one
-    at a time (only test_b lists a series before counting: it waits for them first)."""
+    """Cover requests the extension made with its Referer rule: the downloader's, one per episode
+    it saved (since DramaFetch 4.0.0 the page shows no thumbnails, so every such request is the
+    downloader's)."""
     return [
         r
         for r in server.cover_requests
@@ -156,24 +156,6 @@ def _report_files(ext: ExtensionHarness) -> list[Path]:
 def _videos(ext: ExtensionHarness) -> list[Path]:
     """Every saved file but the reports: the episodes (and any cover sidecar)."""
     return [path for path in ext.saved_files() if path.parent != REPORTS_FOLDER]
-
-
-def _mtimes(ext: ExtensionHarness) -> dict[int, int]:
-    """When each of the main series' episodes E01-E04 was last written (ns), by number."""
-    return {number: _episode_file(ext, number).stat().st_mtime_ns for number in range(1, 5)}
-
-
-def _paces(entry: dict[str, Any]) -> list[float]:
-    """The pauses between two episodes a job took (`pace`, in seconds), in order."""
-    return [pause["seconds"] for pause in entry["pauses"] if pause["kind"] == "pace"]
-
-
-#: What Chrome's download history holds of these download ids: each item's file, state and
-#: whether the file is still there (None for an id Chrome does not know).
-DOWNLOAD_ITEMS_JS = """async (ids) => Promise.all(ids.map(async (id) => {
-  const [item] = await chrome.downloads.search({ id });
-  return item ? { filename: item.filename, state: item.state, exists: item.exists } : null;
-}))"""
 
 
 def _ffmpeg() -> str | None:
@@ -288,15 +270,11 @@ def test_a_main_series_saved_verified_with_embedded_covers(tmp_path: Path, tools
 
 
 def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
-    """A second look (a paste with **Look again**: recheck) finds every episode on disk: skipped,
-    zero media requests; **See episodes** then shows each of them **On disk** and unticked (the
-    locked one unticked too), its thumbnails asked for once each as their rows come into view, and
-    downloads nothing by listing; a third run within 24 h is the complete skip — zero requests at
-    all, no tab opened, and the line points at recheck for the locked episode. (What **See
-    episodes**' own buttons do with an episode on disk — download it again in full, DramaFetch
-    3.0.0 — is `test_t`.)"""
+    """A second look (a paste with **Look again**: recheck) lists the drama again and finds every
+    episode on disk: skipped, zero media requests, no cover asked for; a third run within 24 h is
+    the complete skip — zero requests at all, no tab opened, and the line points at recheck for
+    the locked episode."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         first = ext.paste_and_wait(MAIN_LINK)
         assert first["error"] is None and first["stopped"] is None  # a failed listing is no skip
         assert _statuses(first["series"][0]) == ["done"] * 4 + ["skipped-locked"]
@@ -315,26 +293,9 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
         assert series["line"] == "complete: 4 of 5 (4 already on disk) — 1 locked (5)"
         assert len(server.media_requests) == media and len(_downloader_covers(server)) == covers
 
-        listing = ext.see_episodes(SERIES_ID)
-        assert listing["series"][0]["episodes"] == 5
-        table = ext.page.locator("#episode-table tbody")
-        for number in range(1, 6):
-            row = table.locator(f"tr[data-number='{number}']")
-            assert row.locator(".badge.ondisk").count() == (1 if number < 5 else 0)
-            assert row.locator("input[type=checkbox]").is_checked() is False  # on disk, or locked
-        assert table.locator("tr[data-number='5']").get_attribute("data-access") == "locked"
-        # the list's thumbnails: the extension's own requests, one per episode, each once its row
-        # is in view (scrolled to, row by row), then none again
-        for number in range(1, 6):
-            row = table.locator(f"tr[data-number='{number}']")
-            row.locator("td.cover-cell").scroll_into_view_if_needed()
-            ext.wait_for(lambda row=row: row.locator("img.cover").count() == 1, 20, "no thumbnail")
-        assert table.locator("img.cover").count() == 5
-        assert len(_downloader_covers(server)) == covers + 5
-        assert len(server.media_requests) == media  # listing downloads nothing
-
         requests = len(server.requests)
         tabs = len(ext.opened_tabs())
+        records = ext.series_state(SERIES_ID)
         third = ext.paste_and_wait(MAIN_LINK)
         (skipped,) = third["series"]
         assert skipped["status"] == "skipped (complete)"
@@ -345,6 +306,7 @@ def test_b_again_skips_then_the_complete_skip(tmp_path: Path) -> None:
         assert len(server.requests) == requests
         assert len(ext.opened_tabs()) == tabs  # the complete skip opens no tab
         assert len(ext.saved_files()) == 4
+        assert ext.series_state(SERIES_ID) == records  # and writes nothing: records as they were
 
 
 def test_c_paid_series_with_and_without_the_session(tmp_path: Path) -> None:
@@ -379,9 +341,10 @@ def test_c_paid_series_with_and_without_the_session(tmp_path: Path) -> None:
 
 def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: Path) -> None:
     """An encrypted episode: failed-unavailable with DRM_MESSAGE, nothing saved, no other mirror,
-    no fresh list, no cover; the state remembers it, so the next run skips it without a request —
-    and **See episodes**' **Download all available**, which downloads the other three again in full
-    (DramaFetch 3.0.0), takes the encrypted one neither: never requested again."""
+    no fresh list, no cover; the state remembers it, so the next run skips it without a request.
+    Only **Also ask for locked episodes** (the box's checkbox, for that paste) asks for it again:
+    requested once more, still encrypted, nothing saved, the verdict still remembered — while the
+    episodes on disk stay skipped and the checkbox clears."""
     drm = frozenset({(SERIES_ID, 2)})
     with FakeTikTok(drm_media=drm) as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         first = ext.paste_and_wait(MAIN_LINK)
@@ -409,72 +372,27 @@ def test_d_drm_media_is_refused_remembered_and_never_requested_again(tmp_path: P
         assert len(server.media_requests) == media
         assert series["line"] == "complete: 3 of 5 (3 already on disk) — 2 locked (2, 5)"
 
-        # See episodes shows what the records know: TikTok's list calls E2 free, but a download
-        # found it encrypted — locked there, unticked, with that verdict and what tries it again
-        # THERE (never the box's checkbox, which See episodes' buttons do not read), and not
-        # counted available
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
-        ext.see_episodes(SERIES_ID)
-        row = ext.page.locator("#episode-table tbody tr[data-number='2']")
-        box = row.locator("input[type=checkbox]")
-        assert box.get_attribute("data-locked") == "1" and not box.is_checked()
-        assert (row.locator(".hints").text_content() or "") == (
-            "protected by DRM (found by an earlier run): DramaFetch does not decrypt it; tick it "
-            "and press “Download selected” to try again"
-        )
-        meta = ext.page.locator("#series-meta").text_content() or ""
-        assert meta.startswith("5 episodes listed, 3 available"), meta
-        # Download all available takes exactly those three, never E2 — and downloads them again
-        # in full (3.0.0): one more request each, the same three files, no ` (1)` copy
-        listings = len(server.series_page_requests)
-        remembered = ext.episode_records(SERIES_ID)[2]
-        assert remembered["message"] == DRM_REMEMBERED_MESSAGE
-        third = ext.download_available()
+        # Also ask for locked episodes, for one paste: the remembered verdict is asked again — E2
+        # requested once more, encrypted still, nothing saved — while what is on disk is skipped
+        third = ext.paste_and_wait(MAIN_LINK, include_locked=True)
         (series,) = third["series"]
-        assert third["label"] == f"3 episodes of {SERIES_NAME}"
-        assert sorted(_rows(series)) == [1, 3, 4]
-        assert _statuses(series) == ["done"] * 3
-        assert series.get("overwrite") is True
-        assert len(server.media_requests) == media + 3
-        assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [2, 1, 2, 2, 0]
-        assert len(server.series_page_requests) == listings + 1  # its own fresh list, as always
+        rows = _rows(series)
+        assert [rows[n]["status"] for n in (1, 2, 3, 4)] == [
+            "skipped-exists",
+            "failed-unavailable",
+            "skipped-exists",
+            "skipped-exists",
+        ]
+        assert rows[2]["message"] == DRM_MESSAGE
+        assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 5)] == [1, 2, 1, 1]
+        assert not _episode_file(ext, 2).exists() and not _downloader_covers(server, MAIN_ITEMS[2])
+        assert not _media_of(server, MAIN_ITEMS[5])  # the locked one has no play address at all
         assert _videos(ext) == [
             MAIN_FOLDER / f"{SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 3, 4)
         ]
-        assert ext.episode_records(SERIES_ID)[2] == remembered  # the verdict stays remembered
-
-
-def test_d2_a_job_stopped_by_hand_leaves_see_episodes_as_the_owner_left_it(tmp_path: Path) -> None:
-    """See episodes shows the drama; the owner unticks E3 and presses Download selected (E1, E2
-    and E4), then Stop in the pause after E1: the list stays as the owner left it — E3 still
-    unticked, never ticked again by a redraw, so pressing Download selected again takes only what
-    the owner chose — and the stop is not held up by a redraw."""
-    settings = {"delayMinS": 3, "delayMaxS": 3}  # a pause after E1 to press Stop in
-    with (
-        FakeTikTok() as server,
-        ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
-    ):
-        page = ext.page
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
-        ext.see_episodes(SERIES_ID)
-        table = page.locator("#episode-table tbody")
-        table.locator("input[data-number='3']").set_checked(False)
-        ticked = lambda: [  # noqa: E731
-            box.get_attribute("data-number")
-            for box in table.locator("input[type=checkbox]").all()
-            if box.is_checked()
-        ]
-        assert ticked() == ["1", "2", "4"]
-        jobs = ext.finished_jobs()
-        page.click("#download-selected-button")
-        ext.wait_for(lambda: _episode_file(ext, 1).exists(), 60, "E1 was not saved")
-        ext.wait_for(lambda: page.locator("#progress-pause").is_visible(), 10, "no pause")
-        page.click("#stop-button")
-        ext.wait_for(lambda: ext.finished_jobs() > jobs and ext.idle(), 30, "not stopped")
-        entry = ext.journal()[0]
-        assert (entry["kind"], entry["stopped"]) == ("selection", "stopped by you")
-        assert ticked() == ["1", "2", "4"]  # E3 never ticked again
-        assert len(_media_of(server, MAIN_ITEMS[3])) == 0
+        assert ext.page.locator("#include-locked").is_checked() is False  # for that paste only
+        state = ext.series_state(SERIES_ID)
+        assert state is not None and state["episodes"]["2"]["message"] == DRM_MESSAGE
 
 
 def test_e_rate_limit_stops_records_the_cooldown_and_refuses_the_next_action(
@@ -711,85 +629,96 @@ def _job_rests(entry: dict[str, Any]) -> list[str]:
 
 def test_j_a_redirect_is_never_followed(tmp_path: Path) -> None:
     """A 302 from the fake CDN to a host the test copy does not cover (`localhost`) is never
-    followed: not for a video — refused like a 403, the next URL, `failed-unavailable`, nothing
-    saved — and not for a thumbnail of **See episodes** (none shown): no request reaches that
-    host."""
+    followed, for a video or for its cover. A video so redirected is refused like a 403 — the next
+    URL, `failed-unavailable`, nothing saved, so no cover asked for either. A cover so redirected,
+    the videos served as usual, is refused at once: each episode `done`, its message noting the
+    cover's redirect that was not followed, nothing embedded, every cover asked for once. Not one
+    request reaches that host."""
     with (
         FakeTikTok(redirect_media=True, redirect_covers=True) as server,
-        ExtensionHarness(tmp_path, server.base_url) as ext,
+        ExtensionHarness(tmp_path / "videos", server.base_url) as ext,
     ):
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))
-        ext.see_episodes(SERIES_ID)
-        for number, item in MAIN_ITEMS.items():  # each row's thumbnail is asked for once in view
-            row = ext.page.locator(f"#episode-table tbody tr[data-number='{number}']")
-            row.locator("td.cover-cell").scroll_into_view_if_needed()
-            asked = f"/cover/{item}.jpg"
-            ext.wait_for(
-                lambda asked=asked: any(r.path == asked for r in server.cover_requests),
-                20,
-                "no thumbnail was asked for",
-            )
-        ext.wait_for(lambda: len(server.cover_requests) == 5, 20, "no thumbnail was asked for")
         entry = ext.paste_and_wait(MAIN_LINK)
         (series,) = entry["series"]
         rows = _rows(series)
         assert _statuses(series) == ["failed-unavailable"] * 3 + ["failed", "skipped-locked"]
         assert rows[1]["message"].endswith("(a redirect from 127.0.0.1, not followed)")
         assert rows[4]["message"].startswith("stopped: 3 consecutive failures (last: ")
-        assert ext.page.locator("#episode-table img.cover").count() == 0
         assert _videos(ext) == []  # only the report of the failures (test_q)
-        assert len(server.cover_requests) == 5  # each thumbnail asked for once; no cover GET
+        assert server.cover_requests == []  # no video, so no cover GET
     assert server.media_requests and not server.elsewhere_requests
 
+    # the covers alone redirected off the covered hosts: the videos saved, each cover refused
+    with (
+        FakeTikTok(redirect_covers=True) as server,
+        ExtensionHarness(tmp_path / "covers", server.base_url) as ext,
+    ):
+        entry = ext.paste_and_wait(MAIN_LINK)
+        (series,) = entry["series"]
+        rows = _rows(series)
+        assert _statuses(series) == ["done"] * 4 + ["skipped-locked"]
+        for number in range(1, 5):
+            assert rows[number]["message"].endswith(
+                "; cover: a redirect from 127.0.0.1, not followed"
+            )
+            tags = MP4(_episode_file(ext, number)).tags
+            assert tags is None or "covr" not in tags  # nothing embedded
+        assert _videos(ext) == [
+            MAIN_FOLDER / f"{SERIES_NAME} - Episode {n:02d}.mp4" for n in range(1, 5)
+        ]
+    assert [r.path for r in server.cover_requests] == [
+        f"/cover/{MAIN_ITEMS[n]}.jpg" for n in range(1, 5)
+    ]  # each asked for once, its redirect never followed
+    assert len(server.media_requests) == 4 and not server.elsewhere_requests
 
-def test_k_a_selection_lists_the_series_again_for_the_session_logged_in_now(
-    tmp_path: Path,
-) -> None:
-    """**Download all available** never takes the list shown — someone else, or nobody, may be
-    logged in by now: listed with the session (episode 3 unlocked), logged out, the selection lists
-    the series again after the rest between jobs, and that list decides — episode 3 is skipped
-    without a request; nothing of the earlier session's list is used. A paste of the drama on
-    screen then draws its own fresh list too, never the earlier one."""
+
+def test_k_a_retry_lists_the_series_again_for_the_session_logged_in_now(tmp_path: Path) -> None:
+    """The progress card's **Retry** — a `selection` job, the one kind a user starts by hand
+    besides a paste since DramaFetch 4.0.0 — never takes the list an earlier job read: someone
+    else, or nobody, may be logged in by now. A paste with the session (the account that bought
+    episode 3) leaves E03 failed, its transfer cut short (the automatic retry turned off first, so
+    that the retry is the user's); logged out, **Retry** rests between jobs, lists the series
+    again — without the session — and that list decides: E03 is locked now, skipped without a
+    request; nothing of the earlier session's list is used."""
     settings = {"restMinS": 0.5, "restMaxS": 6}
     with (
-        FakeTikTok() as server,
+        FakeTikTok(truncate_once=frozenset({(THIRD_SERIES_ID, 3)})) as server,
         ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
     ):
-        ext.keep_library((THIRD_SERIES_ID, THIRD_SERIES_NAME, 4))
+        ext.turn_off_auto_retry()  # the retry is the user's, pressed after logging out
         ext.add_session_cookie(SESSION_VALUE)
-        ext.see_episodes(THIRD_SERIES_ID)
-        table = ext.page.locator("#episode-table tbody")
-        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "unlocked"
+        first = ext.paste_and_wait(THIRD_LINK)
+        (series,) = first["series"]
+        assert _statuses(series) == ["done", "done", "failed", "skipped-locked"]
+        assert _rows(series)[3]["message"].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
+        assert server.item_list_requests[-1].logged_in  # listed with the session: E03 unlocked
+        assert len(_media_of(server, THIRD[3])) == 1
+        retry = ext.page.locator("#retry-button")
+        assert retry.is_enabled()
+        assert retry.text_content() == "Retry the episodes that did not download (1)"
+
         ext.context.clear_cookies()  # logged out of the fake TikTok
         pages = len(server.series_page_requests)
-        entry = ext.download_available()
+        entry = ext._run("#retry-button", 90)
+        assert (entry["kind"], entry["label"]) == ("selection", f"Retry 1 of {THIRD_SERIES_NAME}")
+        assert entry["stopped"] is None
         (series,) = entry["series"]
-        assert _statuses(series) == ["done", "done", "skipped-locked"]
+        assert _statuses(series) == ["skipped-locked"]
         assert _rows(series)[3]["message"].startswith("looks locked: ")
-        assert not _media_of(server, THIRD[3])
+        assert len(_media_of(server, THIRD[3])) == 1  # never asked for again
         assert len(server.series_page_requests) == pages + 1  # listed again, without the session
         assert not server.item_list_requests[-1].logged_in
         assert len(_job_rests(entry)) == 1  # the rest came first: the list follows right after it
-        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "locked"
-
-        # a paste of the drama on screen (a batch; Look again, so that it is listed) draws the list
-        # it listed right before its downloads, never the earlier one shown
-        ext.add_session_cookie(SESSION_VALUE)
-        ext.see_episodes(THIRD_SERIES_ID)
-        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "unlocked"
-        ext.context.clear_cookies()  # logged out again
-        pasted = ext.paste_and_wait(THIRD_LINK, recheck=True)
-        assert _rows(pasted["series"][0])[3]["status"] == "skipped-locked"
-        assert not server.item_list_requests[-1].logged_in
-        assert table.locator("tr[data-number='3']").get_attribute("data-access") == "locked"
+        assert ext.page.locator("#failed-block").is_hidden()  # nothing left that failed
 
 
-def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
+def test_l_the_rest_between_jobs_holds_after_a_run_a_stop_and_a_closed_tab(
     tmp_path: Path,
 ) -> None:
     """The rest between two jobs that contact TikTok counts from the last contact, whatever ended
-    the job — a listing (**See episodes**), a run the user stopped, a run whose tab was closed (the
-    contact is stored as it happens) — so the next job rests before its first request."""
+    the job — a run that ran its course, a run the user stopped, a run whose tab was closed (the
+    contact is stored as it happens) — so the next job rests before its first request; the first
+    job of all, with no contact before it, rests not."""
     settings = {"delayMinS": 1, "delayMaxS": 1, "restMinS": 0.5, "restMaxS": 6}
     with (
         FakeTikTok() as server,
@@ -801,11 +730,11 @@ def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
             assert isinstance(stored, (int, float))
             return float(stored)
 
-        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))
         started = time.time()
-        ext.see_episodes(SECOND_SERIES_ID)
-        assert contact() >= started  # a listing contacts TikTok too
-        assert len(_job_rests(ext.paste_and_wait(SECOND_LINK))) == 1
+        assert _job_rests(ext.paste_and_wait(SECOND_LINK)) == []  # nothing contacted TikTok yet
+        assert contact() >= started
+        # Look again, so that the drama on disk is listed: a job that contacts TikTok
+        assert len(_job_rests(ext.paste_and_wait(SECOND_LINK, recheck=True))) == 1
 
         page = ext.page
         jobs = ext.finished_jobs()
@@ -830,14 +759,13 @@ def test_l_the_rest_between_jobs_holds_after_a_listing_a_stop_and_a_closed_tab(
 
 
 def test_m_the_tiktok_tab_is_closed_when_the_app_tab_goes_away_mid_listing(tmp_path: Path) -> None:
-    """The DramaFetch tab closed — or reloaded — while a series is being listed: its own clean-up
-    never runs, yet the muted TikTok tab it opened is closed (by the background worker; by the
-    reloaded page)."""
+    """The DramaFetch tab closed — or reloaded — while a pasted drama is being listed: its own
+    clean-up never runs, yet the muted TikTok tab it opened is closed (by the background worker;
+    by the reloaded page)."""
     with (
         FakeTikTok(slow_pagination_s=20) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
         series_page = f"{server.base_url}/shortdrama/episode/"
         watcher = ext.context.new_page()
         watcher.goto(f"chrome-extension://{ext.extension_id}/src/app/popup.html")
@@ -851,10 +779,11 @@ def test_m_the_tiktok_tab_is_closed_when_the_app_tab_goes_away_mid_listing(tmp_p
 
         for how in ("close", "reload"):
             lists = len(server.item_list_requests)
-            ext.page.click(ext.card_button(SERIES_ID, "browse"))
+            ext.paste(MAIN_LINK)
             # the page's own list request, the repeated first page, then the slow second page
             ext.wait_for(lambda: len(server.item_list_requests) >= lists + 3, 30, "not listing")  # noqa: B023
             assert len(tiktok_tabs()) == 1
+            assert not server.media_requests  # still listing: nothing downloaded
             if how == "close":
                 ext.page.close()
                 ext.wait_for(lambda: not tiktok_tabs(), 10, "the TikTok tab stayed open")
@@ -1147,19 +1076,23 @@ def test_q_a_report_of_the_episodes_that_did_not_download_is_saved(tmp_path: Pat
         assert ext.saved_files() == sorted([report_path, second_path])  # still no video
 
 
-def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_short_served_file(
+def test_r_a_free_series_with_conditions_locks_its_short_header_and_names_a_short_served_file(
     tmp_path: Path,
 ) -> None:
     """The fourth series (the owner's real payload shape of 2026-11-06, `isLimitedFree`), the CDN
     serving episode 3 as TikTok served the owner's 7 — the whole file by size, a header that plays
-    2 s of the 10 s the list announces. **See episodes** shows episodes 1-2 `free` and 3 `locked`
-    with the list's own hint (`plays 2 s of 10 s`: `music.duration` against `video.duration`,
-    no request made; `IsFreeIntro: false` / `IsPreview` / `PreviewType` lock nothing). **Download
-    all available** saves 1-2 and asks nothing for 3. **Download selected** with 3 ticked asks
-    for it once: `failed-unavailable` with the short-served message, nothing saved for it, no
-    cover; the page shows it apart with the checkbox advice in place of `--recheck`; the report's
-    probable cause names the short-served file and its `episodes_digest` carries every listed
-    episode's `music.duration` (3, 3, 2) next to the video's."""
+    2 s of the 10 s the list announces. A paste saves episodes 1-2 and skips 3 as locked from the
+    list alone, with the list's own hint (`plays 2 s of 10 s`: `music.duration` against
+    `video.duration`; `IsFreeIntro: false` / `IsPreview` / `PreviewType` lock nothing) and no
+    request for it — but since 3.0.1 (§9) episode 3 is a free one DramaFetch only GUESSED was
+    locked: `not downloaded (free)` under **Did not download** with the hint, the line
+    `incomplete`, a report saved, no complete mark. The same paste with **Also ask for locked
+    episodes** — the drama listed again, never found complete — asks for episode 3 once, episodes
+    1-2 on disk and skipped: `failed-unavailable` with the short-served message, nothing saved for
+    it, no cover; the page shows it apart with the checkbox advice in place of `--recheck`; the
+    report's probable cause names the short-served file and its `episodes_digest` carries every
+    listed episode's `music.duration` (3, 3, 2) next to the video's, whether DramaFetch only
+    guessed it was locked, and the sound's id and title."""
     short = frozenset({(FOURTH_SERIES_ID, 3)})
     hint = f"{SHORT_HEADER_HINT_PREFIX}2 s of {SHORT_HEADER_LISTED_DURATION_S} s"
     served = (
@@ -1172,33 +1105,12 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         FakeTikTok(short_header_media=short) as server,
         ExtensionHarness(tmp_path, server.base_url) as ext,
     ):
-        ext.keep_library((FOURTH_SERIES_ID, FOURTH_SERIES_NAME, 3))
-        listing = ext.see_episodes(FOURTH_SERIES_ID)
-        assert listing["series"][0]["episodes"] == 3
         page = ext.page
-        table = page.locator("#episode-table tbody")
-        for number in (1, 2):
-            row = table.locator(f"tr[data-number='{number}']")
-            assert row.get_attribute("data-access") == "free"
-            assert row.locator("input[type=checkbox]").is_checked()  # free, not on disk yet
-            assert row.locator(".hints").count() == 0
-        third = table.locator("tr[data-number='3']")
-        assert third.get_attribute("data-access") == "locked"
-        assert third.locator("input[type=checkbox]").is_checked() is False
-        assert third.locator(".badge.locked").count() == 1
-        assert third.locator(".hints").text_content() == hint  # the display's English: as is
-        assert server.media_requests == []  # listing asks for no media
-        # the list's thumbnails, one per row once in view — so that every later cover request
-        # for episode 3 can only be the downloader's (none is allowed)
-        for number in (1, 2, 3):
-            row = table.locator(f"tr[data-number='{number}']")
-            row.locator("td.cover-cell").scroll_into_view_if_needed()
-            ext.wait_for(lambda row=row: row.locator("img.cover").count() == 1, 20, "no thumbnail")
-        assert len(_downloader_covers(server, FOURTH[3])) == 1  # the thumbnail, nothing else yet
-
-        available = ext.download_available()
-        (series,) = available["series"]
-        assert _statuses(series) == ["done", "done"]
+        first = ext.paste_and_wait(FOURTH_SERIES_ID)
+        (series,) = first["series"]
+        assert _statuses(series) == ["done", "done", "skipped-locked"]
+        assert _rows(series)[3]["message"] == f"looks locked: {hint}"  # the list's own hint
+        assert _rows(series)[3].get("guessed") is True  # 3.0.1: only DramaFetch's guess
         # 3.0.1 (§9): episode 3 is a free one DramaFetch only guessed was locked — not downloaded,
         # never "complete" (the line used to read `complete: 2 of 3 (2 downloaded) — 1 locked (3)`)
         assert series["line"] == (
@@ -1206,24 +1118,39 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
             "TikTok's list made it look locked"
         )
         assert [len(_media_of(server, FOURTH[n])) for n in (1, 2, 3)] == [1, 1, 0]
+        assert _downloader_covers(server, FOURTH[3]) == []
         assert _videos(ext) == [
             FOURTH_FOLDER / f"{FOURTH_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2)
         ]
-        assert _report_files(ext) == []  # nothing failed: no report
-        assert page.locator("#failed-block").is_hidden()
+        state = ext.series_state(FOURTH_SERIES_ID)
+        assert state is not None and state["complete_at"] is None  # no complete mark
+        # the page (3.0.1): episode 3 under Did not download — `not downloaded (free)` with the
+        # list's hint, the display's English as is —, no longer among the result table's rows
+        assert page.locator("#failed-block").is_visible()
+        assert _table_rows(page, "#failed-table") == [("3", "skipped-locked")]
+        guessed_row = page.locator("#failed-table tbody tr[data-number='3']")
+        assert guessed_row.get_attribute("data-guessed") == "1"
+        assert guessed_row.locator(".badge").text_content() == "not downloaded (free)"
+        assert (guessed_row.locator("td.message").text_content() or "").endswith(hint)
+        assert _table_rows(page, "#result-table") == [("1", "done"), ("2", "done")]
+        # its report (3.0.1): episode 3 not asked for, nothing attempted
+        ext.wait_for(lambda: len(_report_files(ext)) == 1, 20, "the report was not saved")
+        (guessed_path,) = _report_files(ext)
+        guessed_report = json.loads((ext.downloads / guessed_path).read_text(encoding="utf-8"))
+        (guessed_reported,) = guessed_report["series"]
+        (not_asked,) = guessed_reported["not_downloaded"]
+        assert (not_asked["number"], not_asked["status"]) == (3, "skipped-locked")
+        assert not_asked["guessed_lock"] is True and not_asked["attempted"] is False
 
-        for box in table.locator("input[type=checkbox]").all():
-            box.set_checked(box.get_attribute("data-number") == "3")
-        assert page.locator("#download-selected-button").is_enabled()
-        selected = ext.download_selected(90)
-        assert selected["kind"] == "selection"
+        selected = ext.paste_and_wait(FOURTH_SERIES_ID, include_locked=True, timeout_s=90)
+        assert selected["kind"] == "batch"
         (series,) = selected["series"]
-        assert _statuses(series) == ["failed-unavailable"]
+        assert _statuses(series) == ["skipped-exists", "skipped-exists", "failed-unavailable"]
         row = _rows(series)[3]
         assert row["message"] == served  # byte for byte the Python engines' message
         assert series["line"] == "incomplete: 2 of 3 — 1 failed (3)"
         assert [len(_media_of(server, FOURTH[n])) for n in (1, 2, 3)] == [1, 1, 1]  # once
-        assert len(_downloader_covers(server, FOURTH[3])) == 1  # no cover GET for a failed body
+        assert _downloader_covers(server, FOURTH[3]) == []  # no cover GET for a failed body
         assert _videos(ext) == [
             FOURTH_FOLDER / f"{FOURTH_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2)
         ]  # nothing saved for episode 3: no video, no `(short)` file, no `.part`
@@ -1233,7 +1160,8 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         assert state["episodes"]["3"]["message"] == served
         assert state["episodes"]["3"].get("download_id") is None
 
-        # the page: shown apart, the English display with the checkbox advice
+        # the page: shown apart, the English display with the checkbox advice — the row this job
+        # took replaces the first paste's (3.0.1: the block keeps every job's rows)
         assert page.locator("#failed-block").is_visible()
         assert _table_rows(page, "#failed-table") == [("3", "failed-unavailable")]
         shown = page.locator("#failed-table tbody tr").first.locator("td.message").text_content()
@@ -1253,16 +1181,20 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
 
         # the report: the short-served file as the probable cause, the digest of every listed
         # episode
-        ext.wait_for(lambda: len(_report_files(ext)) == 1, 20, "the report was not saved")
-        (report_path,) = _report_files(ext)
+        ext.wait_for(lambda: len(_report_files(ext)) == 2, 20, "the report was not saved")
+        (report_path,) = [path for path in _report_files(ext) if path != guessed_path]
         assert _report_name_re(FOURTH_SERIES_NAME).match(report_path.name), report_path.name
         report = json.loads((ext.downloads / report_path).read_text(encoding="utf-8"))
         assert report["dramafetch_report"] == 1
-        assert report["job"]["kind"] == "selection" and report["job"]["stopped"] is None
+        assert report["job"]["kind"] == "batch" and report["job"]["stopped"] is None
         (reported,) = report["series"]
         assert reported["series_id"] == FOURTH_SERIES_ID and reported["name"] == FOURTH_SERIES_NAME
         assert reported["listed"] == 3
         assert reported["access_counts"] == {"free": 2, "unlocked": 0, "locked": 1}
+        # what was on disk is no failure: the reference to compare with, never a row of its own
+        reference = reported["reference"]
+        assert (reference["number"], reference["status"]) == (1, "skipped-exists")
+        assert reference["raw"]["id"] == FOURTH[1]
         (not_downloaded,) = reported["not_downloaded"]
         assert not_downloaded["number"] == 3 and not_downloaded["status"] == "failed-unavailable"
         assert not_downloaded["message"] == served
@@ -1286,10 +1218,6 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         assert [entry["duration_s"] for entry in digest] == [3, 3, SHORT_HEADER_LISTED_DURATION_S]
         assert [entry["music_duration_s"] for entry in digest] == [3, 3, 2]
         assert [entry["music_original"] for entry in digest] == [True, True, True]
-        assert [entry["size"] for entry in digest] == [MEDIA_SIZE] * 3
-        assert all(isinstance(entry["bitrate"], int) and entry["bitrate"] > 0 for entry in digest)
-        assert [entry["is_preview"] for entry in digest] == [True, True, False]
-        assert [entry["preview_type"] for entry in digest] == [4, 4, 1]
         # 3.0.1: whether DramaFetch only guessed it was locked, and the sound's id and title
         assert [entry["guessed_lock"] for entry in digest] == [False, False, True]
         assert [entry["music_id"] for entry in digest] == [
@@ -1300,6 +1228,10 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         assert {entry["music_title"] for entry in digest} == {
             f"original sound - {FOURTH_SERIES_NAME}"
         }
+        assert [entry["size"] for entry in digest] == [MEDIA_SIZE] * 3
+        assert all(isinstance(entry["bitrate"], int) and entry["bitrate"] > 0 for entry in digest)
+        assert [entry["is_preview"] for entry in digest] == [True, True, False]
+        assert [entry["preview_type"] for entry in digest] == [4, 4, 1]
         assert list(digest[0]) == [
             "number",
             "access",
@@ -1410,152 +1342,14 @@ def test_s_a_long_batch_keeps_its_table_light_its_report_whole_and_its_journal_c
         assert page.locator("#result-trimmed").is_hidden()
 
 
-def test_t_see_episodes_downloads_again_in_full_under_the_same_names(tmp_path: Path) -> None:
-    """**See episodes** downloads again in full (DramaFetch 3.0.0, the owner's decision of
-    2026-11-25: “permitir que se descarguen de nuevo completamente”). The main series is on disk —
-    a paste saved E01-E04, E05 is locked — and its card's **See episodes** lists E01-E04 **On
-    disk**, unticked. **Download all available** downloads every one of them again in full
-    (`overwrite` in its record): one media request and one cover request each, at the usual pace —
-    the same three pauses between four episodes as the paste's —, each file replaced under the
-    SAME name (the same episode byte for byte, a newer file; no ` (1)` copy, no other file),
-    DramaFetch's records pointing at the new downloads (Chrome's items at the same paths), the
-    locked episode never asked for. **Download selected** with one episode on disk ticked (E02)
-    downloads that one again and touches nothing else. A paste of the drama still skips what is
-    on disk: listed again — the downloads in full were new attempts, so no complete mark —, every
-    episode `already downloaded (manifest)`, no media request; and the paste after it is the
-    complete skip, no request at all."""
-    pace = {"delayMinS": 0.5, "delayMaxS": 0.5}  # the usual pause between two episodes, short
-    on_disk = {1: "done", 2: "done", 3: "done", 4: "done", 5: "skipped-locked"}
-    episodes = [MAIN_FOLDER / f"{SERIES_NAME} - Episode {n:02d}.mp4" for n in range(1, 5)]
-    with (
-        FakeTikTok() as server,
-        ExtensionHarness(tmp_path, server.base_url, test_settings=pace) as ext,
-    ):
-        ext.keep_library((SERIES_ID, SERIES_NAME, 5))  # its card's See episodes lists it
-        first = ext.paste_and_wait(MAIN_LINK)
-        assert _statuses(first["series"][0]) == ["done"] * 4 + ["skipped-locked"]
-        assert _paces(first) == [0.5] * 3
-        assert ext.saved_files() == episodes
-        saved = {n: _episode_file(ext, n).read_bytes() for n in range(1, 5)}
-        written = _mtimes(ext)
-        before = ext.wait_for_records(SERIES_ID, on_disk)
-
-        ext.see_episodes(SERIES_ID)
-        page = ext.page
-        table = page.locator("#episode-table tbody")
-
-        def shown_on_disk() -> None:
-            """E01-E04 **On disk** and unticked, E05 locked and unticked."""
-            for number in range(1, 6):
-                row = table.locator(f"tr[data-number='{number}']")
-                assert row.locator(".badge.ondisk").count() == (1 if number < 5 else 0)
-                assert row.locator("input[type=checkbox]").is_checked() is False
-
-        shown_on_disk()
-        # the list's thumbnails first (the extension's own cover requests, once per row in view),
-        # so that every later cover request is the downloader's
-        for number in range(1, 6):
-            row = table.locator(f"tr[data-number='{number}']")
-            row.locator("td.cover-cell").scroll_into_view_if_needed()
-            ext.wait_for(lambda row=row: row.locator("img.cover").count() == 1, 20, "no thumbnail")
-        covers = len(_downloader_covers(server))
-        listings = len(server.series_page_requests)
-
-        again = ext.download_available()
-        assert (again["kind"], again["label"]) == ("selection", f"4 episodes of {SERIES_NAME}")
-        assert again["error"] is None and again["stopped"] is None
-        (series,) = again["series"]
-        assert series.get("overwrite") is True
-        assert _statuses(series) == ["done"] * 4
-        rows = _rows(series)
-        for number in range(1, 5):
-            message = rows[number]["message"]
-            assert message.startswith(f"saved {_episode_file(ext, number).name} (")
-            assert message.endswith(" + cover embedded")
-        assert series["line"] == "complete: 4 of 5 (4 downloaded) — 1 locked (5)"
-        assert _paces(again) == [0.5] * 3  # the usual pace: a pause between every two episodes
-        # one request per episode, the locked one never asked for; its own fresh list
-        assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [2, 2, 2, 2, 0]
-        assert len(_downloader_covers(server)) == covers + 4
-        assert len(server.series_page_requests) == listings + 1
-        # the same names, replaced: never a ` (1)` copy next to them, nothing else saved
-        assert ext.saved_files() == episodes
-        assert {n: _episode_file(ext, n).read_bytes() for n in range(1, 5)} == saved
-        replaced = _mtimes(ext)
-        assert all(replaced[n] > written[n] for n in range(1, 5)), (written, replaced)
-        # the records: the new downloads, at the same paths
-        records = ext.wait_for_records(SERIES_ID, on_disk)
-        for number in range(1, 5):
-            assert records[number]["download_id"] != before[number]["download_id"]
-            assert records[number]["path"] == before[number]["path"]
-            assert records[number]["message"] == rows[number]["message"]
-        new_ids = [records[n]["download_id"] for n in range(1, 5)]
-        assert page.evaluate(DOWNLOAD_ITEMS_JS, new_ids) == [
-            {"filename": records[n]["path"], "state": "complete", "exists": True}
-            for n in range(1, 5)
-        ]
-        state = ext.series_state(SERIES_ID)
-        assert state is not None and state["complete_at"] is None  # new attempts: no complete mark
-
-        # Download selected with ONE episode on disk ticked: that one again, nothing else
-        shown_on_disk()  # the list drawn again after the job, its ticks as they were
-        table.locator("input[data-number='2']").check()
-        covers = len(_downloader_covers(server))
-        written = _mtimes(ext)
-        one = ext.download_selected()
-        assert one["kind"] == "selection" and one["stopped"] is None
-        (series,) = one["series"]
-        assert series.get("overwrite") is True
-        assert {number: row["status"] for number, row in _rows(series).items()} == {2: "done"}
-        assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [2, 3, 2, 2, 0]
-        assert len(_downloader_covers(server)) == covers + 1
-        assert ext.saved_files() == episodes
-        assert _episode_file(ext, 2).read_bytes() == saved[2]
-        replaced = _mtimes(ext)
-        assert replaced[2] > written[2]
-        assert [replaced[n] for n in (1, 3, 4)] == [written[n] for n in (1, 3, 4)]  # untouched
-        after = ext.wait_for_records(SERIES_ID, on_disk)
-        assert after[2]["download_id"] != records[2]["download_id"]
-        assert [after[n]["download_id"] for n in (1, 3, 4)] == [
-            records[n]["download_id"] for n in (1, 3, 4)
-        ]
-
-        # a paste of the same drama still skips what is on disk: listed again, no media request
-        media = len(server.media_requests)
-        listings = len(server.series_page_requests)
-        pasted = ext.paste_and_wait(MAIN_LINK)
-        (series,) = pasted["series"]
-        assert _statuses(series) == ["skipped-exists"] * 4 + ["skipped-locked"]
-        assert all(
-            _rows(series)[n]["message"].startswith("already downloaded (manifest): ")
-            for n in range(1, 5)
-        )
-        assert series["line"] == "complete: 4 of 5 (4 already on disk) — 1 locked (5)"
-        assert len(server.media_requests) == media
-        assert len(server.series_page_requests) == listings + 1
-        assert ext.saved_files() == episodes
-        kept = ext.wait_for_records(SERIES_ID, on_disk)
-        assert [kept[n]["download_id"] for n in range(1, 5)] == [
-            after[n]["download_id"] for n in range(1, 5)
-        ]
-        # found complete again: the next paste is the complete skip — no request at all
-        requests = len(server.requests)
-        (skipped,) = ext.paste_and_wait(MAIN_LINK)["series"]
-        assert skipped["status"] == "skipped (complete)"
-        assert len(server.requests) == requests
-        assert ext.saved_files() == episodes
-
-
-def test_u_a_cover_kept_as_a_file_is_replaced_too(tmp_path: Path) -> None:
-    """**See episodes**' downloads in full replace the cover kept as a separate image as well (the
-    **Cover** setting `Embedded, and a separate image`, DramaFetch 3.0.0): the second drama pasted
-    — each of its three episodes saved with its cover embedded and beside it —, then **Download all
-    available**: exactly the same six files, each newer and byte for byte the same — never a
-    ` (1)` copy of a video or of its image."""
+def test_u_a_cover_kept_as_a_file_too_lands_beside_its_video(tmp_path: Path) -> None:
+    """The **Cover** setting `Embedded, and a separate image` (`both`): the second drama pasted —
+    each of its three episodes saved with its cover embedded AND beside it as an image of the same
+    name (`.jpg` / `.jpeg`), the fake CDN's cover byte for byte in both places, the rows saying
+    ` + cover embedded + file`; nothing else saved."""
     folder = Path("DramaFetch") / f"{SECOND_SERIES_NAME} [{SECOND_SERIES_ID}]"
     videos = [folder / f"{SECOND_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2, 3)]
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
-        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))  # its card's See episodes
         page = ext.page
         page.click("#settings-card > summary")
         page.select_option("#setting-thumbnail", "both")
@@ -1580,92 +1374,86 @@ def test_u_a_cover_kept_as_a_file_is_replaced_too(tmp_path: Path) -> None:
             (folder, video.stem) for video in videos
         ]
         assert all(path.suffix in (".jpg", ".jpeg") for path in images)
-        before = {
-            path: ((ext.downloads / path).read_bytes(), (ext.downloads / path).stat().st_mtime_ns)
-            for path in files
-        }
-
-        ext.see_episodes(SECOND_SERIES_ID)
-        again = ext.download_available()
-        (series,) = again["series"]
-        assert series.get("overwrite") is True
-        assert _statuses(series) == ["done"] * 3
-        assert all(row["message"].endswith(" + cover embedded + file") for row in series["rows"])
-        assert ext.saved_files() == files  # the same six names: no ` (1)` video or image
-        for path, (data, written) in before.items():
-            assert (ext.downloads / path).read_bytes() == data, path
-            assert (ext.downloads / path).stat().st_mtime_ns > written, path
+        for item, video, image in zip(SECOND_ITEMS, videos, images, strict=True):
+            assert (ext.downloads / image).read_bytes() == cover_bytes(item)
+            tags = MP4(ext.downloads / video).tags
+            assert tags is not None
+            assert bytes(tags["covr"][0]) == cover_bytes(item)
+    assert len(_downloader_covers(server)) == 3  # one cover request per episode, both kept
 
 
-def test_v_a_failed_download_in_full_keeps_the_old_file_and_its_retry_downloads_again(
+def test_w_dramas_pasted_while_one_downloads_wait_their_turn_and_all_download(
     tmp_path: Path,
 ) -> None:
-    """A download in full that fails keeps the old file, and its **Retry** downloads that episode
-    in full too (DramaFetch 3.0.0): the second drama on disk (a paste); then, the CDN cutting E02's
-    first transfer short, **See episodes** → **Download all available**: E01 and E03 replaced, E02
-    `failed` with nothing saved — its old file as it was, byte for byte and untouched, its record
-    the failure — and shown apart with **Retry**. That **Retry** (the automatic one turned off
-    first, so that the page can be read in between) queues `Retry 1 of <drama>` in full
-    (`overwrite` in its record), which downloads E02 again — `done`, never `already exists` for
-    the old copy Chrome's history still shows at its place —: the file replaced (newer, the same
-    bytes), still no ` (1)` copy."""
-    folder = Path("DramaFetch") / f"{SECOND_SERIES_NAME} [{SECOND_SERIES_ID}]"
-    episodes = [folder / f"{SECOND_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2, 3)]
-    on_disk = {1: "done", 2: "done", 3: "done"}
-
-    def stamps(ext: ExtensionHarness) -> dict[int, tuple[bytes, int]]:
-        """Each episode file's bytes and last write (ns), by number."""
-        return {
-            number: ((ext.downloads / path).read_bytes(), (ext.downloads / path).stat().st_mtime_ns)
-            for number, path in enumerate(episodes, start=1)
-        }
-
-    with FakeTikTok() as clean, ExtensionHarness(tmp_path, clean.base_url) as ext:
-        ext.turn_off_auto_retry()  # the tab's own Retry is what this proves, read in between
-        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))  # its card's See episodes
-        first = ext.paste_and_wait(SECOND_LINK)
-        assert _statuses(first["series"][0]) == ["done"] * 3
-        assert _videos(ext) == episodes
-        before = stamps(ext)
-        kept = ext.wait_for_records(SECOND_SERIES_ID, on_disk)
-        second = (SECOND_SERIES_ID, 2)
-        with FakeTikTok(truncate_once=frozenset({second})) as cut:
-            ext.save_test_settings({**ext.settings, "baseUrl": cut.base_url})
-            ext.see_episodes(SECOND_SERIES_ID)
-            again = ext.download_available()
-            (series,) = again["series"]
-            assert series.get("overwrite") is True
-            assert _statuses(series) == ["done", "failed", "done"]
-            assert _rows(series)[2]["message"].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
-            assert _videos(ext) == episodes  # nothing saved for E02: no ` (1)`, no other file
-            failed = stamps(ext)
-            assert failed[2] == before[2]  # the old E02 as it was: its bytes and its time
-            assert failed[1][1] > before[1][1] and failed[3][1] > before[3][1]  # E01, E03 again
-            records = ext.wait_for_records(SECOND_SERIES_ID, {1: "done", 2: "failed", 3: "done"})
-            assert records[2]["download_id"] is None
-            assert records[2]["message"] == _rows(series)[2]["message"]
-            page = ext.page
-            assert page.locator("#failed-heading").text_content() == "Did not download (1)"
-            assert page.locator("#retry-button").is_enabled()
-
-            retried = ext._run("#retry-button", 90)
-            assert (retried["kind"], retried["label"]) == (
-                "selection",
-                f"Retry 1 of {SECOND_SERIES_NAME}",
+    """Mass downloads (the owner's words of 2026-11-27: let a pasted link or ID download at once,
+    and let downloads pile up in the queue): a drama pasted while another downloads is queued
+    behind it — the box emptied, the status line saying so — and the **Waiting** card shows it by
+    its whole id while it waits (nothing names it yet, and no request is made for a name); the
+    same drama pasted again while it waits, and the one downloading pasted again, are named and
+    never queued twice. Each downloads in its turn: the second starts only once the first is done,
+    after the rest between jobs, and both download whole, every file on disk under its name; then
+    nothing waits."""
+    settings = {"delayMinS": 1.5, "delayMaxS": 1.5, "restMinS": 0.5, "restMaxS": 3}
+    second_folder = Path("DramaFetch") / f"{SECOND_SERIES_NAME} [{SECOND_SERIES_ID}]"
+    with (
+        FakeTikTok() as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=settings) as ext,
+    ):
+        page = ext.page
+        status = page.locator("#input-status")
+        waiting = page.locator("#queue-list li")
+        jobs = ext.finished_jobs()
+        ext.paste(MAIN_LINK)
+        ext.wait_for(lambda: bool(_media_of(server, MAIN_ITEMS[1])), 30, "the first did not start")
+        assert page.locator("#queue-card").is_hidden()  # the drama pasted downloads: none waits
+        ext.paste(SECOND_LINK)  # while the first downloads
+        ext.wait_for(lambda: waiting.count() == 1, 10, "the second drama is not waiting")
+        assert page.input_value("#links") == ""  # the paste taken
+        assert status.text_content() == (
+            f"Series {SECOND_SERIES_ID} queued: it downloads whole, with the usual pauses."
+        )
+        assert page.locator("#queue-card").is_visible()
+        row = waiting.first
+        assert (row.get_attribute("data-kind"), row.get_attribute("data-series-id")) == (
+            "download",
+            SECOND_SERIES_ID,
+        )
+        assert row.inner_text() == f"{SECOND_SERIES_ID} · name shown once its list is read"
+        # pasted again — the drama waiting, then the one downloading —: named, never queued twice
+        for link, series_id in ((SECOND_LINK, SECOND_SERIES_ID), (MAIN_LINK, SERIES_ID)):
+            refused = f"Already being downloaded, or waiting to be — not queued twice: {series_id}."
+            ext.paste(link)
+            ext.wait_for(
+                lambda refused=refused: status.text_content() == refused,
+                10,
+                "the paste was not refused as being downloaded already",
             )
-            (series,) = retried["series"]
-            assert series.get("overwrite") is True  # in full, as its job was
-            assert {number: row["status"] for number, row in _rows(series).items()} == {2: "done"}
-            assert _rows(series)[2]["message"].endswith(" + cover embedded")
-            asked = {number: len(_media_of(cut, SECOND_ITEMS[number - 1])) for number in (1, 2, 3)}
-            assert asked == {1: 1, 2: 2, 3: 1}  # E02 cut once, then whole
-            assert page.locator("#failed-block").is_hidden()
-            assert _videos(ext) == episodes
-            healed = stamps(ext)
-            assert healed[2][0] == before[2][0] and healed[2][1] > before[2][1]  # replaced
-            assert [healed[n] for n in (1, 3)] == [failed[n] for n in (1, 3)]  # untouched
-            after = ext.wait_for_records(SECOND_SERIES_ID, on_disk)
-            assert after[2]["download_id"] not in (None, kept[2]["download_id"])
-            assert [after[n]["download_id"] for n in (1, 3)] == [
-                records[n]["download_id"] for n in (1, 3)
-            ]
+            assert waiting.count() == 1 and page.input_value("#links") == ""
+        assert not ext.idle() and not server.series_requests(SECOND_SERIES_ID)  # still waiting
+
+        ext.wait_for(
+            lambda: ext.finished_jobs() == jobs + 2 and ext.idle(),
+            120,
+            "the two downloads did not end",
+        )
+        assert page.locator("#queue-card").is_hidden()  # nothing waits any more
+        journal = ext.journal()
+        assert [(entry["kind"], entry["label"]) for entry in journal] == [
+            ("batch", f"Series {SECOND_SERIES_ID}"),
+            ("batch", f"Series {SERIES_ID}"),
+        ]
+        second, first = journal
+        assert all(entry["error"] is None and entry["stopped"] is None for entry in journal)
+        assert first["series"][0]["line"] == "complete: 4 of 5 (4 downloaded) — 1 locked (5)"
+        assert second["series"][0]["line"] == "complete: 3 of 3 (3 downloaded)"
+        assert second["started_at"] >= first["finished_at"]  # in its turn, after the first
+        assert len(_job_rests(second)) == 1  # the rest between jobs before its listing
+        assert ext.saved_files() == sorted(
+            [MAIN_FOLDER / f"{SERIES_NAME} - Episode {n:02d}.mp4" for n in range(1, 5)]
+            + [second_folder / f"{SECOND_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2, 3)]
+        )
+    # one after the other: every request of the first drama before any of the second
+    first_span = [server.requests.index(r) for r in server.series_requests(SERIES_ID)]
+    second_span = [server.requests.index(r) for r in server.series_requests(SECOND_SERIES_ID)]
+    assert max(first_span) < min(second_span)
+    assert len(server.media_requests) == 4 + 3  # each episode once
