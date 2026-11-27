@@ -1,20 +1,24 @@
 """A tiny stand-in for TikTok's web app, enough to drive the browser strategy end to end offline.
 
-It serves four series: the main one (`SERIES_ID`, "The Billionaire's Secret Heiress", five
+It serves five series: the main one (`SERIES_ID`, "The Billionaire's Secret Heiress", five
 episodes on two `item_list` pages, episode 5 locked — `FakeOptions.series_id` can move it to
 another id), a second one (`SECOND_SERIES_ID`, "Second Chance Bride": three free episodes on
 one page, `fixtures/item_list_series2.json`), a paid third one (`THIRD_SERIES_ID`, "Paid Love
 Story": four episodes on one page whose answer depends on the session — with a `sessionid`
 cookie `fixtures/item_list_series3_logged_in.json`, where episode 3 is sold but unlocked by this
 account and carries play URLs, without one `item_list_series3_logged_out.json`, where it is
-locked and carries none; episode 4 is locked either way) and a fourth one free with conditions
+locked and carries none; episode 4 is locked either way), a fourth one free with conditions
 (`FOURTH_SERIES_ID`, "Limited Free Drama", `fixtures/item_list_series4_limited_free.json`,
 modeled on the owner's real payload of 2026-11-06: three episodes with `dramaInfo.isLimitedFree`,
 `IsFreeIntro: false`, `IsPreview` / `PreviewType` and an original `music` block; episodes 1-2
 have `music.duration == video.duration`, episode 3 `music.duration` 2 of a `video.duration` of 3 —
 the short header the list alone gives away, so it is `locked` without any request; its list is
 served with `video.size` and every `PlayAddr.DataSize` set to the exact length of the media body
-the CDN serves, `MEDIA_SIZE`, so the engines' size rule can fire), each with its own covers and
+the CDN serves, `MEDIA_SIZE`, so the engines' size rule can fire) and a fifth one in the same real
+item shape (`FIFTH_SERIES_ID`, "Highlight Drama", 3.0.1, `fixtures/item_list_series5_page1.json`
+and `…_page2.json`: five episodes on two pages, a highlight of episode 2 numbered 2 and listed
+before it, episode 3 numbered in `dramaInfo.episodeNumber` only, a trailer, another drama's item;
+TikTok's count `numVideos` 7 counts the highlight and the trailer), each with its own covers and
 play URLs through the same fake CDN; the series page, `item_list` and `detail` answer per
 `dramaID`.
 
@@ -22,12 +26,16 @@ Routes (all GET):
   /shortdrama/episode/<id>/<n>   the series page: inline JS fetches `/api/drama/detail/` and then
                                  `/api/drama/episode/item_list/?dramaID=<id>&cursor=0&count=10&...`
                                  and renders the titles into `[data-testid="short-drama-detail"]`;
+                                 with `opens_at_episode` that first request asks for the window
+                                 that holds episode n (`cursor=<n - 1>`), as TikTok's player page
+                                 opened at a later episode may;
                                  302 to /login when `require_login` and no `sessionid` cookie;
                                  a "Verify to continue" page when `challenge`
   /api/drama/episode/item_list/  JSON built from the fixtures: for the main series cursor 0 -> page
                                  1, 3 -> page 2; for the second series cursor 0 -> its only page;
                                  for the third, its logged-in or logged-out page (the `sessionid`
-                                 cookie decides; its value is never stored);
+                                 cookie decides; its value is never stored); for the fifth cursor
+                                 0 -> page 1, 5 -> page 2;
                                  empty for unknown `dramaID`, or when `require_login` and no cookie;
                                  with `lazy`, later pages are served only to the page's own scroll
                                  handler (header `X-Requested-By: scroll`); `lazy_empty` answers
@@ -36,9 +44,25 @@ Routes (all GET):
                                  the latest); `rate_limit_pagination` answers it with HTTP 429;
                                  `challenge_after_first_page` answers every later page — ours and
                                  the page's scroll handler's — with the captcha page, and the
-                                 page then shows the wall
+                                 page then shows the wall.
+                                 What TikTok's list may leave out (3.0.1, the owner's report of
+                                 2026-11-27 — episodes missing without a word): `omit_once` leaves
+                                 an episode out of the FIRST answer that would hold it, once (a
+                                 page asked for again holds it); `omit_always` out of every answer;
+                                 `lose_page_once` answers the first request of a page (series id,
+                                 cursor) with no list at all — TikTok's JSON without `itemList`, or
+                                 HTTP 500 with `lost_page_status` 500 — and later requests of it
+                                 with the page, `lose_page_always` every request of it (the list
+                                 never brings it); with `opens_at_episode`, a cursor no fixture page
+                                 starts at gets the window of episodes cursor+1 … cursor+count
+                                 (`window_page`); the pagination's own fallbacks (3.0.1,
+                                 the review's T1): `no_cursor_pages` answers a page (series id,
+                                 cursor) with its `hasMore` but no `cursor` at all,
+                                 `repeat_pages` answers it with the series' FIRST page again (its
+                                 items, its `cursor`, its `hasMore`)
   /api/drama/detail/             the series name and total (per `dramaID`; the main series' for
-                                 any id it does not know)
+                                 any id it does not know; the fifth's names its `dramaID` and
+                                 gives TikTok's count as `numVideos`, as the real detail does)
   /@invented_viewer              the user's profile (`PROFILE_PATH`): a **Favorites** tab whose
                                  **Drama** sub-tab, once clicked, makes the page's own request of
                                  its favorites list (`DRAMA_LIST_PATH`, `cursor=0&count=3` amid
@@ -216,6 +240,33 @@ FOURTH_PAGES = {
 }
 #: The item ids of the fourth series' episodes 1-3.
 FOURTH_ITEMS = tuple(str(item["id"]) for item in FOURTH_PAGES["0"]["itemList"])
+#: The fifth series (3.0.1, the owner's report of 2026-11-27), the real item shape of the series-4
+#: capture: on page 1 (cursor 0) episode 1, a HIGHLIGHT of episode 2 (`IsHighlight: true`,
+#: `LinkedEpisodeID` = episode 2's id) numbered 2 and listed BEFORE episode 2, episode 2, episode 3
+#: with `EpisodeNumber: 0` and its number in `dramaInfo.episodeNumber`, a trailer (no number
+#: anywhere); on page 2 (cursor 5) another drama's item first (its own `numVideos` 12), then
+#: episodes 4-5. TikTok's count, `numVideos` 7 on every item and in the detail, counts the
+#: highlight and the trailer: seven items of this drama come for five episodes — the list is whole.
+FIFTH_SERIES_ID = "7699393770256782377"
+FIFTH_SERIES_NAME = "Highlight Drama"
+FIFTH_NUM_VIDEOS = 7
+FIFTH_PAGES = {
+    "0": json.loads((FIXTURES / "item_list_series5_page1.json").read_text(encoding="utf-8")),
+    "5": json.loads((FIXTURES / "item_list_series5_page2.json").read_text(encoding="utf-8")),
+}
+#: The item ids of the fifth series' episodes 1-5 (the real ones, never the highlight).
+FIFTH_ITEMS = {
+    1: "7699400000000000601",
+    2: "7699400000000000602",
+    3: "7699400000000000603",
+    4: "7699400000000000604",
+    5: "7699400000000000605",
+}
+#: The fifth series' items that are no episode of it: the highlight numbered 2, the trailer, and
+#: the other drama's item on its second page.
+FIFTH_HIGHLIGHT_ITEM = "7699400000000000692"
+FIFTH_TRAILER_ITEM = "7699400000000000690"
+FIFTH_OTHER_DRAMA_ITEM = "7699400000000000778"
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
 #: The user's TikTok profile, whose Favorites → Drama tab lists their favorite dramas.
 PROFILE_USER = "invented_viewer"
@@ -308,7 +359,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   const seriesId = "__SERIES_ID__";
   const lazy = __LAZY__;
   const detail = document.querySelector('[data-testid="short-drama-detail"]');
-  const state = { cursor: 0, hasMore: true, busy: false };
+  const state = { cursor: __START_CURSOR__, hasMore: true, busy: false };
   const listOf = (j) => j.itemList || (j.data && j.data.itemList) || [];
   const render = (items) => {
     for (const it of items) {
@@ -494,6 +545,30 @@ class FakeOptions:
     origin_probe: bool = False
     # The `/cookie-control/…` routes: does the profile send a third-party cookie at all?
     cookie_control: bool = False
+    # What TikTok's list may leave out (3.0.1, the owner's report of 2026-11-27: "it skips one or
+    # two episodes, no error message"), each episode as (series id, episode number):
+    # left out of the FIRST list answer that would hold it — the page's own request included —,
+    # once; every later answer holds it (what the discovery's gap filling asks for again)
+    omit_once: frozenset[tuple[str, int]] = frozenset()
+    # left out of every list answer: TikTok's list never holds it
+    omit_always: frozenset[tuple[str, int]] = frozenset()
+    # List pages, as (series id, cursor), whose FIRST request is lost: answered with no list at
+    # all — `lost_page_status` 200: TikTok's JSON without an `itemList`; 500: an HTTP 500 —; every
+    # later request of the page gets it
+    lose_page_once: frozenset[tuple[str, str]] = frozenset()
+    # … and pages EVERY request of which is lost the same way: TikTok's list never brings them
+    lose_page_always: frozenset[tuple[str, str]] = frozenset()
+    lost_page_status: int = 200
+    # The pagination's fallbacks (3.0.1, the review's T1), each list page as (series id, cursor):
+    # answered with its `hasMore` and no `cursor` at all — DramaFetch cannot ask for the next page
+    no_cursor_pages: frozenset[tuple[str, str]] = frozenset()
+    # … answered with the series' FIRST page again (cursor "0"): a repeat, nothing new
+    repeat_pages: frozenset[tuple[str, str]] = frozenset()
+    # TikTok's player page opened at episode n asks first for the window that holds it: the series
+    # page's own first request carries `cursor=<n - 1>`, and a cursor no fixture page starts at is
+    # answered with that window (`window_page`). Never combined with the modes above that tell
+    # DramaFetch's own later-page fetch by its cursor (`lazy`, `rate_limit_pagination`, …).
+    opens_at_episode: bool = False
 
     @property
     def page_scrolls(self) -> bool:
@@ -533,6 +608,10 @@ class FakeTikTokServer(ThreadingHTTPServer):
         self.media_lists_served = 0  # item_list responses that carried (rewritten) play URLs
         #: How many cut-short media requests each `truncate_once` / `truncate_twice` episode got.
         self.cuts: dict[tuple[str, int], int] = {}
+        #: The `omit_once` episodes left out of an answer already, and the `lose_page_once` pages
+        #: lost once already (3.0.1).
+        self.omitted: set[tuple[str, int]] = set()
+        self.lost: set[tuple[str, str]] = set()
         self.lock = threading.Lock()
         self.release = threading.Event()  # set at shutdown: wakes handlers sleeping on purpose
 
@@ -567,6 +646,50 @@ class FakeTikTokServer(ThreadingHTTPServer):
                 return False
             self.cuts[episode] = served + 1
             return True
+
+    def page_lost(self, series_id: str, cursor: str) -> bool:
+        """Whether this request of the list page (`series_id`, `cursor`) is to be lost: every one
+        of a page in `lose_page_always`, the first one of a page in `lose_page_once`."""
+        page = (series_id, cursor)
+        if page in self.options.lose_page_always:
+            return True
+        if page not in self.options.lose_page_once:
+            return False
+        with self.lock:
+            if page in self.lost:
+                return False
+            self.lost.add(page)
+            return True
+
+    def left_out(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """`payload` (a fixture page, never edited) as this answer serves it: a copy whose item
+        lists hold no episode of `omit_always`, nor one of `omit_once` this answer is the first to
+        hold; the payload itself when neither applies."""
+        options = self.options
+        if not options.omit_always and not options.omit_once:
+            return payload
+
+        def kept(item: Any) -> bool:
+            episode = EPISODE_OF_ITEM.get(str(item.get("id"))) if isinstance(item, dict) else None
+            if episode is None:
+                return True  # a trailer, a highlight, another drama's item: as the fixture has it
+            if episode in options.omit_always:
+                return False
+            if episode not in options.omit_once:
+                return True
+            with self.lock:
+                if episode in self.omitted:
+                    return True
+                self.omitted.add(episode)
+                return False
+
+        copy = dict(payload)
+        if isinstance(payload.get("itemList"), list):
+            copy["itemList"] = [item for item in payload["itemList"] if kept(item)]
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("itemList"), list):
+            copy["data"] = {**data, "itemList": [item for item in data["itemList"] if kept(item)]}
+        return copy
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A client that gave up (the browser aborted a deliberately slow answer) is not an error
@@ -629,9 +752,14 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 page = PAGE_TEMPLATE.replace("__SERIES_ID__", match.group("id"))
                 page = page.replace("__LAZY__", "true" if options.page_scrolls else "false")
+                # the window that holds the episode the page was opened at, with
+                # `opens_at_episode`; the list's start otherwise
+                start = max(0, int(match.group("n")) - 1) if options.opens_at_episode else 0
+                page = page.replace("__START_CURSOR__", str(start))
                 self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
         elif path == "/api/drama/episode/item_list/":
-            later_page = (query.get("cursor", "0") or "0") != "0"
+            cursor = query.get("cursor", "0") or "0"
+            later_page = cursor != "0"
             ours = later_page and not from_scroll
             if ours and options.slow_pagination_s > 0:
                 server.release.wait(options.slow_pagination_s)
@@ -643,9 +771,11 @@ class _Handler(BaseHTTPRequestHandler):
                     b'{"statusCode": 429, "statusMsg": "too many requests"}',
                     "application/json",
                 )
+            elif server.page_lost(query.get("dramaID", ""), cursor):
+                self._lost_page(options)
             else:
                 payload = self._item_list(options, query, logged_in, from_scroll)
-                self._json(self._with_media_urls(server, payload))
+                self._json(self._with_media_urls(server, server.left_out(payload)))
         elif path.startswith(ELSEWHERE_PREFIX):
             self._elsewhere(path[len(ELSEWHERE_PREFIX) :])
         elif (match := HOP_PATH_RE.match(path)) is not None:
@@ -675,6 +805,15 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == DRAMA_LIST_PATH:
             self._json(favorites_page(query, server.base_url))
         elif path == "/api/drama/detail/":
+            if query.get("dramaID") == FIFTH_SERIES_ID:
+                # the real detail's keys: the drama's id, its name, TikTok's count as `numVideos`
+                info = {
+                    "dramaID": FIFTH_SERIES_ID,
+                    "dramaName": FIFTH_SERIES_NAME,
+                    "numVideos": FIFTH_NUM_VIDEOS,
+                }
+                self._json({"dramaInfo": info})
+                return
             if query.get("dramaID") == SECOND_SERIES_ID:
                 name, total = SECOND_SERIES_NAME, SECOND_TOTAL_EPISODES
             elif query.get("dramaID") == THIRD_SERIES_ID:
@@ -703,6 +842,8 @@ class _Handler(BaseHTTPRequestHandler):
             pages = THIRD_PAGES_LOGGED_IN if logged_in else THIRD_PAGES_LOGGED_OUT
         elif drama_id == FOURTH_SERIES_ID:
             pages = FOURTH_PAGES
+        elif drama_id == FIFTH_SERIES_ID:
+            pages = FIFTH_PAGES
         elif drama_id == options.series_id:
             pages = PAGES
         else:
@@ -712,9 +853,31 @@ class _Handler(BaseHTTPRequestHandler):
         if options.lazy and cursor != "0" and not from_scroll:
             return {"statusCode": 10201, "statusMsg": "pagination is only served to the page"}
         page = pages.get(cursor)
+        if page is None and options.opens_at_episode and cursor.isdigit():
+            count = query.get("count", "10")
+            fixture_id = SERIES_ID if pages is PAGES else str(drama_id)  # whose items they are
+            return window_page(
+                pages, fixture_id, int(cursor), int(count) if count.isdigit() else 10
+            )
         if page is None:
             return {"itemList": [], "hasMore": False, "cursor": cursor, "statusCode": 0}
+        if (str(drama_id), cursor) in options.repeat_pages:
+            page = pages.get("0", page)
+        if (str(drama_id), cursor) in options.no_cursor_pages:
+            page = _without_cursor(page)
         return page
+
+    def _lost_page(self, options: FakeOptions) -> None:
+        """A list page lost (`lose_page_once`): TikTok's JSON with no list in it (its status and
+        nothing else), or an HTTP 500."""
+        if options.lost_page_status == HTTPStatus.INTERNAL_SERVER_ERROR:
+            self._send(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                b'{"statusCode": 500, "statusMsg": "internal error"}',
+                "application/json",
+            )
+        else:
+            self._json({"statusCode": 0, "status_code": 0, "status_msg": ""})
 
     @staticmethod
     def _with_media_urls(server: FakeTikTokServer, payload: dict[str, Any]) -> dict[str, Any]:
@@ -956,6 +1119,45 @@ def _item_lists(payload: dict[str, Any]) -> list[list[Any]]:
     return found
 
 
+def _without_cursor(page: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a fixture page with no `cursor` anywhere it keeps one (`no_cursor_pages`)."""
+    copy = {key: value for key, value in page.items() if key != "cursor"}
+    data = page.get("data")
+    if isinstance(data, dict):
+        copy["data"] = {key: value for key, value in data.items() if key != "cursor"}
+    return copy
+
+
+def window_page(
+    pages: dict[str, dict[str, Any]], series_id: str, cursor: int, count: int
+) -> dict[str, Any]:
+    """The window of a series' list after `cursor` episodes (`opens_at_episode`, 3.0.1): its
+    episodes cursor+1 … cursor+count from the fixture pages `pages`, in episode order — a trailer,
+    a highlight and another drama's item are no episode of `series_id` and stay out —, the last
+    number served as the next `cursor`, `hasMore` while episodes are left after it: a cursor as the
+    episodes before a page, the model the gap filling asks by (`cursor` = the first missing number
+    - 1)."""
+    episodes: dict[int, Any] = {}
+    for page in pages.values():
+        for items in _item_lists(page):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                episode = EPISODE_OF_ITEM.get(str(item.get("id")))
+                if episode is not None and episode[0] == series_id:
+                    episodes.setdefault(episode[1], item)
+    last = max(episodes, default=0)
+    end = min(last, cursor + max(1, count))
+    served = [episodes[number] for number in sorted(episodes) if cursor < number <= end]
+    return {
+        "statusCode": 0,
+        "status_code": 0,
+        "cursor": end,
+        "hasMore": end < last,
+        "itemList": served,
+    }
+
+
 def favorites_page(query: dict[str, str], base_url: str = "") -> dict[str, Any]:
     """The favorites list's page for `query`'s `cursor` (`FAVORITES_CURSORS`), three dramas of
     `FAVORITES` a page in the capture's item shape, the next page's cursor, `hasMore` and the
@@ -1025,21 +1227,29 @@ def short_header_media_bytes(item_id: str, index: str) -> bytes:
 
 
 def _episodes_of_items() -> dict[str, tuple[str, int]]:
-    """item id -> (series id, episode number), from every fixture page the fake serves (an item
-    without an episode number, a trailer, is left out)."""
+    """item id -> (series id, episode number), from every fixture page the fake serves: the
+    number `DramaVideoData.EpisodeNumber` gives, else — 0 there, as the fifth series' episode 3
+    has it — `dramaInfo.episodeNumber`; an item without a number (a trailer) and a highlight
+    (`IsHighlight`) are no episode and are left out."""
     found: dict[str, tuple[str, int]] = {}
-    for pages in (PAGES, SECOND_PAGES, THIRD_PAGES_LOGGED_IN, FOURTH_PAGES):
+    for pages in (PAGES, SECOND_PAGES, THIRD_PAGES_LOGGED_IN, FOURTH_PAGES, FIFTH_PAGES):
         for page in pages.values():
             for item in page.get("itemList") or page.get("data", {}).get("itemList", []):
                 drama = item.get("dramaInfo") or {}
-                number = (drama.get("DramaVideoData") or {}).get("EpisodeNumber")
-                if isinstance(number, int) and drama.get("dramaID"):
+                video_data = drama.get("DramaVideoData") or {}
+                if video_data.get("IsHighlight") is True:
+                    continue
+                number = video_data.get("EpisodeNumber")
+                if number == 0:
+                    number = drama.get("episodeNumber")
+                if isinstance(number, int) and number > 0 and drama.get("dramaID"):
                     found[str(item["id"])] = (str(drama["dramaID"]), number)
     return found
 
 
-#: Which episode an item id of the fixtures is: how `drm_media` / `short_header_media` (series id,
-#: number) pairs reach the CDN, whose paths carry item ids only.
+#: Which episode an item id of the fixtures is: how `drm_media` / `short_header_media` /
+#: `omit_once` … (series id, number) pairs reach the CDN and the lists, whose paths and items
+#: carry item ids only.
 EPISODE_OF_ITEM = _episodes_of_items()
 
 
@@ -1152,6 +1362,8 @@ class FakeTikTok:
             items = set(THIRD_ITEMS)
         elif series_id == FOURTH_SERIES_ID:
             items = set(FOURTH_ITEMS)
+        elif series_id == FIFTH_SERIES_ID:
+            items = {*FIFTH_ITEMS.values(), FIFTH_HIGHLIGHT_ITEM, FIFTH_TRAILER_ITEM}
         else:
             items = _main_items(series_id)
         found = []

@@ -8,12 +8,18 @@
  * from `state.js` with an injected "file still exists" answer.
  */
 
-import { isLocked, makeEpisode } from "./catalog.js";
+import { UNCERTAIN_TEXT, countCheck, isLocked, makeEpisode, missingNumbers, otherItemsText } from "./catalog.js";
 import {
   DRM_MARK,
   DRM_REMEMBERED_MESSAGE,
   DONE,
+  ENDED_EARLY_TEXT,
+  FAILED_UNAVAILABLE,
   MANIFEST_SKIP_PREFIX,
+  NOT_LISTED_AGAIN_MESSAGE,
+  NOT_LISTED_EARLY_END_MESSAGE,
+  NOT_LISTED_MESSAGE,
+  NOT_LISTED_PREFIX,
   PAYLOAD_DRM_MESSAGE,
   RECHECK_AFTER_S,
   RECHECK_HINT,
@@ -24,7 +30,7 @@ import {
   isOk,
 } from "./messages.js";
 import { displayName, fileBaseName, fileStem } from "./naming.js";
-import { completeSince, doneEntries, donePath, drmProtected, lockedNumbers, missingFiles } from "./state.js";
+import { completeSince, completeTrusted, doneEntries, donePath, drmProtected, lockedNumbers, missingFiles } from "./state.js";
 
 /**
  * @typedef {import("./catalog.js").Episode} Episode
@@ -59,6 +65,21 @@ import { completeSince, doneEntries, donePath, drmProtected, lockedNumbers, miss
  * @property {number | null} checkedAgoS
  * @property {number} unlocked
  * @property {number[]} unlockedNumbers
+ * @property {boolean} endedEarly the listing ended before TikTok said the list was over
+ *   (`Series.earlyEnd`) and the episodes listed do not reach TikTok's count — unknown, or above the
+ *   highest number listed
+ *   (3.0.1, `SeriesReport.ended_early`)
+ * @property {number} lastListed the highest episode number listed (0: none, or never listed)
+ * @property {number} guessedLocked the `skipped-locked` rows of FREE episodes DramaFetch only
+ *   guessed were locked ({@link isGuessedLocked}; 3.0.1, `SeriesReport.guessed_locked`): counted
+ *   apart from `locked` and against completeness
+ * @property {number[]} guessedLockedNumbers their numbers, ascending
+ * @property {boolean} [uncertain] TikTok counts more than the drama certainly has (3.0.1,
+ *   `catalog.countCheck`; `SeriesReport.uncertain`): its count may include the other items it
+ *   listed, or episodes past the highest number listed may be missing — never complete, no row for
+ *   a number past `certainTop`, said in the line
+ * @property {number} [otherItems] the drama's items received besides its episode numbers (a
+ *   trailer, a highlight, …; `SeriesReport.other_items`)
  *
  * @typedef {object} SeriesRunLike What {@link batchStatus} and {@link notStartedMessage} read of a run.
  * @property {{seriesId: string}} ref
@@ -67,6 +88,13 @@ import { completeSince, doneEntries, donePath, drmProtected, lockedNumbers, miss
  * @property {string | null} error
  * @property {string | null} [errorKind]
  */
+
+/**
+ * What a report line says of the free episodes DramaFetch did not ask for because its own rules
+ * guessed they were locked (3.0.1, `engine.NOT_ASKED_TEXT`): `1 free episode not asked for (17):
+ * TikTok's list made it look locked`.
+ */
+export const NOT_ASKED_TEXT = "not asked for";
 
 /** Largest episode number gaps are computed up to (`engine.MAX_EPISODE_NUMBER`). */
 export const MAX_EPISODE_NUMBER = 10_000;
@@ -156,13 +184,41 @@ export function summarize(results) {
   return counts;
 }
 
+/**
+ * Whether `result` is the row of a FREE episode DramaFetch skipped only because its own rules
+ * guessed it was locked (3.0.1, `engine.is_guessed_locked`): `skipped-locked` for an episode whose
+ * `guessedLock` is set (`catalog.accessOf`: a short header and/or no play address, with no DRM,
+ * price, entitlement or TikTok lock clue) — not the skip of a DRM verdict an earlier download left
+ * in the state ({@link drmMemorySkip}), which is a fact, not a guess. {@link seriesReport} counts
+ * such a row as NOT downloaded.
+ * @param {{status: string, message: string, episode: {guessedLock?: boolean, access: string, drm: boolean, paid: boolean}}} result
+ * @returns {boolean}
+ */
+export function isGuessedLocked(result) {
+  const { episode } = result;
+  return (
+    result.status === SKIPPED_LOCKED &&
+    episode.guessedLock === true &&
+    episode.access === "locked" &&
+    !episode.drm &&
+    !episode.paid &&
+    result.message !== DRM_REMEMBERED_MESSAGE
+  );
+}
+
 // ------------------------------------------------------------------------ reports
 
 /**
  * The {@link SeriesReport} of a series and the results of its run (`engine.series_report`).
  * `series` is null when it was never resolved (skipped as complete, refused by a cooldown, a
  * failed resolve, not started); the id and name then come from `seriesId` / `name`, else from
- * the first result's episode. Gaps are computed up to {@link MAX_EPISODE_NUMBER} at most.
+ * the first result's episode. Gaps are computed up to {@link MAX_EPISODE_NUMBER} at most: since
+ * 3.0.1 up to `catalog.countCheck`'s `certainTop` (TikTok's count less the drama's other items
+ * received, so a count that may include a trailer raises no number it cannot place), plus the
+ * number of every failure row the list does not hold ({@link notListedResults}) — such a row counts
+ * as missing from the list, not as failed —; a list that ended early short of TikTok's count
+ * (unknown, or above the highest number listed) is incomplete too (`endedEarly`), and so is an
+ * uncertain one (`uncertain`).
  * @param {Series | null} series
  * @param {readonly DownloadResult[]} results
  * @param {{skippedComplete?: boolean, stopped?: string | null, seriesId?: string | null,
@@ -191,13 +247,16 @@ export function seriesReport(series, results, options = {}) {
     [...rows.entries()].filter(([, row]) => test(row.status)).map(([number]) => number).sort((a, b) => a - b);
   const done = numbersWhere((status) => status === DONE);
   const onDisk = numbersWhere((status) => status === SKIPPED_EXISTS);
-  const locked = numbersWhere((status) => status === SKIPPED_LOCKED);
-  const failed = numbersWhere((status) => !isOk(status));
+  // 3.0.1: a free episode DramaFetch only guessed was locked is not downloaded, apart from locked
+  const guessed = [...rows.entries()].filter(([, row]) => isGuessedLocked(row)).map(([number]) => number).sort((a, b) => a - b);
+  const guessedSet = new Set(guessed);
+  const locked = numbersWhere((status) => status === SKIPPED_LOCKED).filter((number) => !guessedSet.has(number));
   // paid episodes the user's own account unlocked, among those obtained (downloaded or on disk)
   const unlocked = [...new Set([...done, ...onDisk])]
     .sort((a, b) => a - b)
     .filter((number) => /** @type {DownloadResult} */ (rows.get(number)).episode.access === "unlocked");
   if (series === null) {
+    const failed = numbersWhere((status) => !isOk(status));
     return {
       seriesId: reportId,
       name: reportName,
@@ -217,22 +276,44 @@ export function seriesReport(series, results, options = {}) {
       checkedAgoS,
       unlocked: unlocked.length,
       unlockedNumbers: unlocked,
+      endedEarly: false,
+      lastListed: 0,
+      guessedLocked: guessed.length,
+      guessedLockedNumbers: guessed,
+      uncertain: false,
+      otherItems: 0,
     };
   }
   const numbers = new Set(series.episodes.map((episode) => episode.number));
   const listed = series.episodes.length;
   const hint = series.totalHint && series.totalHint > 0 ? series.totalHint : null;
-  let highest = hint ?? 0;
-  for (const number of numbers) if (number > highest) highest = number;
+  // THE count rule (catalog.countCheck): the numbers certainly an episode of the drama, and whether
+  // TikTok counts more than that (its count may include the other items it listed)
+  const check = countCheck(numbers, hint, series.itemsReceived ?? null, series.highlightNumbers ?? []);
+  // a failure row of a number the list does not hold: missing from TikTok's list, not a failure
+  const unlisted = new Set(
+    numbersWhere((status) => !isOk(status)).filter((number) => !numbers.has(number) && number > 0 && number <= MAX_EPISODE_NUMBER),
+  );
+  const failed = numbersWhere((status) => !isOk(status)).filter((number) => !unlisted.has(number));
+  // every number from 1 up to the highest one certainly an episode, or wanted (such a row's), that
+  // the list does not hold
+  let top = check.certainTop;
+  for (const number of unlisted) if (number > top) top = number;
+  top = Math.min(top, MAX_EPISODE_NUMBER);
   /** @type {number[]} */
   const gaps = [];
-  for (let number = 1; number <= Math.min(highest, MAX_EPISODE_NUMBER); number += 1) {
-    if (!numbers.has(number)) gaps.push(number);
-  }
+  for (let number = 1; number <= top; number += 1) if (!numbers.has(number)) gaps.push(number);
+  let lastListed = 0;
+  for (const number of numbers) if (number > lastListed) lastListed = number;
+  const highest = Math.max(lastListed, check.certainTop, gaps.length > 0 ? /** @type {number} */ (gaps[gaps.length - 1]) : 0);
+  // the list ended before TikTok said it was over, and the episodes listed do not reach its count
+  const endedEarly = (series.earlyEnd ?? null) !== null && (hint === null || hint > lastListed);
   const obtained = new Set([...done, ...onDisk]);
   // What cannot be downloaded is left out of "every downloadable episode is on disk": a locked
   // episode, and one this run skipped as locked although its payload reads as playable (a DRM
-  // verdict the state remembers; it is counted in `locked` all the same).
+  // verdict the state remembers; it is counted in `locked` all the same). A free episode
+  // DramaFetch only GUESSED was locked (3.0.1, `guessed`) is not left out: while one is not on
+  // disk the series is not complete.
   const skippedLocked = new Set(locked);
   const complete =
     listed > 0 &&
@@ -240,8 +321,12 @@ export function seriesReport(series, results, options = {}) {
       .filter((episode) => !isLocked(episode) && !skippedLocked.has(episode.number))
       .every((episode) => obtained.has(episode.number)) &&
     failed.length === 0 &&
+    guessed.length === 0 &&
     gaps.length === 0 &&
-    (hint === null || listed === hint);
+    // more listed than TikTok announces stays incomplete; fewer is a gap, or uncertain
+    (hint === null || listed <= hint) &&
+    !endedEarly &&
+    !check.uncertain;
   return {
     seriesId: reportId,
     name: reportName,
@@ -261,7 +346,132 @@ export function seriesReport(series, results, options = {}) {
     checkedAgoS,
     unlocked: unlocked.length,
     unlockedNumbers: unlocked,
+    endedEarly,
+    lastListed,
+    guessedLocked: guessed.length,
+    guessedLockedNumbers: guessed,
+    uncertain: check.uncertain,
+    otherItems: check.otherItems,
   };
+}
+
+/**
+ * Whether a series' list itself is incomplete (3.0.1): it lacks a number — a hole, or one up to
+ * TikTok's count less the drama's other items received (`Series.missingNumbers`, else computed as
+ * `catalog.missingNumbers` does) —, it ended early (`Series.earlyEnd`) short of TikTok's count
+ * (unknown, or above the highest number listed), or it is uncertain ({@link listUncertain}): what
+ * makes {@link seriesReport} say `gaps`, `endedEarly` or `uncertain`, whatever the downloads did —
+ * and the list's warnings warn-coloured, the report saved.
+ * @param {Series} series
+ * @returns {boolean}
+ */
+export function listIncomplete(series) {
+  if (listMissing(series).length > 0) return true;
+  if (listUncertain(series)) return true;
+  const hint = series.totalHint && series.totalHint > 0 ? series.totalHint : null;
+  let lastListed = 0;
+  for (const episode of series.episodes) if (episode.number > lastListed) lastListed = episode.number;
+  return (series.earlyEnd ?? null) !== null && (hint === null || hint > lastListed);
+}
+
+/**
+ * Whether TikTok counts more than a series' list can place (3.0.1, `catalog.countCheck`'s
+ * `uncertain`): its count may include the trailer or highlight it listed, or episodes past the
+ * highest number listed may be missing.
+ * @param {Series} series
+ * @returns {boolean}
+ */
+export function listUncertain(series) {
+  return countCheck(
+    series.episodes.map((episode) => episode.number),
+    series.totalHint,
+    series.itemsReceived ?? null,
+    series.highlightNumbers ?? [],
+  ).uncertain;
+}
+
+/**
+ * The drama's items received besides its episode numbers (3.0.1, `catalog.countCheck`'s
+ * `otherItems`): a trailer, a highlight, an item left out for another one's number, one without a
+ * number or an id.
+ * @param {Series} series
+ * @returns {number}
+ */
+export function listOtherItems(series) {
+  return countCheck(
+    series.episodes.map((episode) => episode.number),
+    series.totalHint,
+    series.itemsReceived ?? null,
+    series.highlightNumbers ?? [],
+  ).otherItems;
+}
+
+/**
+ * The numbers a series' list lacks (3.0.1): `Series.missingNumbers` as the discovery left it after
+ * its gap filling, else — a series built by hand — computed as `catalog.missingNumbers` does.
+ * @param {Series} series
+ * @returns {number[]}
+ */
+export function listMissing(series) {
+  if (series.missingNumbers !== undefined) return [...series.missingNumbers];
+  const hint = series.totalHint && series.totalHint > 0 ? series.totalHint : null;
+  return missingNumbers(
+    series.episodes.map((episode) => episode.number),
+    hint,
+    series.itemsReceived ?? null,
+    MAX_EPISODE_NUMBER,
+    series.highlightNumbers ?? [],
+  );
+}
+
+/**
+ * Whether a row is the row of an episode TikTok's list lacks ({@link notListedResults}, 3.0.1;
+ * `engine.is_not_listed`): `failed-unavailable` with a message that starts with
+ * `messages.NOT_LISTED_PREFIX` — made without a request.
+ * @param {{status: string, message: string}} result
+ * @returns {boolean}
+ */
+export function isNotListed(result) {
+  return result.status === FAILED_UNAVAILABLE && result.message.startsWith(NOT_LISTED_PREFIX);
+}
+
+/**
+ * At most this many rows {@link notListedResults} makes for one series (the lowest numbers;
+ * `engine.MAX_NOT_LISTED_ROWS`): more missing numbers come from an absurd number in a payload — the
+ * report line still names them all.
+ */
+export const MAX_NOT_LISTED_ROWS = 500;
+
+/**
+ * One `failed-unavailable` row per number of `numbers` that `series` does not list
+ * (`engine.not_listed_results`; 3.0.1, the owner's report of 2026-11-27: an episode missing from
+ * TikTok's list gets a row of its own, never silence) — ascending, each number once, between 1 and
+ * {@link MAX_EPISODE_NUMBER}, at most {@link MAX_NOT_LISTED_ROWS} — made without a request: no
+ * pause, nothing counted, never recorded in the state. The message says why: `again` (a
+ * selection's wanted number its fresh list lacks) {@link NOT_LISTED_AGAIN_MESSAGE}, else
+ * {@link NOT_LISTED_EARLY_END_MESSAGE} for a number past the highest one listed when the listing
+ * ended early (`Series.earlyEnd`), else {@link NOT_LISTED_MESSAGE}. The row's episode has the
+ * number, the series' id and name, and nothing else (no item id: TikTok's list named none).
+ * @param {Series} series
+ * @param {Iterable<number>} numbers
+ * @param {{again?: boolean}} [options]
+ * @returns {DownloadResult[]}
+ */
+export function notListedResults(series, numbers, options = {}) {
+  const listed = new Set(series.episodes.map((episode) => episode.number));
+  let last = 0;
+  for (const number of listed) if (number > last) last = number;
+  const endedEarly = (series.earlyEnd ?? null) !== null;
+  const wanted = [...new Set(numbers)]
+    .filter((number) => Number.isInteger(number) && number > 0 && number <= MAX_EPISODE_NUMBER && !listed.has(number))
+    .sort((a, b) => a - b);
+  return wanted.slice(0, MAX_NOT_LISTED_ROWS).map((number) => {
+    let message = NOT_LISTED_MESSAGE;
+    if (options.again === true) message = NOT_LISTED_AGAIN_MESSAGE;
+    else if (endedEarly && number > last) message = NOT_LISTED_EARLY_END_MESSAGE;
+    const episode = makeEpisode({ number, itemId: "", title: "", seriesId: series.seriesId, seriesName: series.name });
+    return { episode, status: FAILED_UNAVAILABLE, path: null, message };
+  });
 }
 
 /**
@@ -361,7 +571,16 @@ export function ago(seconds) {
  * unlocked (3), 1 locked (4)`, `incomplete: 26 of 30 — 2 locked (5, 6), 1 failed (12); episode 17
  * missing from TikTok's list`, or for a series skipped as complete `complete, nothing to do: 3
  * episodes already on disk, 1 locked (4) (checked 2 h ago) — unlocked more in the TikTok app since?
- * --recheck looks again`.
+ * --recheck looks again`. A list that ended early (`endedEarly`, 3.0.1) names apart what it did
+ * not bring past the highest number listed — `incomplete: 60 of 62 — TikTok's list ended early:
+ * episodes 61, 62 not received` ({@link ENDED_EARLY_TEXT}), its holes below that number still
+ * `missing from TikTok's list` — or, when TikTok's count is unknown, where it ended: `incomplete:
+ * 60 of 60 — TikTok's list ended early after episode 60`. The free episodes DramaFetch only guessed
+ * were locked (`guessedLocked`, 3.0.1) have a group of their own after the counts: `incomplete: 2 of
+ * 3 — 1 free episode not asked for (3): TikTok's list made it look locked`. An uncertain list
+ * (`uncertain`, 3.0.1) says what TikTok counts and what was listed: `incomplete: 65 of 65 — TikTok's
+ * list may be incomplete: TikTok counts 66 episodes, 65 listed and 1 other item (a trailer or a
+ * highlight)`.
  * @param {SeriesReport} report
  * @returns {string}
  */
@@ -396,12 +615,27 @@ export function reportLine(report) {
   if (report.unlocked) details.push(unlocked);
   if (report.locked) details.push(locked);
   if (report.failed) details.push(`${report.failed} failed (${numbersText(report.failedNumbers)})`);
-  const rest = report.listed - have - report.locked - report.failed;
+  const rest = report.listed - have - report.locked - (report.guessedLocked ?? 0) - report.failed;
   if (rest > 0) details.push(`${rest} not downloaded`);
   const groups = details.length > 0 ? [details.join(", ")] : [];
-  if (report.gaps.length > 0) {
-    const gapNoun = report.gaps.length === 1 ? "episode" : "episodes";
-    groups.push(`${gapNoun} ${numbersText(report.gaps)} missing from TikTok's list`);
+  if ((report.guessedLocked ?? 0) > 0) groups.push(notAskedText(report.guessedLockedNumbers ?? []));
+  if (report.endedEarly) {
+    const holes = report.gaps.filter((number) => number < report.lastListed);
+    const unreceived = report.gaps.filter((number) => number > report.lastListed);
+    if (holes.length > 0) groups.push(missingText(holes));
+    if (unreceived.length > 0) {
+      const noun = unreceived.length === 1 ? "episode" : "episodes";
+      groups.push(`${ENDED_EARLY_TEXT}: ${noun} ${numbersText(unreceived)} not received`);
+    } else if (report.lastListed > 0) {
+      groups.push(`${ENDED_EARLY_TEXT} after episode ${report.lastListed}`);
+    } else {
+      groups.push(ENDED_EARLY_TEXT);
+    }
+  } else if (report.gaps.length > 0) {
+    groups.push(missingText(report.gaps));
+  }
+  if (report.uncertain === true && report.totalHint) {
+    groups.push(uncertainLineText(report.totalHint, report.listed, report.otherItems ?? 0));
   }
   if (report.totalHint && report.listed > report.totalHint) {
     groups.push(`TikTok announces ${report.totalHint} episodes, ${report.listed} listed`);
@@ -411,6 +645,42 @@ export function reportLine(report) {
   let line = `incomplete: ${have} of ${total}`;
   if (groups.length > 0) line += ` — ${groups.join("; ")}`;
   return line;
+}
+
+/**
+ * `1 free episode not asked for (17): TikTok's list made it look locked` / `2 free episodes not
+ * asked for (3, 17): TikTok's list made them look locked` (3.0.1, `engine._not_asked_text`,
+ * {@link NOT_ASKED_TEXT}): the free episodes DramaFetch's own rules guessed were locked.
+ * @param {readonly number[]} numbers
+ * @returns {string}
+ */
+function notAskedText(numbers) {
+  const one = numbers.length === 1;
+  return `${numbers.length} free ${one ? "episode" : "episodes"} ${NOT_ASKED_TEXT} (${numbersText(numbers)}): TikTok's list made ${one ? "it" : "them"} look locked`;
+}
+
+/**
+ * `TikTok's list may be incomplete: TikTok counts 66 episodes, 65 listed and 1 other item (a trailer
+ * or a highlight)` (3.0.1, `engine._uncertain_text`, `catalog.UNCERTAIN_TEXT`): an uncertain list, in
+ * a report line.
+ * @param {number} total
+ * @param {number} listed
+ * @param {number} other
+ * @returns {string}
+ */
+function uncertainLineText(total, listed, other) {
+  return `${UNCERTAIN_TEXT}: TikTok counts ${total} ${total === 1 ? "episode" : "episodes"}, ${listed} listed and ${otherItemsText(other)}`;
+}
+
+/**
+ * `episode 17 missing from TikTok's list` / `episodes 5, 6 missing from TikTok's list`
+ * (`engine._missing_text`).
+ * @param {readonly number[]} numbers
+ * @returns {string}
+ */
+function missingText(numbers) {
+  const noun = numbers.length === 1 ? "episode" : "episodes";
+  return `${noun} ${numbersText(numbers)} missing from TikTok's list`;
 }
 
 /**
@@ -439,6 +709,12 @@ export function reportToDict(report) {
     checked_ago_s: report.checkedAgoS,
     unlocked: report.unlocked,
     unlocked_numbers: [...report.unlockedNumbers],
+    ended_early: report.endedEarly,
+    last_listed: report.lastListed,
+    guessed_locked: report.guessedLocked ?? 0,
+    guessed_locked_numbers: [...(report.guessedLockedNumbers ?? [])],
+    uncertain: report.uncertain ?? false,
+    other_items: report.otherItems ?? 0,
     line: reportLine(report),
   };
 }
@@ -518,13 +794,16 @@ export function completeSkipAllowed(selection, options) {
 /**
  * The run of a series its state says was complete less than `RECHECK_AFTER_S` (24 h) before
  * `nowS`, every file it counted still on disk and at least one there (`engine._skip_if_complete`)
- * — or null, and the series is resolved as usual. Ask {@link completeSkipAllowed} first.
+ * — or null, and the series is resolved as usual. A mark written under another completeness rule
+ * than `state.COMPLETE_RULE` (3.0.1: a mark of 3.0.0 or earlier carries none, `completeTrusted`)
+ * never skips. Ask {@link completeSkipAllowed} first.
  * @param {SeriesState | null} state
  * @param {{seriesId: string, nowS: number, exists: FileExists}} context
  * @returns {CompleteSkip | null}
  */
 export function completeSkip(state, context) {
   if (state === null || state.complete_episodes === null || state.complete_episodes === undefined) return null;
+  if (!completeTrusted(state)) return null; // 3.0.1: a mark of an older completeness rule never skips
   const since = completeSince(state);
   if (since === null) return null;
   const age = context.nowS - since;

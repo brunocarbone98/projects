@@ -7,10 +7,11 @@ The file name comes from ``DownloadOptions.name_format`` (see :func:`episode_ste
 message, timestamp) so a rerun skips what is already on disk and retries the rest, whatever name
 format the run uses; it never contains cookies or URLs with tokens. Writes are atomic (temp file +
 replace) so a Ctrl+C mid-run leaves a valid file. It also remembers when the series was last found
-complete (``complete_at``, ``complete_episodes``): ``engine.run_series`` skips such a series without
-a request for ``models.RECHECK_AFTER_S``, and any new attempt (a result that is not a skip) forgets
-it. :func:`read_manifest` reads a manifest without any side effect (``Manifest.load`` moves a
-corrupt file aside).
+complete (``complete_at``, ``complete_episodes``) and under which completeness rule
+(``complete_rule``, :data:`COMPLETE_RULE`, 3.0.1): ``engine.run_series`` skips such a series without
+a request for ``models.RECHECK_AFTER_S`` — only when the mark was written under the rule in force —,
+and any new attempt (a result that is not a skip) forgets it. :func:`read_manifest` reads a
+manifest without any side effect (``Manifest.load`` moves a corrupt file aside).
 """
 
 from __future__ import annotations
@@ -37,6 +38,13 @@ log = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = "dramafetch.json"
 MANIFEST_VERSION = 1
+#: The completeness rule a complete mark is written under (``complete_rule``, 3.0.1, the owner's
+#: report of 2026-11-27): 2 since 3.0.1, whose ``engine.series_report`` counts a free episode
+#: DramaFetch only guessed was locked, the numbers missing from TikTok's list — its last ones
+#: included, held against TikTok's count — and a list that ended early. A mark without it (written
+#: by 3.0.0 or earlier, under the old rule: "1") or under another rule never skips: the series is
+#: listed again, one ordinary paced listing; the record stays readable.
+COMPLETE_RULE = 2
 #: The placeholders a name format may use (in braces); anything else in braces is refused.
 NAME_PLACEHOLDERS = ("series", "number", "n", "title", "id")
 #: Placeholders that tell one episode from another. A format needs at least one of them: with
@@ -196,10 +204,13 @@ class Manifest:
     Format::
 
         {"version": 1, "series_id": "...", "series_name": "...", "episodes": {"1": {...}},
-         "complete_at": "2026-11-01T05:00:00Z", "complete_episodes": 30}
+         "complete_at": "2026-11-01T05:00:00Z", "complete_episodes": 30, "complete_rule": 2}
 
-    ``complete_at`` / ``complete_episodes`` are optional (written only while set): when a run
-    last found the series complete and how many episodes were on disk then (:meth:`mark_complete`).
+    ``complete_at`` / ``complete_episodes`` / ``complete_rule`` are optional (written only while
+    set): when a run last found the series complete, how many episodes were on disk then, and the
+    completeness rule it was found complete under (:meth:`mark_complete`, :data:`COMPLETE_RULE`;
+    absent from a mark written before 3.0.1 — such a mark is read, never trusted:
+    :meth:`complete_trusted`).
     """
 
     def __init__(self, path: Path, series_id: str, series_name: str | None) -> None:
@@ -209,6 +220,7 @@ class Manifest:
         self.entries: dict[int, ManifestEntry] = {}
         self.complete_at: str | None = None
         self.complete_episodes: int | None = None
+        self.complete_rule: int | None = None
 
     @classmethod
     def load(cls, path: Path, series_id: str, series_name: str | None) -> Manifest:
@@ -244,6 +256,8 @@ class Manifest:
         if self.complete_at is not None:
             data["complete_at"] = self.complete_at
             data["complete_episodes"] = self.complete_episodes
+            if self.complete_rule is not None:
+                data["complete_rule"] = self.complete_rule
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(
             json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -319,18 +333,25 @@ class Manifest:
 
     def mark_complete(self, when: float, episodes: int) -> None:
         """Remember that a run found the series complete at ``when`` (seconds since the epoch)
-        with ``episodes`` episodes on disk, and save. Cleared by the next :meth:`record` of a
-        result that is not a skip."""
+        with ``episodes`` episodes on disk, under the completeness rule in force
+        (:data:`COMPLETE_RULE`), and save. Cleared by the next :meth:`record` of a result that is
+        not a skip."""
         self.complete_at = _iso_utc(when)
         self.complete_episodes = int(episodes)
+        self.complete_rule = COMPLETE_RULE
         self.save()
 
     def clear_complete(self) -> None:
         """Forget that the series was complete (a whole run found it incomplete) and save."""
-        if self.complete_at is None and self.complete_episodes is None:
+        if (
+            self.complete_at is None
+            and self.complete_episodes is None
+            and self.complete_rule is None
+        ):
             return
         self.complete_at = None
         self.complete_episodes = None
+        self.complete_rule = None
         self.save()
 
     def complete_since(self) -> float | None:
@@ -338,6 +359,13 @@ class Manifest:
         if self.complete_at is None:
             return None
         return _epoch_of(self.complete_at)
+
+    def complete_trusted(self) -> bool:
+        """Whether the complete mark may make a run skip the series (3.0.1): it was written under
+        the completeness rule in force (``complete_rule`` == :data:`COMPLETE_RULE`). A mark of
+        3.0.0 or earlier carries none — it may hide the list's last episodes or a free episode
+        DramaFetch guessed was locked — so it never skips: the series is listed again."""
+        return self.complete_at is not None and self.complete_rule == COMPLETE_RULE
 
     def record(self, result: DownloadResult) -> None:
         """Store one result (replacing any earlier entry for the number) and save immediately.
@@ -353,6 +381,7 @@ class Manifest:
             # has to be found complete again before a run may skip it.
             self.complete_at = None
             self.complete_episodes = None
+            self.complete_rule = None
         recorded_path: str | None = None
         if result.path is not None:
             recorded_path = _relative_or_absolute(result.path, self.path.parent)
@@ -423,6 +452,7 @@ class _Parsed:
     entries: dict[int, ManifestEntry]
     complete_at: str | None
     complete_episodes: int | None
+    complete_rule: int | None
 
 
 def _apply(manifest: Manifest, parsed: _Parsed) -> None:
@@ -431,6 +461,7 @@ def _apply(manifest: Manifest, parsed: _Parsed) -> None:
     manifest.entries = parsed.entries
     manifest.complete_at = parsed.complete_at
     manifest.complete_episodes = parsed.complete_episodes
+    manifest.complete_rule = parsed.complete_rule
 
 
 def _parse_manifest(text: str, series_id: str) -> _Parsed | None:
@@ -465,7 +496,17 @@ def _parse_manifest(text: str, series_id: str) -> _Parsed | None:
         or complete_episodes < 0
     ):
         complete_at, complete_episodes = None, None
-    return _Parsed(name, entries, complete_at, complete_episodes)
+    # 3.0.1: the rule the mark was written under; a mark of 3.0.0 or earlier has none (still
+    # readable — it simply never skips), and an odd value is forgotten like the rest
+    complete_rule = data.get("complete_rule")
+    if (
+        complete_at is None
+        or isinstance(complete_rule, bool)
+        or not isinstance(complete_rule, int)
+        or complete_rule < 1
+    ):
+        complete_rule = None
+    return _Parsed(name, entries, complete_at, complete_episodes, complete_rule)
 
 
 def _parse_entry(key: Any, value: Any) -> ManifestEntry | None:

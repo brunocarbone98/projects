@@ -1051,7 +1051,8 @@ class _RunPrinter:
     def result(self, result: DownloadResult) -> None:
         _print_result(result)
         stopped = result.message.startswith(engine.STOPPED_PREFIX)
-        if result.status not in engine.NO_NETWORK_STATUSES and not stopped:
+        no_request = result.status in engine.NO_NETWORK_STATUSES or engine.is_not_listed(result)
+        if not no_request and not stopped:
             self._downloads += 1
         if stopped and not self._stopped:
             self._stopped = True
@@ -1107,11 +1108,19 @@ class _SeriesPrinter(_RunPrinter):
                 _stderr(f"warning: {self._prefix()}{warning}")
             if not series.episodes:
                 return  # series_done says so
-            missing = engine.missing_from_selection(series, self._spec)
-            if missing:
+            # 3.0.1: a requested number TikTok's list lacks up to the series' last episode gets a
+            # row of its own (``not in TikTok's list this time``); past it, it is no episode
+            unlisted = engine.unlisted_requested(series, self._spec)
+            if unlisted:
+                _stderr(
+                    "requested episodes TikTok's list does not hold: "
+                    + engine.format_ranges(engine.compress_ranges(unlisted))
+                )
+            ignored = engine.ignored_requested(series, self._spec)
+            if ignored:
                 _stderr(
                     "requested episodes the series does not list (ignored): "
-                    + engine.format_ranges(missing)
+                    + engine.format_ranges(ignored)
                 )
             if not start.episodes:
                 _stderr("no episodes match --episodes; nothing to do")
@@ -1183,7 +1192,11 @@ _BATCH_STATUS_WIDTH = 40
 def format_batch_summary(runs: list[engine.SeriesRun]) -> list[str]:
     """The table ``download`` prints after several series: one row per series with its status
     (:func:`batch_status`) and counts — ``listed`` is ``-`` for a series whose list was not
-    fetched (skipped as complete, failed, not started)."""
+    fetched (skipped as complete, failed, not started). ``not asked`` (3.0.1, the lead's D12): the
+    free episodes DramaFetch did not ask for because TikTok's list made them look locked
+    (``SeriesReport.guessed_locked``) — not downloaded, and no longer counted under ``locked``,
+    which keeps the paid, TikTok-flagged and DRM ones; the extension's batch table has the same
+    column."""
     statuses = [batch_status(run) for run in runs]
     tally: dict[str, int] = {}
     for status in statuses:
@@ -1200,7 +1213,7 @@ def format_batch_summary(runs: list[engine.SeriesRun]) -> list[str]:
         "",
         f"Batch: {len(runs)} series — {counts}" if counts else "Batch: no series",
         f"  {'series':<{series_width}}  {'status':<{status_width}}  listed  done  on disk  "
-        "locked  failed",
+        "locked  not asked  failed",
     ]
     for run, name, status in zip(runs, names, statuses, strict=True):
         report = run.report
@@ -1208,7 +1221,8 @@ def format_batch_summary(runs: list[engine.SeriesRun]) -> list[str]:
         lines.append(
             f"  {_truncate(name, series_width):<{series_width}}  "
             f"{_truncate(status, status_width):<{status_width}}  {listed:>6}  {report.done:>4}  "
-            f"{report.on_disk:>7}  {report.locked:>6}  {report.failed:>6}"
+            f"{report.on_disk:>7}  {report.locked:>6}  {report.guessed_locked:>9}  "
+            f"{report.failed:>6}"
         )
     return lines
 

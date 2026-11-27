@@ -249,9 +249,14 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--bord
 th { color: var(--muted); font-weight: 600; /* on: --card */ }
 td.message, .report li, .banner { overflow-wrap: anywhere; }
 tr.series-row td { font-weight: 600; color: var(--row-head-fg); background: var(--row-head-bg); }
+/* the list's warnings under a drama's header (3.0.1): information, warn-coloured when the list itself is incomplete */
+tr.series-warning td { color: var(--muted); font-size: 0.85rem; padding-left: 20px; overflow-wrap: anywhere; /* on: --card */ }
+tr.series-warning.warn td { color: var(--warn); font-weight: 600; /* on: --card */ }
 #batch-table td[data-status="complete"], #batch-table td[data-status="skipped (complete)"] { color: var(--ok); font-weight: 600; /* on: --card */ }
 #batch-table td[data-status="incomplete"], #batch-table td[data-status^="failed"] { color: var(--bad); font-weight: 600; /* on: --card */ }
 #batch-table td[data-status="not started"] { color: var(--muted); /* on: --card */ }
+/* the batch table's eight columns (3.0.1: `Not asked` among them) fit the tab: a long name or a bare id breaks */
+#batch-table td:first-child { overflow-wrap: anywhere; }
 /* a thumbnail, or the empty frame it fills once its row has been in view (so no row ever jumps) */
 .cover { width: 40px; height: 54px; object-fit: cover; border-radius: 4px; background: var(--chip); display: block; /* no text */ }
 .badge { display: inline-block; padding: 1px 9px; border-radius: 999px; background: var(--btn); color: var(--btn-text); font-size: 0.8rem; font-weight: 600; white-space: nowrap; margin-right: 4px; }
@@ -317,6 +322,9 @@ button.link:hover:not(:disabled) { background: none; color: var(--link-hover); /
 .drama-actions button.primary { font-size: 0.86rem; padding: 6px 12px; }
 .library-foot { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 12px; }
 .report { padding-left: 18px; }
+/* every job's lines stay (3.0.1), each styled by its drama's outcome: complete, or not complete */
+.report li.complete { color: var(--ok); /* on: --card */ }
+.report li.incomplete { color: var(--bad); /* on: --card */ }
 /* the episodes a job did not download, apart from the ones that completed, with their retry */
 #failed-block { margin-top: 14px; }
 #failed-block h3 { font-size: 1rem; margin: 0; color: var(--bad); /* on: --card */ }
@@ -351,4 +359,16 @@ button.link:hover:not(:disabled) { background: none; color: var(--link-hover); /
   #episode-table th:nth-child(2), #episode-table td:nth-child(2),
   #episode-table th:nth-child(6), #episode-table td:nth-child(6) { display: none; }
   th, td { padding: 6px 5px; }
+}
+/* a tab narrower than the batch table's eight headings side by side (3.0.1): the counts' headings stand on
+   end, the table a little smaller; at 420 px and less a status may break too — the table fits from 320 px up */
+@media (max-width: 760px) {
+  #batch-table { font-size: 0.85rem; }
+  #batch-table th, #batch-table td { padding: 5px; }
+  #batch-table th { vertical-align: bottom; }
+  #batch-table th:nth-child(n+3) { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; text-align: left; }
+}
+@media (max-width: 420px) {
+  #batch-table th, #batch-table td { padding: 4px 3px; }
+  #batch-table td:nth-child(2) { overflow-wrap: anywhere; hyphens: auto; }
 }

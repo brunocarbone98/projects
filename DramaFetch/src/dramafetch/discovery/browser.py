@@ -2,6 +2,12 @@
 list from the `/api/drama/episode/item_list/` responses the page itself requests, then page through
 the rest by re-issuing that request from inside the page (same cookies, same signature params).
 
+The page is opened at episode 1 whatever episode a link names (3.0.1). Once the pagination is
+over, what the list still lacks — a hole, the episodes up to TikTok's count, the rest of a list
+that ended early — is asked for again with the same request, paced the same, at most
+`GAP_FILL_REQUESTS` times; what is still missing, and every page asked for (cursors and counts,
+never a query), stays on the `Series` (`missing_numbers`, `early_end`, `listing`).
+
 Nothing here unlocks anything or touches DRM: the browser only does what the user's own browser
 does when they scroll the episode list. The only automation-related setting is a normal Chrome
 user agent (Playwright's default says "HeadlessChrome"); Chromium is launched with its default
@@ -24,15 +30,21 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from dramafetch.catalog import (
+    Listing,
     PagePayload,
     catalog_warnings,
+    fill_covered,
+    fill_target,
     find_item_lists,
-    merge_episodes,
+    merge_pages,
+    missing_numbers,
+    page_ends_list,
     parse_detail_payload,
     parse_item_list_payload,
+    series_item_ids,
 )
 from dramafetch.discovery.cookies import load_netscape_cookies
 from dramafetch.discovery.static import (
@@ -52,7 +64,14 @@ from dramafetch.errors import (
     LoginRequiredError,
     RateLimitedError,
 )
-from dramafetch.models import DiscoveryOptions, Series, SeriesRef
+from dramafetch.models import (
+    MAX_EPISODE_NUMBER,
+    DiscoveryOptions,
+    ListingPage,
+    ListingRecord,
+    Series,
+    SeriesRef,
+)
 from dramafetch.urls import series_page_url
 
 if TYPE_CHECKING:
@@ -86,6 +105,33 @@ RATE_LIMIT_MESSAGE = (
     "TikTok is rate-limiting this address (HTTP 429 on the episode list): wait 30-60 minutes "
     "before trying again"
 )
+#: The warnings of the pagination's fallbacks — each one an early end of the list
+#: (``Series.early_end``) until a later page says ``hasMore`` false — word for word the extension's
+#: (``discovery.js``; parity-tested), next to the max-pages warning (``_max_pages_warning``).
+NO_CURSOR_WARNING = (
+    "TikTok reported more episodes without a usable cursor; scrolled the page instead"
+)
+NO_LIST_WARNING = "in-page pagination fetch returned no episode list; scrolled the page instead"
+NOTHING_NEW_WARNING = (
+    "in-page pagination returned no new episodes although TikTok reported more; "
+    "scrolled the page instead"
+)
+#: The gap filling (3.0.1, the owner's report of 2026-11-27): once the pagination is over, the
+#: listing asks TikTok AGAIN for the pages that should hold what it lacks — a hole below the
+#: highest number listed, the numbers up to TikTok's count less the drama's other items received,
+#: once the page after the highest number listed when TikTok counts more than it can place, the
+#: rest of a list that ended early (``catalog.fill_target``) — with the very request the
+#: pagination makes (the template with ``cursor`` = the first missing number - 1 and the usual
+#: ``count``), after the usual list-page pause, one at a time, and at most this many per listing
+#: (the extension's ``discovery.GAP_FILL_REQUESTS``, parity-tested). A 429 or a captcha stops the
+#: listing as anywhere else; an answer that brings no list ends the filling; what is still missing
+#: stays in ``Series.missing_numbers`` / ``Series.early_end`` and is said.
+GAP_FILL_REQUESTS = 4
+# ``ListingPage.kind`` of what this strategy reads (``models.LISTING_KINDS``): the page's own
+# requests read off the wire, the pagination's next pages, the gap filling's requests.
+_PAGE = "page"
+_NEXT = "next"
+_FILL = "fill"
 
 # Re-issues an item_list request from inside the page: same cookies, same signature parameters.
 # Called as `page.evaluate(FETCH_JS, [url, timeout_ms])`. A non-2xx answer (whatever its body) and
@@ -134,38 +180,118 @@ class _Capture:
     payloads: list[Any] = field(default_factory=list)  # item_list payloads, dump order
     pages: list[PagePayload] = field(default_factory=list)
     item_ids: set[str] = field(default_factory=set)
+    # the ids of the series' items any page brought (``catalog.page_ends_list``)
+    seen_ids: set[str] = field(default_factory=set)
     seen_payloads: set[str] = field(default_factory=set)
     template_url: str | None = None  # last item_list request URL; stays in memory only
     pending: list[tuple[str, Any]] = field(default_factory=list)
     detail: Any | None = None
     page_url: str = ""
     warnings: list[str] = field(default_factory=list)
+    # the warning of the fallback the pagination stopped on, None while it ended on a last page
+    ended_early: str | None = None
+    # a page said the list is over (``hasMore`` false, and no mere repeat): at any time
+    end_reached: bool = False
+    # the cursors pages announced with ``hasMore`` true: an answer to one of them with no item of
+    # the series ends nothing (``catalog.page_ends_list``'s ``expected_more``, 3.0.1)
+    announced: set[str] = field(default_factory=set)
+    # the list request's scheme, host and path (never its query), and every page asked or read
+    endpoint: str | None = None
+    listing: list[ListingPage] = field(default_factory=list)
 
-    def ingest(self, url: str, payload: Any) -> tuple[PagePayload, int]:
+    @property
+    def early_end(self) -> str | None:
+        """Why the list ended early — the fallback the pagination stopped on — while no page has
+        said since that the list is over; None otherwise."""
+        return None if self.end_reached else self.ended_early
+
+    def ingest(self, url: str, payload: Any, *, fill: bool = False) -> tuple[PagePayload, int]:
         """Parse one item_list payload; return it with the number of episodes not seen before.
 
         A payload seen before (the listener also sees the fetches we issue ourselves, and the
-        page may re-request a page) is parsed but not counted or stored again.
+        page may re-request a page) is parsed but not counted or stored again. ``fill``: the
+        answer to a gap-filling request, which more was expected of (3.0.1).
         """
+        page, new, _fresh = self._take(url, payload, fill=fill)
+        return page, new
+
+    def _take(self, url: str, payload: Any, *, fill: bool = False) -> tuple[PagePayload, int, bool]:
+        """:meth:`ingest`, and whether the payload was new (stored)."""
         page = parse_item_list_payload(payload, self.series_id)
         key = _payload_key(payload)
         if key in self.seen_payloads:
-            return page, 0
+            return page, 0, False
         self.seen_payloads.add(key)
         self.payloads.append(payload)
         self.pages.append(page)
         self.template_url = url
+        if self.endpoint is None:
+            self.endpoint = safe_url(url)
+        # An answer to a cursor an earlier page announced with hasMore true, or to a gap-filling
+        # request, that brings no item of the series ends nothing (3.0.1, the review's L5): the
+        # early end the pagination or the filling records stands.
+        expected_more = fill or _query_value(url, "cursor") in self.announced
+        if page_ends_list(
+            page, self.seen_ids, listed=_has_item_list(payload), expected_more=expected_more
+        ):
+            self.end_reached = True
+        if page.has_more and page.cursor is not None:
+            self.announced.add(str(page.cursor))
+        self.seen_ids.update(series_item_ids(page))
         new_ids = {episode.item_id for episode in page.episodes} - self.item_ids
         self.item_ids |= new_ids
-        return page, len(new_ids)
+        return page, len(new_ids), True
 
     def drain(self) -> int:
-        """Ingest what the response listener queued meanwhile; return the count of new episodes."""
+        """Ingest what the response listener queued meanwhile; return the count of new episodes.
+        Each new payload that holds a list is a page the series page asked for itself (``page``
+        in the listing): the echoes of our own requests are payloads seen already, and an answer
+        without a list — TikTok's error to one of ours, read off the wire too — was recorded
+        where we asked for it."""
         new = 0
         while self.pending:
             url, payload = self.pending.pop(0)
-            new += self.ingest(url, payload)[1]
+            page, added, fresh = self._take(url, payload)
+            if fresh and _has_item_list(payload):
+                self.note(_PAGE, url, page)
+            new += added
         return new
+
+    def note(self, kind: str, url: str, page: PagePayload | None) -> None:
+        """Record one page of the listing (``Series.listing``): the ``cursor`` and ``count`` the
+        request asked — read from its URL, nothing else of it — and what the answer said; ``page``
+        None for an answer that held no list."""
+        cursor_asked, count_asked = _query_value(url, "cursor"), _query_value(url, "count")
+        if page is None:
+            self.listing.append(ListingPage(kind, cursor_asked, count_asked, listed=False))
+            return
+        self.listing.append(
+            ListingPage(
+                kind,
+                cursor_asked,
+                count_asked,
+                listed=True,
+                items=page.seen_items,
+                numbers=tuple(episode.number for episode in page.episodes),
+                has_more=page.has_more,
+                cursor=page.cursor,
+            )
+        )
+
+    def end_early(self, warning: str) -> None:
+        """The pagination stops on a fallback: its warning, and the early end (the first one)."""
+        self.warnings.append(warning)
+        if self.ended_early is None:
+            self.ended_early = warning
+
+    def count(self, listing: Listing) -> int | None:
+        """TikTok's count of the series' episodes: the detail's total, else the items'
+        ``numVideos`` (``_build_series`` reads it the same way)."""
+        if self.detail is not None:
+            total = parse_detail_payload(self.detail, self.series_id)[1]
+            if total is not None:
+                return total
+        return listing.total_hint
 
     def on_response(self, response: Response) -> None:
         url = response.url
@@ -244,11 +370,14 @@ class PlaywrightDiscovery:
     def _capture_series(
         self, page: Page, ref: SeriesRef, options: DiscoveryOptions, capture: _Capture
     ) -> None:
-        """Open the series page and page through its episode list, filling ``capture``."""
+        """Open the series page and page through its episode list, then ask again for what it
+        lacks (:meth:`_fill_gaps`, once TikTok's count from the detail is in), filling
+        ``capture``."""
         page.on("response", capture.on_response)
         self._open_series_page(page, ref, options, capture)
         self._paginate(page, options, capture)
         self._await_detail(page, capture)
+        self._fill_gaps(page, options, capture)
         capture.page_url = safe_url(page.url)
 
     # -- steps -----------------------------------------------------------------------------------
@@ -298,7 +427,10 @@ class PlaywrightDiscovery:
     def _open_series_page(
         self, page: Page, ref: SeriesRef, options: DiscoveryOptions, capture: _Capture
     ) -> None:
-        url = series_page_url(ref.series_id, ref.episode_hint or 1, options.base_url)
+        # Episode 1's page whatever episode the link names (3.0.1): a page opened at a later
+        # episode may ask first for the window that holds it, and the pages before it were never
+        # asked for. The episode in the link picks nothing — a paste downloads the whole drama.
+        url = series_page_url(ref.series_id, 1, options.base_url)
         timeout_ms = max(1, int(options.timeout_s * 1000))
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         deadline = time.monotonic() + options.timeout_s
@@ -330,19 +462,18 @@ class PlaywrightDiscovery:
             page.wait_for_timeout(POLL_INTERVAL_S * 1000)
 
     def _paginate(self, page: Page, options: DiscoveryOptions, capture: _Capture) -> None:
-        """Primary pagination: re-fetch the captured item_list URL with the next cursor."""
+        """Primary pagination: re-fetch the captured item_list URL with the next cursor. Each
+        fallback it stops on is an early end of the list (``_Capture.end_early``) until a later
+        page says the list is over."""
         current = capture.pages[-1]
         previous_cursor: int | str | None = None
         while current.has_more:
             if len(capture.pages) >= options.max_pages:
-                capture.warnings.append(_max_pages_warning(options.max_pages))
+                capture.end_early(_max_pages_warning(options.max_pages))
                 return
             cursor, template = current.cursor, capture.template_url
             if cursor is None or template is None or cursor == previous_cursor:
-                capture.warnings.append(
-                    "TikTok reported more episodes without a usable cursor; "
-                    "scrolled the page instead"
-                )
+                capture.end_early(NO_CURSOR_WARNING)
                 self._scroll_for_more(page, options, capture)
                 return
             next_url = _with_query_params(
@@ -351,25 +482,62 @@ class PlaywrightDiscovery:
             self._page_pause(page, options)
             payload = self._fetch_in_page(page, next_url, options.timeout_s)
             if payload is None:
+                capture.note(_NEXT, next_url, None)
                 self._stop_if_challenged(page)  # a wall already up is a refusal, not a fallback
-                capture.warnings.append(
-                    "in-page pagination fetch returned no episode list; scrolled the page instead"
-                )
+                capture.end_early(NO_LIST_WARNING)
                 self._scroll_for_more(page, options, capture)
                 return
             previous_cursor = cursor
             current, new = capture.ingest(next_url, payload)
+            capture.note(_NEXT, next_url, current)
             new += capture.drain()
             if new == 0:
                 # The previous page said hasMore, yet the re-issued request added nothing: TikTok
                 # may answer a re-signed request with an empty list. Let the page itself load the
                 # rest the way a user's scrolling would (bounded by SCROLL_ROUNDS_WITHOUT_NEWS).
-                capture.warnings.append(
-                    "in-page pagination returned no new episodes although TikTok reported more; "
-                    "scrolled the page instead"
-                )
+                capture.end_early(NOTHING_NEW_WARNING)
                 self._scroll_for_more(page, options, capture)
                 return
+
+    def _fill_gaps(self, page: Page, options: DiscoveryOptions, capture: _Capture) -> None:
+        """Ask TikTok again, once the pagination is over, for the pages that should hold what the
+        listing lacks (:data:`GAP_FILL_REQUESTS`): the next number :func:`catalog.fill_target`
+        names — a hole, a number up to TikTok's count, the rest of a list that ended early —
+        through the pagination's own request (the captured template with ``cursor`` = that
+        number - 1 and ``count`` = ``page_count``), after the list-page pause, one at a time;
+        each answer is ingested like any page and covers what it was asked for
+        (:func:`catalog.fill_covered`), so no number is asked for twice. An HTTP 429 raises
+        ``RateLimitedError`` and a captcha ``ChallengeError``, as in the pagination; an answer
+        that brings no list ends the filling."""
+        covered: list[tuple[int, int | None]] = []
+        for _ in range(GAP_FILL_REQUESTS):
+            capture.drain()
+            listing = merge_pages(capture.pages)
+            target = fill_target(
+                (episode.number for episode in listing.episodes),
+                capture.count(listing),
+                listing.items_received,
+                early_end=capture.early_end is not None,
+                covered=covered,
+                limit=MAX_EPISODE_NUMBER,
+                highlights=listing.highlight_numbers,
+            )
+            if target is None or capture.template_url is None:
+                return
+            url = _with_query_params(
+                capture.template_url,
+                {"cursor": str(target - 1), "count": str(options.page_count)},
+            )
+            self._page_pause(page, options)
+            payload = self._fetch_in_page(page, url, options.timeout_s)
+            if payload is None:
+                capture.note(_FILL, url, None)
+                self._stop_if_challenged(page)  # a wall is a refusal, as during the pagination
+                log.debug("the gap filling brought no episode list; the filling ends")
+                return
+            answer, _ = capture.ingest(url, payload, fill=True)
+            capture.note(_FILL, url, answer)
+            covered.append(fill_covered(target, options.page_count, answer))
 
     def _fetch_in_page(self, page: Page, url: str, timeout_s: float) -> Any | None:
         """The payload of an item_list request issued from inside the page, or None when the
@@ -451,10 +619,19 @@ def _default_factory() -> Callable[[], Any]:
 
 
 def _build_series(ref: SeriesRef, options: DiscoveryOptions, capture: _Capture) -> Series:
-    episodes = merge_episodes(page.episodes for page in capture.pages)
-    name, total = (
-        parse_detail_payload(capture.detail) if capture.detail is not None else (None, None)
+    """The series of the captured pages (``catalog.merge_pages``: one episode per number by the
+    preference order; the items left out and the skipped ones said in the warnings), the detail's
+    name and count — the items' ``numVideos`` when the detail gives none —, and what the listing
+    still lacks once the gap filling is over: the missing numbers (``catalog.missing_numbers``),
+    the early end (``_Capture.early_end``) and the pages it asked for (``Series.listing``)."""
+    listing = merge_pages(capture.pages)
+    episodes = listing.episodes
+    name = (
+        parse_detail_payload(capture.detail, ref.series_id)[0]
+        if capture.detail is not None
+        else None
     )
+    total = capture.count(listing)
     if name is None:
         name = next((e.series_name for e in episodes if e.series_name), None)
     if not episodes:
@@ -470,9 +647,35 @@ def _build_series(ref: SeriesRef, options: DiscoveryOptions, capture: _Capture) 
             f"TikTok listed {seen} items but none belongs to series {ref.series_id} "
             "(is this a short-drama series URL?)"
         )
-    warnings = [*capture.warnings, *catalog_warnings(episodes, total)]
+    warnings = [
+        *capture.warnings,
+        *catalog_warnings(
+            episodes,
+            total,
+            duplicates=listing.duplicates,
+            skipped=listing.skipped,
+            items_received=listing.items_received,
+            highlights=listing.highlight_numbers,
+        ),
+    ]
     return Series(
-        series_id=ref.series_id, name=name, episodes=episodes, total_hint=total, warnings=warnings
+        series_id=ref.series_id,
+        name=name,
+        episodes=episodes,
+        total_hint=total,
+        warnings=warnings,
+        skipped_items=listing.skipped,
+        items_received=listing.items_received,
+        highlight_numbers=listing.highlight_numbers,
+        missing_numbers=missing_numbers(
+            (episode.number for episode in episodes),
+            total,
+            listing.items_received,
+            limit=MAX_EPISODE_NUMBER,
+            highlights=listing.highlight_numbers,
+        ),
+        early_end=capture.early_end,
+        listing=ListingRecord(endpoint=capture.endpoint, pages=list(capture.listing)),
     )
 
 
@@ -549,6 +752,13 @@ def _json_or_none(response: Response) -> Any | None:
 def _has_item_list(payload: Any) -> bool:
     """Same definition of "an item list" as the parser (``itemList`` or ``item_list``, nested)."""
     return bool(find_item_lists(payload))
+
+
+def _query_value(url: str, name: str) -> str | None:
+    """The first value of query parameter ``name`` (percent-decoded), or None — a request's
+    ``cursor`` or ``count`` for the listing record; nothing else of the query is read."""
+    values = parse_qs(urlsplit(url).query, keep_blank_values=True).get(name)
+    return values[0] if values else None
 
 
 def _with_query_params(url: str, params: dict[str, str]) -> str:

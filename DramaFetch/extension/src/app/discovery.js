@@ -15,9 +15,16 @@
  *   request handling apply exactly as for the page; the extension never reads a cookie. It cannot
  *   read the bodies of the page's own requests, so the first page costs one repeated request —
  *   the page's own item_list URL replayed byte for byte, since TikTok signs the whole query;
+ * - it opens the series page at episode 1 whatever episode a link names (3.0.1): the episode in a
+ *   link picks nothing, and a page opened at a later one may list only the window that holds it;
  * - it pauses `pageDelayS` × uniform(1.0, 2.0) — 0.8–1.6 s — before EVERY page fetch, the first
  *   included; it falls back to scrolling the list ({@link scrollInPage}, DOM scrolling in the
  *   ISOLATED world) and re-fetching, once each, the exact item_list URLs the page requested;
+ * - once the pagination is over, it asks again for what the list still lacks — a hole, the
+ *   episodes up to TikTok's count, the rest of a list that ended early — with the pagination's own
+ *   request, paced the same, at most {@link GAP_FILL_REQUESTS} times (3.0.1), and keeps what is
+ *   still missing and every page it asked for on the series (`missingNumbers`, `earlyEnd`,
+ *   `listing`: cursors and counts, never a query);
  * - it stops at a login redirect, a captcha page ({@link looksLikeChallenge}, the page text read
  *   in the ISOLATED world — while the first list is awaited, and again whenever a later page
  *   brings no list or a scroll round loads nothing: a wall TikTok raises mid-list stops the
@@ -31,14 +38,20 @@
 
 import {
   catalogWarnings,
+  fillCovered,
+  fillTarget,
   findItemLists,
   isDict,
-  mergeEpisodes,
+  mergePages,
+  missingNumbers,
+  pageEndsList,
   parseDetailPayload,
   parseItemListPayload,
+  seriesItemIds,
 } from "../lib/catalog.js";
 import { LIST_RATE_LIMIT_MESSAGE, TIKTOK_BASE_URL, pyFormatG } from "../lib/messages.js";
 import { PAGE_DELAY_S, defaultRng, pagePause, sleepSeconds } from "../lib/pacing.js";
+import { MAX_EPISODE_NUMBER } from "../lib/report.js";
 import { seriesPageUrl } from "../lib/urls.js";
 
 /** Substrings of the two API requests the page makes (`browser.ITEM_LIST_MARKER` / `DETAIL_MARKER`). */
@@ -64,6 +77,24 @@ export const SCROLL_ROUNDS_WITHOUT_NEWS = 4;
 export const PAGE_COUNT = 30;
 /** At most this many list pages per series (`DiscoveryOptions.max_pages`). */
 export const MAX_PAGES = 60;
+/**
+ * The gap filling (3.0.1, the owner's report of 2026-11-27; `browser.GAP_FILL_REQUESTS`,
+ * parity-tested): once the pagination is over and TikTok's count is in, the listing asks TikTok
+ * AGAIN for the pages that should hold what it lacks — a hole below the highest number listed, the
+ * numbers up to TikTok's count less the drama's other items received, the page after the highest
+ * number listed once when TikTok counts more than it can place, the rest of a list that ended early
+ * (`catalog.fillTarget`) — with the very request the pagination makes (the template with `cursor`
+ * = the first missing number - 1 and the usual `count`), after the usual list-page pause, one at a
+ * time, and at most this many per listing. A 429 or a captcha stops the listing as anywhere else;
+ * an answer that brings no list ends the filling; what is still missing stays in
+ * `Series.missingNumbers` / `Series.earlyEnd` and is said.
+ */
+export const GAP_FILL_REQUESTS = 4;
+/** `ListingPage.kind` of what the extension asks (`models.LISTING_KINDS`). */
+const FIRST = "first";
+const NEXT = "next";
+const SCROLL = "scroll";
+const FILL = "fill";
 /** How long the new tab may take to finish loading `about:blank` before it is sent to the series. */
 export const BLANK_TAB_WAIT_S = 2;
 /**
@@ -85,7 +116,10 @@ export const CHALLENGE_MESSAGE =
 export const EMPTY_LIST_MESSAGE =
   "TikTok returned an empty episode list; a logged-in session is required: log in to TikTok in a " +
   "normal tab of this Chrome";
-/** The warnings of the pagination (`browser._paginate`), word for word. */
+/**
+ * The warnings of the pagination (`browser._paginate`), word for word (parity-tested): each one an
+ * early end of the list (`Series.earlyEnd`) until a later page says `hasMore` false.
+ */
 export const NO_CURSOR_WARNING = "TikTok reported more episodes without a usable cursor; scrolled the page instead";
 export const NO_LIST_WARNING = "in-page pagination fetch returned no episode list; scrolled the page instead";
 export const NOTHING_NEW_WARNING =
@@ -472,6 +506,7 @@ export function chromeBrowser(appTabId, options = {}) {
 
 /**
  * @typedef {import("../lib/catalog.js").Series} Series
+ * @typedef {import("../lib/catalog.js").ListingPage} ListingPage
  * @typedef {import("../lib/catalog.js").PagePayload} PagePayload
  * @typedef {import("../lib/urls.js").SeriesRef} SeriesRef
  * @typedef {import("../lib/pacing.js").Rng} Rng
@@ -502,8 +537,21 @@ class Capture {
     this.pages = [];
     /** @type {Set<string>} */
     this.itemIds = new Set();
+    /** @type {Set<string>} the ids of the series' items any page brought (`catalog.pageEndsList`) */
+    this.seenIds = new Set();
     /** @type {Set<string>} */
     this.seenPayloads = new Set();
+    /** @type {string | null} the warning of the fallback the pagination stopped on; null while it ended on a last page */
+    this.endedEarly = null;
+    /** a page said the list is over (`hasMore` false, and no mere repeat): at any time */
+    this.endReached = false;
+    /** @type {Set<string>} the cursors pages announced with `hasMore` true: an answer to one of them
+     * with no item of the series ends nothing (`catalog.pageEndsList`'s `expectedMore`, 3.0.1) */
+    this.announced = new Set();
+    /** @type {string | null} the list request's scheme, host and path (never its query) */
+    this.endpoint = null;
+    /** @type {ListingPage[]} every list page the discovery asked for, in order */
+    this.listing = [];
     /** @type {unknown} */
     this.detail = null;
     /** @type {string[]} */
@@ -552,16 +600,26 @@ class Capture {
 
   /**
    * Parse one item_list payload (`_Capture.ingest`): the page and how many episodes it added. A
-   * payload seen before is parsed but not counted or stored again.
+   * payload seen before is parsed but not counted or stored again. `url` is the request it answers
+   * (its `cursor` read, nothing else of it); `fill` says it answers a gap-filling request — either
+   * way, an answer that brings no item of the series where more was expected (a cursor an earlier
+   * page announced with `hasMore` true, or a filling request) ends nothing (3.0.1, the review's L5).
    * @param {unknown} payload
+   * @param {string | null} [url]
+   * @param {boolean} [fill]
    * @returns {{page: PagePayload, added: number}}
    */
-  ingest(payload) {
+  ingest(payload, url = null, fill = false) {
     const page = parseItemListPayload(payload, this.seriesId);
     const key = JSON.stringify(payload);
     if (this.seenPayloads.has(key)) return { page, added: 0 };
     this.seenPayloads.add(key);
     this.pages.push(page);
+    const cursor = url === null ? null : queryParam(url, "cursor");
+    const expectedMore = fill || (cursor !== null && this.announced.has(cursor));
+    if (pageEndsList(page, this.seenIds, true, expectedMore)) this.endReached = true; // only list payloads come here
+    if (page.hasMore && page.cursor !== null) this.announced.add(String(page.cursor));
+    for (const itemId of seriesItemIds(page)) this.seenIds.add(itemId);
     let added = 0;
     for (const episode of page.episodes) {
       if (!this.itemIds.has(episode.itemId)) {
@@ -570,6 +628,65 @@ class Capture {
       }
     }
     return { page, added };
+  }
+
+  /**
+   * Why the list ended early — the fallback the pagination stopped on — while no page has said
+   * since that the list is over; null otherwise (`_Capture.early_end`).
+   * @returns {string | null}
+   */
+  get earlyEnd() {
+    return this.endReached ? null : this.endedEarly;
+  }
+
+  /**
+   * The pagination stops on a fallback: its warning, and the early end (the first one).
+   * @param {string} warning
+   */
+  endEarly(warning) {
+    this.warnings.push(warning);
+    if (this.endedEarly === null) this.endedEarly = warning;
+  }
+
+  /**
+   * Record one page the discovery asked for (`Series.listing`): the `cursor` and `count` the
+   * request asked — read from its URL, nothing else of it — and what the answer said; `page` null
+   * for an answer that held no list.
+   * @param {string} kind
+   * @param {string} url
+   * @param {PagePayload | null} page
+   */
+  note(kind, url, page) {
+    const cursorAsked = queryParam(url, "cursor");
+    const countAsked = queryParam(url, "count");
+    if (page === null) {
+      this.listing.push({ kind, cursorAsked, countAsked, listed: false, items: 0, numbers: [], hasMore: null, cursor: null });
+      return;
+    }
+    this.listing.push({
+      kind,
+      cursorAsked,
+      countAsked,
+      listed: true,
+      items: page.seenItems,
+      numbers: page.episodes.map((episode) => episode.number),
+      hasMore: page.hasMore,
+      cursor: page.cursor,
+    });
+  }
+
+  /**
+   * TikTok's count of the series' episodes: the detail's total, else the items' `numVideos`
+   * (`buildSeries` reads it the same way).
+   * @param {import("../lib/catalog.js").Listing} listing
+   * @returns {number | null}
+   */
+  count(listing) {
+    if (this.detail !== null) {
+      const { total } = parseDetailPayload(this.detail, this.seriesId);
+      if (total !== null) return total;
+    }
+    return listing.totalHint;
   }
 }
 
@@ -701,7 +818,13 @@ export async function discoverSeries(ref, options = {}) {
         }
         await pause();
         const payload = await fetchListPage(tab, url);
-        if (payload !== null) added += capture.ingest(payload).added;
+        if (payload === null) {
+          capture.note(SCROLL, url, null);
+        } else {
+          const ingested = capture.ingest(payload, url);
+          capture.note(SCROLL, url, ingested.page);
+          added += ingested.added;
+        }
       }
       if (added > 0) {
         quiet = 0;
@@ -718,7 +841,9 @@ export async function discoverSeries(ref, options = {}) {
    * because TikTok signs the whole query (`X-Bogus`, `_signature`, `msToken`, …) and a `cursor` or
    * `count` the page did not ask for would no longer match that signature. Python reads that first
    * response off the wire; the extension cannot, so it repeats the exact request. Only the pages
-   * after it are the template with the next `cursor` and the extension's `count`.
+   * after it are the template with the next `cursor` and the extension's `count`. Each fallback it
+   * stops on is an early end of the list (`Capture.endEarly`) until a later page says the list is
+   * over.
    * @param {number} tab
    * @param {string} template
    */
@@ -726,22 +851,24 @@ export async function discoverSeries(ref, options = {}) {
     await pause();
     const first = await fetchListPage(tab, template);
     if (first === null) {
+      capture.note(FIRST, template, null);
       await stopIfChallenged(tab); // no list: the wall may stand where the series was
-      capture.warnings.push(FIRST_PAGE_WARNING);
+      capture.endEarly(FIRST_PAGE_WARNING);
       await scrollForMore(tab);
       return;
     }
-    let current = capture.ingest(first).page;
+    let current = capture.ingest(first, template).page;
+    capture.note(FIRST, template, current);
     /** @type {string} the cursor of the page fetched last: the template's own ("0" without one) */
     let previousCursor = queryParam(template, "cursor") ?? "0";
     while (current.hasMore) {
       if (capture.pages.length >= maxPages) {
-        capture.warnings.push(maxPagesWarning(maxPages));
+        capture.endEarly(maxPagesWarning(maxPages));
         return;
       }
       const cursor = current.cursor;
       if (cursor === null || String(cursor) === previousCursor) {
-        capture.warnings.push(NO_CURSOR_WARNING);
+        capture.endEarly(NO_CURSOR_WARNING);
         await scrollForMore(tab);
         return;
       }
@@ -749,19 +876,59 @@ export async function discoverSeries(ref, options = {}) {
       await pause();
       const payload = await fetchListPage(tab, nextUrl);
       if (payload === null) {
+        capture.note(NEXT, nextUrl, null);
         await stopIfChallenged(tab); // no list: the wall may stand where the series was
-        capture.warnings.push(NO_LIST_WARNING);
+        capture.endEarly(NO_LIST_WARNING);
         await scrollForMore(tab);
         return;
       }
       previousCursor = String(cursor);
-      const ingested = capture.ingest(payload);
+      const ingested = capture.ingest(payload, nextUrl);
       current = ingested.page;
+      capture.note(NEXT, nextUrl, current);
       if (ingested.added === 0) {
-        capture.warnings.push(NOTHING_NEW_WARNING);
+        capture.endEarly(NOTHING_NEW_WARNING);
         await scrollForMore(tab);
         return;
       }
+    }
+  };
+
+  /**
+   * `browser._fill_gaps`: once the pagination is over and the detail is in, ask TikTok again for
+   * the pages that should hold what the listing lacks ({@link GAP_FILL_REQUESTS}): the next number
+   * `catalog.fillTarget` names — a hole, a number up to TikTok's count, the rest of a list that
+   * ended early — through the pagination's own request (the template with `cursor` = that number
+   * - 1 and the usual `count`), after the list-page pause, one at a time; each answer is ingested
+   * like any page and covers what it was asked for (`catalog.fillCovered`), so no number is asked
+   * for twice. A 429 throws {@link RateLimitedError} and a captcha {@link ChallengeError}, as in
+   * the pagination; an answer that brings no list ends the filling.
+   * @param {number} tab
+   * @param {string} template
+   */
+  const fillGaps = async (tab, template) => {
+    /** @type {[number, number | null][]} */
+    const covered = [];
+    for (let asked = 0; asked < GAP_FILL_REQUESTS; asked += 1) {
+      const listing = mergePages(capture.pages);
+      const target = fillTarget(
+        listing.episodes.map((episode) => episode.number),
+        capture.count(listing),
+        listing.itemsReceived,
+        { earlyEnd: capture.earlyEnd !== null, covered, limit: MAX_EPISODE_NUMBER, highlights: listing.highlightNumbers },
+      );
+      if (target === null) return;
+      const url = withQueryParams(template, { cursor: String(target - 1), count: String(pageCount) });
+      await pause();
+      const payload = await fetchListPage(tab, url);
+      if (payload === null) {
+        capture.note(FILL, url, null);
+        await stopIfChallenged(tab); // a wall is a refusal, as during the pagination
+        return;
+      }
+      const answer = capture.ingest(payload, url, true).page;
+      capture.note(FILL, url, answer);
+      covered.push(fillCovered(target, pageCount, answer));
     }
   };
 
@@ -771,7 +938,10 @@ export async function discoverSeries(ref, options = {}) {
     stopObserving = browser.observe(tab, observedUrlPatterns(base), {
       completed: (request) => capture.observed(request),
     });
-    await browser.navigate(tab, seriesPageUrl(ref.seriesId, ref.episodeHint || 1, base));
+    // Episode 1's page whatever episode the link names (3.0.1): a page opened at a later episode
+    // may ask first for the window that holds it, and the pages before it were never asked for.
+    // The episode in the link picks nothing — a paste downloads the whole drama.
+    await browser.navigate(tab, seriesPageUrl(ref.seriesId, 1, base));
 
     // `_open_series_page`: wait for the page's own first item_list request
     const started = clock();
@@ -804,7 +974,9 @@ export async function discoverSeries(ref, options = {}) {
       }
       await sleep(POLL_INTERVAL_S);
     }
-    await paginate(tab, /** @type {string} */ (capture.template));
+    const template = /** @type {string} */ (capture.template);
+    capture.endpoint = safeUrl(template);
+    await paginate(tab, template);
 
     // `_await_detail`: the detail request the page made (name and announced total), fetched once
     const detailDeadline = clock() + (options.detailGraceS ?? DETAIL_GRACE_S);
@@ -814,6 +986,9 @@ export async function discoverSeries(ref, options = {}) {
       const detail = await fetchPage(tab, capture.detailUrl);
       if (detail !== null) capture.detail = detail;
     }
+
+    // `_fill_gaps`: what the listing lacks, asked for again once TikTok's count is in
+    await fillGaps(tab, template);
   } finally {
     if (stopObserving !== null) stopObserving();
     if (tabId !== null) {
@@ -835,15 +1010,21 @@ function maxPagesWarning(maxPages) {
 }
 
 /**
- * `browser._build_series`: the merged episodes, the detail's name and total (the items'
- * `dramaInfo.dramaName` as the fallback name), the warnings.
+ * `browser._build_series`: the merged episodes (`catalog.mergePages`: one per number by the
+ * preference order; the items left out and the skipped ones said in the warnings), the detail's
+ * name and total — the items' `numVideos` when the detail gives none, the items'
+ * `dramaInfo.dramaName` as the fallback name —, the warnings, and what the listing still lacks
+ * once the gap filling is over: the missing numbers (`catalog.missingNumbers`), the early end
+ * (`Capture.earlyEnd`) and the pages it asked for (`Series.listing`).
  * @param {SeriesRef} ref
  * @param {Capture} capture
  * @returns {Series}
  */
 function buildSeries(ref, capture) {
-  const episodes = mergeEpisodes(capture.pages.map((page) => page.episodes));
-  let { name, total } = capture.detail !== null ? parseDetailPayload(capture.detail) : { name: null, total: null };
+  const listing = mergePages(capture.pages);
+  const episodes = listing.episodes;
+  let name = capture.detail !== null ? parseDetailPayload(capture.detail, ref.seriesId).name : null;
+  const total = capture.count(listing);
   if (name === null) name = episodes.find((episode) => episode.seriesName)?.seriesName ?? null;
   if (episodes.length === 0) {
     const seen = capture.pages.reduce((sum, page) => sum + page.seenItems, 0);
@@ -857,6 +1038,26 @@ function buildSeries(ref, capture) {
     name,
     episodes,
     totalHint: total,
-    warnings: [...capture.warnings, ...catalogWarnings(episodes, total)],
+    warnings: [
+      ...capture.warnings,
+      ...catalogWarnings(episodes, total, {
+        duplicates: listing.duplicates,
+        skipped: listing.skipped,
+        itemsReceived: listing.itemsReceived,
+        highlights: listing.highlightNumbers,
+      }),
+    ],
+    skippedItems: listing.skipped,
+    itemsReceived: listing.itemsReceived,
+    highlightNumbers: listing.highlightNumbers,
+    missingNumbers: missingNumbers(
+      episodes.map((episode) => episode.number),
+      total,
+      listing.itemsReceived,
+      MAX_EPISODE_NUMBER,
+      listing.highlightNumbers,
+    ),
+    earlyEnd: capture.earlyEnd,
+    listing: { endpoint: capture.endpoint, pages: [...capture.listing] },
   };
 }

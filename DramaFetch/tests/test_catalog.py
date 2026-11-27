@@ -11,32 +11,57 @@ from pathlib import Path
 import pytest
 
 from dramafetch.catalog import (
+    LEFT_OUT_HIGHLIGHT,
+    LEFT_OUT_LATER,
+    LEFT_OUT_LOCKED,
+    LEFT_OUT_REASONS,
+    LEFT_OUT_SHORTER,
     MAX_EXACT_INT,
     NO_PLAY_ADDRESS,
     SHORT_HEADER_HINT_PREFIX,
     SHORT_HEADER_MIN_GAP_S,
     SHORT_HEADER_RATIO,
+    SKIP_HIGHLIGHT,
+    SKIP_NO_ID,
+    SKIP_NO_NUMBER,
+    SKIP_OTHER_DRAMA,
+    SKIP_REASONS,
+    UNCERTAIN_TEXT,
     VIDEO_ONLY_PATH_SUFFIX,
+    AccessDecision,
+    CountCheck,
+    Duplicate,
+    Listing,
     PagePayload,
     Rendition,
     access_of,
     catalog_warnings,
     choose_rendition,
     codec_name,
+    count_check,
     cover_url_of,
     episode_from_item,
+    fill_target,
     find_item_lists,
     is_drm_key,
+    is_highlight,
     is_video_only_url,
+    item_key,
+    item_total_hint,
     key_words,
     listed_sizes,
     lock_hints,
     merge_episodes,
+    merge_pages,
+    missing_numbers,
     ordered_renditions,
+    page_ends_list,
     parse_detail_payload,
     parse_item_list_payload,
     play_url_candidates,
     renditions,
+    skip_reason,
+    uncertain_text,
     url_expiry,
 )
 from dramafetch.models import (
@@ -45,6 +70,7 @@ from dramafetch.models import (
     DRM_MESSAGE,
     QUALITY_MODES,
     Episode,
+    SkippedItem,
 )
 
 SERIES_ID = "7699393770256782354"
@@ -422,10 +448,12 @@ def test_cursor_is_not_taken_from_inside_items():
 
 def test_catalog_warnings_gaps_duplicates_total_and_locked():
     episodes = [_episode(n, f"id-{n}-{i}") for i, n in enumerate((1, 2, 3, 5, 8, 8))]
+    # a list that still holds two items with one number: the duplicate is found by the merge's
+    # rules (alike in every rule: the first listed stays) and named with both items
     assert catalog_warnings(episodes, 10) == [
         "episode 4 missing (gap)",
         "episodes 6-7 missing (gap)",
-        "duplicate episode number 8",
+        "duplicate episode number 8: item id-8-5 left out (listed later), item id-8-4 kept",
         "TikTok announces 10 episodes, 5 listed",
     ]
     assert catalog_warnings([_episode(3), _episode(4)], None) == ["episodes 1-2 missing (gap)"]
@@ -889,7 +917,7 @@ def test_the_limited_free_series_as_the_owner_s_real_payload_reads(item_list_pag
     ],
 )
 def test_free_keys_intro_and_preview_flags(item, expected, hints):
-    access, paid, drm, found = access_of(item)
+    access, paid, drm, found = access_of(item)[:4]
     assert (access, paid, drm) == expected
     if hints is not None:
         assert found == hints
@@ -912,6 +940,7 @@ def test_the_short_header_rule_locks_before_any_request():
         False,
         False,
         ("plays 69 s of 106 s",),
+        True,  # 3.0.1: locked only by the SHORT-HEADER guess
     )
     # the hint prints numbers like Python's str(): an int as it is, a float as it is
     assert access_of(_windowed(106, 69.5))[3] == ("plays 69.5 s of 106 s",)
@@ -920,9 +949,9 @@ def test_the_short_header_rule_locks_before_any_request():
     assert access_of(_windowed(106, 69.0))[3] == ("plays 69 s of 106 s",)
     # `video.duration` is read up to MAX_EXACT_INT; a longer number is junk, never an OverflowError
     assert access_of(_windowed(2**53 - 1, 69))[3] == (f"plays 69 s of {2**53 - 1} s",)
-    assert access_of(_windowed(2**53, 69)) == ("free", False, False, ())
-    assert access_of(_windowed(int("1" * 400), 69)) == ("free", False, False, ())
-    assert access_of(_windowed("1" * 400, 69)) == ("free", False, False, ())
+    assert access_of(_windowed(2**53, 69)) == ("free", False, False, (), False)
+    assert access_of(_windowed(int("1" * 400), 69)) == ("free", False, False, (), False)
+    assert access_of(_windowed("1" * 400, 69)) == ("free", False, False, (), False)
     assert access_of(_windowed(106, 10**400))[0] == "free"  # a huge sound: longer than the video
     # the boundary: at most 85 % and at least 1 s shorter
     assert access_of(_windowed(100, 85))[0] == "locked"
@@ -930,10 +959,10 @@ def test_the_short_header_rule_locks_before_any_request():
     assert access_of(_windowed(3, 2))[0] == "locked"  # the fixture's E03: 2 of 3
     assert access_of(_windowed(3, 2.5))[0] == "free"  # not 1 s apart
     assert access_of(_windowed(1, 0.5))[0] == "free"
-    assert access_of(_windowed(69, 69)) == ("free", False, False, ())  # a full episode
+    assert access_of(_windowed(69, 69)) == ("free", False, False, (), False)  # a full episode
     # without `music.original` truthy, or without either duration, the rule never fires
-    assert access_of(_windowed(106, 69, original=False)) == ("free", False, False, ())
-    assert access_of(_windowed(106, 69, original=None)) == ("free", False, False, ())
+    assert access_of(_windowed(106, 69, original=False)) == ("free", False, False, (), False)
+    assert access_of(_windowed(106, 69, original=None)) == ("free", False, False, (), False)
     assert access_of(_windowed(106, 69, original=0))[0] == "free"
     assert access_of(_windowed(106, 69, original="false"))[0] == "free"
     assert access_of(_windowed(106, "69"))[0] == "free"  # music.duration must be a number
@@ -944,9 +973,9 @@ def test_the_short_header_rule_locks_before_any_request():
     assert access_of(_windowed(0, 69))[0] == "free"
     assert access_of(_windowed(2.5, 1))[0] == "free"  # video.duration must be a whole number
     no_music = _item(None, video={**PLAYABLE, "duration": 106})
-    assert access_of(no_music) == ("free", False, False, ())
+    assert access_of(no_music) == ("free", False, False, (), False)
     no_music["music"] = "x"
-    assert access_of(no_music) == ("free", False, False, ())
+    assert access_of(no_music) == ("free", False, False, (), False)
     # the item may be wrapped in itemStruct
     wrapped = {"itemStruct": _windowed(106, 69)}
     assert access_of(wrapped)[0] == "locked" and access_of(wrapped)[3][0].startswith("plays")
@@ -959,6 +988,7 @@ def test_the_short_header_rule_in_the_decision_order():
         True,
         False,
         ("isUnlocked=True", "plays 69 s of 106 s"),
+        False,
     )
     # DRM beats everything
     assert access_of(_windowed(106, 69, drmType="widevine"))[:3] == ("locked", False, True)
@@ -969,6 +999,7 @@ def test_the_short_header_rule_in_the_decision_order():
         True,
         False,
         ("isFree=false", "unlockPrice=30", "plays 69 s of 106 s"),
+        False,  # 3.0.1: sold, so no guess of DramaFetch's alone
     )
     # the window hint comes before NO_PLAY_ADDRESS
     item = _windowed(106, 69)
@@ -979,10 +1010,70 @@ def test_the_short_header_rule_in_the_decision_order():
     served["dramaInfo"]["DramaVideoData"].update(
         {"IsFreeIntro": False, "IsHighlight": False, "IsPreview": True, "PreviewType": 4}
     )
-    assert access_of(served) == ("free", False, False, ())
+    assert access_of(served) == ("free", False, False, (), False)
     windowed = _windowed(106, 69, isLimitedFree=True)
     windowed["dramaInfo"]["DramaVideoData"].update({"IsFreeIntro": False, "PreviewType": 1})
-    assert access_of(windowed) == ("locked", False, False, ("plays 69 s of 106 s",))
+    assert access_of(windowed) == ("locked", False, False, ("plays 69 s of 106 s",), True)
+
+
+def test_the_guessed_lock_is_locked_by_dramafetchs_own_guesses_only():
+    """3.0.1 (the owner's report of 2026-11-27): an episode locked ONLY by the SHORT-HEADER rule
+    and/or no play address — no DRM, no price or entitlement clue, no lock flag of TikTok's — is a
+    guessed lock: the decision does not change (``locked``), the flag says DramaFetch guessed."""
+    short = access_of(_windowed(106, 69))
+    assert isinstance(short, AccessDecision)
+    assert (short.access, short.paid, short.drm, short.guessed_lock) == (
+        "locked",
+        False,
+        False,
+        True,
+    )
+    assert access_of(_item(None, video={})).guessed_lock  # no play address alone
+    assert access_of({"id": "1"}).guessed_lock  # no video at all
+    no_address = _windowed(106, 69)
+    no_address["video"] = {"duration": 106}
+    assert access_of(no_address).guessed_lock  # both structural rules
+    assert access_of(_windowed(106, 69, isLimitedFree=True)).guessed_lock  # the owner's shape
+    assert access_of(
+        _item({"payStatus": 1}, video={})
+    ).guessed_lock  # an ambiguous hint decides nothing
+    # what is not DramaFetch's guess alone: a whole episode, a price, an entitlement, TikTok's own
+    # lock flags, DRM
+    assert not access_of(_windowed(106, 106)).guessed_lock
+    assert not access_of(_item({"unlockPrice": 30}, video={})).guessed_lock
+    assert not access_of(_windowed(106, 69, unlockPrice=30)).guessed_lock
+    assert not access_of(_windowed(106, 69, isFree=False)).guessed_lock
+    assert not access_of(_windowed(106, 69, isVip=True)).guessed_lock
+    assert not access_of(_item({"isUnlocked": True}, video={})).guessed_lock  # unlocked
+    assert not access_of(_item({"isUnlocked": False}, video={})).guessed_lock  # NOT-ENTITLED
+    assert not access_of(_item({"isLocked": True})).guessed_lock
+    assert not access_of(_item({"needPay": 1}, video={})).guessed_lock
+    assert not access_of(_item({"lockStatus": "locked"})).guessed_lock
+    assert not access_of(_item({"isDrm": True})).guessed_lock
+    assert not access_of(_windowed(106, 69, drmType="widevine")).guessed_lock
+
+
+def test_the_guessed_lock_rides_on_the_episode_and_the_owners_series():
+    """3.0.1: ``episode_from_item`` carries the flag; fixture series 4 (the owner's real shape,
+    ``isLimitedFree``) guesses E03 locked (its own sound: 2 s of 3 s), E01 and E02 are free."""
+    page = json.loads((FIXTURES / "item_list_series4_limited_free.json").read_text("utf-8"))
+    parsed = parse_item_list_payload(page, "7699393770256782366")
+    assert [(e.number, e.access, e.guessed_lock) for e in parsed.episodes] == [
+        (1, "free", False),
+        (2, "free", False),
+        (3, "locked", True),
+    ]
+    assert parsed.episodes[2].lock_hints == ("plays 2 s of 3 s",)
+    # an Episode refuses a guessed lock that is not locked, or is DRM or sold
+    assert Episode(1, "1", "t", "s", access="locked", guessed_lock=True).guessed_lock
+    for wrong in (
+        {"access": "free"},
+        {"access": "unlocked", "paid": True},
+        {"access": "locked", "drm": True},
+        {"access": "locked", "paid": True},
+    ):
+        with pytest.raises(ValueError, match="guessed lock"):
+            Episode(1, "1", "t", "s", guessed_lock=True, **wrong)
 
 
 def test_listed_sizes_reads_video_size_and_every_data_size():
@@ -1113,7 +1204,7 @@ def test_listed_sizes_reads_video_size_and_every_data_size():
     ],
 )
 def test_access_of_follows_the_clue_table_and_the_decision_order(item, expected):
-    access, paid, drm, hints = access_of(item)
+    access, paid, drm, hints = access_of(item)[:4]
     assert (access, paid, drm) == expected
     assert hints == lock_hints(item)
     if not _has_play(item):
@@ -1166,7 +1257,7 @@ def test_a_sold_episode_needs_a_real_play_url_to_count_as_unlocked(tmp_path, vid
     from dramafetch.models import DownloadOptions, DownloadStatus, Series
 
     sold = _item({"isFree": False, "unlockPrice": 30}, video=video)
-    access, paid, drm, hints = access_of(sold)
+    access, paid, drm, hints = access_of(sold)[:4]
     assert (access, paid, drm) == ("locked", True, False)
     assert hints[-1] == NO_PLAY_ADDRESS and hints.count(NO_PLAY_ADDRESS) == 1
     assert hints[:2] == ("isFree=false", "unlockPrice=30")
@@ -1199,7 +1290,7 @@ def test_a_sold_episode_needs_a_real_play_url_to_count_as_unlocked(tmp_path, vid
 @pytest.mark.parametrize("value", [0, 1, 2, -1, 1.0, True, False])
 def test_an_ambiguous_status_number_is_a_hint_and_never_decides(value):
     for key in ("unlockStatus", "pay_status", "purchaseStatus"):
-        access, paid, drm, hints = access_of(_item({key: value}))
+        access, paid, drm, hints = access_of(_item({key: value}))[:4]
         assert (access, paid, drm) == ("free", False, False)
         assert hints == (f"{key}={value}",)
         # with a price it is the price that decides, without a play address the address does
@@ -1214,6 +1305,7 @@ def test_hints_name_every_clue_in_payload_order_and_drm_ones_too():
         True,
         True,
         ("isFree=false", "unlockPrice=30", "isUnlocked=True", "drmType=fairplay"),
+        False,
     )
     status = _item({"unlockStatus": " unlocked "})
     assert access_of(status)[3] == ("unlockStatus=unlocked",)
@@ -1281,7 +1373,7 @@ def _everywhere(key, value):
 def test_a_key_that_names_drm_in_whole_words_locks_the_episode_as_drm(key, value):
     assert is_drm_key(key)
     for item in _everywhere(key, value):
-        assert access_of(item) == ("locked", False, True, (f"{key}={value}",)), item
+        assert access_of(item) == ("locked", False, True, (f"{key}={value}",), False), item
     episode = episode_from_item(_item({key: value}), "s")
     assert episode is not None and episode.drm and episode.locked
     assert episode.lock_hints == (f"{key}={value}",)
@@ -1293,7 +1385,7 @@ def test_a_key_that_names_drm_in_whole_words_locks_the_episode_as_drm(key, value
 def test_hdr_flags_negations_and_identifiers_are_not_drm_nor_any_clue(key, value):
     assert not is_drm_key(key)
     for item in _everywhere(key, value):
-        assert access_of(item) == ("free", False, False, ()), item
+        assert access_of(item) == ("free", False, False, (), False), item
     # they hide nothing either: a real DRM flag next to one still locks
     assert access_of(_item({key: value, "isDrm": True}))[:3] == ("locked", False, True)
     # and on a sold episode TikTok gave this session a play URL for, rule 5 decides as before
@@ -1308,7 +1400,7 @@ def test_hdr_flags_negations_and_identifiers_are_not_drm_nor_any_clue(key, value
 def test_a_falsy_drm_value_is_never_a_clue(key, value):
     assert is_drm_key(key)
     for item in _everywhere(key, value):
-        assert access_of(item) == ("free", False, False, ())
+        assert access_of(item) == ("free", False, False, (), False)
 
 
 @pytest.mark.parametrize(
@@ -1362,9 +1454,9 @@ def test_block_is_not_lock(key, value):
     """`lock_?status` and the old heuristic's leftovers do not match `block…` keys: no clue at
     all — where `lockStatus: 1` and `isLocked: true` lock the episode."""
     for item in _everywhere(key, value):
-        assert access_of(item) == ("free", False, False, ())
+        assert access_of(item) == ("free", False, False, (), False)
     for variant in (key.upper(), key[0].upper() + key[1:], f"un{key}"):
-        assert access_of(_item({variant: value})) == ("free", False, False, ()), variant
+        assert access_of(_item({variant: value})) == ("free", False, False, (), False), variant
     unblocked = key.replace("block", "lock").replace("Block", "Lock")
     assert access_of(_item({unblocked: value}))[0] == "locked"
 
@@ -1397,7 +1489,7 @@ def test_a_word_that_ends_in_b_before_lock_is_not_block(key, value, expected):
     """Only a word that CONTAINS `block` is no lock word (`test_block_is_not_lock`): `subLock…`,
     `webLock…` and `DBLock` are two words, the second a lock — such an episode is never
     attempted on a lock flag's account, nor a sold one without a play URL."""
-    access, paid, drm, hints = access_of(_item({key: value}))
+    access, paid, drm, hints = access_of(_item({key: value}))[:4]
     assert (access, paid, drm) == expected
     assert hints == (f"{key}={value}",)
     if expected == UNLOCKED:  # sold, and no real play URL: locked, as for any sold episode
@@ -1406,6 +1498,7 @@ def test_a_word_that_ends_in_b_before_lock_is_not_block(key, value, expected):
             True,
             False,
             (f"{key}={value}", NO_PLAY_ADDRESS),
+            False,  # 3.0.1: sold, so no guess of DramaFetch's alone
         )
 
 
@@ -1448,7 +1541,7 @@ def test_a_word_that_ends_in_b_before_lock_is_not_block(key, value, expected):
 )
 def test_a_lock_status_string_reads_like_a_status(value, expected, hint):
     for key in ("lockStatus", "lock_status", "LockStatus", "episodeLockStatus"):
-        access, paid, drm, hints = access_of(_item({key: value}))
+        access, paid, drm, hints = access_of(_item({key: value}))[:4]
         assert (access, paid, drm) == expected, key
         assert hints == ((f"{key}={hint}",) if hint is not None else ()), key
 
@@ -1459,6 +1552,7 @@ def test_lock_status_unlocked_with_a_play_address_is_unlocked_and_an_unknown_one
         True,
         False,
         ("lockStatus=unlocked",),
+        False,
     )
     # an entitlement needs no play address; without one the episode is still the account's
     assert access_of(_item({"lockStatus": "unlocked"}, video={}))[0] == "unlocked"
@@ -1476,6 +1570,7 @@ def test_lock_status_unlocked_with_a_play_address_is_unlocked_and_an_unknown_one
         True,
         False,
         ("isFree=false", "unlockPrice=30", "lockStatus=1"),
+        False,
     )
 
 
@@ -1576,21 +1671,833 @@ def test_access_of_never_raises_and_is_deterministic_on_junk():
         item = _junk(rng)
         if not isinstance(item, dict):
             item = {"dramaInfo": item, "video": _junk(rng), rng.choice(_FUZZ_KEYS): _junk(rng)}
-        access, paid, drm, hints = access_of(item)
+        access, paid, drm, hints, guessed = access_of(item)
         seen.add(access)
         assert access in ACCESS_MODES
         assert isinstance(paid, bool) and isinstance(drm, bool)
         assert not drm or access == "locked"
+        # 3.0.1: a guessed lock is a locked episode with no DRM, price or entitlement clue
+        assert isinstance(guessed, bool) and (
+            not guessed or (access, paid, drm) == ("locked", False, False)
+        )
         assert isinstance(hints, tuple) and all(isinstance(hint, str) for hint in hints)
         assert len(set(hints)) == len(hints)
-        assert access_of(copy.deepcopy(item)) == (access, paid, drm, hints)
+        assert access_of(copy.deepcopy(item)) == (access, paid, drm, hints, guessed)
         assert lock_hints(item) == hints
         episode = episode_from_item(item, "s")  # builds an Episode: its checks never trip
-        assert episode is None or (episode.access, episode.paid, episode.drm) == (access, paid, drm)
+        assert episode is None or (
+            episode.access,
+            episode.paid,
+            episode.drm,
+            episode.guessed_lock,
+        ) == (
+            access,
+            paid,
+            drm,
+            guessed,
+        )
     assert seen == set(ACCESS_MODES)
     for junk in (None, [], "x", 5, 1.5, ["isLocked", True]):
-        assert access_of(junk) == ("locked", False, False, (NO_PLAY_ADDRESS,))
+        assert access_of(junk) == ("locked", False, False, (NO_PLAY_ADDRESS,), True)
     deep: dict = {"isUnlocked": True}
     for _ in range(50):
         deep = {"inner": deep}  # deeper than MAX_DEPTH: cut, never a RecursionError
     assert access_of(_item(deep))[0] == "free"
+
+
+# --------------------------------------------------------------------------- the whole list (3.0.1)
+#
+# The owner's report of 2026-11-27: some dramas lost one or two free episodes without a word.
+# TikTok's own count (dramaInfo.numVideos), an episode number that falls through to the next key,
+# duplicates found BEFORE the number merge (the episode over a highlight, free or unlocked over
+# locked, the longer over the shorter, the first listed) and every item that is no episode, kept
+# with its reason and said.
+
+FIFTH_SERIES_ID = "7699393770256782377"
+E2_ID = "7699400000000000602"
+HIGHLIGHT_OF_E2 = "7699400000000000692"
+TRAILER_ID = "7699400000000000690"
+FOREIGN_ID = "7699400000000000778"
+#: The fifth series' duplicate, as the warnings name it.
+HIGHLIGHT_WARNING = (
+    f"duplicate episode number 2: item {HIGHLIGHT_OF_E2} left out (a highlight), item {E2_ID} kept"
+)
+
+
+def _series5_pages():
+    """The fifth series' two pages (fixtures/item_list_series5_page{1,2}.json): the series-4
+    capture's item shape, with a highlight of episode 2 numbered 2 and listed before it, an
+    episode whose EpisodeNumber is 0 and whose number is in dramaInfo, a trailer, another drama's
+    item, and TikTok's count (numVideos 7: five episodes, the highlight and the trailer)."""
+    fixtures = Path(__file__).parent / "fixtures"
+    return [
+        json.loads((fixtures / f"item_list_series5_page{n}.json").read_text(encoding="utf-8"))
+        for n in (1, 2)
+    ]
+
+
+def _numbered(page):
+    return [(e.number, e.item_id[-3:]) for e in page]
+
+
+def test_the_fifth_series_reads_like_the_real_captures():
+    first, second = (parse_item_list_payload(page, FIFTH_SERIES_ID) for page in _series5_pages())
+    # page 1: E1, the highlight of E2 (numbered 2, listed first), E2, E3 (EpisodeNumber 0: its
+    # number is dramaInfo's episodeNumber), the trailer (EpisodeNumber 0 and nothing else)
+    assert _numbered(first.episodes) == [(1, "601"), (2, "692"), (2, "602"), (3, "603")]
+    assert (first.cursor, first.has_more, first.seen_items, first.skipped_items) == (5, True, 5, 1)
+    assert first.skipped == [SkippedItem(SKIP_NO_NUMBER, TRAILER_ID)]
+    assert first.total_hint == 7  # TikTok's count: numVideos
+    # page 2: another drama's item first — its numVideos (12) is no count of this drama
+    assert _numbered(second.episodes) == [(4, "604"), (5, "605")]
+    assert (second.cursor, second.has_more, second.seen_items) == (8, False, 3)
+    assert second.skipped == [SkippedItem(SKIP_OTHER_DRAMA, FOREIGN_ID)]
+    assert second.total_hint == 7
+    assert all(not e.locked and e.access == "free" for e in [*first.episodes, *second.episodes])
+
+    listing = merge_pages([first, second])
+    assert isinstance(listing, Listing)
+    # the episode, never its highlight, is episode 2
+    assert _numbered(listing.episodes) == [
+        (1, "601"),
+        (2, "602"),
+        (3, "603"),
+        (4, "604"),
+        (5, "605"),
+    ]
+    assert listing.episodes[1].duration_s == 98
+    ((duplicate,),) = [listing.duplicates]
+    assert isinstance(duplicate, Duplicate)
+    assert (duplicate.number, duplicate.kept.item_id, duplicate.left_out.item_id) == (
+        2,
+        E2_ID,
+        HIGHLIGHT_OF_E2,
+    )
+    assert duplicate.why == LEFT_OUT_HIGHLIGHT
+    assert listing.skipped == [
+        SkippedItem(SKIP_NO_NUMBER, TRAILER_ID),
+        SkippedItem(SKIP_OTHER_DRAMA, FOREIGN_ID),
+    ]
+    # five episodes, the highlight and the trailer: TikTok's 7 all came (another drama's item is
+    # not this drama's). 3.0.1, the lead's decision D2 (changed on purpose): whether TikTok counts
+    # the highlight and the trailer is not known, so no number past 5 is named missing — and the
+    # list is UNCERTAIN: TikTok counts 7, the drama certainly has 5, its 2 other items may be in
+    # the count. Said (the count and the uncertainty), never complete.
+    assert (listing.items_received, listing.total_hint) == (7, 7)
+    numbers = [e.number for e in listing.episodes]
+    assert count_check(numbers, 7, listing.items_received) == CountCheck(5, 2, True)
+    assert missing_numbers(numbers, 7, listing.items_received, limit=10_000) == []
+    assert catalog_warnings(
+        listing.episodes,
+        listing.total_hint,
+        duplicates=listing.duplicates,
+        skipped=listing.skipped,
+        items_received=listing.items_received,
+    ) == [
+        HIGHLIGHT_WARNING,
+        "TikTok listed 1 item DramaFetch could not read (another drama's id)",
+        "TikTok listed 1 item DramaFetch could not read (no episode number)",
+        "TikTok announces 7 episodes, 5 listed",
+        uncertain_text(7, 5, 2),
+    ]
+
+    # the list ended after page 1: five of TikTok's seven items came, three episodes and two other
+    # items (the highlight, the trailer): numbers 4 and 5 are certainly missing (7 - 2), 6 and 7
+    # are not named (3.0.1, D2: no phantom episode) — the list is uncertain past 5
+    early = merge_pages([first])
+    assert (early.items_received, early.total_hint) == (5, 7)
+    assert count_check([1, 2, 3], 7, early.items_received) == CountCheck(5, 2, True)
+    assert missing_numbers([1, 2, 3], 7, early.items_received, limit=10_000) == [4, 5]
+    assert catalog_warnings(
+        early.episodes,
+        early.total_hint,
+        duplicates=early.duplicates,
+        skipped=early.skipped,
+        items_received=early.items_received,
+    ) == [
+        HIGHLIGHT_WARNING,
+        "TikTok listed 1 item DramaFetch could not read (no episode number)",
+        "TikTok announces 7 episodes, 3 listed",
+        uncertain_text(7, 3, 2),
+    ]
+    # the highlight listed AFTER its episode changes nothing
+    page = _series5_pages()[0]
+    page["itemList"][1], page["itemList"][2] = page["itemList"][2], page["itemList"][1]
+    reordered = merge_pages([parse_item_list_payload(page, FIFTH_SERIES_ID)])
+    assert reordered.episodes[1].item_id == E2_ID
+    assert [d.left_out.item_id for d in reordered.duplicates] == [HIGHLIGHT_OF_E2]
+
+
+def test_num_videos_is_tiktok_s_count_and_the_first_total_key_of_the_detail():
+    assert parse_detail_payload({"dramaInfo": {"dramaName": "D", "numVideos": 62}}) == ("D", 62)
+    # TikTok's own key wins over the older guesses in the same object
+    assert parse_detail_payload({"dramaInfo": {"numVideos": 62, "totalEpisode": 60}}) == (None, 62)
+    assert parse_detail_payload({"dramaInfo": {"numVideos": 0, "totalEpisode": 60}}) == (None, 60)
+    assert parse_detail_payload({"drama": {"numVideos": "62"}}) == (None, 62)
+    # with the series' id, a related drama's object gives neither its name nor its count
+    related = {
+        "data": {
+            "recommended": {"dramaInfo": {"dramaID": "1", "dramaName": "Other", "numVideos": 12}},
+            "dramaInfo": {"dramaID": FIFTH_SERIES_ID, "dramaName": "Mine", "numVideos": 7},
+        }
+    }
+    assert parse_detail_payload(related) == ("Other", 12)  # without the id: the first found
+    assert parse_detail_payload(related, FIFTH_SERIES_ID) == ("Mine", 7)
+    assert parse_detail_payload(related, int(FIFTH_SERIES_ID)) == ("Mine", 7)
+    unnamed = {"dramaInfo": {"dramaName": "No id", "numVideos": 5}}
+    assert parse_detail_payload(unnamed, FIFTH_SERIES_ID) == ("No id", 5)  # no id: not another's
+    assert parse_detail_payload({"dramaInfo": {"albumId": "9", "numVideos": 5}}, "8") == (
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("drama", "expected"),
+    [
+        ({"numVideos": 62}, 62),
+        ({"numVideos": "62"}, 62),
+        ({"numVideos": " 62 "}, 62),
+        ({"numVideos": 62.0}, 62),
+        ({"numVideos": 0}, None),
+        ({"numVideos": -3}, None),
+        ({"numVideos": 2.5}, None),
+        ({"numVideos": True}, None),
+        ({"numVideos": "x"}, None),
+        ({"numVideos": None}, None),
+        ({"numVideos": [62]}, None),
+        ({"numVideos": MAX_EXACT_INT + 1}, None),
+        ({}, None),
+        ({"dramaID": OTHER_SERIES_ID, "numVideos": 12}, None),  # another drama's count
+        ({"dramaID": FIFTH_SERIES_ID, "numVideos": 7}, 7),
+        ({"DramaVideoData": {"numVideos": 7}}, None),  # dramaInfo's own key only
+    ],
+)
+def test_item_total_hint_reads_the_series_num_videos(drama, expected):
+    assert item_total_hint({"id": "1", "dramaInfo": drama}, FIFTH_SERIES_ID) == expected
+    wrapped = {"itemStruct": {"id": "1", "dramaInfo": drama}}
+    assert item_total_hint(wrapped, FIFTH_SERIES_ID) == expected
+
+
+def test_item_total_hint_and_the_page_count_never_raise_on_junk():
+    for junk in (None, "x", 5, [], {"dramaInfo": "x"}, {"dramaInfo": [1]}):
+        assert item_total_hint(junk, "s") is None
+    # the page's count is its first positive one, from an item of the series, wherever it is
+    items = [
+        {"id": "a", "dramaInfo": {"dramaID": "other", "numVideos": 40}},
+        {"id": "b", "dramaInfo": {"numVideos": 0, "DramaVideoData": {"EpisodeNumber": 1}}},
+        {"id": "c", "dramaInfo": {"dramaID": "s", "DramaVideoData": {}, "numVideos": "9"}},
+        {"id": "d", "dramaInfo": {"numVideos": 11, "DramaVideoData": {"EpisodeNumber": 2}}},
+    ]
+    page = parse_item_list_payload({"itemList": items}, "s")
+    assert page.total_hint == 9  # the trailer "c" carries it too: an item of the series
+    assert parse_item_list_payload({"itemList": items[:2]}, "s").total_hint is None
+    assert parse_item_list_payload({"itemList": []}, "s").total_hint is None
+
+
+@pytest.mark.parametrize("junk", [0, None, "", " ", "x", -1, 2.5, True, {}, [3], "²"])
+def test_an_unusable_episode_number_falls_through_to_the_next_key(junk):
+    # DramaVideoData's other number keys first...
+    item = _base_item()
+    item["dramaInfo"]["DramaVideoData"] = {"EpisodeNumber": junk, "episodeNumber": 6}
+    episode = episode_from_item(item, SERIES_ID)
+    assert episode is not None and episode.number == 6
+    # ... then dramaInfo's own keys
+    item = _base_item()
+    item["dramaInfo"]["DramaVideoData"] = {"EpisodeNumber": junk, "episode_number": junk}
+    item["dramaInfo"]["episodeNumber"] = 17
+    episode = episode_from_item(item, SERIES_ID)
+    assert episode is not None and episode.number == 17
+    assert skip_reason(item, SERIES_ID) is None
+    # nothing usable anywhere: a trailer, skipped with its reason
+    item["dramaInfo"]["episodeNumber"] = junk
+    assert episode_from_item(item, SERIES_ID) is None
+    assert skip_reason(item, SERIES_ID) == SKIP_NO_NUMBER
+
+
+def test_the_first_usable_number_wins_in_key_order():
+    item = _base_item()
+    item["dramaInfo"]["DramaVideoData"] = {"EpisodeNumber": 4, "episodeNumber": 9}
+    item["dramaInfo"]["EpisodeNumber"] = 12
+    episode = episode_from_item(item, SERIES_ID)
+    assert episode is not None and episode.number == 4
+    item["dramaInfo"]["DramaVideoData"] = "not a dict"
+    episode = episode_from_item(item, SERIES_ID)
+    assert episode is not None and episode.number == 12
+
+
+def test_skip_reason_says_why_an_item_is_no_episode_in_order():
+    assert SKIP_REASONS == (SKIP_OTHER_DRAMA, SKIP_NO_ID, SKIP_NO_NUMBER)
+    assert (SKIP_OTHER_DRAMA, SKIP_NO_ID, SKIP_NO_NUMBER) == (
+        "another drama's id",
+        "no id",
+        "no episode number",
+    )
+    assert skip_reason(_base_item(), SERIES_ID) is None
+    other = _base_item()
+    other["dramaInfo"]["dramaID"] = OTHER_SERIES_ID
+    assert skip_reason(other, SERIES_ID) == SKIP_OTHER_DRAMA
+    del other["id"]  # another drama's item without an id is another drama's first
+    assert skip_reason(other, SERIES_ID) == SKIP_OTHER_DRAMA
+    no_id = _base_item()
+    no_id["id"] = "  "
+    assert skip_reason(no_id, SERIES_ID) == SKIP_NO_ID
+    del no_id["dramaInfo"]["DramaVideoData"]  # no id before no number
+    assert skip_reason(no_id, SERIES_ID) == SKIP_NO_ID
+    trailer = _base_item()
+    del trailer["dramaInfo"]["DramaVideoData"]
+    assert skip_reason(trailer, SERIES_ID) == SKIP_NO_NUMBER
+    assert skip_reason({"itemStruct": trailer}, SERIES_ID) == SKIP_NO_NUMBER
+    for junk in (None, "x", 5, []):
+        assert skip_reason(junk, SERIES_ID) == SKIP_NO_ID
+    # the page keeps each skipped item with its reason and its id, in page order
+    page = parse_item_list_payload({"itemList": [no_id, _base_item(), trailer, other]}, SERIES_ID)
+    assert [e.number for e in page.episodes] == [7]
+    assert page.skipped == [
+        SkippedItem(SKIP_NO_ID, None),
+        SkippedItem(SKIP_NO_NUMBER, "1"),
+        SkippedItem(SKIP_OTHER_DRAMA, None),
+    ]
+    assert (page.seen_items, page.skipped_items) == (4, 3)
+
+
+@pytest.mark.parametrize(
+    ("video_data", "expected"),
+    [
+        ({"IsHighlight": False, "LinkedEpisodeID": "0"}, False),  # every captured episode
+        ({}, False),
+        ({"IsHighlight": True}, True),
+        ({"IsHighlight": 1}, True),
+        ({"IsHighlight": "true"}, True),
+        ({"IsHighlight": "false"}, False),
+        ({"IsHighlight": "0"}, False),
+        ({"IsHighlight": 0}, False),
+        ({"IsHighlight": None}, False),
+        ({"IsHighlight": {"x": 1}}, False),  # a container never counts
+        ({"IsHighlight": [1]}, False),
+        ({"LinkedEpisodeID": "7699400000000000602"}, True),
+        ({"LinkedEpisodeID": 7699400000000000602}, True),
+        ({"LinkedEpisodeID": " 0 "}, False),
+        ({"LinkedEpisodeID": 0}, False),
+        ({"LinkedEpisodeID": ""}, False),
+        ({"LinkedEpisodeID": None}, False),
+        ({"LinkedEpisodeID": True}, False),
+        ({"LinkedEpisodeID": 1.5}, False),
+        ({"IsHighlight": False, "LinkedEpisodeID": "12"}, True),
+    ],
+)
+def test_is_highlight_reads_is_highlight_and_linked_episode_id(video_data, expected):
+    item = {"id": "1", "dramaInfo": {"DramaVideoData": {"EpisodeNumber": 2, **video_data}}}
+    assert is_highlight(item) is expected
+    assert is_highlight({"itemStruct": item}) is expected
+    # dramaInfo's own keys count too
+    flat = {"id": "1", "dramaInfo": {"DramaVideoData": {"EpisodeNumber": 2}, **video_data}}
+    assert is_highlight(flat) is expected
+
+
+def test_is_highlight_never_raises_on_junk():
+    for junk in (None, "x", 5, [], {}, {"dramaInfo": "x"}, {"dramaInfo": {"DramaVideoData": 3}}):
+        assert is_highlight(junk) is False
+
+
+def _candidate(item_id, *, highlight=False, locked=False, duration=None, number=2):
+    raw = {"id": item_id, "dramaInfo": {"DramaVideoData": {"EpisodeNumber": number}}}
+    if highlight:
+        raw["dramaInfo"]["DramaVideoData"]["IsHighlight"] = True
+    return Episode(
+        number=number,
+        item_id=item_id,
+        title=item_id,
+        series_id="s",
+        duration_s=duration,
+        access="locked" if locked else "free",
+        raw=raw,
+    )
+
+
+def _kept_and_left_out(*candidates):
+    listing = merge_pages([PagePayload(list(candidates), None, False, len(candidates), 0)])
+    return listing.episodes[0].item_id, [(d.left_out.item_id, d.why) for d in listing.duplicates]
+
+
+def test_the_merge_keeps_one_episode_per_number_by_the_preference_order():
+    assert LEFT_OUT_REASONS == (
+        LEFT_OUT_HIGHLIGHT,
+        LEFT_OUT_LOCKED,
+        LEFT_OUT_SHORTER,
+        LEFT_OUT_LATER,
+    )
+    clip = _candidate("clip", highlight=True, duration=99)
+    episode = _candidate("ep", duration=40)
+    # no highlight over a highlight — whatever the order, the access or the length
+    assert _kept_and_left_out(clip, episode) == ("ep", [("clip", LEFT_OUT_HIGHLIGHT)])
+    assert _kept_and_left_out(episode, clip) == ("ep", [("clip", LEFT_OUT_HIGHLIGHT)])
+    locked = _candidate("locked-ep", locked=True, duration=99)
+    assert _kept_and_left_out(locked, clip) == ("locked-ep", [("clip", LEFT_OUT_HIGHLIGHT)])
+    # then free or unlocked over locked
+    free = _candidate("free", duration=10)
+    assert _kept_and_left_out(locked, free) == ("free", [("locked-ep", LEFT_OUT_LOCKED)])
+    unlocked = replace(_candidate("unlocked", duration=10), access="unlocked", paid=True)
+    assert _kept_and_left_out(locked, unlocked) == ("unlocked", [("locked-ep", LEFT_OUT_LOCKED)])
+    # then the longer video.duration — an unknown one is the shortest
+    short, long = _candidate("short", duration=41), _candidate("long", duration=98)
+    assert _kept_and_left_out(short, long) == ("long", [("short", LEFT_OUT_SHORTER)])
+    unknown = _candidate("unknown", duration=None)
+    assert _kept_and_left_out(unknown, short) == ("short", [("unknown", LEFT_OUT_SHORTER)])
+    zero = _candidate("zero", duration=0)
+    assert _kept_and_left_out(unknown, zero) == ("zero", [("unknown", LEFT_OUT_SHORTER)])
+    # then the first listed
+    twin_a, twin_b = _candidate("a", duration=90), _candidate("b", duration=90)
+    assert _kept_and_left_out(twin_a, twin_b) == ("a", [("b", LEFT_OUT_LATER)])
+    assert _kept_and_left_out(twin_b, twin_a) == ("b", [("a", LEFT_OUT_LATER)])
+    # three items with one number: every one left out is named, as listed
+    kept, left = _kept_and_left_out(clip, short, locked, long)
+    assert kept == "long"
+    assert left == [
+        ("clip", LEFT_OUT_HIGHLIGHT),
+        ("short", LEFT_OUT_SHORTER),
+        ("locked-ep", LEFT_OUT_LOCKED),
+    ]
+    # the same item served twice is one item, never a duplicate
+    listing = merge_pages(
+        [
+            PagePayload([short], None, False, 1, 0),
+            PagePayload([replace(short, title="again")], None, False, 1, 0),
+        ]
+    )
+    assert [e.title for e in listing.episodes] == ["short"] and listing.duplicates == []
+    # merge_episodes is the same merge
+    assert merge_episodes([[clip, short], [long]]) == [long]
+    # a hand-built episode without its payload is no highlight
+    assert _kept_and_left_out(replace(clip, raw=None), episode)[0] == "clip"
+
+
+def test_merge_pages_counts_the_items_received_and_keeps_the_skipped_reasons():
+    one, two = _candidate("e1", number=1), _candidate("e2", number=2)
+    pages = [
+        PagePayload(
+            [one],
+            3,
+            True,
+            4,
+            3,
+            [
+                SkippedItem(SKIP_NO_NUMBER, "trailer"),
+                SkippedItem(SKIP_NO_ID),
+                SkippedItem(SKIP_OTHER_DRAMA, "foreign"),
+            ],
+            0,
+        ),
+        PagePayload(
+            [two],
+            None,
+            False,
+            5,
+            4,
+            [
+                SkippedItem(SKIP_NO_NUMBER, "trailer"),  # the same trailer again: once
+                SkippedItem(SKIP_NO_NUMBER, "e1"),  # read as an episode on page 1: no skip
+                SkippedItem(SKIP_NO_ID),  # no id: each one counts
+                SkippedItem(SKIP_OTHER_DRAMA, "foreign-2"),
+            ],
+            9,
+        ),
+        PagePayload([], None, False, 0, 0, [], 4),
+    ]
+    listing = merge_pages(pages)
+    assert listing.skipped == [
+        SkippedItem(SKIP_NO_NUMBER, "trailer"),
+        SkippedItem(SKIP_NO_ID),
+        SkippedItem(SKIP_OTHER_DRAMA, "foreign"),
+        SkippedItem(SKIP_NO_ID),
+        SkippedItem(SKIP_OTHER_DRAMA, "foreign-2"),
+    ]
+    # two episodes, the trailer and two items without an id; another drama's items do not count
+    assert listing.items_received == 5
+    assert listing.total_hint == 9  # the first positive count (page 1 said 0)
+    assert merge_pages([]) == Listing([], [], [], 0, None)
+
+
+def test_a_highlight_never_stands_for_an_episode():
+    """3.0.1, the lead's decision D3 (the review's L3): a highlight no episode of its number came
+    with is a skipped item (``SKIP_HIGHLIGHT``), counted among the items received (so among the
+    drama's other items), and its number is a hole the filling asks for and the warnings name; a
+    highlight beside its episode stays the duplicate left out, as before."""
+    first, second = (parse_item_list_payload(page, FIFTH_SERIES_ID) for page in _series5_pages())
+    lone = [e for e in first.episodes if e.item_id != E2_ID]  # TikTok lists the clip, not E02
+    page = replace(first, episodes=lone)
+    listing = merge_pages([page, second])
+    assert [e.number for e in listing.episodes] == [1, 3, 4, 5]
+    assert all(e.item_id != HIGHLIGHT_OF_E2 for e in listing.episodes)
+    assert listing.duplicates == []
+    assert listing.skipped == [
+        SkippedItem(SKIP_NO_NUMBER, TRAILER_ID),
+        SkippedItem(SKIP_OTHER_DRAMA, FOREIGN_ID),
+        SkippedItem(SKIP_HIGHLIGHT, HIGHLIGHT_OF_E2),
+    ]
+    # E01, E03-E05, the highlight and the trailer: 6 items, 4 numbers, 2 other items
+    assert listing.items_received == 6
+    numbers = [e.number for e in listing.episodes]
+    assert count_check(numbers, 7, listing.items_received) == CountCheck(5, 2, True)
+    assert missing_numbers(numbers, 7, listing.items_received, limit=10_000) == [2]
+    assert fill_target(numbers, 7, listing.items_received, early_end=False, limit=10_000) == 2
+    assert catalog_warnings(
+        listing.episodes,
+        7,
+        duplicates=listing.duplicates,
+        skipped=listing.skipped,
+        items_received=listing.items_received,
+    ) == [
+        "episode 2 missing (gap)",
+        "TikTok listed 1 item DramaFetch could not read (another drama's id)",
+        "TikTok listed 1 item DramaFetch could not read (no episode number)",
+        "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
+        "TikTok announces 7 episodes, 4 listed",
+        uncertain_text(7, 4, 2),
+    ]
+    # two highlights of one number and no episode: both skipped, no duplicate between them
+    clip_a = _candidate("clip-a", highlight=True, duration=40)
+    clip_b = _candidate("clip-b", highlight=True, duration=50)
+    one = _candidate("e1", number=1)
+    both = merge_pages([PagePayload([one, clip_a, clip_b], None, False, 3, 0)])
+    assert [e.item_id for e in both.episodes] == ["e1"]
+    assert both.duplicates == []
+    assert both.skipped == [
+        SkippedItem(SKIP_HIGHLIGHT, "clip-a"),
+        SkippedItem(SKIP_HIGHLIGHT, "clip-b"),
+    ]
+    assert both.items_received == 3
+    assert merge_episodes([[one, clip_a]]) == [one]
+    # the paired case is unchanged: the episode kept, the highlight the duplicate left out
+    paired = merge_pages([first, second])
+    assert [d.left_out.item_id for d in paired.duplicates] == [HIGHLIGHT_OF_E2]
+    assert all(item.reason != SKIP_HIGHLIGHT for item in paired.skipped)
+    assert (listing.highlight_numbers, paired.highlight_numbers) == ([2], [])
+    assert both.highlight_numbers == [2]  # two clips of one number: one number
+
+
+def test_a_lone_highlight_past_the_last_episode_listed_makes_its_number_missing():
+    """3.0.1, D3 at the top of the list: TikTok drops a drama's last episode but lists its
+    highlight, numbered like it. A highlight is a clip of an episode, so the drama has that number:
+    it is missing like a hole below the highest one — the filling asks for it, the warnings name it
+    —, whether TikTok's count is unknown (never complete) or counts the episodes only (missing, not
+    uncertain); a count that may also hold the highlight is uncertain past it, as ever."""
+    episodes = [_candidate(f"e{number}", number=number) for number in range(1, 66)]
+    clip = _candidate("clip-66", highlight=True, number=66)
+    listing = merge_pages([PagePayload([*episodes, clip], None, False, 66, 0)])
+    assert [e.number for e in listing.episodes] == list(range(1, 66))
+    assert listing.skipped == [SkippedItem(SKIP_HIGHLIGHT, "clip-66")]
+    assert (listing.items_received, listing.highlight_numbers) == (66, [66])
+    numbers = [e.number for e in listing.episodes]
+    for total in (None, 66):
+        assert count_check(numbers, total, 66, highlights=[66]) == CountCheck(66, 1, False)
+        assert missing_numbers(numbers, total, 66, limit=10_000, highlights=[66]) == [66]
+        assert fill_target(numbers, total, 66, early_end=False, limit=10_000, highlights=[66]) == 66
+        assert (
+            fill_target(
+                numbers,
+                total,
+                66,
+                early_end=False,
+                covered=[(66, None)],
+                limit=10_000,
+                highlights=[66],
+            )
+            is None
+        )
+    assert catalog_warnings(
+        listing.episodes,
+        None,
+        skipped=listing.skipped,
+        items_received=66,
+        highlights=listing.highlight_numbers,
+    ) == [
+        "episode 66 missing (gap)",
+        "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
+    ]
+    # a count of 67 may hold the highlight, or one more episode: 66 missing, the rest uncertain
+    assert count_check(numbers, 67, 66, highlights=[66]) == CountCheck(66, 1, True)
+    assert missing_numbers(numbers, 67, 66, limit=10_000, highlights=[66]) == [66]
+    # once the filling covered 66 (its answer brought the clip again, hasMore true), the uncertain
+    # list asks once for the page after the clip's number — never the clip's own page again
+    clip_page = [(66, 66)]
+    assert (
+        fill_target(
+            numbers, 67, 66, early_end=False, covered=clip_page, limit=10_000, highlights=[66]
+        )
+        == 67
+    )
+    assert fill_target(numbers, 67, 66, early_end=False, covered=[(66, None)], limit=10_000) is None
+    # without the highlight's number, the old reading: nothing missing past the last episode
+    assert missing_numbers(numbers, None, 66, limit=10_000) == []
+    # a lone highlight below the highest number listed was a hole already: unchanged
+    middle = [e for e in episodes if e.number != 30]
+    below = merge_pages(
+        [
+            PagePayload(
+                [*middle, _candidate("clip-30", highlight=True, number=30)], None, False, 65, 0
+            )
+        ]
+    )
+    assert below.highlight_numbers == [30]
+    below_numbers = [e.number for e in below.episodes]
+    assert missing_numbers(below_numbers, None, 65, limit=10_000, highlights=[30]) == [30]
+    assert missing_numbers(below_numbers, None, 65, limit=10_000) == [30]
+
+
+def test_a_lone_highlight_numbered_past_tiktoks_count_raises_no_row():
+    """3.0.1: TikTok counts every episode of the drama, so a lone highlight numbered past its
+    count is no episode number DramaFetch can place: it raises no missing number, no gap warning
+    and no filling request — never hundreds of rows for episodes that may not exist —, and stays
+    one of the other items, so a count it may be part of reads uncertain as ever. With no count,
+    nothing holds its number against anything: it is the drama's, as before."""
+    episodes = [_candidate(f"e{number}", number=number) for number in range(1, 66)]
+    clip = _candidate("clip-500", highlight=True, number=500)
+    listing = merge_pages([PagePayload([*episodes, clip], None, False, 66, 0)])
+    assert (listing.items_received, listing.highlight_numbers) == (66, [500])
+    numbers = [e.number for e in listing.episodes]
+    # every episode TikTok counts is listed: nothing missing, nothing asked, not uncertain
+    assert count_check(numbers, 65, 66, highlights=[500]) == CountCheck(65, 1, False)
+    assert missing_numbers(numbers, 65, 66, limit=10_000, highlights=[500]) == []
+    assert fill_target(numbers, 65, 66, early_end=False, limit=10_000, highlights=[500]) is None
+    assert catalog_warnings(
+        listing.episodes, 65, skipped=listing.skipped, items_received=66, highlights=[500]
+    ) == ["TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)"]
+    # a count of 66 may hold the clip, or one more episode: uncertain, the page after E65 asked
+    assert count_check(numbers, 66, 66, highlights=[500]) == CountCheck(65, 1, True)
+    assert missing_numbers(numbers, 66, 66, limit=10_000, highlights=[500]) == []
+    assert fill_target(numbers, 66, 66, early_end=False, limit=10_000, highlights=[500]) == 66
+    assert catalog_warnings(
+        listing.episodes, 66, skipped=listing.skipped, items_received=66, highlights=[500]
+    ) == [
+        "TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)",
+        "TikTok announces 66 episodes, 65 listed",
+        uncertain_text(66, 65, 1),
+    ]
+    # a clip within the count is placed as before; with no count, the clip's number is the drama's
+    assert missing_numbers(numbers, 67, 66, limit=10_000, highlights=[66, 500]) == [66]
+    assert missing_numbers(numbers, None, 66, limit=10_000, highlights=[500]) == list(
+        range(66, 501)
+    )
+    # a count the list itself goes past (60 with E1-E65 listed: a stale count) holds nothing back:
+    # the clip of E66 makes E66 missing, as with no count — asked for, named, never hidden
+    assert count_check(numbers, 60, 66, highlights=[66]) == CountCheck(66, 1, False)
+    assert missing_numbers(numbers, 60, 66, limit=10_000, highlights=[66]) == [66]
+    assert fill_target(numbers, 60, 66, early_end=False, limit=10_000, highlights=[66]) == 66
+    assert (
+        catalog_warnings(
+            listing.episodes, 60, skipped=listing.skipped, items_received=66, highlights=[66]
+        )[0]
+        == "episode 66 missing (gap)"
+    )
+
+
+def test_an_item_without_an_id_counts_once_per_listing():
+    """3.0.1, the lead's decision D4 (the review's L4): the same id-less item served again — a
+    gap filling overlaps the pages read before it — is one item: one skipped item, counted once in
+    the items received and in the warning; two different id-less items stay two."""
+    idless = {"dramaInfo": {"dramaID": SERIES_ID, "DramaVideoData": {"EpisodeNumber": 14}}}
+    other = {"dramaInfo": {"dramaID": SERIES_ID, "DramaVideoData": {"EpisodeNumber": 15}}}
+    episode = _base_item()
+    first = parse_item_list_payload({"itemList": [episode, idless], "hasMore": True}, SERIES_ID)
+    # the same item again, its keys in another order and a whole float for an int
+    again = json.loads(json.dumps(idless))
+    again["dramaInfo"] = {"DramaVideoData": {"EpisodeNumber": 14.0}, "dramaID": SERIES_ID}
+    refill = parse_item_list_payload({"itemList": [again], "hasMore": False}, SERIES_ID)
+    assert first.skipped_keys == [item_key(idless)]
+    assert refill.skipped_keys == [item_key(again)] == [item_key(idless)]
+    listing = merge_pages([first, refill])
+    assert listing.skipped == [SkippedItem(SKIP_NO_ID)]
+    assert listing.items_received == 2  # the episode and the one id-less item
+    assert catalog_warnings(listing.episodes, None, skipped=listing.skipped) == [
+        "episodes 1-6 missing (gap)",
+        "TikTok listed 1 item DramaFetch could not read (no id)",
+    ]
+    distinct = parse_item_list_payload({"itemList": [other], "hasMore": False}, SERIES_ID)
+    assert merge_pages([first, distinct]).items_received == 3
+    # an item with an id gets no key; a page built by hand has none: each id-less item counts
+    assert (
+        parse_item_list_payload({"itemList": [episode, _base_item()]}, SERIES_ID).skipped_keys == []
+    )
+    hand = PagePayload([], None, False, 1, 1, [SkippedItem(SKIP_NO_ID)])
+    assert merge_pages([hand, hand]).items_received == 2
+
+
+def test_item_key_is_canonical_and_never_raises():
+    assert item_key({"b": 1, "a": [2.0, {"d": None, "c": "é"}]}) == item_key(
+        {"a": [2, {"c": "é", "d": None}], "b": 1.0}
+    )
+    assert item_key({"a": 1}) != item_key({"a": "1"})
+    assert item_key({"a": True}) != item_key({"a": 1})
+    assert item_key({"a": 2.5}) != item_key({"a": 2})
+    assert item_key({"a": float("nan")}) == item_key({"a": None})
+    assert item_key({"a": -0.0}) == item_key({"a": 0})
+    deep: dict[str, object] = {}
+    node = deep
+    for _ in range(200):
+        node["x"] = {}
+        node = node["x"]  # type: ignore[assignment]
+    assert isinstance(item_key(deep), str)
+    for junk in (None, "x", 5, [], 2.0**80):
+        assert isinstance(item_key(junk), str)
+
+
+def test_an_answer_with_no_item_of_the_series_ends_nothing_when_more_was_expected():
+    """3.0.1, the lead's decision D5 (the review's L5): an answer with no item of the series and
+    hasMore false ends the list — unless it answers a cursor an earlier page announced with hasMore
+    true, or a filling request (``expected_more``); a last page that brings items of the series
+    still ends it, and a repeat never does."""
+    empty = parse_item_list_payload({"itemList": [], "hasMore": False}, SERIES_ID)
+    foreign = _base_item()
+    foreign["dramaInfo"]["dramaID"] = OTHER_SERIES_ID
+    only_other = parse_item_list_payload({"itemList": [foreign], "hasMore": False}, SERIES_ID)
+    last = parse_item_list_payload({"itemList": [_base_item()], "hasMore": False}, SERIES_ID)
+    for page in (empty, only_other):
+        assert page_ends_list(page, []) is True
+        assert page_ends_list(page, [], expected_more=True) is False
+    assert page_ends_list(last, [], expected_more=True) is True
+    assert page_ends_list(last, ["1"], expected_more=True) is False  # a repeat
+    assert page_ends_list(last, [], listed=False) is False
+
+
+@pytest.mark.parametrize(
+    ("numbers", "total", "received", "expected"),
+    [
+        ([], None, None, CountCheck(0, 0, False)),
+        ([1, 2, 3], None, 5, CountCheck(3, 2, False)),  # no count: the highest listed
+        ([1, 2, 3], 0, None, CountCheck(3, 0, False)),
+        ([1, 2, 3], -1, 0, CountCheck(3, 0, False)),
+        ([1, 2, 3], 7, None, CountCheck(7, 0, False)),  # unknown items: the count stands
+        ([1, 2, 3], 7, 3, CountCheck(7, 0, False)),  # no other item: 4-7 certainly missing
+        ([1, 2, 3], 7, 5, CountCheck(5, 2, True)),  # 4-5 certain, 6-7 uncertain
+        ([1, 2, 3], 7, 7, CountCheck(3, 4, True)),  # the count may be the items' alone
+        ([1, 2, 3], 3, 5, CountCheck(3, 2, False)),  # the count placed: nothing uncertain
+        ([1, 2, 3], 2, 5, CountCheck(3, 2, False)),  # more listed than announced
+        ([1, 2, 5], 5, 4, CountCheck(5, 1, False)),  # a hole below the highest, the count met
+        # the review's three cases: 66 episodes + a trailer, E66 never listed — uncertain, no
+        # phantom; 6 + a trailer counted 7, E04 never listed — [4] only, uncertain; and no
+        # other item, E66 never listed — 66 certainly missing, as before
+        (list(range(1, 66)), 66, 66, CountCheck(65, 1, True)),
+        ([1, 2, 3, 5, 6], 7, 6, CountCheck(6, 1, True)),
+        (list(range(1, 66)), 66, 65, CountCheck(66, 0, False)),
+    ],
+)
+def test_count_check_is_the_one_count_rule(numbers, total, received, expected):
+    """3.0.1, the lead's decision D2: certain_top = max(H, C - S), uncertain when C is known and
+    above it; S = items received - distinct numbers listed (the drama's other items)."""
+    assert count_check(numbers, total, received) == expected
+    assert count_check(iter(numbers), total, received) == expected
+
+
+def test_the_review_cases_name_no_phantom_and_ask_once_past_the_highest():
+    """3.0.1 (the review's L2 and V2): (a) 66 episodes and a trailer, TikTok counts 66, E66 never
+    listed: nothing certainly missing, uncertain, one filling request for the page after 65; (b) 6
+    episodes and a trailer, TikTok counts 7, E04 never listed: [4] only — no phantom 7 —, also
+    uncertain; (c) no other item, TikTok counts 66, E66 never listed: [66], as before."""
+    sixty_five = list(range(1, 66))
+    assert missing_numbers(sixty_five, 66, 66, limit=10_000) == []
+    assert fill_target(sixty_five, 66, 66, early_end=False, limit=10_000) == 66
+    assert (
+        fill_target(sixty_five, 66, 66, early_end=False, covered=[(66, None)], limit=10_000) is None
+    )
+    assert (
+        fill_target(sixty_five, 66, 66, early_end=False, covered=[(66, 95)], limit=10_000) is None
+    )
+    six = [1, 2, 3, 5, 6]
+    assert missing_numbers(six, 7, 6, limit=10_000) == [4]
+    assert fill_target(six, 7, 6, early_end=False, limit=10_000) == 4
+    # an answer from cursor 3 that says the list is over covers the page after 6 too: once
+    assert fill_target(six, 7, 6, early_end=False, covered=[(4, None)], limit=10_000) is None
+    assert fill_target(six, 7, 6, early_end=False, covered=[(4, 6)], limit=10_000) == 7
+    assert missing_numbers(sixty_five, 66, 65, limit=10_000) == [66]
+    assert fill_target(sixty_five, 66, 65, early_end=False, limit=10_000) == 66
+    # a count everything listed accounts for asks nothing past the highest
+    assert fill_target([1, 2, 3], 3, 5, early_end=True, limit=10_000) is None
+    # the main fake series' shape (TikTok counts 5, five episodes and a trailer) is no question
+    assert count_check([1, 2, 3, 4, 5], 5, 6) == CountCheck(5, 1, False)
+    assert fill_target([1, 2, 3, 4, 5], 5, 6, early_end=False, limit=10_000) is None
+    # ... and with E05 lost: uncertain, the page after 4 asked for once
+    assert count_check([1, 2, 3, 4], 5, 5) == CountCheck(4, 1, True)
+    assert fill_target([1, 2, 3, 4], 5, 5, early_end=False, limit=10_000) == 5
+
+
+def test_missing_numbers_are_the_holes_and_the_numbers_up_to_an_unmet_count():
+    assert missing_numbers([1, 2, 3, 5, 7], None, None, limit=100) == [4, 6]  # 5 → 7 without 6
+    assert missing_numbers([1, 2, 3], 5, 3, limit=100) == [4, 5]  # the last ones
+    assert missing_numbers([1, 2, 3], 5, 5, limit=100) == []  # 5 items came: nothing past 3
+    assert missing_numbers([1, 2, 3], 5, None, limit=100) == [4, 5]  # unknown items
+    assert missing_numbers([2, 4], 6, 2, limit=100) == [1, 3, 5, 6]
+    assert missing_numbers([], 3, 0, limit=100) == [1, 2, 3]
+    assert missing_numbers([], None, None, limit=100) == []
+    assert missing_numbers([1, 9], 2**40, 2, limit=12) == [2, 3, 4, 5, 6, 7, 8, 10, 11, 12]
+    assert missing_numbers(iter([3, 1]), 2, 9, limit=100) == [2]
+    # 3.0.1, D2: never past TikTok's count less the drama's other items received
+    assert missing_numbers([1, 2, 3], 7, 5, limit=100) == [4, 5]
+    assert missing_numbers([1, 2, 3, 5, 6], 7, 6, limit=100) == [4]
+
+
+def test_catalog_warnings_name_the_duplicates_the_skipped_items_and_the_count():
+    e1, e2, e3 = (_candidate(f"e{n}", number=n, duration=90) for n in (1, 2, 3))
+    clip = _candidate("clip", number=2, highlight=True)
+    duplicate = Duplicate(2, e2, clip, LEFT_OUT_HIGHLIGHT)
+    skipped = [
+        SkippedItem(SKIP_NO_NUMBER, "t1"),
+        SkippedItem("an odd reason", "x"),
+        SkippedItem(SKIP_NO_NUMBER, "t2"),
+        SkippedItem(SKIP_NO_ID),
+        SkippedItem(SKIP_OTHER_DRAMA, "f"),
+    ]
+    # 3.0.1, the lead's decision D2 (changed on purpose): seven items for TikTok's six no longer
+    # silence the count — four of them are other items, so the list is uncertain and says so
+    assert catalog_warnings(
+        [e1, e2, e3], 6, duplicates=[duplicate], skipped=skipped, items_received=7
+    ) == [
+        "duplicate episode number 2: item clip left out (a highlight), item e2 kept",
+        "TikTok listed 1 item DramaFetch could not read (another drama's id)",
+        "TikTok listed 1 item DramaFetch could not read (no id)",
+        "TikTok listed 2 items DramaFetch could not read (no episode number)",
+        "TikTok listed 1 item DramaFetch could not read (an odd reason)",
+        "TikTok announces 6 episodes, 3 listed",
+        uncertain_text(6, 3, 4),
+    ]
+    assert uncertain_text(6, 3, 4) == (
+        "TikTok's list may be incomplete: TikTok counts 6 episodes; 3 episodes and 4 other items "
+        "(trailers or highlights) were listed, so DramaFetch cannot tell whether an episode is "
+        "missing — paste the drama again later to check again"
+    )
+    assert uncertain_text(66, 65, 1).startswith(
+        f"{UNCERTAIN_TEXT}: TikTok counts 66 episodes; 65 episodes and 1 other item (a trailer or "
+        "a highlight) were listed"
+    )
+    # the count: fewer numbers than TikTok counts, or more listed than it announces
+    assert catalog_warnings([e1, e2, e3], 6, items_received=5) == [
+        "TikTok announces 6 episodes, 3 listed",
+        uncertain_text(6, 3, 2),  # 4 certainly missing (6 - 2); 5-6 may be the 2 others
+    ]
+    # 3.0.1, the lead's decision D2 (changed on purpose): six items for TikTok's six no longer
+    # silence the count — three of them are other items DramaFetch cannot place
+    assert catalog_warnings([e1, e2, e3], 6, items_received=6) == [
+        "TikTok announces 6 episodes, 3 listed",
+        uncertain_text(6, 3, 3),
+    ]
+    assert catalog_warnings([e1, e2, e3], 6, items_received=3) == [
+        "TikTok announces 6 episodes, 3 listed"
+    ]
+    assert catalog_warnings([e1, e2, e3], 2, items_received=3) == [
+        "TikTok announces 2 episodes, 3 listed"
+    ]
+    assert catalog_warnings([e1, e2, e3], 3, items_received=3) == []
+    # without the items received, the numbers listed are held against the count (as before)
+    assert catalog_warnings([e1, e2, e3], 6) == ["TikTok announces 6 episodes, 3 listed"]
+    assert catalog_warnings([e1, e2, e3], 3) == []
+    # a list that still holds two items with one number is merged by the same rules
+    assert catalog_warnings([clip, e1, e2], None) == [
+        "duplicate episode number 2: item clip left out (a highlight), item e2 kept",
+    ]
+    # the duplicates come by number, those of the list first
+    later = Duplicate(1, e1, _candidate("dup1", number=1), LEFT_OUT_LATER)
+    assert catalog_warnings([clip, e1, e2], None, duplicates=[duplicate, later]) == [
+        "duplicate episode number 1: item dup1 left out (listed later), item e1 kept",
+        "duplicate episode number 2: item clip left out (a highlight), item e2 kept",
+        "duplicate episode number 2: item clip left out (a highlight), item e2 kept",
+    ]

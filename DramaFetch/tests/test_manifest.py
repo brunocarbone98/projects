@@ -15,6 +15,7 @@ from dramafetch.downloader import (
     locked_result,
 )
 from dramafetch.manifest import (
+    COMPLETE_RULE,
     MANIFEST_FILENAME,
     MAX_STEM_LEN,
     Manifest,
@@ -599,6 +600,60 @@ def test_an_odd_complete_mark_is_forgotten_not_a_corrupt_manifest(
     assert manifest.complete_at is None and manifest.complete_episodes is None
     assert not (tmp_path / (MANIFEST_FILENAME + ".bak")).exists()
     assert read_manifest(tmp_path, "1").complete_since() is None
+
+
+def test_a_complete_mark_records_the_rule_it_was_written_under(tmp_path):
+    """3.0.1 (§10): ``mark_complete`` writes ``complete_rule`` (:data:`COMPLETE_RULE`, 2) next to
+    ``complete_at``; ``complete_trusted`` says the mark may skip; clearing it, or any new attempt,
+    forgets the rule with the rest of the mark."""
+    assert COMPLETE_RULE == 2
+    path = tmp_path / MANIFEST_FILENAME
+    manifest = _complete_manifest(tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8"))["complete_rule"] == COMPLETE_RULE
+    loaded = Manifest.load(path, "123", None)
+    assert loaded.complete_rule == COMPLETE_RULE and loaded.complete_trusted()
+    assert read_manifest(tmp_path, "123").complete_trusted()
+    loaded.clear_complete()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "complete_rule" not in data and "complete_at" not in data
+    assert not Manifest.load(path, "123", None).complete_trusted()
+    manifest.mark_complete(WHEN, 2)
+    manifest.record(DownloadResult(_episode(3), DownloadStatus.FAILED, None, "a new attempt"))
+    assert manifest.complete_rule is None and not manifest.complete_trusted()
+    assert "complete_rule" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("rule", "kept"),
+    [
+        ("absent", None),  # a mark of 3.0.0 or earlier
+        (1, 1),
+        (COMPLETE_RULE + 1, COMPLETE_RULE + 1),
+        (True, None),
+        ("2", None),
+        (0, None),
+        (None, None),
+    ],
+)
+def test_a_complete_mark_without_the_rule_in_force_is_read_but_never_trusted(tmp_path, rule, kept):
+    """3.0.1 (§10): a mark written by 3.0.0 or earlier has no ``complete_rule``; it is read as it
+    is — no migration error, nothing moved aside, its time and count kept — and never trusted, so
+    the complete skip lists the series again. A rule other than :data:`COMPLETE_RULE` is kept as
+    read and not trusted either; an odd value is forgotten."""
+    path = tmp_path / MANIFEST_FILENAME
+    _complete_manifest(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if rule == "absent":
+        data.pop("complete_rule")
+    else:
+        data["complete_rule"] = rule
+    path.write_text(json.dumps(data), encoding="utf-8")
+    for manifest in (Manifest.load(path, "123", None), read_manifest(tmp_path, "123")):
+        assert manifest is not None and sorted(manifest.entries) == [1, 2]
+        assert manifest.complete_since() == WHEN and manifest.complete_episodes == 2
+        assert manifest.complete_rule == kept
+        assert not manifest.complete_trusted()
+    assert not (tmp_path / (MANIFEST_FILENAME + ".bak")).exists()
 
 
 # --------------------------------------------------------------------------- build 7: DRM memory

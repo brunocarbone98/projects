@@ -52,6 +52,7 @@ import {
   completeSkipAllowed,
   drmMemorySkip,
   manifestSkip,
+  notListedResults,
   notStartedMessage,
   reportRows,
   seriesReport,
@@ -483,8 +484,13 @@ export async function resolve(engine, ref) {
  * One series, start to finish, resolved right before its downloads (`engine.run_series`, a
  * whole-series run): the cooldown (refused: no request) → the complete skip (no request, no tab)
  * → `beforeNetwork` (the batch rests there) + the cooldown again → whether the progress can be
- * stored (refused: no request) → the resolve → the downloads → the report, and the complete mark
- * set or cleared.
+ * stored (refused: no request) → the resolve → the downloads → a row for every number the list
+ * still lacks after its gap filling (`Series.missingNumbers`; 3.0.1, the owner's report of
+ * 2026-11-27, the extension's own: `report.notListedResults` — `failed-unavailable`, `not in
+ * TikTok's list`, no request, never recorded in the state, passed to `onResult` after the
+ * downloads, so the **Did not download** block, its **Retry**, the alert, the automatic retry and
+ * the report take them; the Python CLI prints the list's warnings and its report line names them)
+ * → the report, and the complete mark set or cleared.
  * @param {Engine} engine
  * @param {SeriesRef} ref
  * @param {{beforeNetwork?: (() => Promise<void>) | null}} [hooks]
@@ -552,7 +558,12 @@ export async function runSeries(engine, ref, hooks = {}) {
   }
   const state = loadState(await engine.readState(series.seriesId), series.seriesId, series.name);
   await engine.view.refresh();
-  const { results, stopped: reported } = await downloadSeries(engine, series, selected, state);
+  const downloaded = await downloadSeries(engine, series, selected, state);
+  const reported = downloaded.stopped;
+  // 3.0.1: every number TikTok's list still lacks gets a row of its own — no request
+  const missing = notListedResults(series, series.missingNumbers ?? []);
+  for (const row of missing) engine.onResult?.(row);
+  const results = [...downloaded.results, ...missing];
   let stopped = reported ?? stopStatusSummary(results);
   let report = seriesReport(series, results, { stopped });
   if (stopped === null || !stopped.startsWith(STORAGE_REFUSED_PREFIX)) {
@@ -682,8 +693,11 @@ export async function runBatch(engine, refs, hooks = {}) {
 /**
  * A selection of an already listed series (**Download all available** / **Download selected**,
  * the web's download job): the cooldown first (refused: no request), the job rest right before
- * the first request, the downloads, and a report over the whole series (`engine.report_rows`). No
- * complete mark: only a whole-series run sets one.
+ * the first request, the downloads, a row for every wanted number the list does not hold (3.0.1,
+ * `report.notListedResults` with `again`: `failed-unavailable`, `not in TikTok's list this time`
+ * — no request, never recorded in the state, passed to `onResult` after the downloads; the Python
+ * selection path, `download --episodes`, does the same), and a report over the whole series
+ * (`engine.report_rows`). No complete mark: only a whole-series run sets one.
  * @param {Engine} engine
  * @param {Series} series
  * @param {readonly number[]} numbers
@@ -711,7 +725,12 @@ export async function runSelection(engine, series, numbers, job) {
     rested = true;
     await restBetweenJobs(engine, { lastContactAt: job.lastContactAt, batchJob: false });
   };
-  const { results, stopped: reported } = await downloadSeries(engine, series, selected, state, { beforeNetwork });
+  const downloaded = await downloadSeries(engine, series, selected, state, { beforeNetwork });
+  const reported = downloaded.stopped;
+  // 3.0.1: a wanted number this list does not hold gets a row of its own — no request
+  const unlisted = notListedResults(series, wanted, { again: true });
+  for (const row of unlisted) engine.onResult?.(row);
+  const results = [...downloaded.results, ...unlisted];
   const stopped = reported ?? stopStatusSummary(results);
   const exists = (/** @type {import("../lib/state.js").StateEntry} */ entry) => engine.view.exists(entry);
   const report = seriesReport(series, reportRows(series, results, state, exists), { stopped });

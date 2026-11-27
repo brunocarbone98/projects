@@ -46,6 +46,19 @@ short header on 2026-11-06, from the owner's real run):
   the same point too, nothing changes it until TikTok replaces the file.
 - ``GET /api/drama/detail/`` carries the series name and announced total; its exact shape is
   unknown, so :func:`parse_detail_payload` is best-effort.
+- TikTok's own count of a drama's episodes is ``dramaInfo.numVideos`` (every captured
+  ``dramaInfo`` carries it: the items of the owner's 2026-11-06 series, the favorites list of
+  2026-11-15): the first of the detail's total keys, and the series' count when the detail gives
+  none (:func:`item_total_hint`, :attr:`PagePayload.total_hint`, :func:`merge_pages`). Whether
+  it counts a trailer or a highlight TikTok lists besides the episodes is NOT known, so a listing
+  is held against it by ONE rule (:func:`count_check`, 3.0.1): the numbers certainly missing are
+  the holes and those up to the count less the drama's other items received; a count above that
+  makes the list uncertain — said, never counted complete, never a row.
+- Every captured item's ``dramaInfo.DramaVideoData`` also carries ``IsHighlight`` (false) and
+  ``LinkedEpisodeID`` (``"0"``): a clip of an episode would be numbered like it, so when two items
+  share a number the merge keeps the episode (:func:`is_highlight`, :func:`merge_pages`) and says
+  which item it left out; a highlight never stands for an episode — with no episode of its number
+  it is a skipped item (:data:`SKIP_HIGHLIGHT`) and its number missing.
 - Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
   codec and bitrate, plus ``video.playAddr``), valid until their ``expire`` query parameter.
   Each ``bitrateInfo`` entry is one rendition — ``CodecType`` (``h264``, ``h265`` or ``bytevc1``,
@@ -66,14 +79,16 @@ short header on 2026-11-06, from the owner's real run):
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
-from dramafetch.models import QUALITY_MODES, Episode
+from dramafetch.models import QUALITY_MODES, Episode, SkippedItem
 
 #: How deep the recursive searches descend into a payload before giving up.
 MAX_DEPTH = 12
@@ -170,15 +185,73 @@ _KNOWN_STATUS_VALUES = _ENTITLED_STATUS_VALUES | _LOCKED_STATUS_VALUES
 _PRICE_KEY_RE = re.compile(r"price|coin|cost|charge", re.IGNORECASE)
 _SOLD_KEY_RE = re.compile(r"vip|paid", re.IGNORECASE)
 _SERIES_ID_KEYS = ("dramaID", "dramaId", "DramaID", "albumId")
+#: Where an item's episode number lives, read in order — ``DramaVideoData``'s keys, then
+#: ``dramaInfo``'s — the first usable one wins (an int ≥ 1: a ``0``, ``null``, ``""`` or any other
+#: value falls through to the next key instead of dropping the item).
 _EPISODE_NUMBER_KEYS = ("EpisodeNumber", "episodeNumber", "episode_number")
 _NAME_KEYS = ("dramaName", "title", "name")
-_TOTAL_KEYS = ("totalEpisode", "totalEpisodes", "episodeCount", "total", "episodeTotal")
+#: TikTok's count of a drama's episodes (see the module docstring): every captured ``dramaInfo``.
+_NUM_VIDEOS_KEY = "numVideos"
+_TOTAL_KEYS = (
+    _NUM_VIDEOS_KEY,
+    "totalEpisode",
+    "totalEpisodes",
+    "episodeCount",
+    "total",
+    "episodeTotal",
+)
 _DETAIL_CONTAINER_KEYS = ("dramaInfo", "drama", "detail")
+#: TikTok's highlight marks (:func:`is_highlight`), on ``dramaInfo.DramaVideoData`` in every
+#: capture (``IsHighlight: false``, ``LinkedEpisodeID: "0"`` on the owner's episodes).
+_HIGHLIGHT_KEY = "IsHighlight"
+_LINKED_EPISODE_KEY = "LinkedEpisodeID"
 #: Where an item's cover image lives, best first: the full frame, the cropped poster, the animated
 #: preview.
 _COVER_KEYS = ("originCover", "cover", "dynamicCover")
 _FALSY_STRINGS = frozenset({"", "0", "false", "no", "none", "null"})
 _MAX_HINT_VALUE_LEN = 40
+
+#: Why :func:`skip_reason` leaves an item out of a series (``models.SkippedItem.reason``), in the
+#: order it checks them: the item names another drama (``dramaInfo.dramaID`` / ``dramaId`` /
+#: ``DramaID`` / ``albumId``), it has no id, or neither ``DramaVideoData`` nor ``dramaInfo``
+#: gives a usable episode number (a trailer). :func:`catalog_warnings` says each one.
+SKIP_OTHER_DRAMA = "another drama's id"
+SKIP_NO_ID = "no id"
+SKIP_NO_NUMBER = "no episode number"
+SKIP_REASONS = (SKIP_OTHER_DRAMA, SKIP_NO_ID, SKIP_NO_NUMBER)
+#: The reason of a highlight no episode of its number was listed with (3.0.1, the review's L3): a
+#: highlight never stands for an episode, so :func:`merge_pages` keeps it as a skipped item — not
+#: :func:`skip_reason`'s, which reads one item alone — and its number stays missing (a hole the gap
+#: filling asks for, named in the report line). :func:`catalog_warnings` says it after
+#: :data:`SKIP_REASONS`.
+SKIP_HIGHLIGHT = "a highlight, a clip of an episode"
+#: Why the merge left an item out for another one with its number (``Duplicate.why``): the first
+#: rule of the preference order that tells the two apart — the kept one is no highlight
+#: (:func:`is_highlight`), or reads free or unlocked where the other reads locked, or is longer
+#: (``video.duration``); else it was listed first.
+LEFT_OUT_HIGHLIGHT = "a highlight"
+LEFT_OUT_LOCKED = "locked"
+LEFT_OUT_SHORTER = "shorter"
+LEFT_OUT_LATER = "listed later"
+LEFT_OUT_REASONS = (LEFT_OUT_HIGHLIGHT, LEFT_OUT_LOCKED, LEFT_OUT_SHORTER, LEFT_OUT_LATER)
+
+
+class AccessDecision(NamedTuple):
+    """What :func:`access_of` decides of an item: ``(access, paid, drm, hints, guessed_lock)``.
+
+    ``guessed_lock`` (3.0.1, the owner's report of 2026-11-27) says that ``access`` is ``locked``
+    ONLY by DramaFetch's own structural guesses — the SHORT-HEADER rule and/or no play address —
+    with no DRM clue, no price or entitlement clue (``paid`` false) and no lock flag of TikTok's
+    (VIEWER-LOCK, NOT-ENTITLED): a free episode DramaFetch guessed was locked. The decision does
+    not change (such an episode is ``locked`` and skipped before any request, as ever); the
+    reports count it as NOT downloaded (``engine.series_report``: never complete while one is
+    left) and the extension's **Retry** asks TikTok for it once."""
+
+    access: str
+    paid: bool
+    drm: bool
+    hints: tuple[str, ...]
+    guessed_lock: bool
 
 
 @dataclass
@@ -190,6 +263,49 @@ class PagePayload:
     has_more: bool
     seen_items: int
     skipped_items: int
+    #: The page's items that are no episode of the series, each with its reason, in page order
+    #: (``skipped_items`` counts them).
+    skipped: list[SkippedItem] = field(default_factory=list)
+    #: TikTok's count of the series' episodes as the page's items carry it: the first positive
+    #: ``dramaInfo.numVideos`` of an item of the series (:func:`item_total_hint`), else None.
+    total_hint: int | None = None
+    #: One entry per ``skipped`` item (3.0.1, the review's L4): the canonical JSON of the raw item
+    #: (:func:`item_key`) for an item without an id, None for one with an id — what
+    #: :func:`merge_pages` dedupes id-less items by, so the same item served again (a gap filling
+    #: overlaps the pages read before it) counts once. Empty for a page built by hand: its id-less
+    #: items then count each.
+    skipped_keys: list[str | None] = field(default_factory=list, compare=False, repr=False)
+
+
+@dataclass
+class Duplicate:
+    """Two items TikTok listed with one episode number: ``kept`` is the episode the series keeps,
+    ``left_out`` the other item and ``why`` the rule that decided (``LEFT_OUT_*``)."""
+
+    number: int
+    kept: Episode
+    left_out: Episode
+    why: str
+
+
+@dataclass
+class Listing:
+    """What the pages of one listing add up to (:func:`merge_pages`): the episodes (one per
+    number, sorted), every item left out for another one's number, every item that is no
+    episode (with its reason; a highlight no episode of its number came with among them), how
+    many distinct items of the series came, TikTok's count as the items carry it, and the numbers
+    of those lone highlights (3.0.1)."""
+
+    episodes: list[Episode]
+    duplicates: list[Duplicate]
+    skipped: list[SkippedItem]
+    items_received: int
+    total_hint: int | None
+    #: The numbers of the highlights no episode of their number came with, ascending and distinct
+    #: (3.0.1): each is a clip of an episode TikTok did not list, so the drama has that number —
+    #: :func:`count_check` reaches it (``highlights``), so it is missing, asked for and named even
+    #: above the highest episode number listed.
+    highlight_numbers: list[int] = field(default_factory=list)
 
 
 def find_item_lists(payload: Any, max_depth: int = MAX_DEPTH) -> list[list[dict[str, Any]]]:
@@ -219,8 +335,9 @@ def _walk_item_lists(
             _walk_item_lists(value, depth + 1, max_depth, found)
 
 
-def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
-    """``(access, paid, drm, hints)`` of an item: what THIS session may do with the episode.
+def access_of(item: dict[str, Any]) -> AccessDecision:
+    """``(access, paid, drm, hints, guessed_lock)`` of an item (:class:`AccessDecision`): what THIS
+    session may do with the episode.
 
     Pure and deterministic; never raises on junk. ``access`` is one of ``models.ACCESS_MODES``,
     decided from the payload TikTok served to the user's own session — nothing here unlocks,
@@ -302,6 +419,12 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     the integrity check of every download (``media.verify_video``: the duration) catches it: a
     whole file by :func:`listed_sizes` with a short header is named short-served
     (``downloader.served_short``), anything else is quarantined as incomplete.
+
+    ``guessed_lock`` (3.0.1): ``locked`` with no DRM clue, no PRICING or ENTITLED clue (``paid``
+    false) and no VIEWER-LOCK or NOT-ENTITLED clue — locked only by SHORT-HEADER and/or no play
+    address, DramaFetch's own guesses (a free episode whose list says its own sound lasts only
+    part of it, or that names no play address). It changes no decision; see
+    :class:`AccessDecision`.
     """
     if not isinstance(item, dict):
         item = {}
@@ -346,15 +469,24 @@ def access_of(item: dict[str, Any]) -> tuple[str, bool, bool, tuple[str, ...]]:
     else:
         access = "free"
     paid = _PRICING in classes or _ENTITLED in classes
-    return access, paid, drm, tuple(dict.fromkeys(hints))
+    # 3.0.1: locked only by DramaFetch's own structural guesses (SHORT-HEADER, no play address) —
+    # nothing of TikTok's says DRM, a price, an entitlement or a lock
+    guessed_lock = (
+        access == "locked"
+        and not drm
+        and not paid
+        and _VIEWER_LOCK not in classes
+        and _NOT_ENTITLED not in classes
+    )
+    return AccessDecision(access, paid, drm, tuple(dict.fromkeys(hints)), guessed_lock)
 
 
 def lock_hints(item: dict[str, Any]) -> tuple[str, ...]:
     """Every pricing, free, lock, entitlement and DRM clue of an item, deterministic order (the
-    fourth element of :func:`access_of`): ``"key=value"``, ``"isFree=false"``, ``"plays 69 s of
+    ``hints`` of :func:`access_of`): ``"key=value"``, ``"isFree=false"``, ``"plays 69 s of
     106 s"``, ``"no play address"``. Informational — ``Episode.access`` decides; an empty tuple
     means the payload says nothing about a price or a lock."""
-    return access_of(item)[3]
+    return access_of(item).hints
 
 
 def _short_header(item: dict[str, Any], video: Any) -> str | None:
@@ -612,28 +744,99 @@ def _has_play_address(video: dict[str, Any]) -> bool:
 def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     """Turn one ``itemList`` entry into an Episode, or None when it must be skipped.
 
-    Skipped: no item id; no (or invalid) ``dramaInfo.DramaVideoData.EpisodeNumber`` — trailers and
-    teasers; a ``dramaInfo`` series id (``dramaID``/``dramaId``/``DramaID``/``albumId``) that
-    differs from ``series_id``. The item may be wrapped in ``{"itemStruct": {...}}``.
-    ``cover_url`` is the first http(s) URL among ``video.originCover``, ``video.cover`` and
-    ``video.dynamicCover`` (see :func:`cover_url_of`), None when the item has none.
-    ``quality_hint`` is the label of the rendition the default quality mode takes
-    (:func:`choose_rendition` with ``"compatible"``, e.g. ``"720p h264"``), None without one.
-    ``access`` / ``paid`` / ``drm`` / ``lock_hints`` come from :func:`access_of`, always passed
-    explicitly (``Episode`` derives ``access`` from ``lock_hints`` only for other callers).
+    Skipped (:func:`skip_reason` says why): a ``dramaInfo`` series id (``dramaID``/``dramaId``/
+    ``DramaID``/``albumId``) that differs from ``series_id``; no item id; no usable episode
+    number — ``DramaVideoData``'s ``EpisodeNumber`` / ``episodeNumber`` / ``episode_number``, then
+    ``dramaInfo``'s, the first that is an int ≥ 1 (a ``0``, ``null``, ``""`` or other junk falls
+    through to the next key): trailers and teasers. The item may be wrapped in
+    ``{"itemStruct": {...}}``. ``cover_url`` is the first http(s) URL among
+    ``video.originCover``, ``video.cover`` and ``video.dynamicCover`` (see
+    :func:`cover_url_of`), None when the item has none. ``quality_hint`` is the label of the
+    rendition the default quality mode takes (:func:`choose_rendition` with ``"compatible"``,
+    e.g. ``"720p h264"``), None without one. ``access`` / ``paid`` / ``drm`` / ``lock_hints`` /
+    ``guessed_lock`` come from :func:`access_of`, always passed explicitly (``Episode`` derives
+    ``access`` from ``lock_hints`` only for other callers).
     """
-    item_id = _as_id(_field(item, "id"))
-    if item_id is None:
+    reason, item_id, number = _identify(item, series_id)
+    if reason is not None or item_id is None or number is None:
         return None
-    drama_info_raw = _field(item, "dramaInfo")
-    drama_info: dict[str, Any] = drama_info_raw if isinstance(drama_info_raw, dict) else {}
+    return _episode(item, series_id, item_id, number)
+
+
+def skip_reason(item: Any, series_id: str) -> str | None:
+    """Why :func:`episode_from_item` leaves an item out of series ``series_id`` — the first that
+    holds of :data:`SKIP_OTHER_DRAMA` (its ``dramaInfo`` names another drama), :data:`SKIP_NO_ID`
+    and :data:`SKIP_NO_NUMBER` (no usable episode number in ``DramaVideoData`` or ``dramaInfo``)
+    — or None when it reads as one of the series' episodes. A non-dict is :data:`SKIP_NO_ID`.
+    Pure; never raises."""
+    if not isinstance(item, dict):
+        return SKIP_NO_ID
+    return _identify(item, series_id)[0]
+
+
+def is_highlight(item: Any) -> bool:
+    """Whether an item is one of TikTok's highlights — a clip of an episode, numbered like it —
+    rather than the episode: a truthy ``IsHighlight`` (a bool, a number or a string read as
+    ``_truthy`` reads one; a container or None never counts) or a ``LinkedEpisodeID`` that is an
+    id other than ``"0"`` (a string or an int), in ``dramaInfo.DramaVideoData`` or in
+    ``dramaInfo``. Absent keys, ``false``, ``"0"`` and ``0`` are an episode's: every captured
+    episode carries ``IsHighlight: false`` and ``LinkedEpisodeID: "0"``. Pure; never raises; the
+    item may be wrapped in ``{"itemStruct": {...}}``."""
+    if not isinstance(item, dict):
+        return False
+    drama_info = _drama_info(item)
+    video_data = drama_info.get("DramaVideoData")
+    containers = [video_data] if isinstance(video_data, dict) else []
+    containers.append(drama_info)
+    for container in containers:
+        flag = container.get(_HIGHLIGHT_KEY)
+        if isinstance(flag, bool | int | float | str) and _truthy(flag):
+            return True
+        linked = _as_id(container.get(_LINKED_EPISODE_KEY))
+        if linked is not None and linked != "0":
+            return True
+    return False
+
+
+def item_total_hint(item: Any, series_id: str) -> int | None:
+    """TikTok's count of the episodes of the item's drama: ``dramaInfo.numVideos`` when it is a
+    positive int (``_as_int``: an int, a whole float or a digit string) and the item does not name
+    another drama than ``series_id``; else None. Pure; never raises."""
+    if not isinstance(item, dict):
+        return None
+    drama_info = _drama_info(item)
     found_series_id = _series_id_of(drama_info)
     if found_series_id is not None and found_series_id != str(series_id):
         return None
+    total = _as_int(drama_info.get(_NUM_VIDEOS_KEY))
+    return total if total is not None and total > 0 else None
+
+
+def _drama_info(item: dict[str, Any]) -> dict[str, Any]:
+    """The item's ``dramaInfo`` (an ``itemStruct`` wrapper's too), ``{}`` when it is no dict."""
+    found = _field(item, "dramaInfo")
+    return found if isinstance(found, dict) else {}
+
+
+def _identify(item: dict[str, Any], series_id: str) -> tuple[str | None, str | None, int | None]:
+    """``(skip reason, item id, episode number)`` of an item, the checks of :func:`skip_reason`
+    in order; the reason is None — and the id and the number are set — for an episode."""
+    drama_info = _drama_info(item)
+    item_id = _as_id(_field(item, "id"))
+    found_series_id = _series_id_of(drama_info)
+    if found_series_id is not None and found_series_id != str(series_id):
+        return SKIP_OTHER_DRAMA, item_id, None
+    if item_id is None:
+        return SKIP_NO_ID, None, None
     number = _episode_number(drama_info)
     if number is None:
-        return None
+        return SKIP_NO_NUMBER, item_id, None
+    return None, item_id, number
 
+
+def _episode(item: dict[str, Any], series_id: str, item_id: str, number: int) -> Episode:
+    """The Episode of an item :func:`_identify` read as episode ``number`` of the series."""
+    drama_info = _drama_info(item)
     series_name = _clean_str(drama_info.get("dramaName"))
     desc = _clean_str(_field(item, "desc"))
     if desc:
@@ -649,7 +852,7 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
     duration = _as_int(video.get("duration")) if isinstance(video, dict) else None
     if duration is not None and duration < 0:
         duration = None
-    access, paid, drm, hints = access_of(item)
+    decision = access_of(item)
 
     return Episode(
         number=number,
@@ -659,12 +862,13 @@ def episode_from_item(item: dict[str, Any], series_id: str) -> Episode | None:
         series_name=series_name,
         author=author,
         duration_s=duration,
-        lock_hints=hints,
+        lock_hints=decision.hints,
         cover_url=cover_url_of(item),
         quality_hint=chosen.label if (chosen := choose_rendition(item)) is not None else None,
-        access=access,
-        paid=paid,
-        drm=drm,
+        access=decision.access,
+        paid=decision.paid,
+        drm=decision.drm,
+        guessed_lock=decision.guessed_lock,
         raw=item,
     )
 
@@ -744,6 +948,9 @@ def _series_id_of(drama_info: dict[str, Any]) -> str | None:
 
 
 def _episode_number(drama_info: dict[str, Any]) -> int | None:
+    """The first usable episode number (an int ≥ 1, ``_as_int``) among ``DramaVideoData``'s
+    number keys, then ``dramaInfo``'s; a key present with junk (``0``, ``null``, ``""``, ``2.5``)
+    falls through to the next one; None when none is usable."""
     video_data = drama_info.get("DramaVideoData")
     containers = [video_data] if isinstance(video_data, dict) else []
     containers.append(drama_info)
@@ -751,7 +958,8 @@ def _episode_number(drama_info: dict[str, Any]) -> int | None:
         for key in _EPISODE_NUMBER_KEYS:
             if key in container:
                 number = _as_int(container[key])
-                return number if number is not None and number >= 1 else None
+                if number is not None and number >= 1:
+                    return number
     return None
 
 
@@ -760,24 +968,76 @@ def parse_item_list_payload(payload: Any, series_id: str) -> PagePayload:
 
     ``cursor`` is read from the top level first, else the first one found recursively (items
     themselves are not searched). ``has_more`` is True only for ``hasMore``/``has_more`` being
-    ``true`` (also ``1``/``"true"``).
+    ``true`` (also ``1``/``"true"``). Every item that is no episode of the series is kept in
+    ``skipped`` with its reason (:func:`skip_reason`) and its id; ``total_hint`` is the first
+    positive ``dramaInfo.numVideos`` of an item of the series (:func:`item_total_hint`).
     """
     episodes: list[Episode] = []
+    skipped: list[SkippedItem] = []
+    keys: list[str | None] = []
     seen = 0
-    skipped = 0
+    total: int | None = None
     for items in find_item_lists(payload):
         for item in items:
             seen += 1
-            episode = episode_from_item(item, series_id)
-            if episode is None:
-                skipped += 1
+            reason, item_id, number = _identify(item, series_id)
+            if reason is None and item_id is not None and number is not None:
+                episodes.append(_episode(item, series_id, item_id, number))
             else:
-                episodes.append(episode)
+                skipped.append(SkippedItem(reason or SKIP_NO_ID, item_id))
+                keys.append(item_key(item) if item_id is None else None)
+            if total is None:
+                total = item_total_hint(item, series_id)
     cursor = _as_cursor(_first_value(payload, ("cursor",)))
     has_more = _as_flag(_first_value(payload, ("hasMore", "has_more")))
     return PagePayload(
-        episodes=episodes, cursor=cursor, has_more=has_more, seen_items=seen, skipped_items=skipped
+        episodes=episodes,
+        cursor=cursor,
+        has_more=has_more,
+        seen_items=seen,
+        skipped_items=len(skipped),
+        skipped=skipped,
+        total_hint=total,
+        skipped_keys=keys,
     )
+
+
+def item_key(item: Any) -> str:
+    """The canonical JSON of a raw item (3.0.1, the review's L4): its keys sorted at every depth,
+    no spaces, a whole float within :data:`MAX_EXACT_INT` written as the int it is and a float
+    that is not finite as ``null`` — so that two copies of one item give one key, as the
+    extension's ``catalog.itemKey`` does (the two agree on which items are the same, parity-tested;
+    the strings themselves may differ). :func:`merge_pages` dedupes the items without an id by it.
+    Pure; never raises."""
+    return json.dumps(
+        _canonical(item, 0), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+
+
+def _canonical(value: Any, depth: int) -> Any:
+    """``value`` as :func:`item_key` writes it: JSON's own values, whole floats as ints, floats
+    that are not finite as None, anything else as its ``str``; a container deeper than any item
+    (``MAX_DEPTH`` times 4 levels) as its kind only (``"<dict>"`` / ``"<list>"``), as the extension
+    writes it."""
+    if isinstance(value, dict):
+        if depth > MAX_DEPTH * 4:
+            return "<dict>"
+        return {str(key): _canonical(inner, depth + 1) for key, inner in value.items()}
+    if isinstance(value, list | tuple):
+        if depth > MAX_DEPTH * 4:
+            return "<list>"
+        return [_canonical(inner, depth + 1) for inner in value]
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer() and abs(value) <= MAX_EXACT_INT:
+            return int(value)
+        return value
+    return str(value)
 
 
 def _first_value(payload: Any, keys: tuple[str, ...]) -> Any:
@@ -833,34 +1093,338 @@ def _as_flag(value: Any) -> bool:
 
 
 def merge_episodes(pages: Iterable[Iterable[Episode]]) -> list[Episode]:
-    """Combine pages: dedupe by item id, then by number (first seen wins); sort by number."""
+    """Combine pages: dedupe by item id (the first seen stays), then keep one episode per number
+    by the preference order of :func:`merge_pages`; sort by number. A highlight no episode of its
+    number came with is no episode (3.0.1): left out."""
+    return _merge(pages)[0]
+
+
+def merge_pages(pages: Iterable[PagePayload]) -> Listing:
+    """The pages of one listing as a :class:`Listing`.
+
+    The episodes are deduped by item id (the same item served twice is one item), THEN merged by
+    number: when several items carry one number the series keeps, in this order of preference,
+    the one that is no highlight (:func:`is_highlight`), then one that reads free or unlocked over
+    one that reads locked, then the longer ``video.duration`` (an unknown one is the shortest),
+    then the first listed — and every other item is a :class:`Duplicate` naming the rule that
+    decided (``LEFT_OUT_*``). A highlight never stands for an episode (3.0.1, the review's L3):
+    when no item that is no highlight holds its number, it is a skipped item
+    (:data:`SKIP_HIGHLIGHT`, after the pages' own, by number) and its number is missing
+    (:attr:`Listing.highlight_numbers`, which :func:`count_check` reaches). The
+    skipped items keep their reasons, once per item id (an id read as an episode on another page
+    is no skipped item), and an item without an id once per listing (3.0.1, the review's L4: its
+    canonical JSON, :attr:`PagePayload.skipped_keys`; a page built by hand without keys counts each
+    one). ``items_received`` counts the distinct items of the series: every episode before the
+    number merge (a lone highlight among them) plus the skipped items that do not name another
+    drama (TikTok's count of this drama leaves those out). ``total_hint`` is the first page's count
+    (:attr:`PagePayload.total_hint`).
+    """
+    listed = list(pages)
+    episodes, duplicates, highlights = _merge(page.episodes for page in listed)
+    episode_ids = {episode.item_id for page in listed for episode in page.episodes}
+    skipped: list[SkippedItem] = []
+    skipped_ids: set[str] = set()
+    skipped_keys: set[str] = set()
+    for page in listed:
+        for index, item in enumerate(page.skipped):
+            if item.item_id is not None:
+                if item.item_id in episode_ids or item.item_id in skipped_ids:
+                    continue
+                skipped_ids.add(item.item_id)
+            else:
+                key = page.skipped_keys[index] if index < len(page.skipped_keys) else None
+                if key is not None:
+                    if key in skipped_keys:
+                        continue
+                    skipped_keys.add(key)
+            skipped.append(item)
+    received = len(episode_ids) + sum(1 for item in skipped if item.reason != SKIP_OTHER_DRAMA)
+    skipped.extend(SkippedItem(SKIP_HIGHLIGHT, highlight.item_id) for highlight in highlights)
+    total = next(
+        (page.total_hint for page in listed if page.total_hint is not None and page.total_hint > 0),
+        None,
+    )
+    return Listing(
+        episodes=episodes,
+        duplicates=duplicates,
+        skipped=skipped,
+        items_received=received,
+        total_hint=total,
+        highlight_numbers=sorted({highlight.number for highlight in highlights}),
+    )
+
+
+def _merge(
+    pages: Iterable[Iterable[Episode]],
+) -> tuple[list[Episode], list[Duplicate], list[Episode]]:
+    """The episodes of ``pages`` deduped by item id, then one per number by the preference order
+    (:func:`merge_pages`), sorted by number; every item left out, by number then as listed; and
+    the highlights of a number no other item holds (3.0.1: never an episode), by number then as
+    listed."""
     by_item: dict[str, Episode] = {}
     for page in pages:
         for episode in page:
             by_item.setdefault(episode.item_id, episode)
-    by_number: dict[int, Episode] = {}
+    by_number: dict[int, list[Episode]] = {}
     for episode in by_item.values():
-        by_number.setdefault(episode.number, episode)
-    return sorted(by_number.values(), key=lambda episode: episode.number)
+        by_number.setdefault(episode.number, []).append(episode)
+    episodes: list[Episode] = []
+    duplicates: list[Duplicate] = []
+    highlights: list[Episode] = []
+    for number in sorted(by_number):
+        candidates = by_number[number]
+        if all(is_highlight(candidate.raw) for candidate in candidates):
+            highlights.extend(candidates)  # a clip of an episode TikTok did not list
+            continue
+        kept = candidates[0]
+        for candidate in candidates[1:]:
+            if _preference(candidate) < _preference(kept):
+                kept = candidate
+        episodes.append(kept)
+        duplicates.extend(
+            Duplicate(number=number, kept=kept, left_out=other, why=_left_out_why(kept, other))
+            for other in candidates
+            if other is not kept
+        )
+    return episodes, duplicates, highlights
 
 
-def catalog_warnings(episodes: list[Episode], total_hint: int | None) -> list[str]:
-    """Human-readable oddities: gaps, duplicate numbers, announced-vs-listed total, locked count."""
+def _preference(episode: Episode) -> tuple[int, int, int]:
+    """The merge's sort key, smaller kept: a highlight last, then a locked episode, then the
+    shorter ``video.duration`` (an unknown duration below every known one)."""
+    duration = episode.duration_s if episode.duration_s is not None else -1
+    return (1 if is_highlight(episode.raw) else 0, 1 if episode.locked else 0, -duration)
+
+
+def _left_out_why(kept: Episode, left_out: Episode) -> str:
+    """The first rule of the preference order that tells ``left_out`` from ``kept``."""
+    kept_key, left_key = _preference(kept), _preference(left_out)
+    for index, why in enumerate((LEFT_OUT_HIGHLIGHT, LEFT_OUT_LOCKED, LEFT_OUT_SHORTER)):
+        if left_key[index] != kept_key[index]:
+            return why
+    return LEFT_OUT_LATER
+
+
+class CountCheck(NamedTuple):
+    """What a listing's numbers say against TikTok's count (:func:`count_check`, 3.0.1).
+
+    ``certain_top``: the highest episode number the drama certainly has — the highest number
+    listed or held by a lone highlight, or TikTok's count less the drama's other items received
+    when that is higher;
+    ``other_items``: those other items (``items_received`` less the episode numbers listed: a
+    trailer, a highlight, an item left out for another one's number, an item without a number or
+    an id — never another drama's); ``uncertain``: TikTok counts more than ``certain_top`` — its
+    count may include those other items, or episodes past the highest number listed may be
+    missing, and DramaFetch cannot tell which."""
+
+    certain_top: int
+    other_items: int
+    uncertain: bool
+
+
+def count_check(
+    numbers: Iterable[int],
+    total_hint: int | None,
+    items_received: int | None,
+    *,
+    highlights: Iterable[int] = (),
+) -> CountCheck:
+    """THE count rule of a listing (3.0.1, the owner's report of 2026-11-27; the extension's
+    ``catalog.countCheck``, parity-tested): with C TikTok's count (``total_hint``, unknown when it
+    is not a positive int), E the distinct episode numbers listed, H their highest — or the highest
+    number of a lone highlight (``highlights``: :attr:`Listing.highlight_numbers`, a clip of an
+    episode TikTok did not list) when that is higher, within C when C is known
+    (:func:`_placed_highlights`); 0 for none — and S = ``items_received`` - |E| the drama's other
+    items received (0 when ``items_received`` is unknown: a series built by hand), the numbers
+    certainly an episode of the drama are 1.. ``certain_top`` = max(H, C - S) — H when C is unknown
+    —, and the list is ``uncertain`` when C is known and above ``certain_top`` (only possible when
+    S > 0): whether TikTok counts the S other items or S episodes past H are missing, nothing in
+    the list tells. Pure."""
+    listed = set(numbers)
+    highest = max((*listed, *_placed_highlights(highlights, total_hint, listed)), default=0)
+    other = max(0, items_received - len(listed)) if items_received is not None else 0
+    if total_hint is None or total_hint <= 0:
+        return CountCheck(highest, other, False)
+    top = max(highest, total_hint - other)
+    return CountCheck(top, other, total_hint > top)
+
+
+def _placed_highlights(
+    highlights: Iterable[int], total_hint: int | None, numbers: Iterable[int]
+) -> list[int]:
+    """The lone highlights' numbers :func:`count_check` reaches (3.0.1; the extension's
+    ``catalog`` does the same, parity-tested): every one while TikTok's count is unknown or the
+    list itself goes past it (``numbers``, the episode numbers listed: a count the list
+    contradicts, a stale one say, holds nothing back), else those within it — TikTok counts every
+    episode of the drama, so a clip numbered past its count is no episode number DramaFetch can
+    place, whatever TikTok numbered it by: it raises no missing number, no row and no request, and
+    stays one of the drama's other items received."""
+    clips = list(highlights)
+    if total_hint is None or total_hint <= 0 or total_hint < max(numbers, default=0):
+        return clips
+    return [number for number in clips if number <= total_hint]
+
+
+def missing_numbers(
+    numbers: Iterable[int],
+    total_hint: int | None,
+    items_received: int | None,
+    *,
+    limit: int,
+    highlights: Iterable[int] = (),
+) -> list[int]:
+    """The episode numbers a listing certainly lacks, ascending: every number from 1 up to
+    :func:`count_check`'s ``certain_top`` that is not listed — a hole below the highest number
+    listed (5, then 7 without 6), the numbers above it up to a lone highlight's (``highlights``,
+    within TikTok's count when it is known) and up to TikTok's count less the drama's other items
+    received —; never above ``limit`` (an
+    absurd count costs nothing). A number past ``certain_top`` is never named: an uncertain list
+    is said, not given rows (3.0.1)."""
+    listed = set(numbers)
+    check = count_check(listed, total_hint, items_received, highlights=highlights)
+    top = min(check.certain_top, limit)
+    return [number for number in range(1, top + 1) if number not in listed]
+
+
+def series_item_ids(page: PagePayload) -> list[str]:
+    """The ids of the page's items of the series — its episodes, then the items DramaFetch could
+    not read that do not name another drama — in page order; an item without an id gives none."""
+    ids = [episode.item_id for episode in page.episodes]
+    ids.extend(
+        item.item_id
+        for item in page.skipped
+        if item.reason != SKIP_OTHER_DRAMA and item.item_id is not None
+    )
+    return ids
+
+
+def page_ends_list(
+    page: PagePayload,
+    seen_ids: Iterable[str],
+    *,
+    listed: bool = True,
+    expected_more: bool = False,
+) -> bool:
+    """Whether an episode-list page says the series' list is over: an answer that holds a list
+    (``listed``: an answer without one — TikTok's error JSON, say — ends nothing) whose ``hasMore``
+    is false and that is no repeat: it holds no item of the series at all (an empty last page), or
+    one whose id ``seen_ids`` — the ids of the series' items earlier pages brought — does not hold.
+    A page that only repeats items already listed (TikTok answering a later cursor with the first
+    page again) ends nothing, whatever its ``hasMore`` says; and (3.0.1, the review's L5) an answer
+    with no item of the series ends nothing when more was expected (``expected_more``: it answers a
+    cursor an earlier page announced with ``hasMore`` true, or a gap-filling request) — TikTok may
+    answer a re-signed request with an empty list; a last page that brings items of the series
+    still ends the list."""
+    if not listed or page.has_more:
+        return False
+    own: list[str | None] = [episode.item_id for episode in page.episodes]
+    own.extend(item.item_id for item in page.skipped if item.reason != SKIP_OTHER_DRAMA)
+    if not own:
+        return not expected_more
+    seen = set(seen_ids)
+    return any(item_id is not None and item_id not in seen for item_id in own)
+
+
+def fill_target(
+    numbers: Iterable[int],
+    total_hint: int | None,
+    items_received: int | None,
+    *,
+    early_end: bool,
+    covered: Iterable[tuple[int, int | None]] = (),
+    limit: int,
+    highlights: Iterable[int] = (),
+) -> int | None:
+    """The episode number the gap filling asks TikTok for next — the list page from ``cursor`` =
+    that number - 1 — or None when nothing is left to ask.
+
+    The first number :func:`missing_numbers` names (a hole below the highest number listed, a
+    number up to a lone highlight's — ``highlights`` — or up to TikTok's count less the drama's
+    other items received: :func:`count_check`) that no earlier filling answer covered
+    (``covered``: the spans :func:`fill_covered` gave, ``(low, high)`` with ``high`` None for no
+    bound); else, once every such number is covered, the number after the highest one listed or
+    held by a lone highlight, unless an answer covered it, when the list ended early
+    (``early_end``) and TikTok's count is unknown, or when the list is uncertain (3.0.1: TikTok
+    counts more than the drama certainly has — the page after the highest number listed is asked
+    for once). A known count everything listed accounts for leaves nothing to ask past the highest
+    number listed. Pure."""
+    spans = list(covered)
+
+    def is_covered(number: int) -> bool:
+        return any(low <= number and (high is None or number <= high) for low, high in spans)
+
+    listed = list(numbers)
+    clips = list(highlights)
+    missing = missing_numbers(listed, total_hint, items_received, limit=limit, highlights=clips)
+    for number in missing:
+        if not is_covered(number):
+            return number
+    unknown = total_hint is None or total_hint <= 0
+    check = count_check(listed, total_hint, items_received, highlights=clips)
+    if (early_end and unknown) or check.uncertain:
+        after = max((*listed, *_placed_highlights(clips, total_hint, listed)), default=0) + 1
+        if after <= limit and not is_covered(after):
+            return after
+    return None
+
+
+def fill_covered(target: int, count: int, answer: PagePayload | None) -> tuple[int, int | None]:
+    """The episode numbers one filling answer covered, from ``target`` on — those the filling stops
+    asking for once the answer did not bring them: every number from ``target`` on when the answer
+    says the list is over (``hasMore`` false; None: no upper bound); while it says more, up to the
+    highest number at or above ``target`` it listed (TikTok sent a shorter page than asked), else
+    up to ``target + count - 1`` (the page asked; ``count`` at least 1). Pure."""
+    if answer is not None and not answer.has_more:
+        return target, None
+    reached = [] if answer is None else [e.number for e in answer.episodes if e.number >= target]
+    if reached:
+        return target, max(reached)
+    return target, target + max(1, count) - 1
+
+
+def catalog_warnings(
+    episodes: list[Episode],
+    total_hint: int | None,
+    *,
+    duplicates: Iterable[Duplicate] = (),
+    skipped: Iterable[SkippedItem] = (),
+    items_received: int | None = None,
+    highlights: Iterable[int] = (),
+) -> list[str]:
+    """Human-readable oddities of a listing, in this order: the gaps below the highest number
+    listed or held by a lone highlight (``highlights``, 3.0.1: a clip of an episode TikTok did not
+    list — the numbers above the highest episode listed up to it are missing too, within TikTok's
+    count when it is known, as :func:`count_check` reads them); one line per
+    item left out for another one's number — those ``episodes`` holds
+    itself (found by :func:`merge_pages`' rules), then ``duplicates`` (a :class:`Listing`'s) —
+    naming the number, the item left out and why, and the item kept; one line per reason of the
+    ``skipped`` items, with their count (:data:`SKIP_REASONS` first, then :data:`SKIP_HIGHLIGHT`);
+    TikTok's count against the numbers listed whenever they differ (``TikTok announces N
+    episodes, M listed``: more listed than it announces, or fewer — 3.0.1, the review's L2: other
+    items received never silence it); when :func:`count_check` finds the list uncertain, what
+    TikTok counts, what was listed and that DramaFetch cannot tell (:func:`uncertain_text`); the
+    locked count."""
     warnings: list[str] = []
     numbers = sorted({episode.number for episode in episodes})
+    clips = _placed_highlights(highlights, total_hint, numbers)
     expected = 1
     for number in numbers:
         if number > expected:
             warnings.append(_gap_text(expected, number - 1))
         expected = number + 1
-    counts = Counter(episode.number for episode in episodes)
-    warnings.extend(
-        f"duplicate episode number {number}"
-        for number, count in sorted(counts.items())
-        if count > 1
-    )
+    if max(clips, default=0) >= expected:
+        warnings.append(_gap_text(expected, max(clips)))
+    found = [*_merge([episodes])[1], *duplicates]
+    warnings.extend(_duplicate_text(duplicate) for duplicate in sorted(found, key=_number_of))
+    reasons = Counter(item.reason for item in skipped)
+    known = (*SKIP_REASONS, SKIP_HIGHLIGHT)
+    order = [*known, *(reason for reason in reasons if reason not in known)]
+    warnings.extend(_skipped_text(reasons[reason], reason) for reason in order if reasons[reason])
     if total_hint is not None and total_hint > 0 and len(numbers) != total_hint:
         warnings.append(f"TikTok announces {total_hint} episodes, {len(numbers)} listed")
+    check = count_check(numbers, total_hint, items_received, highlights=clips)
+    if check.uncertain and total_hint is not None:
+        warnings.append(uncertain_text(total_hint, len(numbers), check.other_items))
     locked = sum(1 for episode in episodes if episode.locked)
     if locked == 1:
         warnings.append("1 episode looks locked")
@@ -869,23 +1433,77 @@ def catalog_warnings(episodes: list[Episode], total_hint: int | None) -> list[st
     return warnings
 
 
+def _number_of(duplicate: Duplicate) -> int:
+    return duplicate.number
+
+
+#: How the warnings and the report line start for a list TikTok counts more items of than
+#: DramaFetch can place (3.0.1, :func:`count_check`'s ``uncertain``) — the words of the extension's
+#: alert title too.
+UNCERTAIN_TEXT = "TikTok's list may be incomplete"
+
+
+def other_items_text(count: int) -> str:
+    """``1 other item (a trailer or a highlight)`` / ``2 other items (trailers or highlights)``."""
+    if count == 1:
+        return "1 other item (a trailer or a highlight)"
+    return f"{count} other items (trailers or highlights)"
+
+
+def uncertain_text(total: int, listed: int, other: int) -> str:
+    """The warning of an uncertain list (3.0.1, the review's L2): ``TikTok's list may be
+    incomplete: TikTok counts 66 episodes; 65 episodes and 1 other item (a trailer or a
+    highlight) were listed, so DramaFetch cannot tell whether an episode is missing — paste the
+    drama again later to check again``."""
+    return (
+        f"{UNCERTAIN_TEXT}: TikTok counts {_episodes_text(total)}; {_episodes_text(listed)} and "
+        f"{other_items_text(other)} were listed, so DramaFetch cannot tell whether an episode is "
+        "missing — paste the drama again later to check again"
+    )
+
+
+def _episodes_text(count: int) -> str:
+    """``1 episode`` / ``2 episodes``."""
+    return f"{count} episode" if count == 1 else f"{count} episodes"
+
+
+def _duplicate_text(duplicate: Duplicate) -> str:
+    return (
+        f"duplicate episode number {duplicate.number}: item {duplicate.left_out.item_id} left "
+        f"out ({duplicate.why}), item {duplicate.kept.item_id} kept"
+    )
+
+
+def _skipped_text(count: int, reason: str) -> str:
+    items = "item" if count == 1 else "items"
+    return f"TikTok listed {count} {items} DramaFetch could not read ({reason})"
+
+
 def _gap_text(low: int, high: int) -> str:
     if low == high:
         return f"episode {low} missing (gap)"
     return f"episodes {low}-{high} missing (gap)"
 
 
-def parse_detail_payload(payload: Any) -> tuple[str | None, int | None]:
+def parse_detail_payload(
+    payload: Any, series_id: str | None = None
+) -> tuple[str | None, int | None]:
     """Best-effort ``(series name, announced total)`` from a ``/api/drama/detail/`` payload.
 
     Looks inside ``dramaInfo``/``drama``/``detail`` objects first (recursively), then at the top
     level: the name is the first string under ``dramaName``, ``title`` or ``name``; the total is
-    the first positive integer under ``totalEpisode``, ``totalEpisodes``, ``episodeCount``,
-    ``total`` or ``episodeTotal``.
+    the first positive integer under ``numVideos`` (TikTok's count), ``totalEpisode``,
+    ``totalEpisodes``, ``episodeCount``, ``total`` or ``episodeTotal``. With ``series_id``, an
+    object whose own series id (``dramaID`` / ``dramaId`` / ``DramaID`` / ``albumId``) names
+    another drama gives neither: a related drama's name or count is not this one's.
     """
     name: str | None = None
     total: int | None = None
     for container in _detail_containers(payload):
+        if series_id is not None:
+            found_series_id = _series_id_of(container)
+            if found_series_id is not None and found_series_id != str(series_id):
+                continue
         if name is None:
             name = _first_str(container, _NAME_KEYS)
         if total is None:

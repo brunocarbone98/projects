@@ -17,7 +17,9 @@ import { PY_SPACE, TIKTOK_BASE_URL, caseless, pyHead, pyRepr, pyStrip } from "./
  * @typedef {object} SeriesRef A short-drama series identified from a pasted URL or id.
  * @property {"series"} kind
  * @property {string} seriesId
- * @property {number | null} episodeHint the 1-based episode the viewer was looking at
+ * @property {number | null} episodeHint the 1-based episode the viewer was looking at, kept as
+ *   parsed: since 3.0.1 no listing reads it — every listing, the in-run refresh included, opens
+ *   episode 1 (spec §5) — and it picks no episode
  * @property {string} sourceUrl
  *
  * @typedef {object} VideoRef A single ordinary TikTok video (`/@user/video/<item_id>`).

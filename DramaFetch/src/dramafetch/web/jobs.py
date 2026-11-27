@@ -64,6 +64,7 @@ from dramafetch.models import (
     Episode,
     Series,
     SeriesRef,
+    is_guessed_locked,
 )
 from dramafetch.thumbnails import cover_sidecar
 
@@ -147,6 +148,9 @@ def result_to_dict(result: DownloadResult) -> dict[str, Any]:
     ``file_name`` is the basename, for display; ``thumbnail`` says whether a cover is available —
     a sidecar next to the file or one embedded in it (:func:`has_cover`) — so the page knows
     whether to offer a Cover link next to Save video. Computed here, once, when the row is made.
+    ``guessed_lock`` (3.0.1): the row is a FREE episode DramaFetch skipped only because its own
+    rules guessed it was locked (``models.is_guessed_locked``) — not downloaded, so the page gives
+    it the failure colour; its status stays ``skipped-locked``.
     """
     path = result.path
     return {
@@ -157,6 +161,7 @@ def result_to_dict(result: DownloadResult) -> dict[str, Any]:
         "path": str(path) if path is not None else None,
         "file_name": path.name if path is not None else None,
         "thumbnail": path is not None and has_cover(path),
+        "guessed_lock": is_guessed_locked(result),
     }
 
 

@@ -30,12 +30,18 @@ import logging
 import random
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+from dramafetch.catalog import (
+    UNCERTAIN_TEXT,
+    count_check,
+    missing_numbers,
+    other_items_text,
+)
 from dramafetch.cooldown import (
     Cooldown,
     active_cooldown,
@@ -61,6 +67,11 @@ from dramafetch.manifest import (
 )
 from dramafetch.models import (
     DRM_REMEMBERED_MESSAGE,
+    MAX_EPISODE_NUMBER,
+    NOT_LISTED_AGAIN_MESSAGE,
+    NOT_LISTED_EARLY_END_MESSAGE,
+    NOT_LISTED_MESSAGE,
+    NOT_LISTED_PREFIX,
     QUALITY_MODES,
     RECHECK_AFTER_S,
     RECHECK_HINT_TAIL,
@@ -74,6 +85,7 @@ from dramafetch.models import (
     Episode,
     Series,
     SeriesRef,
+    is_guessed_locked,
 )
 
 log = logging.getLogger(__name__)
@@ -115,10 +127,8 @@ HUMAN_JITTER_S = 3.0
 STOPPED_PREFIX = "stopped: "
 
 _SPEC_TOKEN_RE = re.compile(r"^(?P<lo>\d+)?(?P<dash>-)?(?P<hi>\d+)?$")
-#: Largest episode number an ``--episodes`` spec may name; short dramas have at most a few hundred
-#: episodes (the series URL itself allows four digits), and the bound keeps a typo such as
-#: ``1-99999999999`` from being taken seriously.
-MAX_EPISODE_NUMBER = 10_000
+# ``MAX_EPISODE_NUMBER`` (imported above from ``models``, where the discovery reads it too): the
+# largest episode number an ``--episodes`` spec may name and the report's gaps reach.
 #: Results that did not contact TikTok: they never pause, count or reset anything.
 NO_NETWORK_STATUSES = frozenset(
     {DownloadStatus.SKIPPED_EXISTS, DownloadStatus.SKIPPED_LOCKED, DownloadStatus.DRY_RUN}
@@ -157,6 +167,14 @@ COOKIES_STOP = "malformed cookies file"
 MANIFEST_SKIP_PREFIX = "already downloaded (manifest): "
 #: What the report line of a series skipped as complete adds when locked episodes remain.
 RECHECK_HINT = f"unlocked more in the TikTok app since? {RECHECK_HINT_TAIL}"
+#: How an incomplete report line says that the listing ended before TikTok said the list was over
+#: (``SeriesReport.ended_early``, 3.0.1): ``TikTok's list ended early: episodes 61, 62 not
+#: received``, or ``TikTok's list ended early after episode 60`` when TikTok's count is unknown.
+ENDED_EARLY_TEXT = "TikTok's list ended early"
+#: What a report line says of the free episodes DramaFetch did not ask for because its own rules
+#: guessed they were locked (3.0.1, :func:`is_guessed_locked`): ``1 free episode not asked for
+#: (17): TikTok's list made it look locked``.
+NOT_ASKED_TEXT = "not asked for"
 
 
 def resolve(
@@ -267,6 +285,47 @@ def missing_from_selection(series: Series, spec: str | None) -> list[tuple[int, 
         if cursor <= top:
             gaps.append((cursor, top))
     return merge_ranges(gaps)
+
+
+def unlisted_requested(series: Series, spec: str | None) -> list[int]:
+    """The requested episode numbers TikTok's list lacks up to the series' last episode as far as
+    anyone knows (3.0.1), ascending: the numbers :func:`series_report` counts as missing from the
+    list — a hole below the highest number listed, or a number up to TikTok's count less the
+    drama's other items received (``catalog.missing_numbers``) — that ``spec`` asks for. Each gets a
+    row of its own (:func:`not_listed_results`), never silence; a requested number past that last
+    episode is no episode of the series and stays an ignored note (:func:`ignored_requested`).
+    ``None`` / ``"all"``: none (a whole-series run reports its missing numbers in its line)."""
+    intervals = parse_episode_spec(spec)
+    if intervals is None:
+        return []
+    missing = missing_numbers(
+        series.numbers,
+        series.total_hint,
+        series.items_received,
+        limit=MAX_EPISODE_NUMBER,
+        highlights=series.highlight_numbers,
+    )
+    return [number for number in missing if _in_intervals(number, intervals)]
+
+
+def ignored_requested(series: Series, spec: str | None) -> list[tuple[int, int]]:
+    """The ranges of :func:`missing_from_selection` past the series' last episode as far as
+    anyone knows — ``catalog.count_check``'s ``certain_top``: the highest number listed, or
+    TikTok's count less the drama's other items received —: what ``download --episodes`` reports
+    as ignored; the requested numbers up to it are :func:`unlisted_requested`'s, with a row each
+    (3.0.1)."""
+    check = count_check(
+        series.numbers,
+        series.total_hint,
+        series.items_received,
+        highlights=series.highlight_numbers,
+    )
+    last = max(max(series.numbers, default=0), min(check.certain_top, MAX_EPISODE_NUMBER))
+    return [
+        (max(low, last + 1), high)
+        for low, high in missing_from_selection(series, spec)
+        if high > last
+    ]
 
 
 def merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -758,6 +817,8 @@ def episode_to_dict(episode: Episode) -> dict[str, Any]:
         "paid": episode.paid,
         "drm": episode.drm,
         "locked": episode.locked,
+        # 3.0.1: locked only by DramaFetch's own guesses (SHORT-HEADER, no play address)
+        "guessed_lock": episode.guessed_lock,
         "lock_hints": list(episode.lock_hints),
         "page_url": episode.page_url,
         "cover_url": episode.cover_url,
@@ -801,14 +862,21 @@ class SeriesReport:
 
     The counts are per episode number: ``done`` downloaded in this run, ``on_disk`` already there
     (``skipped-exists``: the manifest or the file), ``locked`` skipped as locked, ``failed`` every
-    ``failed-*`` status (``stopped: …`` included). ``listed`` is the length of TikTok's list (0
-    when the series was skipped as complete: see ``on_disk``) and ``gaps`` the numbers missing
-    from it between 1 and ``max(highest listed number, total_hint)``. ``complete``: something is
-    listed, every listed episode that can be downloaded is done or on disk — every one that is
-    not ``locked`` and was not skipped as locked by the run (``skipped-locked``: an episode an
-    earlier run's download found protected by DRM, which the manifest remembers, although its
-    payload reads as playable) —, nothing failed, no gaps, and as many listed as TikTok announced
-    (when it announced a total) — or the series was skipped as complete (``skipped_complete``: its
+    ``failed-*`` status (``stopped: …`` included) of a LISTED episode. ``listed`` is the length of
+    TikTok's list (0 when the series was skipped as complete: see ``on_disk``) and ``gaps`` the
+    numbers missing from it (3.0.1: ``catalog.count_check``, so a count that may include a
+    trailer or a highlight raises no number it cannot place): every number the list does not hold
+    between 1 and the highest one listed or wanted — a failure row of a number the list does not
+    hold (:func:`not_listed_results`: a selection's wanted number its fresh list lacks, the
+    extension's row of a missing number), which counts as missing from the list, never as a failed
+    download — and up to TikTok's count less the drama's other items received
+    (``certain_top``). ``complete``: something is listed, every listed episode that can
+    be downloaded is done or on disk — every one that is not ``locked`` and was not skipped as
+    locked by the run (``skipped-locked``: an episode an earlier run's download found protected by
+    DRM, which the manifest remembers, although its payload reads as playable) —, nothing failed,
+    no gaps, no more listed than TikTok announced (when it announced a total), the list did not
+    end early (``ended_early``) and is not ``uncertain`` — or the series was skipped as complete
+    (``skipped_complete``: its
     manifest said so less than ``RECHECK_AFTER_S`` ago and every file is still there; no request
     was made; ``locked`` then counts the episodes its manifest recorded ``skipped-locked``).
     ``stopped`` says why the run stopped in this series (a stop status, a failure streak, a
@@ -816,11 +884,31 @@ class SeriesReport:
 
     The fields after ``stopped`` complete the picture for :func:`report_line`: ``total`` (the
     episodes the series has as far as anyone knows: the largest of the count listed, the highest
-    number listed and TikTok's total — for a skipped series, the episodes on disk), the numbers
-    behind ``locked`` and ``failed``, TikTok's announced ``total_hint``, for a series skipped as
-    complete how long ago its manifest found it complete (``checked_ago_s``), and ``unlocked`` /
-    ``unlocked_numbers``: the episodes done or on disk in this run whose ``Episode.access`` is
-    ``"unlocked"`` — paid episodes the user's own account unlocked.
+    number listed or missing and ``catalog.count_check``'s ``certain_top`` — for a skipped series,
+    the episodes on disk), the numbers behind ``locked`` and ``failed``, TikTok's
+    announced ``total_hint``, for a series skipped as complete how long ago its manifest found it
+    complete (``checked_ago_s``), ``unlocked`` / ``unlocked_numbers``: the episodes done or on disk
+    in this run whose ``Episode.access`` is ``"unlocked"`` — paid episodes the user's own account
+    unlocked —, ``ended_early`` (3.0.1): the listing ended before TikTok said the list was over
+    (``Series.early_end``) and the episodes listed do not reach TikTok's count — it is unknown, or
+    above the highest number listed —, and ``last_listed``: the highest episode number listed (what
+    the line splits the gaps at: the holes below it, the episodes an early end did not bring above
+    it).
+
+    ``uncertain`` / ``other_items`` (3.0.1, the review's L2): ``catalog.count_check`` found TikTok
+    counting more than the drama certainly has — the ``other_items`` it listed besides the
+    episodes (a trailer, a highlight, …) may be in its count, or episodes past the highest number
+    listed may be missing; DramaFetch cannot tell which. Never complete (no complete mark, no
+    24-hour skip); no gap, so no row, for a number past ``certain_top``; the line says it
+    (:data:`~dramafetch.catalog.UNCERTAIN_TEXT`).
+
+    ``guessed_locked`` / ``guessed_locked_numbers`` (3.0.1, the owner's report of 2026-11-27): the
+    ``skipped-locked`` rows of FREE episodes DramaFetch only guessed were locked
+    (:func:`is_guessed_locked`: ``Episode.guessed_lock``, a short header and/or no play address,
+    no price, entitlement, TikTok lock flag or DRM clue) — counted apart from ``locked`` and
+    AGAINST completeness: a series with one is never complete, so it is never marked complete and
+    never skipped as complete; the status stays ``skipped-locked`` (no request was made, exit
+    codes keep their meaning).
     """
 
     series_id: str
@@ -841,6 +929,12 @@ class SeriesReport:
     checked_ago_s: float | None = None
     unlocked: int = 0
     unlocked_numbers: tuple[int, ...] = ()
+    ended_early: bool = False
+    last_listed: int = 0
+    guessed_locked: int = 0
+    guessed_locked_numbers: tuple[int, ...] = ()
+    uncertain: bool = False
+    other_items: int = 0
 
 
 def series_report(
@@ -872,11 +966,17 @@ def series_report(
     statuses = {number: row.status for number, row in rows.items()}
     done = sorted(n for n, status in statuses.items() if status is DownloadStatus.DONE)
     on_disk = sorted(n for n, status in statuses.items() if status is DownloadStatus.SKIPPED_EXISTS)
-    locked = sorted(n for n, status in statuses.items() if status is DownloadStatus.SKIPPED_LOCKED)
-    failed = sorted(n for n, status in statuses.items() if not status.ok)
+    # 3.0.1: a free episode DramaFetch only guessed was locked is not downloaded, apart from locked
+    guessed = sorted(n for n, row in rows.items() if is_guessed_locked(row))
+    locked = sorted(
+        n
+        for n, status in statuses.items()
+        if status is DownloadStatus.SKIPPED_LOCKED and n not in guessed
+    )
     # paid episodes the user's own account unlocked, among those obtained (downloaded or on disk)
     unlocked = tuple(n for n in sorted({*done, *on_disk}) if rows[n].episode.access == "unlocked")
     if series is None:
+        failed = sorted(n for n, status in statuses.items() if not status.ok)
         return SeriesReport(
             series_id=report_id,
             name=report_name,
@@ -895,17 +995,37 @@ def series_report(
             checked_ago_s=checked_ago_s,
             unlocked=len(unlocked),
             unlocked_numbers=unlocked,
+            guessed_locked=len(guessed),
+            guessed_locked_numbers=tuple(guessed),
         )
     numbers = {episode.number for episode in series.episodes}
     listed = len(series.episodes)
     hint = series.total_hint if series.total_hint and series.total_hint > 0 else None
-    highest = max(max(numbers, default=0), hint or 0)
-    gaps = tuple(n for n in range(1, min(highest, MAX_EPISODE_NUMBER) + 1) if n not in numbers)
+    # THE count rule (catalog.count_check): the numbers certainly an episode of the drama, and
+    # whether TikTok counts more than that (its count may include the other items it listed)
+    check = count_check(numbers, hint, series.items_received, highlights=series.highlight_numbers)
+    # a failure row of a number the list does not hold: missing from TikTok's list, not a failure
+    unlisted = {
+        n
+        for n, status in statuses.items()
+        if not status.ok and n not in numbers and 0 < n <= MAX_EPISODE_NUMBER
+    }
+    failed = sorted(n for n, status in statuses.items() if not status.ok and n not in unlisted)
+    # every number from 1 up to the highest one certainly an episode, or wanted (such a row's),
+    # that the list does not hold
+    top = min(max(check.certain_top, max(unlisted, default=0)), MAX_EPISODE_NUMBER)
+    gaps = tuple(number for number in range(1, top + 1) if number not in numbers)
+    last_listed = max(numbers, default=0)
+    highest = max(last_listed, check.certain_top, max(gaps, default=0))
+    # the list ended before TikTok said it was over, and the episodes listed do not reach its count
+    ended_early = series.early_end is not None and (hint is None or hint > last_listed)
     obtained = set(done) | set(on_disk)
     # What cannot be downloaded is left out of "every downloadable episode is on disk": a locked
     # episode, and one this run skipped as locked although its payload reads as playable — a DRM
     # verdict the manifest remembers (it is counted in `locked` all the same). With
-    # --include-locked such an episode is attempted instead, and a failure is a failure.
+    # --include-locked such an episode is attempted instead, and a failure is a failure. A free
+    # episode DramaFetch only GUESSED was locked (3.0.1, `guessed`) is not left out: while one
+    # is not on disk the series is not complete.
     skipped_locked = set(locked)
     complete = (
         listed > 0
@@ -915,8 +1035,12 @@ def series_report(
             if not episode.locked and episode.number not in skipped_locked
         )
         and not failed
+        and not guessed
         and not gaps
-        and (hint is None or listed == hint)
+        # more listed than TikTok announces stays incomplete; fewer is a gap, or uncertain
+        and (hint is None or listed <= hint)
+        and not ended_early
+        and not check.uncertain
     )
     return SeriesReport(
         series_id=report_id,
@@ -937,6 +1061,12 @@ def series_report(
         checked_ago_s=checked_ago_s,
         unlocked=len(unlocked),
         unlocked_numbers=unlocked,
+        ended_early=ended_early,
+        last_listed=last_listed,
+        guessed_locked=len(guessed),
+        guessed_locked_numbers=tuple(guessed),
+        uncertain=check.uncertain,
+        other_items=check.other_items,
     )
 
 
@@ -965,6 +1095,61 @@ def report_rows(
         elif episode.locked:
             extra.append(locked_result(episode))
     return [*results, *extra]
+
+
+def is_not_listed(result: DownloadResult) -> bool:
+    """Whether ``result`` is the row of an episode TikTok's list lacks (:func:`not_listed_results`,
+    3.0.1): ``failed-unavailable`` with a message that starts with ``not in TikTok's list`` — made
+    without a request."""
+    return result.status is DownloadStatus.FAILED_UNAVAILABLE and result.message.startswith(
+        NOT_LISTED_PREFIX
+    )
+
+
+#: At most this many rows :func:`not_listed_results` makes for one series (the lowest numbers):
+#: short dramas have at most a few hundred episodes, so more missing numbers come from an absurd
+#: number in a payload (``1`` and ``10**12`` listed) — the report line still names them all.
+MAX_NOT_LISTED_ROWS = 500
+
+
+def not_listed_results(
+    series: Series, numbers: Iterable[int], *, again: bool = False
+) -> list[DownloadResult]:
+    """One ``failed-unavailable`` row per number of ``numbers`` that ``series`` does not list
+    (3.0.1, the owner's report of 2026-11-27: an episode missing from TikTok's list gets a row of
+    its own, never silence) — ascending, each number once, between 1 and
+    :data:`MAX_EPISODE_NUMBER`, at most :data:`MAX_NOT_LISTED_ROWS` — made without a request:
+    no pause, nothing counted, never recorded in the manifest. The message says why:
+    :data:`~dramafetch.models.NOT_LISTED_AGAIN_MESSAGE` for ``again`` (a selection's wanted number
+    its fresh list lacks), else :data:`~dramafetch.models.NOT_LISTED_EARLY_END_MESSAGE` for a
+    number past the highest one listed when the listing ended early (``Series.early_end``), else
+    :data:`~dramafetch.models.NOT_LISTED_MESSAGE`. The row's episode has the number, the series' id
+    and name, and nothing else (no item id: TikTok's list named none). :func:`series_report` counts
+    such a row as missing from the list (a gap), not as a failed download."""
+    listed = set(series.numbers)
+    last = max(listed, default=0)
+    wanted = sorted({n for n in numbers if 0 < n <= MAX_EPISODE_NUMBER and n not in listed})
+    rows: list[DownloadResult] = []
+    for number in wanted[:MAX_NOT_LISTED_ROWS]:
+        if again:
+            message = NOT_LISTED_AGAIN_MESSAGE
+        elif series.early_end is not None and number > last:
+            message = NOT_LISTED_EARLY_END_MESSAGE
+        else:
+            message = NOT_LISTED_MESSAGE
+        episode = Episode(
+            number=number,
+            item_id="",
+            title="",
+            series_id=series.series_id,
+            series_name=series.name,
+        )
+        rows.append(
+            DownloadResult(
+                episode=episode, status=DownloadStatus.FAILED_UNAVAILABLE, message=message
+            )
+        )
+    return rows
 
 
 #: At most this many ranges of numbers in a report line; the rest becomes "…".
@@ -1007,10 +1192,20 @@ def report_line(report: SeriesReport) -> str:
     locked (5, 6)``), and so do the paid episodes the user's own account unlocked, named before
     the locked ones (``complete: 3 of 4 (3 downloaded) — 1 paid episode your account unlocked
     (3), 1 locked (4)``); an incomplete one lists the unlocked, locked, failed and not downloaded
-    episodes, the gaps in TikTok's list, a total TikTok exceeded, and why the run stopped. A series
-    skipped as complete while its manifest recorded locked episodes points at ``--recheck``
-    (``complete, nothing to do: 3 episodes already on disk, 1 locked (4) (checked 2 h ago) —
-    unlocked more in the TikTok app since? --recheck looks again``)."""
+    episodes, the gaps in TikTok's list, a total TikTok exceeded, and why the run stopped. A list
+    that ended early (``ended_early``, 3.0.1) names apart what it did not bring past the highest
+    number listed — ``incomplete: 60 of 62 — TikTok's list ended early: episodes 61, 62 not
+    received`` (:data:`ENDED_EARLY_TEXT`), its holes below that number still ``missing from TikTok's
+    list`` — or, when TikTok's count is unknown, where it ended: ``incomplete: 60 of 60 — TikTok's
+    list ended early after episode 60``. The free episodes DramaFetch only guessed were locked
+    (``guessed_locked``, 3.0.1) have a group of their own after the counts: ``incomplete: 2 of 3 —
+    1 free episode not asked for (3): TikTok's list made it look locked``. An uncertain list
+    (``uncertain``, 3.0.1) says what TikTok counts and what was listed: ``incomplete: 65 of 65 —
+    TikTok's list may be incomplete: TikTok counts 66 episodes, 65 listed and 1 other item (a
+    trailer or a highlight)``. A series skipped as complete while its manifest recorded locked
+    episodes points at ``--recheck`` (``complete, nothing to do: 3 episodes already on disk, 1
+    locked (4) (checked 2 h ago) — unlocked more in the TikTok app since? --recheck looks
+    again``)."""
     locked = f"{report.locked} locked ({_numbers_text(report.locked_numbers)})"
     if report.skipped_complete:
         noun = "episode" if report.on_disk == 1 else "episodes"
@@ -1051,13 +1246,28 @@ def report_line(report: SeriesReport) -> str:
         details.append(locked)
     if report.failed:
         details.append(f"{report.failed} failed ({_numbers_text(report.failed_numbers)})")
-    rest = report.listed - have - report.locked - report.failed
+    rest = report.listed - have - report.locked - report.guessed_locked - report.failed
     if rest > 0:
         details.append(f"{rest} not downloaded")
     groups = [", ".join(details)] if details else []
-    if report.gaps:
-        noun = "episode" if len(report.gaps) == 1 else "episodes"
-        groups.append(f"{noun} {_numbers_text(report.gaps)} missing from TikTok's list")
+    if report.guessed_locked:
+        groups.append(_not_asked_text(report.guessed_locked_numbers))
+    if report.ended_early:
+        holes = [number for number in report.gaps if number < report.last_listed]
+        unreceived = [number for number in report.gaps if number > report.last_listed]
+        if holes:
+            groups.append(_missing_text(holes))
+        if unreceived:
+            noun = "episode" if len(unreceived) == 1 else "episodes"
+            groups.append(f"{ENDED_EARLY_TEXT}: {noun} {_numbers_text(unreceived)} not received")
+        elif report.last_listed > 0:
+            groups.append(f"{ENDED_EARLY_TEXT} after episode {report.last_listed}")
+        else:
+            groups.append(ENDED_EARLY_TEXT)
+    elif report.gaps:
+        groups.append(_missing_text(list(report.gaps)))
+    if report.uncertain and report.total_hint:
+        groups.append(_uncertain_text(report.total_hint, report.listed, report.other_items))
     if report.total_hint and report.listed > report.total_hint:
         groups.append(f"TikTok announces {report.total_hint} episodes, {report.listed} listed")
     if report.listed == 0:
@@ -1068,6 +1278,35 @@ def report_line(report: SeriesReport) -> str:
     if groups:
         line += " — " + "; ".join(groups)
     return line
+
+
+def _not_asked_text(numbers: tuple[int, ...]) -> str:
+    """``1 free episode not asked for (17): TikTok's list made it look locked`` / ``2 free episodes
+    not asked for (3, 17): TikTok's list made them look locked`` (3.0.1, :data:`NOT_ASKED_TEXT`):
+    the free episodes DramaFetch's own rules guessed were locked."""
+    one = len(numbers) == 1
+    noun = "episode" if one else "episodes"
+    return (
+        f"{len(numbers)} free {noun} {NOT_ASKED_TEXT} ({_numbers_text(numbers)}): "
+        f"TikTok's list made {'it' if one else 'them'} look locked"
+    )
+
+
+def _uncertain_text(total: int, listed: int, other: int) -> str:
+    """``TikTok's list may be incomplete: TikTok counts 66 episodes, 65 listed and 1 other item (a
+    trailer or a highlight)`` (3.0.1, ``catalog.UNCERTAIN_TEXT``): an uncertain list, in a report
+    line."""
+    noun = "episode" if total == 1 else "episodes"
+    return (
+        f"{UNCERTAIN_TEXT}: TikTok counts {total} {noun}, {listed} listed and "
+        f"{other_items_text(other)}"
+    )
+
+
+def _missing_text(numbers: list[int]) -> str:
+    """``episode 17 missing from TikTok's list`` / ``episodes 5, 6 missing from TikTok's list``."""
+    noun = "episode" if len(numbers) == 1 else "episodes"
+    return f"{noun} {_numbers_text(numbers)} missing from TikTok's list"
 
 
 def report_to_dict(report: SeriesReport) -> dict[str, Any]:
@@ -1092,6 +1331,12 @@ def report_to_dict(report: SeriesReport) -> dict[str, Any]:
         "checked_ago_s": report.checked_ago_s,
         "unlocked": report.unlocked,
         "unlocked_numbers": list(report.unlocked_numbers),
+        "ended_early": report.ended_early,
+        "last_listed": report.last_listed,
+        "guessed_locked": report.guessed_locked,
+        "guessed_locked_numbers": list(report.guessed_locked_numbers),
+        "uncertain": report.uncertain,
+        "other_items": report.other_items,
         "line": report_line(report),
     }
 
@@ -1286,7 +1531,9 @@ def _skip_if_complete(
 ) -> tuple[SeriesRun, SeriesStart] | None:
     """The run of a series its manifest says was complete less than ``RECHECK_AFTER_S`` ago with
     every file it counted still on disk — rows rebuilt from the manifest, no request — or None
-    when anything is missing, stale or unreadable (then the series is resolved as usual). The
+    when anything is missing, stale or unreadable, or the mark was written under another
+    completeness rule than ``manifest.COMPLETE_RULE`` (3.0.1: a mark of 3.0.0 or earlier carries
+    none and never skips) — then the series is resolved as usual. The
     entries the manifest recorded ``skipped-locked`` become the report's ``locked`` /
     ``locked_numbers`` (no rows), so its line can say that ``--recheck`` looks again: the user may
     have unlocked them in the TikTok app since."""
@@ -1296,6 +1543,8 @@ def _skip_if_complete(
     manifest = read_manifest(directory, ref.series_id)
     if manifest is None or manifest.complete_episodes is None:
         return None
+    if not manifest.complete_trusted():
+        return None  # 3.0.1: a mark written under an older completeness rule never skips
     since = manifest.complete_since()
     if since is None:
         return None
@@ -1388,7 +1637,11 @@ def run_series(
        -> ``error`` "no episodes listed", no stop, exit 4.
     4. :func:`select_episodes` and :func:`download_series` with ``pacing`` / ``clock`` / ``sleep`` /
        ``rng``; ``on_start`` is called first (also for an empty selection, which downloads
-       nothing).
+       nothing). With an episodes spec, every requested number TikTok's list lacks up to the
+       series' last episode as far as anyone knows (:func:`unlisted_requested`, 3.0.1) then gets
+       a row of its own (:func:`not_listed_results`: ``failed-unavailable``, ``not in TikTok's list
+       this time``), passed to ``on_result`` after the downloads — no request, not recorded in the
+       manifest.
     5. The report; ``stop`` when a stop status occurred or the failure streak stopped the series.
        With an episodes spec the report also counts the listed episodes outside the selection
        that the manifest knows to be on disk (:func:`report_rows`); ``results`` stays the rows
@@ -1447,15 +1700,21 @@ def run_series(
             error_kind="empty",
             contacted=True,
         )
+    # 3.0.1: a requested number TikTok's list lacks (up to the series' last episode as far as
+    # anyone knows) gets a row of its own after the downloads — no request, not recorded
+    unlisted = not_listed_results(series, unlisted_requested(series, episodes_spec), again=True)
     if not selected:
+        for row in unlisted:
+            if on_result is not None:
+                on_result(row)
         return SeriesRun(
             ref=ref,
             series=series,
-            results=[],
-            report=series_report(series, []),
+            results=unlisted,
+            report=series_report(series, unlisted),
             error=None,
             stop=False,
-            exit_code=EXIT_OK,
+            exit_code=exit_code(unlisted),
             contacted=True,
         )
     manifest = Manifest.load(manifest_path(directory), series.series_id, series.name)
@@ -1474,6 +1733,10 @@ def run_series(
         clock=clock,
         on_stop=stops.append,
     )
+    for row in unlisted:
+        results.append(row)
+        if on_result is not None:
+            on_result(row)
     stopped = stops[0] if stops else _stop_status_summary(results)
     # A selection's report covers the whole series: what an earlier run saved counts as on disk.
     counted = results if episodes_spec is None else report_rows(series, results, manifest)

@@ -418,9 +418,12 @@
     return parts.join(',');
   }
 
-  function badgeClass(status) {
+  // 3.0.1: a free episode DramaFetch only guessed was locked (`guessed_lock`, a short header or no
+  // play address) is not downloaded: the failure colour, though its status stays skipped-locked
+  function badgeClass(status, row) {
     if (status === 'done') { return 'done'; }
     if (status.indexOf('failed') === 0) { return 'failed'; }
+    if (row && row.guessed_lock === true) { return 'failed'; }
     if (status === 'running') { return 'running'; }
     return 'skipped';
   }
@@ -751,7 +754,7 @@
       tbody.appendChild(el('tr', null, [
         el('td', { className: 'num', 'data-label': '#', text: String(row.number) }),
         el('td', { 'data-label': 'Title', text: row.title }),
-        el('td', { 'data-label': 'Status' }, [el('span', { className: 'badge ' + badgeClass(row.status), text: row.status })]),
+        el('td', { 'data-label': 'Status' }, [el('span', { className: 'badge ' + badgeClass(row.status, row), text: row.status })]),
         detail,
         save
       ]));

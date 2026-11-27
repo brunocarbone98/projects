@@ -5,8 +5,10 @@ import { test } from "node:test";
 
 import { DRM_MESSAGE, DRM_REMEMBERED_MESSAGE, PAYLOAD_DRM_MESSAGE } from "../src/lib/messages.js";
 import {
+  COMPLETE_RULE,
   clearComplete,
   completeSince,
+  completeTrusted,
   doneEntries,
   donePath,
   drmProtected,
@@ -110,4 +112,47 @@ test("ISO times: whole seconds in UTC, read back in the usual forms", () => {
   for (const bad of ["", "yesterday", "2026-02-30T00:00:00Z", "2026-13-01", "2025-10-23T24:00:00Z"]) {
     assert.equal(epochOf(bad), null, bad);
   }
+});
+
+test("3.0.1 (§10): a complete mark records the rule it was written under; one without it (3.0.0) or under another is read but never trusted; clearing it or an attempt forgets the rule", () => {
+  assert.equal(COMPLETE_RULE, 2);
+  const state = newState("S1", "Name");
+  record(state, result(1, "done", "/d/E01.mp4", "saved"), { exists: () => true, now: 5 });
+  assert.equal(completeTrusted(state), false); // no mark at all
+  markComplete(state, 1761200000, 1);
+  assert.equal(state.complete_rule, COMPLETE_RULE);
+  assert.equal(completeTrusted(state), true);
+  const stored = JSON.parse(JSON.stringify(state));
+  assert.deepEqual(readState(stored, "S1"), state);
+  // what 3.0.0 stored: no rule — readable, the mark kept as it is, never trusted
+  const { complete_rule: _rule, ...old } = stored;
+  const read = readState(old, "S1");
+  assert.ok(read !== null);
+  assert.deepEqual([read.complete_at, read.complete_episodes, read.complete_rule], ["2025-10-23T06:13:20Z", 1, null]);
+  assert.equal(completeTrusted(read), false);
+  for (const [rule, kept] of /** @type {[unknown, number | null][]} */ ([
+    [1, 1],
+    [COMPLETE_RULE + 1, COMPLETE_RULE + 1],
+    [true, null],
+    ["2", null],
+    [0, null],
+    [2.5, null],
+    [null, null],
+  ])) {
+    const other = readState({ ...stored, complete_rule: rule }, "S1");
+    assert.equal(other?.complete_rule, kept, String(rule));
+    assert.equal(other !== null && completeTrusted(other), false, String(rule));
+  }
+  // a rule without a mark is forgotten with it
+  assert.equal(readState({ ...stored, complete_at: null }, "S1")?.complete_rule, null);
+  // an attempt and a clear forget the rule with the mark
+  record(state, result(2, "failed", null, "boom"), { exists: () => true });
+  assert.deepEqual([state.complete_at, state.complete_rule], [null, null]);
+  markComplete(state, 1761200000, 1);
+  assert.equal(clearComplete(state), true);
+  assert.deepEqual([state.complete_at, state.complete_episodes, state.complete_rule], [null, null, null]);
+  assert.equal(clearComplete(state), false);
+  // a rule alone (an odd record) is still a mark to clear
+  state.complete_rule = COMPLETE_RULE;
+  assert.equal(clearComplete(state), true);
 });

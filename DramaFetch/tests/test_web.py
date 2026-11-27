@@ -49,6 +49,7 @@ from dramafetch.cooldown import (
     record_block,
     state_dir,
 )
+from dramafetch.downloader import locked_result
 from dramafetch.errors import (
     ChallengeError,
     DiscoveryError,
@@ -56,6 +57,7 @@ from dramafetch.errors import (
     RateLimitedError,
 )
 from dramafetch.models import (
+    DRM_REMEMBERED_MESSAGE,
     DiscoveryOptions,
     DownloadOptions,
     DownloadResult,
@@ -2834,6 +2836,7 @@ def test_result_to_dict(tmp_path: Path) -> None:
         "path": None,
         "file_name": None,
         "thumbnail": False,
+        "guessed_lock": False,  # 3.0.1: the row of a free episode DramaFetch guessed was locked
     }
     video = tmp_path / "The Billionaire's Secret Heiress - Episode 01.mp4"
     video.write_bytes(b"v")
@@ -3006,3 +3009,31 @@ def test_the_port_is_taken_exclusively_on_windows(monkeypatch):
     monkeypatch.setattr(socket, "SO_EXCLUSIVEADDRUSE", 0xFFFB, raising=False)
     server.server_bind()
     assert server.socket.options == [(socket.SOL_SOCKET, 0xFFFB, 1)] and bound == ["bind", "bind"]
+
+
+def test_a_free_episode_dramafetch_guessed_was_locked_has_the_failure_colour():
+    """3.0.1 (§9): the snapshot row of a free episode DramaFetch only guessed was locked (a short
+    header, no play address) says ``guessed_lock`` — its status stays ``skipped-locked`` — and the
+    page gives it the failure colour; a paid locked one and a remembered DRM verdict do not."""
+    guessed = Episode(
+        3,
+        "id3",
+        "t3",
+        SERIES_ID,
+        access="locked",
+        lock_hints=("plays 2 s of 3 s",),
+        guessed_lock=True,
+    )
+    paid = Episode(4, "id4", "t4", SERIES_ID, lock_hints=("isFree=false",), paid=True)
+    row = result_to_dict(locked_result(guessed))
+    assert (row["status"], row["guessed_lock"]) == ("skipped-locked", True)
+    assert row["message"] == "looks locked: plays 2 s of 3 s"
+    assert result_to_dict(locked_result(paid))["guessed_lock"] is False
+    remembered = DownloadResult(
+        guessed, DownloadStatus.SKIPPED_LOCKED, message=DRM_REMEMBERED_MESSAGE
+    )
+    assert result_to_dict(remembered)["guessed_lock"] is False
+    page = (Path(web_server.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert "function badgeClass(status, row)" in page
+    assert "if (row && row.guessed_lock === true) { return 'failed'; }" in page
+    assert "badgeClass(row.status, row)" in page

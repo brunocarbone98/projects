@@ -12,6 +12,8 @@ import {
   CUT_SHORT_CAUSE_SUFFIX,
   DRM_CAUSE,
   FAILED_CAUSE_PREFIX,
+  GUESSED_LOCKED_CAUSE_PREFIX,
+  GUESSED_LOCKED_CAUSE_SUFFIX,
   INVALID_FILE_CAUSE_PREFIX,
   INVALID_FILE_CAUSE_SUFFIX,
   LOCKED_CAUSE_PREFIX,
@@ -20,6 +22,7 @@ import {
   LOGIN_CAUSE,
   LONGER_FILE_CAUSE_SUFFIX,
   NOT_ATTEMPTED_CAUSE,
+  NOT_LISTED_CAUSE,
   RATE_LIMITED_CAUSE,
   REPORTS_FOLDER,
   REPORT_VERSION,
@@ -33,6 +36,7 @@ import {
   buildReport,
   digestEntry,
   hasFailures,
+  listingSection,
   probableCause,
   reportFilename,
   reportJson,
@@ -44,11 +48,15 @@ import {
   DRM_MESSAGE,
   INCOMPLETE_PREFIX,
   MEDIA_RATE_LIMIT_MESSAGE,
+  NOT_LISTED_AGAIN_MESSAGE,
+  NOT_LISTED_EARLY_END_MESSAGE,
+  NOT_LISTED_MESSAGE,
   PAYLOAD_DRM_MESSAGE,
   SHORT_SERVED_PREFIX,
   UNAVAILABLE_MESSAGE,
   shortServedMessage,
 } from "../src/lib/messages.js";
+import { uncertainText } from "../src/lib/catalog.js";
 
 const SERIES_ID = "7699393770256782354";
 const OTHER_ID = "7699393770256782399";
@@ -147,7 +155,7 @@ const SHORTER_HINTS = ["isFree=False", "unlockPrice=30"];
 /** The downloader's short-served message (`downloader.js`): the whole file by size, a 70 s header. */
 const SERVED = shortServedMessage(9676471, "70", "106");
 
-test("probableCause: the twelve rules, first match wins", () => {
+test("probableCause: the thirteen rules, first match wins", () => {
   // 1. the run stopped before the episode — whatever its status
   assert.equal(
     probableCause(row("failed-rate-limited", `stopped: episode 2 failed-rate-limited: ${MEDIA_RATE_LIMIT_MESSAGE}`), null),
@@ -215,14 +223,20 @@ test("probableCause: the twelve rules, first match wins", () => {
   for (const reason of ["no audio track", "not a valid MP4 (no moov atom)", "no playable duration", "truncated MP4 (mdat atom cut short: 10 of 20 bytes)"]) {
     assert.equal(probableCause(row("failed", `${INCOMPLETE_PREFIX}${reason}`), null), `${INVALID_FILE_CAUSE_PREFIX}${reason}${INVALID_FILE_CAUSE_SUFFIX}`);
   }
-  // 11. no playable stream
+  // 11. (3.0.1) an episode TikTok's list lacked: a row made without a request, never “no playable stream”
+  for (const message of [NOT_LISTED_MESSAGE, NOT_LISTED_EARLY_END_MESSAGE, NOT_LISTED_AGAIN_MESSAGE]) {
+    assert.equal(probableCause(row("failed-unavailable", message), null), NOT_LISTED_CAUSE);
+  }
+  assert.equal(probableCause(row("failed", NOT_LISTED_MESSAGE), null), `${FAILED_CAUSE_PREFIX}${NOT_LISTED_MESSAGE}`); // only that status
+  assert.equal(probableCause(row("failed-unavailable", `stopped: ${NOT_LISTED_MESSAGE}`), null), `${NOT_ATTEMPTED_CAUSE} (${NOT_LISTED_MESSAGE})`);
+  // 12. no playable stream
   const unavailable = `${UNAVAILABLE_MESSAGE} (HTTP 403 from v4.tiktok.com)`;
   assert.equal(probableCause(row("failed-unavailable", unavailable), null), `${UNAVAILABLE_CAUSE_PREFIX}${unavailable}${UNAVAILABLE_CAUSE_SUFFIX}`);
-  // 12. the rest
+  // 13. the rest
   assert.equal(probableCause(row("failed", "download failed: no response (Failed to fetch) from v1.tiktok.com"), null), `${FAILED_CAUSE_PREFIX}no response (Failed to fetch) from v1.tiktok.com`); // the prefix once, never doubled
   assert.equal(probableCause(row("failed", "could not save E01.mp4: FILE_FAILED"), null), `${FAILED_CAUSE_PREFIX}could not save E01.mp4: FILE_FAILED`);
   // every cause is English text without a URL query or a cookie-like value
-  for (const text of [RATE_LIMITED_CAUSE, BLOCKED_CAUSE, LOGIN_CAUSE, DRM_CAUSE, WHAT_THIS_IS]) {
+  for (const text of [RATE_LIMITED_CAUSE, BLOCKED_CAUSE, LOGIN_CAUSE, DRM_CAUSE, NOT_LISTED_CAUSE, WHAT_THIS_IS]) {
     assert.doesNotMatch(text, /[?&]|sessionid|msToken/i);
   }
 });
@@ -309,8 +323,10 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
   const series = /** @type {Record<string, unknown>[]} */ (report["series"]);
   assert.equal(series.length, 2);
   const [one, other] = /** @type {[Record<string, unknown>, Record<string, unknown>]} */ (series);
-  assert.deepEqual(Object.keys(one), ["series_id", "name", "line", "status", "error", "stop", "contacted", "listed", "access_counts", "not_downloaded", "reference", "episodes_digest"]);
+  // 3.0.1 adds `listing`: how the series' list was read (null here: no listing was passed)
+  assert.deepEqual(Object.keys(one), ["series_id", "name", "line", "status", "error", "stop", "contacted", "listed", "access_counts", "not_downloaded", "reference", "episodes_digest", "listing"]);
   assert.equal(one["episodes_digest"], null); // the series' listed episodes were not passed
+  assert.equal(one["listing"], null);
   assert.equal(one["series_id"], SERIES_ID);
   assert.equal(one["name"], "One");
   assert.equal(one["listed"], 7);
@@ -328,6 +344,7 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
     ],
   );
   const [shortFile, truncated, locked, fresh, stopped] = /** @type {Record<string, unknown>[]} */ (rows);
+  // 3.0.1: each row also says whether DramaFetch only guessed it was locked (`guessed_lock`)
   assert.deepEqual(Object.keys(/** @type {object} */ (shortFile)), [
     "number",
     "item_id",
@@ -337,6 +354,7 @@ test("buildReport: the shape, the rows that did not download ascending, a refere
     "paid",
     "drm",
     "lock_hints",
+    "guessed_lock",
     "quality_hint",
     "status",
     "message",
@@ -422,19 +440,20 @@ test("buildReport: one series gives unprefixed summary lines and a skipped-exist
     not_downloaded: [],
     reference: null,
     episodes_digest: null,
+    listing: null, // 3.0.1: never listed, no listing section
   });
 });
 
 /**
  * A list item of the `isLimitedFree` shape (2026-11-06), the fields the digest reads set as given.
- * @param {{videoDuration?: unknown, musicDuration?: unknown, original?: unknown, size?: unknown, bitrate?: unknown, isPreview?: unknown, previewType?: unknown}} fields
+ * @param {{videoDuration?: unknown, musicDuration?: unknown, original?: unknown, size?: unknown, bitrate?: unknown, isPreview?: unknown, previewType?: unknown, musicId?: unknown, musicTitle?: unknown}} fields
  * @returns {Record<string, unknown>}
  */
 function rawItem(fields) {
   return {
     id: "7699393770256782001",
     dramaInfo: { DramaVideoData: { EpisodeNumber: 1, IsFreeIntro: false, IsPreview: fields.isPreview, PreviewType: fields.previewType }, isLimitedFree: true },
-    music: { duration: fields.musicDuration, original: fields.original, playUrl: "https://sf16.tiktokcdn.com/obj/x.mp3" },
+    music: { id: fields.musicId, title: fields.musicTitle, duration: fields.musicDuration, original: fields.original, playUrl: "https://sf16.tiktokcdn.com/obj/x.mp3" },
     video: {
       duration: fields.videoDuration,
       size: fields.size,
@@ -445,9 +464,24 @@ function rawItem(fields) {
 }
 
 test("buildReport: episodes_digest has one small entry per LISTED episode — the fields the short-header rules read, no URL", () => {
+  // 3.0.1: each entry also says whether DramaFetch only guessed the episode was locked, and the
+  // sound's id (a number id as its digits) and title — the shape below changed on purpose
   const listedEpisodes = [
-    { number: 1, access: "free", lockHints: ["isLimitedFree=True"], durationS: 69, raw: rawItem({ videoDuration: 69, musicDuration: 69, original: true, size: 6_000_000, bitrate: 700_000, isPreview: true, previewType: 4 }) },
-    { number: 5, access: "locked", lockHints: ["isLimitedFree=True", "plays 69 s of 106 s"], durationS: 106, raw: rawItem({ videoDuration: 106, musicDuration: 69, original: true, size: 9676471, bitrate: 726189, isPreview: true, previewType: 4 }) },
+    {
+      number: 1,
+      access: "free",
+      lockHints: ["isLimitedFree=True"],
+      durationS: 69,
+      raw: rawItem({ videoDuration: 69, musicDuration: 69, original: true, size: 6_000_000, bitrate: 700_000, isPreview: true, previewType: 4, musicId: "7699400000000099001", musicTitle: "original sound - One" }),
+    },
+    {
+      number: 5,
+      access: "locked",
+      lockHints: ["isLimitedFree=True", "plays 69 s of 106 s"],
+      guessedLock: true,
+      durationS: 106,
+      raw: rawItem({ videoDuration: 106, musicDuration: 69, original: true, size: 9676471, bitrate: 726189, isPreview: true, previewType: 4, musicId: 7699400000000099, musicTitle: "original sound - One" }),
+    },
     // absent or odd fields: null; a sound duration that is no number: null; a string original: null
     { number: 7, access: "free", lockHints: [], durationS: 94, raw: rawItem({ videoDuration: "94", musicDuration: "93", original: "true", size: "x", bitrate: null }) },
     { number: 8, access: "free", lockHints: [], durationS: null, raw: { id: "x", video: "junk", music: [1], dramaInfo: null } },
@@ -462,7 +496,10 @@ test("buildReport: episodes_digest has one small entry per LISTED episode — th
     number: 1,
     access: "free",
     lock_hints: ["isLimitedFree=True"],
+    guessed_lock: false,
     duration_s: 69,
+    music_id: "7699400000000099001",
+    music_title: "original sound - One",
     music_duration_s: 69,
     music_original: true,
     size: 6_000_000,
@@ -474,7 +511,10 @@ test("buildReport: episodes_digest has one small entry per LISTED episode — th
     number: 5,
     access: "locked",
     lock_hints: ["isLimitedFree=True", "plays 69 s of 106 s"],
+    guessed_lock: true,
     duration_s: 106,
+    music_id: "7699400000000099",
+    music_title: "original sound - One",
     music_duration_s: 69,
     music_original: true,
     size: 9676471,
@@ -486,7 +526,10 @@ test("buildReport: episodes_digest has one small entry per LISTED episode — th
     number: 7,
     access: "free",
     lock_hints: [],
+    guessed_lock: false,
     duration_s: 94, // the episode's parsed duration where the raw value is no number
+    music_id: null,
+    music_title: null,
     music_duration_s: null,
     music_original: null,
     size: null,
@@ -494,8 +537,9 @@ test("buildReport: episodes_digest has one small entry per LISTED episode — th
     is_preview: null,
     preview_type: null,
   });
-  assert.deepEqual(digest[3], { number: 8, access: "free", lock_hints: [], duration_s: null, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
-  assert.deepEqual(digest[4], { number: 9, access: "locked", lock_hints: ["no play address"], duration_s: null, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
+  const none = { music_id: null, music_title: null, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null };
+  assert.deepEqual(digest[3], { number: 8, access: "free", lock_hints: [], guessed_lock: false, duration_s: null, ...none });
+  assert.deepEqual(digest[4], { number: 9, access: "locked", lock_hints: ["no play address"], guessed_lock: false, duration_s: null, ...none });
   assert.ok(!JSON.stringify(digest).includes("http"));
   // the short-served row's cause, and the digest copies the hints (the input stays untouched)
   assert.equal(/** @type {Record<string, unknown>[]} */ (series?.["not_downloaded"])[0]?.["probable_cause"], `${SHORT_SERVED_CAUSE_PREFIX}70 s of 106 s${SHORT_SERVED_CAUSE_SUFFIX}`);
@@ -620,6 +664,160 @@ test("hasFailures: any failed-* row of any series; locked skips alone are none",
   assert.equal(hasFailures([seriesInput(SERIES_ID, "One", [episodeInput(1, "done", "saved"), episodeInput(2, "skipped-locked", "looks locked")])]), false);
   assert.equal(hasFailures([seriesInput(SERIES_ID, "One", [episodeInput(1, "failed-unavailable", "x")])]), true);
   assert.equal(hasFailures([]), false);
+});
+
+/**
+ * The row of a free episode DramaFetch only guessed was locked (3.0.1, `catalog.accessOf`'s
+ * `guessedLock`): `skipped-locked` by a short header, no price, entitlement, lock flag or DRM clue.
+ * @param {number} number
+ * @returns {import("../src/lib/diagnosis.js").EpisodeInput}
+ */
+function guessedInput(number) {
+  return {
+    ...episodeInput(number, "skipped-locked", "looks locked: plays 2 s of 3 s", { access: "locked", lockHints: ["plays 2 s of 3 s"], trace: null }),
+    paid: false,
+    guessedLock: true,
+  };
+}
+
+test("3.0.1, a free episode DramaFetch only guessed was locked: worth a report, its own probable cause, its list item kept apart from the locked ones'", () => {
+  // hasFailures: one guessed row is worth a report; a row TikTok's list marks locked still is not
+  assert.equal(hasFailures([seriesInput(SERIES_ID, "One", [episodeInput(1, "done", "saved"), guessedInput(2)])]), true);
+  const locked = episodeInput(2, "skipped-locked", "looks locked: isLocked=True", { access: "locked", lockHints: ["isLocked=True"] });
+  assert.equal(hasFailures([seriesInput(SERIES_ID, "One", [episodeInput(1, "done", "saved"), locked])]), false);
+  assert.equal(hasFailures([seriesInput(SERIES_ID, "One", [episodeInput(1, "done", "saved"), { ...locked, guessedLock: false }])]), false);
+  // probableCause: its own rule (what DramaFetch read, what settles it), never the locked one's
+  const guessedRow = { ...row("skipped-locked", "looks locked: plays 2 s of 3 s", { access: "locked", lockHints: ["plays 2 s of 3 s"] }), guessedLock: true };
+  assert.equal(probableCause(guessedRow, null), `${GUESSED_LOCKED_CAUSE_PREFIX}plays 2 s of 3 s${GUESSED_LOCKED_CAUSE_SUFFIX}`);
+  assert.equal(probableCause({ ...guessedRow, lockHints: [] }, null), `${GUESSED_LOCKED_CAUSE_PREFIX}no clue${GUESSED_LOCKED_CAUSE_SUFFIX}`);
+  assert.equal(probableCause({ ...guessedRow, guessedLock: false }, null), `${LOCKED_CAUSE_PREFIX}plays 2 s of 3 s${LOCKED_CAUSE_SUFFIX}`);
+  assert.ok(!GUESSED_LOCKED_CAUSE_PREFIX.startsWith(LOCKED_CAUSE_PREFIX));
+  // a stop still comes first
+  assert.equal(probableCause({ ...guessedRow, message: "stopped: cooldown until 19:30" }, null), `${NOT_ATTEMPTED_CAUSE} (cooldown until 19:30)`);
+  // slimRows: the first three guessed rows by number keep their item, apart from the first three locked ones
+  const rows = [...mixedRows(5), ...[30, 24, 21, 22, 23].map(guessedInput)];
+  const slim = slimRows(rows);
+  const withRaw = (/** @type {boolean} */ guessed) =>
+    slim
+      .filter((entry) => entry.status === "skipped-locked" && (entry.guessedLock === true) === guessed && entry.raw !== null)
+      .map((entry) => entry.number)
+      .sort((a, b) => a - b);
+  assert.deepEqual(withRaw(false), [5, 6, 7]);
+  assert.deepEqual(withRaw(true), [21, 22, 23]);
+  assert.deepEqual(slimRows(slim), slim); // taking it twice changes nothing
+  // the report of such a series is built, with the guessed rows among the ones that did not download
+  const [entry] = /** @type {Record<string, unknown>[]} */ (buildReport(input([seriesInput(SERIES_ID, "One", [episodeInput(1, "done", "saved"), guessedInput(2)])]))["series"]);
+  const notDownloaded = /** @type {Record<string, unknown>[]} */ (entry?.["not_downloaded"]);
+  assert.deepEqual(
+    notDownloaded.map((item) => [item["number"], item["status"], item["guessed_lock"], item["probable_cause"]]),
+    [[2, "skipped-locked", true, `${GUESSED_LOCKED_CAUSE_PREFIX}plays 2 s of 3 s${GUESSED_LOCKED_CAUSE_SUFFIX}`]],
+  );
+});
+
+/**
+ * A listing as `app.js` hands it to the report (3.0.1): the series' pages, the gap filling's among
+ * them, TikTok's count, what came, what is still missing.
+ * @param {Partial<import("../src/lib/diagnosis.js").ListingInput>} [fields]
+ * @returns {import("../src/lib/diagnosis.js").ListingInput}
+ */
+function listing(fields = {}) {
+  return {
+    endpoint: "https://www.tiktok.com/api/drama/episode/item_list/",
+    pages: [
+      { kind: "first", cursorAsked: "0", countAsked: "30", listed: true, items: 31, numbers: Array.from({ length: 30 }, (_, index) => index + 1), hasMore: true, cursor: 30 },
+      { kind: "next", cursorAsked: "30", countAsked: "30", listed: true, items: 30, numbers: Array.from({ length: 30 }, (_, index) => index + 31), hasMore: true, cursor: 60 },
+      { kind: "next", cursorAsked: "60", countAsked: "30", listed: false, items: 0, numbers: [], hasMore: null, cursor: null },
+      { kind: "fill", cursorAsked: "60", countAsked: "30", listed: false, items: 0, numbers: [], hasMore: null, cursor: null },
+    ],
+    totalHint: 62,
+    itemsReceived: 61,
+    // 3.0.1 (the lead's D2): 60 episodes and a trailer for TikTok's 62 — E61 certainly missing, E62
+    // perhaps the trailer TikTok counts: the list is uncertain
+    otherItems: 1,
+    uncertain: true,
+    episodesListed: 60,
+    missingNumbers: [61],
+    earlyEnd: "in-page pagination fetch returned no episode list; scrolled the page instead",
+    skippedItems: [{ reason: "no episode number", itemId: "7699393770256782000" }],
+    warnings: ["TikTok listed 1 item DramaFetch could not read (no episode number)", "TikTok announces 62 episodes, 60 listed", uncertainText(62, 60, 1)],
+    incomplete: true,
+    ...fields,
+  };
+}
+
+test("3.0.1, the listing section: every page asked — its cursor and count, the items it brought, the series' numbers, hasMore and the cursor returned —, the gap filling's requests, TikTok's count, what came and what is missing, the skipped items with their reasons, the warnings; no query, no user, no fragment", () => {
+  const section = listingSection(listing());
+  assert.deepEqual(Object.keys(section), [
+    "endpoint",
+    "tiktok_count",
+    "items_received",
+    "other_items", // 3.0.1 (the lead's D2): the drama's other items, and whether the list is uncertain
+    "uncertain",
+    "episodes_listed",
+    "missing_numbers",
+    "ended_early",
+    "incomplete",
+    "fill_requests",
+    "pages",
+    "skipped_items",
+    "warnings",
+  ]);
+  assert.equal(section["endpoint"], "https://www.tiktok.com/api/drama/episode/item_list/");
+  assert.equal(section["tiktok_count"], 62);
+  assert.equal(section["items_received"], 61);
+  assert.deepEqual([section["other_items"], section["uncertain"]], [1, true]);
+  assert.equal(section["episodes_listed"], 60);
+  assert.deepEqual(section["missing_numbers"], [61]);
+  assert.equal(section["ended_early"], "in-page pagination fetch returned no episode list; scrolled the page instead");
+  assert.equal(section["incomplete"], true);
+  assert.equal(section["fill_requests"], 1);
+  const pages = /** @type {Record<string, unknown>[]} */ (section["pages"]);
+  assert.equal(pages.length, 4);
+  assert.deepEqual(pages[0], { kind: "first", cursor_asked: "0", count_asked: "30", listed: true, items: 31, numbers: Array.from({ length: 30 }, (_, index) => index + 1), has_more: true, cursor: 30 });
+  assert.deepEqual(pages[3], { kind: "fill", cursor_asked: "60", count_asked: "30", listed: false, items: 0, numbers: [], has_more: null, cursor: null });
+  assert.deepEqual(section["skipped_items"], [{ reason: "no episode number", item_id: "7699393770256782000" }]);
+  assert.deepEqual(section["warnings"], [
+    "TikTok listed 1 item DramaFetch could not read (no episode number)",
+    "TikTok announces 62 episodes, 60 listed",
+    uncertainText(62, 60, 1),
+  ]);
+  // a listing input without the 3.0.1 count fields: none, and certain
+  assert.deepEqual(
+    [listingSection(listing({ otherItems: undefined, uncertain: undefined }))["other_items"], listingSection(listing({ otherItems: undefined, uncertain: undefined }))["uncertain"]],
+    [0, false],
+  );
+  // an address that carried more than its path never reaches the report with it
+  const signed = listingSection(listing({ endpoint: "https://user:secret@www.tiktok.com/api/drama/episode/item_list/?msToken=abc&X-Bogus=def#frag" }));
+  assert.equal(signed["endpoint"], "https://www.tiktok.com/api/drama/episode/item_list/");
+  assert.equal(listingSection(listing({ endpoint: null }))["endpoint"], null);
+  // the whole report: the series' section, and nothing signed anywhere in it
+  const run = { ...seriesInput(SERIES_ID, "One", [episodeInput(1, "done", "saved"), episodeInput(61, "failed-unavailable", NOT_LISTED_MESSAGE, { raw: null, trace: null })]), listing: listing() };
+  const report = buildReport(input([run]));
+  const [entry] = /** @type {Record<string, unknown>[]} */ (report["series"]);
+  assert.deepEqual(entry?.["listing"], section);
+  assert.deepEqual(report["summary"], [`E61 failed-unavailable — ${NOT_LISTED_MESSAGE} — probable cause: ${NOT_LISTED_CAUSE}`]);
+  const text = new TextDecoder().decode(reportJson(buildReport(input([{ ...run, listing: listing({ endpoint: "https://www.tiktok.com/api/drama/episode/item_list/?msToken=abc" }) }]))));
+  assert.doesNotMatch(text, /msToken|X-Bogus|sessionid/);
+});
+
+test("3.0.1, hasFailures: a series whose list itself is short — a number missing, or an early end short of TikTok's count — is worth a report even when every row downloaded; a whole list is not", () => {
+  const clean = [episodeInput(1, "done", "saved"), episodeInput(2, "done", "saved")];
+  assert.equal(hasFailures([{ ...seriesInput(SERIES_ID, "One", clean), listing: listing({ missingNumbers: [], incomplete: true }) }]), true);
+  assert.equal(hasFailures([{ ...seriesInput(SERIES_ID, "One", clean), listing: listing({ missingNumbers: [], earlyEnd: null, incomplete: false }) }]), false);
+  assert.equal(hasFailures([{ ...seriesInput(SERIES_ID, "One", clean), listing: null }]), false);
+  assert.equal(hasFailures([seriesInput(SERIES_ID, "One", [episodeInput(3, "failed-unavailable", NOT_LISTED_MESSAGE)])]), true); // a missing number's row
+  // 3.0.1 (the lead's D2): an uncertain list — nothing named missing, no early end — is worth a report too
+  assert.equal(hasFailures([{ ...seriesInput(SERIES_ID, "One", clean), listing: listing({ missingNumbers: [], earlyEnd: null, uncertain: true, incomplete: true }) }]), true);
+});
+
+test("3.0.1 (the lead's D10): the probable cause of an episode TikTok's list lacked says what is true whether or not the gap filling reached its page — the filling stops after GAP_FILL_REQUESTS, or at an answer without a list — and points to the listing section", () => {
+  assert.doesNotMatch(NOT_LISTED_CAUSE, /asked again for the pages that should hold it/);
+  assert.equal(
+    NOT_LISTED_CAUSE,
+    "missing from the episode list TikTok served to your session (this series' listing section shows each page asked, " +
+      "the gap filling's included, and what it brought): a later listing may hold it, and Retry lists the drama again; " +
+      "if tiktok.com does not show it either, TikTok's web list lacks it",
+  );
 });
 
 test("reportStem: the series' Chrome-safe name (60 at most) or the series count, the local date and time without a colon", () => {

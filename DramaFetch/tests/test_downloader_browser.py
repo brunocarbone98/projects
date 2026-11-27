@@ -18,7 +18,7 @@ import pytest
 
 from dramafetch import downloader_browser, engine
 from dramafetch import media as media_module
-from dramafetch.discovery.browser import FETCH_JS
+from dramafetch.discovery.browser import FETCH_JS, PlaywrightDiscovery
 from dramafetch.downloader import redact_secrets
 from dramafetch.downloader_browser import (
     EXPIRY_MARGIN_S,
@@ -37,6 +37,7 @@ from dramafetch.models import (
     DownloadStatus,
     Episode,
     Series,
+    SeriesRef,
 )
 from dramafetch.thumbnails import EMBED_SUFFIX, extract_cover
 from encrypted_mp4 import encrypted_mp4, with_drm_words_in_mdat
@@ -587,7 +588,39 @@ def test_no_usable_url_refreshes_first_and_the_fresh_list_is_cached_for_the_run(
     assert playwright.request.urls == [_url("f1"), _url("f2"), _url("g3")]
     assert downloader.refreshes == 2  # episode 2 came from the cache; episode 3 needed a new list
     assert len(playwright.context.pages) == 2
-    assert [p.visited[0][0].rsplit("/", 1)[1] for p in playwright.context.pages] == ["1", "3"]
+    # 3.0.1: every listing opens episode 1's page, the refresh for episode 3 too — a page opened at
+    # a later episode may list only the window that holds it, and the episodes before it would be
+    # a hole the gap filling asks TikTok for again; the episode a reference names picks nothing
+    assert [p.visited[0][0].rsplit("/", 1)[1] for p in playwright.context.pages] == ["1", "1"]
+
+
+def test_a_refresh_lists_the_drama_from_episode_1_and_names_no_episode(
+    playwright, tmp_path, monkeypatch
+):
+    """3.0.1 (the lead's D7, no change of behaviour): the in-session refresh of a late episode's
+    play addresses lists the drama like every listing — its page opened at episode 1, the gap
+    filling included (spec §5) — and its reference names no episode: the hint it once passed
+    picked the page to open, and nothing reads it any more."""
+    asked: list[SeriesRef] = []
+    listing = PlaywrightDiscovery.discover_in_page
+
+    def recording(self: PlaywrightDiscovery, page: Any, ref: SeriesRef, options: Any) -> Series:
+        asked.append(ref)
+        return listing(self, page, ref, options)
+
+    monkeypatch.setattr(PlaywrightDiscovery, "discover_in_page", recording)
+    playwright.browser.refresh_events = [
+        _refresh_events(
+            _item(1, "7699400000000000001", _url("f1")),
+            _item(2, "7699400000000000002", _url("f2")),
+            _item(3, "7699400000000000003", _url("f3")),
+        )
+    ]
+    result = _downloader(playwright).download(_episode(3, None), _options(tmp_path))
+    assert result.status is DownloadStatus.DONE
+    assert asked == [SeriesRef(series_id=SERIES_ID, episode_hint=None)]
+    (page,) = playwright.context.pages
+    assert page.visited[0][0].rsplit("/", 1)[1] == "1"
 
 
 def test_episode_missing_from_the_fresh_list_is_unavailable(playwright, tmp_path):

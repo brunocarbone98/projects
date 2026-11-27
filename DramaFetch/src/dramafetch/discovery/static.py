@@ -28,14 +28,21 @@ from urllib.parse import urlsplit
 from dramafetch.catalog import (
     PagePayload,
     catalog_warnings,
-    find_item_lists,
-    merge_episodes,
+    merge_pages,
+    missing_numbers,
     parse_detail_payload,
     parse_item_list_payload,
 )
 from dramafetch.discovery.cookies import cookie_header, load_netscape_cookies
 from dramafetch.errors import DiscoveryError, DramaFetchError, LoginRequiredError, RateLimitedError
-from dramafetch.models import DiscoveryOptions, Series, SeriesRef
+from dramafetch.models import (
+    MAX_EPISODE_NUMBER,
+    DiscoveryOptions,
+    ListingPage,
+    ListingRecord,
+    Series,
+    SeriesRef,
+)
 from dramafetch.urls import series_page_url
 
 log = logging.getLogger(__name__)
@@ -62,6 +69,10 @@ RATE_LIMIT_MESSAGE = (
 )
 NO_DATA_MESSAGE = "page has no episode data; use --strategy browser"
 PARTIAL_WARNING = "static strategy: only the embedded first page was read"
+#: What the static strategy says of a list the page embeds whole (no ``hasMore``) that still lacks
+#: an episode — a hole, or a number TikTok's count or a lone highlight places past it (3.0.1): the
+#: page's list was not cut short, TikTok's list lacks the episode; the browser asks again.
+LACKING_WARNING = "static strategy: the episode list the page embeds lacks an episode"
 HYDRATION_SCRIPT_RE = re.compile(
     r"<script\b[^>]*\bid=[\"'](?:__UNIVERSAL_DATA_FOR_REHYDRATION__|SIGI_STATE)[\"'][^>]*>"
     r"(?P<json>.*?)</script>",
@@ -80,6 +91,10 @@ _TOKEN_RE = re.compile(
 )
 _SENSITIVE_KEY_RE = re.compile(r"(?i)token|csrf|cookie|session|secret|password|^sid\b")
 _MAX_DEPTH = 12
+# The keys an item list lives under (``catalog.find_item_lists``) and the paging keys of the
+# object that holds one (``catalog.parse_item_list_payload`` reads hasMore / has_more / cursor).
+_ITEM_LIST_KEYS = ("itemList", "item_list")
+_PAGING_KEYS = ("hasMore", "has_more", "cursor")
 
 
 def chrome_user_agent(version: str | None = None) -> str:
@@ -257,7 +272,9 @@ class StaticHtmlDiscovery:
         self._fetch: Fetch = fetch if fetch is not None else default_fetch
 
     def discover(self, ref: SeriesRef, options: DiscoveryOptions) -> Series:
-        url = series_page_url(ref.series_id, ref.episode_hint or 1, options.base_url)
+        # Episode 1's page whatever episode the link names (3.0.1), as the browser strategy
+        # opens it: the episode in the link picks nothing — a paste downloads the whole drama.
+        url = series_page_url(ref.series_id, 1, options.base_url)
         headers, warnings = self._headers(options)
         final_url, body = self._get(url, headers)
         if is_login_url(final_url):
@@ -271,29 +288,78 @@ class StaticHtmlDiscovery:
         if not blobs:
             raise DiscoveryError(self._no_data_message(body))
 
+        # Each embedded list with its own holder's `hasMore` and `cursor` (3.0.1): re-wrapped bare,
+        # a first page that says TikTok has more passed for the whole series.
         pages: list[PagePayload] = []
         for blob in blobs:
             pages.extend(
-                parse_item_list_payload({"itemList": items}, ref.series_id)
-                for items in find_item_lists(blob)
+                parse_item_list_payload(embedded, ref.series_id)
+                for embedded in _embedded_lists(blob)
             )
-        episodes = merge_episodes(page.episodes for page in pages)
+        listing = merge_pages(pages)
+        episodes = listing.episodes
         if not episodes:
             raise DiscoveryError(self._no_data_message(body))
 
-        name, total = _detail_from_blobs(blobs)
+        name, total = _detail_from_blobs(blobs, ref.series_id)
+        if total is None:
+            total = listing.total_hint
         if name is None:
             name = next((e.series_name for e in episodes if e.series_name), None)
-        warnings.extend(catalog_warnings(episodes, total))
-        partial = (total is not None and len(episodes) < total) or any(p.has_more for p in pages)
-        if partial:
+        warnings.extend(
+            catalog_warnings(
+                episodes,
+                total,
+                duplicates=listing.duplicates,
+                skipped=listing.skipped,
+                items_received=listing.items_received,
+                highlights=listing.highlight_numbers,
+            )
+        )
+        # What the page does not embed: a number missing (a hole below the highest one listed, or
+        # one up to TikTok's count less the drama's other items: catalog.missing_numbers), or a list
+        # that says TikTok has more. Partial: `auto` completes it with the browser, whose listing
+        # asks again for what it lacks.
+        missing = missing_numbers(
+            (episode.number for episode in episodes),
+            total,
+            listing.items_received,
+            limit=MAX_EPISODE_NUMBER,
+            highlights=listing.highlight_numbers,
+        )
+        early_end = PARTIAL_WARNING if any(p.has_more for p in pages) else None
+        if early_end is not None:
             warnings.append(f"{PARTIAL_WARNING}; use --strategy browser for the full list")
+        elif missing:
+            # the page's list is whole (3.0.1): TikTok's list is what lacks the episode
+            warnings.append(f"{LACKING_WARNING}; use --strategy browser to ask TikTok again")
         return Series(
             series_id=ref.series_id,
             name=name,
             episodes=episodes,
             total_hint=total,
             warnings=warnings,
+            skipped_items=listing.skipped,
+            items_received=listing.items_received,
+            highlight_numbers=listing.highlight_numbers,
+            missing_numbers=missing,
+            early_end=early_end,
+            listing=ListingRecord(
+                endpoint=safe_url(final_url),
+                pages=[
+                    ListingPage(
+                        "embedded",
+                        None,
+                        None,
+                        listed=True,
+                        items=page.seen_items,
+                        numbers=tuple(episode.number for episode in page.episodes),
+                        has_more=page.has_more,
+                        cursor=page.cursor,
+                    )
+                    for page in pages
+                ],
+            ),
         )
 
     def _headers(self, options: DiscoveryOptions) -> tuple[dict[str, str], list[str]]:
@@ -345,18 +411,45 @@ class StaticHtmlDiscovery:
             log.warning("could not write the raw dump to %s: %s", dump_dir, _describe(exc))
 
 
-def _detail_from_blobs(blobs: list[Any]) -> tuple[str | None, int | None]:
-    """Series name and announced total from any `dramaInfo`-bearing object in the hydration data."""
+def _detail_from_blobs(blobs: list[Any], series_id: str) -> tuple[str | None, int | None]:
+    """Series name and announced total from any `dramaInfo`-bearing object in the hydration data
+    (an item's too: its `numVideos` is TikTok's count) — never one that names another drama."""
     name: str | None = None
     total: int | None = None
     for blob in blobs:
         for holder in _objects_with_key(blob, "dramaInfo"):
-            found_name, found_total = parse_detail_payload({"dramaInfo": holder["dramaInfo"]})
+            found_name, found_total = parse_detail_payload(
+                {"dramaInfo": holder["dramaInfo"]}, series_id
+            )
             name = name or found_name
             total = total if total is not None else found_total
             if name is not None and total is not None:
                 return name, total
     return name, total
+
+
+def _embedded_lists(payload: Any, depth: int = 0) -> Iterator[dict[str, Any]]:
+    """Every item list the hydration data holds (``catalog.find_item_lists``' walk: depth-limited,
+    never into a list once found), each as a payload of its own — the list under ``itemList`` and
+    the ``hasMore`` / ``has_more`` / ``cursor`` of the object that holds it, nothing else of it —
+    so that a page that says TikTok has more keeps saying so."""
+    if depth > _MAX_DEPTH:
+        return
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in _ITEM_LIST_KEYS and isinstance(value, list):
+                embedded: dict[str, Any] = {
+                    "itemList": [entry for entry in value if isinstance(entry, dict)]
+                }
+                for field_name in _PAGING_KEYS:
+                    if field_name in payload:
+                        embedded[field_name] = payload[field_name]
+                yield embedded
+            else:
+                yield from _embedded_lists(value, depth + 1)
+    elif isinstance(payload, list):
+        for value in payload:
+            yield from _embedded_lists(value, depth + 1)
 
 
 def _objects_with_key(payload: Any, key: str, depth: int = 0) -> Iterator[dict[str, Any]]:

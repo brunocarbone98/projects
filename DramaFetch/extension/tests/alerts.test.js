@@ -22,6 +22,7 @@ import {
   PageAlerts,
   autoRetryAlert,
   dramaAlert,
+  guessedEpisodes,
   isAlertId,
   notRetriedAlert,
   notificationOptions,
@@ -198,17 +199,28 @@ test("episodes to retry: ⚠ with their count, named — at most ten, then how m
 test("not complete with nothing to retry: the tab's report line, or the error it shows — never an address, only its host —; nothing at all for a drama skipped as complete, refused before any request or never started", () => {
   const fake = fakeChrome();
   try {
-    // episode 2 missing from TikTok's list
+    // episode 2 missing from TikTok's list, with no row to retry (a selection that did not take
+    // it): 3.0.1 makes TikTok's short list a ⚠ (changed on purpose; a whole-series run gives the
+    // number a row of its own, which is the ⚠ alert with its Retry)
     const gap = run(3, [[1, "done"], [3, "done"]]);
     gap.series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (gap.series)), episodes: [episode(1), episode(3)] };
     gap.report = seriesReport(gap.series, gap.results);
     assert.deepEqual(dramaAlert(gap, null, shownAsIs), {
       kind: "incomplete",
-      title: "Red Sapphire — not complete",
+      title: "⚠ Red Sapphire — TikTok's list may be incomplete",
       message: "incomplete: 2 of 3 — episode 2 missing from TikTok's list",
       context: null,
     });
     assert.equal(reportLine(gap.report), "incomplete: 2 of 3 — episode 2 missing from TikTok's list"); // the tab's line
+    // the list whole, an episode not downloaded with nothing to retry (a selection that did not take
+    // it): not complete, no ⚠
+    const partial = run(3, [[1, "done"], [3, "done"]]);
+    assert.deepEqual(dramaAlert(partial, null, shownAsIs), {
+      kind: "incomplete",
+      title: "Red Sapphire — not complete",
+      message: "incomplete: 2 of 3 — 1 not downloaded",
+      context: null,
+    });
     // a list TikTok did not send: the error the tab shows, its address cut to the host
     const failed = run(3, []);
     failed.series = null;
@@ -384,13 +396,14 @@ test("what came of an automatic retry (1.8.0): the drama's alert as ever — ✓
     assert.deepEqual(again, { kind: "retry", title: "⚠ Red Sapphire — 1 episode to retry", message: "E02 did not download.", context: "After an automatic retry." });
     assert.deepEqual(notificationOptions(again).buttons, [{ title: "Retry" }]);
     assert.equal(notificationOptions(again).contextMessage, "After an automatic retry.");
-    // not complete, nothing to retry (episode 2 gone from TikTok's list): the same context
+    // not complete, nothing to retry (episode 2 gone from TikTok's list, no row): the same context —
+    // and since 3.0.1 the ⚠ of a short list (changed on purpose)
     const gap = run(3, [[1, "done"], [3, "done"]]);
     gap.series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (gap.series)), episodes: [episode(1), episode(3)] };
     gap.report = seriesReport(gap.series, gap.results);
     assert.deepEqual(dramaAlert(gap, null, shownAsIs, after), {
       kind: "incomplete",
-      title: "Red Sapphire — not complete",
+      title: "⚠ Red Sapphire — TikTok's list may be incomplete",
       message: "incomplete: 2 of 3 — episode 2 missing from TikTok's list",
       context: "After an automatic retry.",
     });
@@ -657,5 +670,215 @@ test("the worker: a click on an alert brings the DramaFetch tab to the front —
   } finally {
     globalThis.fetch = fetchBefore;
     Reflect.deleteProperty(globalThis, "chrome");
+  }
+});
+
+test("3.0.1, episodes TikTok's list lacked: their rows give the ⚠ alert with its Retry, named apart — `are not in TikTok's list.` —, after the ones that did not download; the automatic retry's alert and the alerts of one that did not run name them the same way; Spanish too", () => {
+  const fake = fakeChrome();
+  try {
+    /** @param {number[]} numbers @param {number[]} missing @returns {import("../src/app/app.js").RetryTarget} */
+    const withMissing = (numbers, missing) => ({ ...target(numbers), missing });
+    const absent = run(60, Array.from({ length: 60 }, (_, index) => /** @type {[number, string]} */ ([index + 1, "done"])));
+    assert.deepEqual(dramaAlert(absent, withMissing([61, 62], [61, 62]), shownAsIs), {
+      kind: "retry",
+      title: "⚠ Red Sapphire — 2 episodes to retry",
+      message: "E61, E62 are not in TikTok's list.",
+      context: null,
+    });
+    assert.equal(dramaAlert(absent, withMissing([28], [28]), shownAsIs)?.message, "E28 is not in TikTok's list.");
+    assert.equal(dramaAlert(absent, withMissing([5, 61, 62], [61, 62]), shownAsIs)?.message, "E05 did not download. E61, E62 are not in TikTok's list.");
+    assert.deepEqual(notificationOptions(/** @type {import("../src/app/alerts.js").AlertTexts} */ (dramaAlert(absent, withMissing([61], [61]), shownAsIs))).buttons, [{ title: "Retry" }]);
+    // twelve missing: ten named, then how many more
+    const twelve = Array.from({ length: 12 }, (_, index) => index + 61);
+    assert.equal(dramaAlert(absent, withMissing(twelve, twelve), shownAsIs)?.message, "E61, E62, E63, E64, E65, E66, E67, E68, E69, E70 and 2 more are not in TikTok's list.");
+    // the automatic retry's “retrying”: named the same way, then that it tries once more
+    assert.deepEqual(autoRetryAlert(absent, withMissing([5, 61], [61])), {
+      kind: "autoretry",
+      title: "↻ Red Sapphire — retrying 2 episodes",
+      message: "E05 did not download. E61 is not in TikTok's list. DramaFetch tries once more on its own.",
+      context: null,
+    });
+    assert.equal(autoRetryAlert(absent, target([5])).message, "E05 did not download — DramaFetch tries it once more on its own."); // as in 1.8.0
+    // an automatic retry that did not run, or that Stop ended: the same naming, with its Retry
+    assert.equal(notRetriedAlert(withMissing([61, 62], [61, 62]), "stopped by you", shownAsIs).message, "E61, E62 are not in TikTok's list.");
+    assert.equal(stoppedRetryAlert(withMissing([5, 62], [62]), "stopped by you", shownAsIs).message, "E05 did not download. E62 is not in TikTok's list.");
+  } finally {
+    fake.restore();
+  }
+  const spanish = fakeChrome({ language: "es" });
+  try {
+    const absent = run(3, [[1, "done"], [2, "done"], [3, "done"]]);
+    assert.equal(dramaAlert(absent, { ...target([4, 5]), missing: [4, 5] }, shownAsIs)?.message, "E04, E05 no están en la lista de TikTok.");
+    assert.equal(dramaAlert(absent, { ...target([2, 4]), missing: [4] }, shownAsIs)?.message, "E02 no se descargó. E04 no está en la lista de TikTok.");
+    assert.equal(autoRetryAlert(absent, { ...target([4]), missing: [4] }).message, "E04 no está en la lista de TikTok. DramaFetch lo intenta una vez más por su cuenta.");
+  } finally {
+    spanish.restore();
+  }
+});
+
+test("3.0.1, TikTok's list short with no row to retry — it ended early while TikTok's count is unknown, or it lacks a number the job did not take —: ⚠ `TikTok's list may be incomplete`, its report line the message, no button; a list that came whole keeps `not complete`", () => {
+  const fake = fakeChrome();
+  try {
+    const ended = run(3, [[1, "done"], [2, "done"], [3, "done"]]);
+    ended.series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (ended.series)), earlyEnd: "in-page pagination fetch returned no episode list; scrolled the page instead" };
+    ended.report = seriesReport(ended.series, ended.results);
+    assert.equal(ended.report.complete, false);
+    const texts = /** @type {import("../src/app/alerts.js").AlertTexts} */ (dramaAlert(ended, null, shownAsIs));
+    assert.deepEqual(texts, {
+      kind: "incomplete",
+      title: "⚠ Red Sapphire — TikTok's list may be incomplete",
+      message: "incomplete: 3 of 3 — TikTok's list ended early after episode 3",
+      context: null,
+    });
+    assert.equal(notificationOptions(texts).buttons, undefined);
+  } finally {
+    fake.restore();
+  }
+  const spanish = fakeChrome({ language: "es" });
+  try {
+    const ended = run(2, [[1, "done"], [2, "done"]]);
+    ended.series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (ended.series)), earlyEnd: "x" };
+    ended.report = seriesReport(ended.series, ended.results);
+    assert.equal(dramaAlert(ended, null, shownAsIs)?.title, "⚠ Red Sapphire — puede que la lista de TikTok esté incompleta");
+  } finally {
+    spanish.restore();
+  }
+});
+
+test("3.0.1 (the lead's D2): an uncertain list — TikTok counts more than the drama certainly has, a trailer or a highlight among what it listed — is ⚠ `TikTok's list may be incomplete`, its report line the message, no button; never ✓", () => {
+  const fake = fakeChrome();
+  try {
+    const counted = run(3, [[1, "done"], [2, "done"], [3, "done"]]);
+    // TikTok counts 4; three episodes and a trailer came: E04 may be missing, or the trailer counted
+    counted.series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (counted.series)), totalHint: 4, itemsReceived: 4 };
+    counted.report = seriesReport(counted.series, counted.results);
+    assert.deepEqual([counted.report.complete, counted.report.uncertain, counted.report.gaps], [false, true, []]);
+    const texts = /** @type {import("../src/app/alerts.js").AlertTexts} */ (dramaAlert(counted, null, shownAsIs));
+    assert.deepEqual(texts, {
+      kind: "incomplete",
+      title: "⚠ Red Sapphire — TikTok's list may be incomplete",
+      message: "incomplete: 3 of 3 — TikTok's list may be incomplete: TikTok counts 4 episodes, 3 listed and 1 other item (a trailer or a highlight)",
+      context: null,
+    });
+    assert.equal(notificationOptions(texts).buttons, undefined);
+    // the count everything listed accounts for: ✓
+    const placed = run(3, [[1, "done"], [2, "done"], [3, "done"]]);
+    placed.series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (placed.series)), totalHint: 3, itemsReceived: 4 };
+    placed.report = seriesReport(placed.series, placed.results);
+    assert.equal(dramaAlert(placed, null, shownAsIs)?.kind, "complete");
+  } finally {
+    fake.restore();
+  }
+});
+
+test("3.0.1 (§9): free episodes DramaFetch only guessed were locked — never ✓ while one is left: the ⚠ alert with its Retry names them apart, the hint for one; beside the ones that did not download and those TikTok's list lacked; Spanish too", () => {
+  /** @param {number} number @param {string} hint */
+  const guessed = (number, hint) =>
+    makeEpisode({ number, itemId: `i${number}`, title: `Episode ${number}`, seriesId: SERIES_ID, seriesName: "Red Sapphire", durationS: 3, access: "locked", lockHints: [hint], guessedLock: true, raw: {} });
+  /**
+   * A run of three listed episodes, E03 a guessed lock (skipped, no request) — as `lockedResult` writes its row.
+   * @param {[number, string, string?][]} rows
+   * @param {import("../src/lib/catalog.js").Episode[]} [extra]
+   */
+  const guessedRun = (rows, extra = []) => {
+    const base = run(2, rows);
+    const third = guessed(3, "plays 2 s of 3 s");
+    const episodes = [...(base.series?.episodes ?? []), third, ...extra];
+    const series = { ...(/** @type {import("../src/lib/catalog.js").Series} */ (base.series)), episodes };
+    const results = [
+      ...base.results,
+      { episode: third, status: /** @type {const} */ ("skipped-locked"), path: null, message: "looks locked: plays 2 s of 3 s" },
+      ...extra.map((episode) => ({ episode, status: /** @type {const} */ ("skipped-locked"), path: null, message: `looks locked: ${episode.lockHints.join("; ")}` })),
+    ];
+    return { ...base, series, results, report: seriesReport(series, results) };
+  };
+  const english = fakeChrome();
+  try {
+    const one = guessedRun([[1, "done"], [2, "done"]]);
+    assert.equal(one.report.complete, false); // the drama is not complete while a free one is left
+    const alert = dramaAlert(one, { ...target([3]), guessed: [3] }, shownAsIs);
+    assert.deepEqual(alert, {
+      kind: "retry",
+      title: "⚠ Red Sapphire — 1 episode to retry",
+      message: "E03 was not asked for: TikTok's list made it look locked (plays 2 s of 3 s).",
+      context: null,
+    });
+    assert.deepEqual(notificationOptions(/** @type {import("../src/app/alerts.js").AlertTexts} */ (alert)).buttons, [{ title: "Retry" }]);
+    // several, beside a failure and a number TikTok's list lacked: each kind its sentence, failures first
+    const several = guessedRun([[1, "failed"], [2, "done"]], [guessed(4, "no play address")]);
+    const mixed = dramaAlert(several, { ...target([1, 3, 4, 7]), missing: [7], guessed: [3, 4] }, shownAsIs);
+    assert.equal(mixed?.title, "⚠ Red Sapphire — 4 episodes to retry");
+    assert.equal(mixed?.message, "E01 did not download. E07 is not in TikTok's list. E03, E04 were not asked for: TikTok's list made them look locked.");
+    // a guessed lock without a hint known (none of the run's rows, none of its list): the plain sentence
+    const bare = dramaAlert({ ...one, results: one.results.slice(0, 2), series: null }, { ...target([3]), guessed: [3] }, shownAsIs);
+    assert.equal(bare?.message, "E03 was not asked for: TikTok's list made it look locked.");
+  } finally {
+    english.restore();
+  }
+  const spanish = fakeChrome({ language: "es" });
+  try {
+    const one = guessedRun([[1, "done"], [2, "done"]]);
+    const show = (/** @type {string} */ text) => (text === "plays 2 s of 3 s" ? "reproduce 2 s de 3 s" : text);
+    const alert = dramaAlert(one, { ...target([3]), guessed: [3] }, show);
+    assert.equal(alert?.title, "⚠ Red Sapphire — 1 episodio por reintentar");
+    assert.equal(alert?.message, "E03 no se pidió: la lista de TikTok lo hacía parecer bloqueado (reproduce 2 s de 3 s).");
+    assert.equal(
+      dramaAlert(guessedRun([[1, "done"], [2, "done"]], [guessed(4, "no play address")]), { ...target([3, 4]), guessed: [3, 4] }, shownAsIs)?.message,
+      "E03, E04 no se pidieron: la lista de TikTok los hacía parecer bloqueados.",
+    );
+  } finally {
+    spanish.restore();
+  }
+});
+
+test("3.0.1 (the lead's D8): the automatic retry's “retrying” names the drama's free episodes DramaFetch only guessed were locked after what it retries — it never asks for them —, the hint for one; the alerts of one that never ran or that Stop ended name them with the rest, behind their Retry; Spanish too", () => {
+  const english = fakeChrome();
+  try {
+    const drama = run(5, [[1, "done"], [2, "done"], [4, "done"], [5, "failed"]]);
+    const one = guessedEpisodes([3], ["plays 2 s of 3 s"], shownAsIs);
+    assert.deepEqual(one, { numbers: [3], hint: "plays 2 s of 3 s" });
+    assert.deepEqual(guessedEpisodes([3, 4], ["plays 2 s of 3 s"], shownAsIs), { numbers: [3, 4], hint: "" }); // several: no hint
+    assert.deepEqual(autoRetryAlert(drama, target([5]), one), {
+      kind: "autoretry",
+      title: "↻ Red Sapphire — retrying 1 episode",
+      message: "E05 did not download — DramaFetch tries it once more on its own. E03 was not asked for: TikTok's list made it look locked (plays 2 s of 3 s).",
+      context: null,
+    });
+    assert.equal(
+      autoRetryAlert(drama, { ...target([5, 6]), missing: [6] }, guessedEpisodes([3, 4], [], shownAsIs)).message,
+      "E05 did not download. E06 is not in TikTok's list. DramaFetch tries once more on its own. E03, E04 were not asked for: TikTok's list made them look locked.",
+    );
+    assert.equal(autoRetryAlert(drama, target([5])).message, "E05 did not download — DramaFetch tries it once more on its own."); // none: as before
+    const both = { ...target([3, 5]), guessed: [3] };
+    assert.deepEqual(notRetriedAlert(both, "stopped by you", shownAsIs, ["plays 2 s of 3 s"]), {
+      kind: "retry",
+      title: "⚠ Red Sapphire — 2 episodes to retry",
+      message: "E05 did not download. E03 was not asked for: TikTok's list made it look locked (plays 2 s of 3 s).",
+      context: "Not retried automatically: stopped by you",
+    });
+    assert.deepEqual(stoppedRetryAlert(both, "stopped by you", shownAsIs, ["plays 2 s of 3 s"]), {
+      kind: "retry",
+      title: "⚠ Red Sapphire — 2 episodes to retry",
+      message: "E05 did not download. E03 was not asked for: TikTok's list made it look locked (plays 2 s of 3 s).",
+      context: "stopped by you",
+    });
+    assert.equal(notRetriedAlert(both, "stopped by you", shownAsIs).message, "E05 did not download. E03 was not asked for: TikTok's list made it look locked."); // no hint known
+  } finally {
+    english.restore();
+  }
+  const spanish = fakeChrome({ language: "es" });
+  try {
+    const drama = run(5, [[1, "done"], [2, "done"], [4, "done"], [5, "failed"]]);
+    const show = (/** @type {string} */ text) => (text === "plays 2 s of 3 s" ? "reproduce 2 s de 3 s" : text);
+    assert.equal(
+      autoRetryAlert(drama, target([5]), guessedEpisodes([3], ["plays 2 s of 3 s"], show)).message,
+      "E05 no se descargó: DramaFetch lo intenta una vez más por su cuenta. E03 no se pidió: la lista de TikTok lo hacía parecer bloqueado (reproduce 2 s de 3 s).",
+    );
+    assert.equal(
+      notRetriedAlert({ ...target([3, 5]), guessed: [3] }, "stopped by you", show, ["plays 2 s of 3 s"]).message,
+      "E05 no se descargó. E03 no se pidió: la lista de TikTok lo hacía parecer bloqueado (reproduce 2 s de 3 s).",
+    );
+  } finally {
+    spanish.restore();
   }
 });

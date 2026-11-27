@@ -1,0 +1,311 @@
+{
+  "statusCode": 0,
+  "status_code": 0,
+  "cursor": 8,
+  "hasMore": false,
+  "itemList": [
+    {
+      "id": "7699400000000000778",
+      "desc": "Another Drama | Episode 1",
+      "createTime": 1762100078,
+      "author": {
+        "id": "6900000000000000005",
+        "uniqueId": "another_drama",
+        "nickname": "Another Drama",
+        "shortDramaCreator": {
+          "isShortDramaCreator": true
+        }
+      },
+      "video": {
+        "id": "7699400000000000778",
+        "duration": 60,
+        "size": 5446417,
+        "bitrate": 726189,
+        "ratio": "540p",
+        "definition": "540p",
+        "codecType": "h264",
+        "format": "mp4",
+        "width": 576,
+        "height": 1024,
+        "videoID": "v1c025g50000ad10000000000000000",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oAD1cover~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=ad1a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oAD1origin~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=ad1b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oAD1h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000AD1&ply_type=2&policy=2&signature=ad1h264sig&tk=tt_chain_token&btag=e00090000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 726189,
+            "BitrateFPS": 25,
+            "CodecType": "h264",
+            "Format": "mp4",
+            "GearName": "normal_540_0",
+            "QualityType": 20,
+            "PlayAddr": {
+              "DataSize": 5446417,
+              "Uri": "v1c025g50000ad10000000000000000",
+              "UrlKey": "v1c025g50000ad10000000000000000_h264_540p_726189",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oAD1h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000AD1&ply_type=2&policy=2&signature=ad1h264sig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 345913,
+            "BitrateFPS": 25,
+            "CodecType": "h265_hvc1",
+            "Format": "mp4",
+            "GearName": "adapt_540_1",
+            "QualityType": 28,
+            "PlayAddr": {
+              "DataSize": 2594347,
+              "Uri": "v1c025g50000ad10000000000000000",
+              "UrlKey": "v1c025g50000ad10000000000000000_bytevc1_540p_345913",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oAD1hevcNaA3WG4IIgrfIABFwfGGLQZWOrtvqyu/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000AD1&ply_type=2&policy=2&signature=ad1hevcsig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7600000000000000000",
+        "dramaName": "Another Drama",
+        "authorUID": "6900000000000000005",
+        "description": "Another drama TikTok put in this list.",
+        "isLimitedFree": true,
+        "numVideos": 12,
+        "numWatched": "41277",
+        "totalDuration": "537",
+        "DramaVideoData": {
+          "EpisodeNumber": 1,
+          "IsFreeIntro": false,
+          "IsHighlight": false,
+          "IsPreview": true,
+          "LinkedEpisodeID": "0",
+          "PreviewType": 4
+        }
+      },
+      "music": {
+        "id": "7699400000000000778",
+        "title": "original sound - Another Drama",
+        "authorName": "Another Drama",
+        "duration": 60,
+        "shoot_duration": 60,
+        "original": true,
+        "isCopyrighted": false
+      },
+      "stats": {
+        "collectCount": 11,
+        "commentCount": 1,
+        "diggCount": 41,
+        "playCount": 901,
+        "shareCount": 1
+      }
+    },
+    {
+      "id": "7699400000000000604",
+      "desc": "Episode 4",
+      "createTime": 1762100004,
+      "author": {
+        "id": "6900000000000000005",
+        "uniqueId": "highlight_drama",
+        "nickname": "Highlight Drama",
+        "shortDramaCreator": {
+          "isShortDramaCreator": true
+        }
+      },
+      "video": {
+        "id": "7699400000000000604",
+        "duration": 90,
+        "size": 8169626,
+        "bitrate": 726189,
+        "ratio": "540p",
+        "definition": "540p",
+        "codecType": "h264",
+        "format": "mp4",
+        "width": 576,
+        "height": 1024,
+        "videoID": "v1c025g50000hd40000000000000000",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oHD4cover~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=hd4a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oHD4origin~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=hd4b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oHD4h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000HD4&ply_type=2&policy=2&signature=hd4h264sig&tk=tt_chain_token&btag=e00090000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 726189,
+            "BitrateFPS": 25,
+            "CodecType": "h264",
+            "Format": "mp4",
+            "GearName": "normal_540_0",
+            "QualityType": 20,
+            "PlayAddr": {
+              "DataSize": 8169626,
+              "Uri": "v1c025g50000hd40000000000000000",
+              "UrlKey": "v1c025g50000hd40000000000000000_h264_540p_726189",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oHD4h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000HD4&ply_type=2&policy=2&signature=hd4h264sig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 345913,
+            "BitrateFPS": 25,
+            "CodecType": "h265_hvc1",
+            "Format": "mp4",
+            "GearName": "adapt_540_1",
+            "QualityType": 28,
+            "PlayAddr": {
+              "DataSize": 3891521,
+              "Uri": "v1c025g50000hd40000000000000000",
+              "UrlKey": "v1c025g50000hd40000000000000000_bytevc1_540p_345913",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oHD4hevcNaA3WG4IIgrfIABFwfGGLQZWOrtvqyu/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000HD4&ply_type=2&policy=2&signature=hd4hevcsig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782377",
+        "dramaName": "Highlight Drama",
+        "authorUID": "6900000000000000005",
+        "description": "A short drama with a highlight numbered like its episode and a trailer TikTok counts.",
+        "isLimitedFree": true,
+        "numVideos": 7,
+        "numWatched": "41277",
+        "totalDuration": "537",
+        "DramaVideoData": {
+          "EpisodeNumber": 4,
+          "IsFreeIntro": false,
+          "IsHighlight": false,
+          "IsPreview": true,
+          "LinkedEpisodeID": "0",
+          "PreviewType": 4
+        }
+      },
+      "music": {
+        "id": "7699400000000000704",
+        "title": "original sound - Highlight Drama",
+        "authorName": "Highlight Drama",
+        "duration": 90,
+        "shoot_duration": 90,
+        "original": true,
+        "isCopyrighted": false
+      },
+      "stats": {
+        "collectCount": 11,
+        "commentCount": 1,
+        "diggCount": 41,
+        "playCount": 901,
+        "shareCount": 1
+      }
+    },
+    {
+      "id": "7699400000000000605",
+      "desc": "Episode 5",
+      "createTime": 1762100005,
+      "author": {
+        "id": "6900000000000000005",
+        "uniqueId": "highlight_drama",
+        "nickname": "Highlight Drama",
+        "shortDramaCreator": {
+          "isShortDramaCreator": true
+        }
+      },
+      "video": {
+        "id": "7699400000000000605",
+        "duration": 91,
+        "size": 8260399,
+        "bitrate": 726189,
+        "ratio": "540p",
+        "definition": "540p",
+        "codecType": "h264",
+        "format": "mp4",
+        "width": 576,
+        "height": 1024,
+        "videoID": "v1c025g50000hd50000000000000000",
+        "cover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oHD5cover~tplv-tiktokx-cropcenter:300:400.jpeg?dr=14575&x-expires=1800000000&x-signature=hd5a&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "originCover": "https://p16-sign-sg.tiktokcdn.com/tos-alisg-p-0037/oHD5origin~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1800000000&x-signature=hd5b&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=useast5",
+        "playAddr": "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oHD5h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000HD5&ply_type=2&policy=2&signature=hd5h264sig&tk=tt_chain_token&btag=e00090000",
+        "bitrateInfo": [
+          {
+            "Bitrate": 726189,
+            "BitrateFPS": 25,
+            "CodecType": "h264",
+            "Format": "mp4",
+            "GearName": "normal_540_0",
+            "QualityType": 20,
+            "PlayAddr": {
+              "DataSize": 8260399,
+              "Uri": "v1c025g50000hd50000000000000000",
+              "UrlKey": "v1c025g50000hd50000000000000000_h264_540p_726189",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oHD5h264AsGrqLOGettOSvfJBISAwafiFw/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000HD5&ply_type=2&policy=2&signature=hd5h264sig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          },
+          {
+            "Bitrate": 345913,
+            "BitrateFPS": 25,
+            "CodecType": "h265_hvc1",
+            "Format": "mp4",
+            "GearName": "adapt_540_1",
+            "QualityType": 28,
+            "PlayAddr": {
+              "DataSize": 3934760,
+              "Uri": "v1c025g50000hd50000000000000000",
+              "UrlKey": "v1c025g50000hd50000000000000000_bytevc1_540p_345913",
+              "Width": 576,
+              "Height": 1024,
+              "UrlList": [
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/tos-alisg-pve-0037/oHD5hevcNaA3WG4IIgrfIABFwfGGLQZWOrtvqyu/?a=1988&bti=ODszNWYuMDE6&mime_type=video_mp4&expire=1761400000&l=2026112707000000HD5&ply_type=2&policy=2&signature=hd5hevcsig&tk=tt_chain_token&btag=e00090000"
+              ]
+            }
+          }
+        ]
+      },
+      "dramaInfo": {
+        "dramaID": "7699393770256782377",
+        "dramaName": "Highlight Drama",
+        "authorUID": "6900000000000000005",
+        "description": "A short drama with a highlight numbered like its episode and a trailer TikTok counts.",
+        "isLimitedFree": true,
+        "numVideos": 7,
+        "numWatched": "41277",
+        "totalDuration": "537",
+        "DramaVideoData": {
+          "EpisodeNumber": 5,
+          "IsFreeIntro": false,
+          "IsHighlight": false,
+          "IsPreview": true,
+          "LinkedEpisodeID": "0",
+          "PreviewType": 4
+        }
+      },
+      "music": {
+        "id": "7699400000000000705",
+        "title": "original sound - Highlight Drama",
+        "authorName": "Highlight Drama",
+        "duration": 91,
+        "shoot_duration": 91,
+        "original": true,
+        "isCopyrighted": false
+      },
+      "stats": {
+        "collectCount": 11,
+        "commentCount": 1,
+        "diggCount": 41,
+        "playCount": 901,
+        "shareCount": 1
+      }
+    }
+  ]
+}
