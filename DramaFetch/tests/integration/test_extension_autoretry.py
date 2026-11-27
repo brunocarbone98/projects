@@ -29,10 +29,11 @@ Chrome for recorded on its way (`extension_alerts.RECORD_ALERTS_JS`):
   retry out of the queue — `not started: …` in the journal —, its drama's notification turns into
   the ⚠ alert with **Retry** and `Not retried automatically: rate limited (HTTP 429)`, and no
   `DramaFetch stopped` alert counts it as a drama never started;
-- (e) a `selection` job the user asked for — **See episodes**, then **Download all available**,
-  which downloads every episode in full (`overwrite`, 3.0.0) — whose E02 transfer is cut short
-  once: its drama, done where the job ends, queues the same ONE automatic retry — downloading in
-  full too —, which saves E02; `↻`, then `✓ … — downloaded` with `After an automatic retry.`;
+- (e) a `selection` job the user asked for — the progress card's **Retry** (since DramaFetch 4.0.0
+  the one a user starts by hand), the paste before it made with the automatic retry turned off —
+  whose E02 transfer is cut short again: its drama, done where the job ends, queues the same ONE
+  automatic retry, which saves E02; `↻`, then `✓ … — downloaded` with `After an automatic
+  retry.`;
 - (f) **Stop** pressed the instant the page asks for a batch's last episode (cut short too) — the
   engine past its last look at Stop, so the batch runs its course —: still a stop. The automatic
   retry the batch's first drama queued comes out of the queue at once (at the batch's end `not
@@ -516,43 +517,49 @@ def test_d_an_automatic_retry_a_later_stop_takes_out_of_the_queue_is_said_not_re
 
 
 def test_e_a_selection_job_s_plain_failure_gets_its_one_automatic_retry(tmp_path: Path) -> None:
-    """(e) A `selection` job the user asked for — **See episodes** on the library's card, then
-    **Download all available**, a job that downloads every chosen episode in full (`overwrite`,
-    DramaFetch 3.0.0) — whose E02 transfer is cut short once: its drama, done where the job ends,
-    queues ONE `Automatic retry: 1 of <drama>` behind it — a `selection` too, after the rest between
-    jobs, and downloading in full as its job did (`overwrite` in both journal records) —, which
-    saves E02 whole; the CDN asked twice for E02 in all. Notifications: `↻ … — retrying 1 episode`
-    with no button, then — the same id — `✓ … — downloaded`, `After an automatic retry.`. Nothing
-    follows: the drama, whole after its automatic retry, stays in the library as it was."""
+    """(e) A `selection` job the user asked for — the progress card's **Retry**, a `selection` job
+    that is no automatic retry — whose E02 transfer is cut short again: its drama, done where the
+    job ends, queues ONE `Automatic retry: 1 of <drama>` behind it — a `selection` too, after the
+    rest between jobs —, which saves E02 whole; the CDN asked three times for E02 in all (the
+    paste's transfer, the Retry's, the automatic retry's). The paste before it ran with **Retry on
+    its own what did not download** turned off — so that what retried its failure is the user's
+    **Retry** —, and the setting was turned back on before that **Retry**. Notifications: the
+    paste's ⚠ with its **Retry**; then the Retry's drama, `↻ … — retrying 1 episode` with no
+    button, and — the same id — `✓ … — downloaded`, `After an automatic retry.`. Nothing
+    follows."""
     second = (SECOND_SERIES_ID, 2)
     with (
-        FakeTikTok(truncate_once=frozenset({second})) as server,
-        ExtensionHarness(tmp_path, server.base_url) as ext,
+        FakeTikTok(truncate_twice=frozenset({second})) as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=RESTING) as ext,
     ):
         page = ext.page
-        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))
-        ext.see_episodes(SECOND_SERIES_ID)
+        ext.turn_off_auto_retry()  # the paste's failure waits for the user's Retry
         page.evaluate(RECORD_ALERTS_JS)
         jobs = ext.finished_jobs()
-        ext.download_available()
-        _until_jobs(ext, jobs + 2, 90, "the download and its automatic retry did not end")
-        journal = ext.journal()
-        assert len(journal) == 3  # the listing, the download, its automatic retry: nothing more
-        automatic, selected, listed = journal
-        assert listed["kind"] == "load"
-        assert (selected["kind"], selected["label"]) == (
-            "selection",
-            f"3 episodes of {SECOND_SERIES_NAME}",
-        )
-        ((series_id, rows),) = _rows(selected)
-        assert series_id == SECOND_SERIES_ID
-        assert [(number, status) for number, status, _ in rows] == [
+        pasted = ext.paste_and_wait(SECOND_LINK)
+        assert [entry["label"] for entry in ext.journal()] == [pasted["label"]]  # nothing queued
+        assert [(number, status) for number, status, _ in _rows(pasted)[0][1]] == [
             (1, "done"),
             (2, "failed"),
             (3, "done"),
         ]
-        assert rows[1][2].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
-        assert selected["series"][0].get("overwrite") is True  # See episodes': in full (3.0.0)
+        assert page.locator("#failed-auto").is_hidden()  # nothing will be retried on its own
+        ext.turn_on_auto_retry()
+        retry = page.locator("#retry-button")
+        assert retry.is_enabled()
+        retry.click()  # the user's Retry: a selection job over E02
+        _until_jobs(ext, jobs + 3, 120, "the retry and its automatic retry did not end")
+        journal = ext.journal()
+        assert len(journal) == 3  # the paste, its Retry, the Retry's automatic retry: no more
+        automatic, retried, _pasted = journal
+        assert (retried["kind"], retried["label"]) == (
+            "selection",
+            f"Retry 1 of {SECOND_SERIES_NAME}",
+        )
+        ((series_id, rows),) = _rows(retried)
+        assert series_id == SECOND_SERIES_ID
+        assert [(number, status) for number, status, _ in rows] == [(2, "failed")]
+        assert rows[0][2].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
         assert (automatic["kind"], automatic["label"]) == (
             "selection",
             f"Automatic retry: 1 of {SECOND_SERIES_NAME}",
@@ -563,12 +570,19 @@ def test_e_a_selection_job_s_plain_failure_gets_its_one_automatic_retry(tmp_path
         assert series_id == SECOND_SERIES_ID
         assert [(number, status) for number, status, _ in rows] == [(2, "done")]
         assert rows[0][2].endswith(" + cover embedded")
-        assert automatic["series"][0].get("overwrite") is True  # in full, as its job was
-        assert _cdn_asked(server, SECOND_SERIES_ID) == {1: 1, 2: 2, 3: 1}
+        assert _cdn_asked(server, SECOND_SERIES_ID) == {1: 1, 2: 3, 3: 1}
+        assert page.locator("#failed-block").is_hidden()
 
-        retrying, done = recorded_alerts(ext, 2)
-        assert len(page.evaluate(ALERTS_JS)) == 2
-        assert retrying["id"].endswith(f":{SECOND_SERIES_ID}:retry")
+        plain, retrying, done = recorded_alerts(ext, 3)
+        assert len(page.evaluate(ALERTS_JS)) == 3
+        assert plain["id"].endswith(f":{SECOND_SERIES_ID}:retry")  # the paste's own
+        assert (plain["options"]["title"], plain["options"]["buttons"]) == (
+            f"⚠ {SECOND_SERIES_NAME} — 1 episode to retry",
+            [{"title": "Retry"}],
+        )
+        assert "contextMessage" not in plain["options"]
+        assert retrying["id"].endswith(f":{SECOND_SERIES_ID}:retry")  # the Retry's
+        assert retrying["id"] != plain["id"]
         assert retrying["options"]["title"] == f"↻ {SECOND_SERIES_NAME} — retrying 1 episode"
         assert "buttons" not in retrying["options"]
         assert done["id"] == retrying["id"]

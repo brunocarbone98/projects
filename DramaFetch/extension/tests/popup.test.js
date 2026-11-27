@@ -1,14 +1,14 @@
 // @ts-check
-// The toolbar popup (src/app/popup.js) over a fake document and a fake `chrome`: on a TikTok
-// profile whose favorites list the worker saw, **Open my library · N dramas** hands that tab over
-// (the message 1.5.0's Choose from your favorites sent: the DramaFetch tab updates the library from
-// it); on such a page before the list was shown, the 1.5.0 hint stays; anywhere else, when a
-// library is kept, the same button opens the DramaFetch tab on the library — no job, no request.
+// The toolbar popup (src/app/popup.js) over a fake document and a fake `chrome`: everywhere **Open
+// DramaFetch** and its hint (never hidden); on a TikTok drama page also the series and **Download
+// this series** (its id handed to the DramaFetch tab: the job a paste of it queues). It reads the
+// active tab's address and nothing stored (DramaFetch 4.0.0: no library, nothing of the user's
+// TikTok Favorites — the fake chrome has no storage at all, so a popup that reached for it would
+// throw).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-const PROFILE = "https://www.tiktok.com/@invented_viewer";
 const SERIES = "7699393770256782354";
 
 /** One element of popup.html as popup.js uses it. */
@@ -28,27 +28,28 @@ class Element {
   }
 }
 
+/** The ids popup.html gives its elements. */
+const IDS = ["popup-version", "popup-series", "popup-download", "popup-open"];
+
 let loads = 0;
 
 /**
  * popup.js loaded (a fresh instance) over a fake document and `chrome`: the active tab's address,
- * the favorites addresses the worker kept (session) and the library kept (local).
- * @param {{url: string, template?: boolean, library?: Record<string, unknown> | null}} options
+ * and nothing else — no storage.
+ * @param {{url: string}} options
  */
 async function popup(options) {
   /** @type {Record<string, {message: string, placeholders?: Record<string, {content: string}>}>} */
   const catalog = JSON.parse(readFileSync(new URL("../_locales/en/messages.json", import.meta.url), "utf8"));
   /** @type {Map<string, Element>} */
   const elements = new Map();
-  for (const id of ["popup-version", "popup-series", "popup-download", "popup-favorites", "popup-favorites-hint", "popup-library", "popup-open"]) elements.set(id, new Element());
+  for (const id of IDS) elements.set(id, new Element());
   /** @type {unknown[]} */
   const sent = [];
   let closed = 0;
-  /** @type {unknown[]} */
-  const localKeys = [];
   const chrome = {
     runtime: {
-      getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "1.6.0" }),
+      getManifest: () => ({ manifest_version: 3, name: "DramaFetch", version: "4.0.0" }),
       sendMessage: async (/** @type {unknown} */ message) => void sent.push(message),
     },
     i18n: {
@@ -64,20 +65,6 @@ async function popup(options) {
       },
     },
     tabs: { query: async () => [{ id: 42, index: 0, windowId: 1, active: true, url: options.url }] },
-    storage: {
-      local: {
-        get: async (/** @type {string} */ key) => {
-          localKeys.push(key);
-          return key === "favoritesLibrary" && options.library ? { favoritesLibrary: options.library } : {};
-        },
-      },
-      session: {
-        get: async (/** @type {string} */ key) =>
-          options.template && key === "favoritesTemplate:42"
-            ? { [key]: { url: "https://www.tiktok.com/api/user/favorite/drama_list/?aid=1988&count=19&cursor=0", at: 1_794_351_500 } }
-            : {},
-      },
-    },
   };
   Object.assign(globalThis, {
     chrome,
@@ -105,82 +92,55 @@ async function popup(options) {
     /** @type {Element} */ (elements.get(id)).click();
     for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
   };
-  return { elements, sent, closed: () => closed, localKeys, click, restore };
+  return { elements, sent, closed: () => closed, click, restore };
 }
 
-/** A library as `chrome.storage.local` keeps it, TikTok counting `total`. @param {number} total */
-const library = (total) => ({ v: 1, listedAt: 1_800_000_000, total, complete: true, short: false, ended: null, profile: "@invented_viewer", items: [{ seriesId: "7712345678901234561", title: "A", episodes: 3, durationS: 9 }] });
+test("popup.html: the series line, Download this series, Open DramaFetch and its hint — no Open my library, no Favorites hint (DramaFetch 4.0.0)", () => {
+  const html = readFileSync(new URL("../src/app/popup.html", import.meta.url), "utf8");
+  assert.deepEqual([...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]), IDS);
+  assert.doesNotMatch(html, /popup-favorites|popup-library|popupLibrary|popupFavorites|library|favorit/i);
+  assert.match(html, /<p class="hint" data-i18n="popupHint">/); // shown everywhere: no `hidden` in its markup (popup.js changes only the series' and its button's)
+});
 
-test("on a TikTok profile whose favorites list the worker saw: Open my library · N dramas hands that tab over — the message 1.5.0's Choose from your favorites sent", async () => {
-  const shown = await popup({ url: PROFILE, template: true, library: library(946) });
+test("on a TikTok drama page: the series and Download this series — its id handed over, the popup closed —; Open DramaFetch there too", async () => {
+  const series = await popup({ url: `https://www.tiktok.com/shortdrama/episode/${SERIES}/1` });
   try {
-    const { elements, sent, closed } = shown;
-    const button = /** @type {Element} */ (elements.get("popup-favorites"));
-    assert.equal(button.hidden, false);
-    assert.equal(button.textContent, "Open my library · 946 dramas");
-    assert.equal(elements.get("popup-library")?.hidden, true);
-    assert.equal(elements.get("popup-favorites-hint")?.hidden, true);
-    await shown.click("popup-favorites");
-    assert.deepEqual(sent, [{ type: "dramafetch:open", favorites: 42 }]);
+    const { elements, sent, closed } = series;
+    assert.equal(elements.get("popup-series")?.hidden, false);
+    assert.equal(elements.get("popup-series")?.textContent, `Series ${SERIES}`);
+    assert.equal(elements.get("popup-download")?.hidden, false);
+    assert.equal(elements.get("popup-version")?.textContent, "4.0.0");
+    await series.click("popup-download");
+    assert.deepEqual(sent, [{ type: "dramafetch:open", load: SERIES }]);
     assert.equal(closed(), 1);
   } finally {
-    shown.restore();
-  }
-  // no library kept yet: the same hand-over, without a count
-  const first = await popup({ url: PROFILE, template: true, library: null });
-  try {
-    assert.equal(first.elements.get("popup-favorites")?.textContent, "Open my library");
-  } finally {
-    first.restore();
-  }
-});
-
-test("on a TikTok profile before its favorites list was shown: the 1.5.0 hint — and, with a library kept, Open my library opens it as it is (no job, no request)", async () => {
-  const shown = await popup({ url: PROFILE, template: false, library: library(945) });
-  try {
-    const { elements, sent } = shown;
-    assert.equal(elements.get("popup-favorites")?.hidden, true);
-    assert.equal(elements.get("popup-favorites-hint")?.hidden, false);
-    const button = /** @type {Element} */ (elements.get("popup-library"));
-    assert.equal(button.hidden, false);
-    assert.equal(button.textContent, "Open my library · 945 dramas");
-    await shown.click("popup-library");
-    assert.deepEqual(sent, [{ type: "dramafetch:open", library: true }]);
-  } finally {
-    shown.restore();
-  }
-  const none = await popup({ url: PROFILE, template: false, library: null });
-  try {
-    assert.equal(none.elements.get("popup-library")?.hidden, true);
-    assert.equal(none.elements.get("popup-favorites-hint")?.hidden, false);
-  } finally {
-    none.restore();
-  }
-});
-
-test("anywhere else: Open my library with a library kept, nothing without one; a series tab keeps Download this series", async () => {
-  const elsewhere = await popup({ url: "https://example.com/", library: library(12) });
-  try {
-    assert.equal(elsewhere.elements.get("popup-library")?.hidden, false);
-    assert.equal(elsewhere.elements.get("popup-library")?.textContent, "Open my library · 12 dramas");
-    assert.equal(elsewhere.elements.get("popup-favorites")?.hidden, true);
-    assert.equal(elsewhere.elements.get("popup-favorites-hint")?.hidden, true);
-  } finally {
-    elsewhere.restore();
-  }
-  const bare = await popup({ url: "https://example.com/", library: null });
-  try {
-    assert.equal(bare.elements.get("popup-library")?.hidden, true);
-  } finally {
-    bare.restore();
-  }
-  const series = await popup({ url: `https://www.tiktok.com/shortdrama/episode/${SERIES}/1`, library: library(12) });
-  try {
-    assert.equal(series.elements.get("popup-download")?.hidden, false);
-    assert.equal(series.elements.get("popup-library")?.hidden, false);
-    await series.click("popup-download");
-    assert.deepEqual(series.sent, [{ type: "dramafetch:open", load: SERIES }]);
-  } finally {
     series.restore();
+  }
+  const again = await popup({ url: `https://www.tiktok.com/shortdrama/episode/${SERIES}/7` });
+  try {
+    await again.click("popup-open");
+    assert.deepEqual(again.sent, [{ type: "dramafetch:open", load: null }]);
+    assert.equal(again.closed(), 1);
+  } finally {
+    again.restore();
+  }
+});
+
+test("anywhere else — a TikTok profile (its Favorites shown or not), TikTok's feed, any other site —: Open DramaFetch and its hint alone, which opens the DramaFetch tab with nothing handed over", async () => {
+  for (const url of ["https://www.tiktok.com/@invented_viewer", "https://www.tiktok.com/foryou", "https://example.com/"]) {
+    const elsewhere = await popup({ url });
+    try {
+      const { elements, sent } = elsewhere;
+      assert.equal(elements.get("popup-series")?.hidden, true, url);
+      assert.equal(elements.get("popup-download")?.hidden, true, url);
+      assert.deepEqual(sent, [], url); // nothing asked of the worker until a click
+      await elsewhere.click("popup-download"); // hidden, and never wired: nothing
+      assert.deepEqual(sent, [], url);
+      await elsewhere.click("popup-open");
+      assert.deepEqual(sent, [{ type: "dramafetch:open", load: null }], url);
+      assert.equal(elsewhere.closed(), 1, url);
+    } finally {
+      elsewhere.restore();
+    }
   }
 });

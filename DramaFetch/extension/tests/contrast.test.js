@@ -23,10 +23,13 @@ test("every text of the tab and the popup reaches 4.5:1 and every outline 3:1 ag
   /** @param {string} scheme */
   const pairs = (scheme) => result.rows.filter((row) => row.scheme === scheme).map((row) => `${row.kind} ${row.fg} ${row.bg}`).sort();
   assert.deepEqual(pairs("dark"), pairs("light"));
-  assert.ok(pairs("light").length >= 60, `${pairs("light").length} pairs`);
+  // 51 since DramaFetch 4.0.0 took the library's and See episodes' rules away, 52 with 3.0.1's warning
+  // rows under a drama's header (`--warn` on `--card`, by name below)
+  assert.ok(pairs("light").length >= 52, `${pairs("light").length} pairs`);
   for (const row of result.rows) assert.ok(row.ratio >= (row.kind === "text" ? TEXT_MIN : UI_MIN), `${row.scheme} ${row.fg} on ${row.bg}`);
   // the texts that matter most, by name: the body, the cards, the muted lines, the buttons, the
-  // statuses, the pause line, the Waiting rows, the header
+  // statuses, the pause line, the Waiting rows, the header, a series' header row and (3.0.1) the
+  // list's warnings under it when the list is short, the text fields
   const names = new Set(result.rows.map((row) => `${row.fg} ${row.bg}`));
   for (const pair of [
     "--text --bg",
@@ -40,14 +43,17 @@ test("every text of the tab and the popup reaches 4.5:1 and every outline 3:1 ag
     "--warn-fg --warn-bg",
     "--run-fg --run-bg",
     "--wait-fg --wait-bg",
+    "--gone-fg --gone-bg",
     "--pause-fg --pause-bg",
     "--banner-fg --banner-bg",
     "--id-ink --queue-bg",
+    "--text --queue-retry-bg",
     "--muted --queue-retry-bg",
     "--hero-text --hero-1",
     "--hero-text --hero-3",
-    "--ph-text --ph-2",
-    "--bar-text --bar-bg",
+    "--row-head-fg --row-head-bg",
+    "--warn --card",
+    "--text --field",
   ]) {
     assert.ok(names.has(pair), pair);
   }
@@ -71,8 +77,13 @@ test("every colour is a token of both schemes, and the popup's own style sets no
   const style = /<style>([\s\S]*?)<\/style>/.exec(popup)?.[1] ?? "";
   assert.doesNotMatch(style, /\b(?:color|background)\s*:/);
   assert.match(popup, /<link rel="stylesheet" href="app\.css">/);
-  // a ticked library card is framed in the accent itself (the library's end-to-end test compares them)
-  assert.match(CSS, /\.drama-card:has\(\.pick input:checked\) \{ border-color: var\(--accent\); \}/);
+  // no rule or token of the library or of See episodes (DramaFetch 4.0.0 took both away): nothing
+  // left unchecked behind them — the episode list, its thumbnails, its badges and hints, its Waiting
+  // rows. (`--warn`, which See episodes' warnings used, stays for 3.0.1's warning rows under a drama's
+  // header in the progress table — `tr.series-warning.warn`, its pair checked by name above.)
+  assert.doesNotMatch(CSS, /\.drama-|\.selection-bar|\.connection|\.library|--conn-bg|--bar-|--ph-|--pick-|--link-hover/);
+  assert.doesNotMatch(CSS, /#series-card|#episode-table|\.cover\b|\.hints\b|\.warnings\b|\.badge\.(?:free|ondisk|unlocked|locked)\b|\.queue-row\.(?:load|selected|available)\b|--queue-list-|--pink-|--chip\b/);
+  assert.match(CSS, /tr\.series-warning\.warn td \{ color: var\(--warn\);/);
 });
 
 test("the checker: WCAG 2's contrast ratio, the colours it reads, and the rules it refuses — a text colour with nothing said of what it sits on, a background holding unnamed text, a raw or translucent colour, an opacity", () => {

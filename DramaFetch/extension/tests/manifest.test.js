@@ -7,7 +7,8 @@
 // longer uses (contextMenus, a message to a content script), nor does a function it injects into a
 // TikTok tab reach for an extension API or a storage (2.0.1), nor does anything press, read or
 // observe TikTok's Bookmark button or its request any more (3.0.0: the removal from the Favorites
-// is gone).
+// is gone), nor does anything read, observe or keep the user's TikTok Favorites or their library, or
+// inject anything into a tab of the user's (4.0.0: no library).
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
@@ -189,6 +190,33 @@ test("nothing presses, reads or observes TikTok's Bookmark any more (DramaFetch 
   }
   const html = readFileSync(file("src/app/app.html"), "utf8");
   assert.doesNotMatch(html, /<dialog|setting-auto-remove|library-removed|bookmark/i, "app.html: no removal dialog, setting or line");
+});
+
+test("nothing reads, observes or keeps the user's TikTok Favorites any more, and nothing is injected into a tab of theirs (DramaFetch 4.0.0, the owner's decision of 2026-11-27): no library or favorites module, no favorites request observed, no address of theirs kept, no hand-over of them; the worker observes no request at all; only the discovery's own tab is injected into; the library 3.x kept is named only to be removed", () => {
+  for (const gone of ["src/lib/favorites.js", "src/lib/library.js", "src/app/favorites.js"]) assert.equal(existsSync(file(gone)), false, `${gone}: gone with the library`);
+  const sources = walk("src").filter((path) => path.endsWith(".js") || path.endsWith(".html"));
+  for (const path of sources) {
+    const text = readFileSync(file(path), "utf8");
+    assert.doesNotMatch(text, /drama_list|favoritesTemplate|favoritesCovers|dramafetch:(favorites|library)|[?&](favorites|library)=|isProfilePageUrl|profileHandleOf/, `${path}: the Favorites or the library`);
+    // the library's keys only where they are removed (storage.RETIRED_KEYS), and nowhere read or written
+    if (path !== "src/app/storage.js") assert.doesNotMatch(text, /favoritesLibrary|librarySort/, `${path}: the library's stored keys`);
+    // the discovery alone runs its browser — the tab it opens, nothing else, is injected into
+    if (path !== "src/app/discovery.js") assert.doesNotMatch(text, /\bchromeBrowser\b|\bfetchInTab\b|\bscrollTab\b|\bpageText\(/, `${path}: an injection outside the discovery`);
+  }
+  const storage = readFileSync(file("src/app/storage.js"), "utf8");
+  assert.equal(storage.match(/"favoritesLibrary"|"librarySort"/g)?.length, 2, "storage.js: each retired key named once, in RETIRED_KEYS");
+  assert.match(storage, /export const RETIRED_KEYS = Object\.freeze\(\["history", "favoritesLibrary", "librarySort"\]\);/);
+  const discovery = readFileSync(file("src/app/discovery.js"), "utf8");
+  assert.equal(discovery.match(/\bchromeBrowser\(/g)?.length, 2, "discovery.js: chromeBrowser declared once and called once, by discoverSeries for the tab it opens");
+  // `chrome.x`, `chrome?.x` and `chrome["x"]` alike; its `tabs.query` / `tabs.onUpdated` compare
+  // addresses with the DramaFetch tab's only, and keep nothing
+  assert.doesNotMatch(
+    readFileSync(file("src/app/background.js"), "utf8"),
+    /chrome\s*(?:\?\.|\.)\s*(?:webRequest|tabs\s*(?:\?\.|\.)\s*get\b)|chrome\s*(?:\?\.)?\s*\[\s*["'`]webRequest/,
+    "background.js: the worker observes no request and looks up no tab by id (no chrome.webRequest, no chrome.tabs.get)",
+  );
+  const popup = readFileSync(file("src/app/popup.html"), "utf8");
+  assert.doesNotMatch(popup, /popup-favorites|popup-library/);
 });
 
 test("host access to TikTok and its media and image CDNs only, https, never localhost", () => {

@@ -2,11 +2,10 @@
 /**
  * The alerts of DramaFetch 1.7.0 — the owner's request of 2026-11-19: “an alert that tells me a
  * drama has been downloaded completely, or that one or more episodes need a retry”. One Chrome
- * notification (a Windows toast) per drama a download job finishes — a paste, a card's
- * **Download**, **Download selected dramas**, a hand-over, **Download selected**, **Download all
- * available**, **Retry** —, made by the
- * DramaFetch tab that ran the job (`app.js`, once the drama's rows and records are stored) and
- * clicked in the worker (`background.js`):
+ * notification (a Windows toast) per drama a download job finishes — a paste or Enter, the popup's
+ * **Download this series**, **Retry**, an automatic retry —, made by the DramaFetch tab that ran
+ * the job (`app.js`, once the drama's rows and records are stored) and clicked in the worker
+ * (`background.js`):
  *
  * - **complete** — `✓ <drama> — downloaded` / `All 60 episodes are on disk.`: the drama's report
  *   says complete, the locked episodes left out as its report line says (`— 2 locked (61, 62)`);
@@ -54,9 +53,8 @@
  *   retry that stopped ({@link stoppedRetryAlert}); with none left, `app.js` takes “retrying” away.
  *
  * Beyond **not retried after all**, nothing for a drama skipped as complete or refused before any
- * request, nothing of their own for a listing (`app.js` asks only for download jobs' dramas),
- * nothing for a job refused at its gate (but an automatic retry's, above), nor while the **Alert me
- * when a drama finishes** setting is off.
+ * request, nothing for a job refused at its gate (but an automatic retry's, above), nor while the
+ * **Alert me when a drama finishes** setting is off.
  * Plain text in the page's display language
  * (`t()`, and the engine's English texts through `lib/display` as the tab shows them); the drama's
  * name cut to {@link MAX_NAME_LENGTH}; never a URL — an address in a text is replaced by its host

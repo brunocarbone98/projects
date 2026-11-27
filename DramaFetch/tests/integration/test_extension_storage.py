@@ -13,6 +13,7 @@ value is involved.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -572,7 +573,7 @@ def test_d_a_store_that_takes_nothing_asks_tiktok_for_nothing_and_the_permission
             page = ext.reopen_app()
             _paste_and_finish(ext, MAIN_LINK, 1)
             assert _status_line(ext) == line
-            assert page.locator("#episode-table tbody tr").count() == 0
+            assert _table_rows(ext, "#result-table") == []  # refused before its list: no row
             assert server.requests == []  # not one request, in all those jobs
             keys = page.evaluate("async () => (await chrome.storage.local.getKeys()).length")
             assert (keys, _bytes_in_use(ext)) == before
@@ -634,30 +635,69 @@ def test_e_a_series_whose_memory_is_gone_is_found_on_disk_and_not_downloaded_aga
         assert _on_disk(state) == dict.fromkeys((1, 2, 3, 4), "skipped-exists")
 
 
-def test_f_the_history_1x_kept_is_removed_at_the_page_s_start_and_nothing_records_jobs_on_disk(
+def test_f_what_1x_and_3x_kept_is_removed_at_the_page_s_start_and_nothing_records_jobs_on_disk(
     tmp_path: Path,
 ) -> None:
-    """DramaFetch 2.0.0 keeps no history of past runs: a job run leaves nothing of itself in
-    `chrome.storage.local` — the test copy's journal of finished jobs lives in the page's memory
-    only —, and what a 1.x install stored under `history` (put back here as a 1.x tab would have
-    left it) goes when the page starts, once, that key alone: the series' records, the pacing and
-    the test settings a first run left stay as they were. A reopened page starts an empty
-    journal, and shows no Past runs."""
+    """DramaFetch 2.0.0 keeps no history of past runs, and 4.0.0 (the owner's decision of
+    2026-11-27) no library: a job run leaves nothing of itself in `chrome.storage.local` — the
+    test copy's journal of finished jobs lives in the page's memory only —, and what an earlier
+    install stored of them — 1.x's `history`, 3.x's `favoritesLibrary` and `librarySort`, put
+    back here as such a tab would have left them — goes when the page starts, once, those keys
+    alone: the series' records, the pacing, the settings and the test settings a first run left
+    stay as they were. A tab restored at a 3.x hand-over's address (`?library=1`, `?favorites=<tab
+    id>`) starts as any other: the address ignored and cleared, no job, no request, no error. A
+    reopened page starts an empty journal, and shows no Past runs and no library."""
     with FakeTikTok() as server, ExtensionHarness(tmp_path, server.base_url) as ext:
         first = ext.paste_and_wait(MAIN_LINK)
         assert first["series"][0]["line"] == MAIN_LINE
         stored = ext.storage()
-        assert "history" not in stored  # the job ended: nothing of it stored
+        assert not {"history", "favoritesLibrary", "librarySort"} & set(stored)  # none written
+        # and no address at all — nothing signed — but the test copy's own base URL
+        assert "http" not in json.dumps({k: v for k, v in stored.items() if k != "testSettings"})
         assert [entry["label"] for entry in ext.journal()] == [f"Series {SERIES_ID}"]
-        # a 1.x tab's history, put back where 1.x kept it, next to what 2.0.0 keeps
-        legacy = [{"id": 1, "kind": "batch", "label": f"Series {SERIES_ID}", "series": []}]
-        ext.page.evaluate("(history) => chrome.storage.local.set({history})", legacy)
-        assert ext.storage("history") == {"history": legacy}
+        # what 1.x and 3.x tabs kept, put back where they kept it, next to what 4.0.0 keeps
+        legacy = {
+            "history": [{"id": 1, "kind": "batch", "label": f"Series {SERIES_ID}", "series": []}],
+            "favoritesLibrary": {
+                "v": 1,
+                "listedAt": 1795000000,
+                "total": 1,
+                "countedAt": None,
+                "fullReadAt": 1795000000,
+                "complete": True,
+                "short": False,
+                "ended": None,
+                "profile": "@invented_viewer",
+                "items": [
+                    {"seriesId": SERIES_ID, "title": SERIES_NAME, "episodes": 5, "durationS": 15}
+                ],
+            },
+            "librarySort": "title",
+        }
+        ext.page.evaluate("(legacy) => chrome.storage.local.set(legacy)", legacy)
+        assert ext.storage(list(legacy)) == legacy
         ext.page.close()
-        ext.reopen_app()
+        page = ext.reopen_app()
         after = ext.storage()
-        assert "history" not in after
-        assert set(after) == set(stored)  # every other key as it was
-        assert after[f"series:{SERIES_ID}"] == stored[f"series:{SERIES_ID}"]
+        assert not set(legacy) & set(after)  # all three gone
+        assert after == stored  # every other key as it was
         assert ext.journal() == []  # a new page: an empty journal
-        assert ext.page.locator("#history-card").count() == 0  # no Past runs on the page
+        assert page.locator("#history-card").count() == 0  # no Past runs on the page
+        assert SERIES_NAME not in page.locator("body").inner_text()  # the library is not drawn
+
+        # a tab Chrome restores at a 3.x hand-over's address: an ordinary start, the address cleared
+        requests = len(server.requests)
+        for search in ("?library=1", "?favorites=123"):
+            errors = _watch_errors(ext)
+            page.goto(f"{ext.app_url}{search}")
+            ext.wait_for(ext.idle, 20, f"the page at {search} did not start")
+            ext.wait_for(
+                lambda: page.evaluate("() => location.search") == "",
+                10,
+                f"{search} stayed in the address",
+            )
+            assert page.evaluate("() => location.pathname").endswith("/src/app/app.html")
+            assert ext.finished_jobs() == 0 and ext.journal() == []  # nothing queued
+            assert page.locator("#input-status").text_content() == ""
+            assert errors == []
+        assert len(server.requests) == requests  # nothing asked of TikTok
