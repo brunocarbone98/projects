@@ -561,9 +561,10 @@ class BrowserDownloader:
         cached = fresh.get(episode.item_id)
         if cached is None:
             return None
-        access, _, drm, hints = access_of(cached)
-        if access == "locked" and not options.include_locked:
-            listed = "; ".join(hints) or "locked"
+        decision = access_of(cached)
+        drm = decision.drm
+        if decision.access == "locked" and not options.include_locked:
+            listed = "; ".join(decision.hints) or "locked"
             log.debug("episode %s: locked in the fresh list (%s)", episode.number, listed)
             message = (
                 f"{DRM_MARK} (in a fresh episode list: {listed}): DramaFetch does not decrypt it"
@@ -598,7 +599,8 @@ class BrowserDownloader:
             timeout_s=REFRESH_TIMEOUT_S,
             strategy="browser",
         )
-        ref = SeriesRef(series_id=episode.series_id, episode_hint=episode.number)
+        # no hint: like every listing since 3.0.1 the refresh opens episode 1 (spec §5, D7)
+        ref = SeriesRef(series_id=episode.series_id, episode_hint=None)
         self.refreshes += 1
         page = context.new_page()
         try:

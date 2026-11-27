@@ -1199,7 +1199,12 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         available = ext.download_available()
         (series,) = available["series"]
         assert _statuses(series) == ["done", "done"]
-        assert series["line"] == "complete: 2 of 3 (2 downloaded) — 1 locked (3)"
+        # 3.0.1 (§9): episode 3 is a free one DramaFetch only guessed was locked — not downloaded,
+        # never "complete" (the line used to read `complete: 2 of 3 (2 downloaded) — 1 locked (3)`)
+        assert series["line"] == (
+            "incomplete: 2 of 3 — 1 free episode not asked for (3): "
+            "TikTok's list made it look locked"
+        )
         assert [len(_media_of(server, FOURTH[n])) for n in (1, 2, 3)] == [1, 1, 0]
         assert _videos(ext) == [
             FOURTH_FOLDER / f"{FOURTH_SERIES_NAME} - Episode {n:02d}.mp4" for n in (1, 2)
@@ -1285,11 +1290,24 @@ def test_r_a_free_series_with_conditions_lists_its_short_header_and_names_a_shor
         assert all(isinstance(entry["bitrate"], int) and entry["bitrate"] > 0 for entry in digest)
         assert [entry["is_preview"] for entry in digest] == [True, True, False]
         assert [entry["preview_type"] for entry in digest] == [4, 4, 1]
+        # 3.0.1: whether DramaFetch only guessed it was locked, and the sound's id and title
+        assert [entry["guessed_lock"] for entry in digest] == [False, False, True]
+        assert [entry["music_id"] for entry in digest] == [
+            "7699400000000000501",
+            "7699400000000000502",
+            "7699400000000000503",
+        ]
+        assert {entry["music_title"] for entry in digest} == {
+            f"original sound - {FOURTH_SERIES_NAME}"
+        }
         assert list(digest[0]) == [
             "number",
             "access",
             "lock_hints",
+            "guessed_lock",
             "duration_s",
+            "music_id",
+            "music_title",
             "music_duration_s",
             "music_original",
             "size",

@@ -7,20 +7,29 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { makeEpisode } from "../src/lib/catalog.js";
+import { makeEpisode, uncertainText } from "../src/lib/catalog.js";
 import { clearCooldown, recordBlock } from "../src/lib/cooldown.js";
 import { CUT_SHORT_CAUSE_PREFIX, DRM_CAUSE, LOCKED_CAUSE_PREFIX, NOT_ATTEMPTED_CAUSE } from "../src/lib/diagnosis.js";
 import { displayText } from "../src/lib/display.js";
-import { DRM_MESSAGE, DRM_REMEMBERED_MESSAGE, MEDIA_RATE_LIMIT_MESSAGE, shortServedMessage } from "../src/lib/messages.js";
+import {
+  DRM_MESSAGE,
+  DRM_REMEMBERED_MESSAGE,
+  MEDIA_RATE_LIMIT_MESSAGE,
+  NOT_LISTED_AGAIN_MESSAGE,
+  NOT_LISTED_EARLY_END_MESSAGE,
+  NOT_LISTED_MESSAGE,
+  shortServedMessage,
+} from "../src/lib/messages.js";
 import { JOB_REST, LONG_REST, PACE, PacingState, REST, SERIES_REST, pacingOptions, pauseMessage } from "../src/lib/pacing.js";
 import { profileHandleOf } from "../src/lib/library.js";
-import { completeSkip, seriesReport } from "../src/lib/report.js";
+import { completeSkip, isGuessedLocked, reportLine, seriesReport } from "../src/lib/report.js";
 import { doneEntries, donePath, markComplete, missingFiles, newState, record } from "../src/lib/state.js";
 import {
   ChallengeError,
   DISCOVERY_TAB_KEY,
   LOGIN_REDIRECT_MESSAGE,
   LoginRequiredError,
+  NO_LIST_WARNING,
   RateLimitedError,
   chromeBrowser,
   closeLeftoverDiscoveryTab,
@@ -81,7 +90,8 @@ const COVER = (() => {
 
 /**
  * @param {number} number
- * @param {{locked?: boolean, urls?: string[], durationS?: number, seriesId?: string}} [options]
+ * @param {{locked?: boolean, guessed?: boolean, urls?: string[], durationS?: number, seriesId?: string}} [options]
+ *   `guessed` (3.0.1): a locked one DramaFetch's own rules only guessed was locked (no play address)
  */
 function episode(number, options = {}) {
   const urls = options.urls ?? [`https://v16-webapp-prime.tiktok.com/v/${number}.mp4?expire=99999999999`];
@@ -92,8 +102,9 @@ function episode(number, options = {}) {
     seriesId: options.seriesId ?? SERIES_ID,
     seriesName: "Test Series",
     durationS: options.durationS ?? 3,
-    access: options.locked ? "locked" : "free",
-    lockHints: options.locked ? ["no play address"] : [],
+    access: options.locked || options.guessed ? "locked" : "free",
+    guessedLock: options.guessed === true,
+    lockHints: options.locked || options.guessed ? ["no play address"] : [],
     coverUrl: `https://p16-sign-sg.tiktokcdn.com/c/${number}.jpeg`,
     raw: { id: `item${number}`, video: { playAddr: options.locked ? "" : urls } },
   });
@@ -804,8 +815,8 @@ function fakeFetch(routes, log) {
 /**
  * A downloader over fakes: every file it saves goes to `saved` (its path below the Downloads
  * folder) and the conflict action it asked Chrome for to `conflicts`; `overwrite` as the jobs of
- * See episodes set it (3.0.0).
- * @param {{fetch: typeof fetch, saved?: string[], conflicts?: string[], thumbnail?: string, view?: DownloadsView, overwrite?: boolean}} options
+ * See episodes set it (3.0.0); `askGuessed` as a Retry of free episodes DramaFetch guessed were locked sets it (3.0.1).
+ * @param {{fetch: typeof fetch, saved?: string[], conflicts?: string[], thumbnail?: string, view?: DownloadsView, overwrite?: boolean, askGuessed?: boolean}} options
  */
 function downloader(options) {
   /** @type {string[]} */
@@ -818,6 +829,7 @@ function downloader(options) {
     thumbnail: options.thumbnail ?? "embed",
     nameFormat: "{series} - Episode {number}",
     includeLocked: false,
+    askGuessed: options.askGuessed, // 3.0.1
     overwrite: options.overwrite,
     hostPatterns: ["https://*.tiktok.com/*", "https://*.tiktokcdn.com/*"],
     view: options.view ?? /** @type {never} */ ({ completedAt: () => null, remember() {} }),
@@ -1381,6 +1393,65 @@ test("a selection lists the series again, after the rest between jobs, and the f
   assert.deepEqual(refused.downloads, []);
 });
 
+const EARLY_END = "in-page pagination fetch returned no episode list; scrolled the page instead";
+
+test("3.0.1: a whole-series run gives every number TikTok's list still lacks a row of its own — failed-unavailable, `not in TikTok's list` (`…: it ended early` past the highest one listed when the list ended early) — after the downloads, passed to onResult: no request, no pause, nothing recorded, no complete mark; the report names them missing from the list, never failed", async () => {
+  // TikTok counts 6; the list brought E01, E03, E04 and ended early: E02 a hole, E05-E06 never received
+  const listed = { ...series([episode(1), episode(3), episode(4)]), totalHint: 6, itemsReceived: 3, missingNumbers: [2, 5, 6], earlyEnd: EARLY_END };
+  const fake = fakeEngine({ discover: async () => listed });
+  const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
+  const [run] = await runBatch(fake.engine, [ref]);
+  assert.ok(run !== undefined);
+  assert.deepEqual(run.results.map((r) => [r.episode.number, r.status, r.message]), [
+    [1, "done", "done 1"],
+    [3, "done", "done 3"],
+    [4, "done", "done 4"],
+    [2, "failed-unavailable", NOT_LISTED_MESSAGE],
+    [5, "failed-unavailable", NOT_LISTED_EARLY_END_MESSAGE],
+    [6, "failed-unavailable", NOT_LISTED_EARLY_END_MESSAGE],
+  ]);
+  assert.deepEqual(fake.downloads, [1, 3, 4]); // no request for a missing number
+  assert.deepEqual(fake.pauses.map((p) => p.kind), ["pace", "pace"]); // nor a pause
+  assert.deepEqual(fake.shown.slice(-3).map((r) => r.episode.number), [2, 5, 6]); // the page draws them
+  const state = /** @type {Record<string, unknown>} */ (fake.states.get(SERIES_ID));
+  assert.deepEqual(Object.keys(/** @type {object} */ (state["episodes"])).sort(), ["1", "3", "4"]); // nothing recorded for them
+  assert.equal(state["complete_at"], null); // never marked complete
+  assert.equal(run.report.complete, false);
+  assert.deepEqual(run.report.gaps, [2, 5, 6]);
+  assert.equal(run.report.failed, 0); // missing from the list, not a failed download
+  assert.equal(run.report.endedEarly, true);
+  assert.equal(reportLine(run.report), "incomplete: 3 of 6 — episode 2 missing from TikTok's list; TikTok's list ended early: episodes 5, 6 not received");
+  assert.equal(run.stop, false);
+  // a list that came whole: no such row, complete as before
+  const whole = fakeEngine({ discover: async () => ({ ...series([episode(1), episode(2)]), totalHint: 2, itemsReceived: 2, missingNumbers: [], earlyEnd: null }) });
+  const [done] = await runBatch(whole.engine, [ref]);
+  assert.deepEqual(done?.results.map((r) => r.status), ["done", "done"]);
+  assert.equal(done?.report.complete, true);
+});
+
+test("3.0.1: a selection whose fresh list lacks a wanted number gives that number a row of its own — failed-unavailable, `not in TikTok's list this time` — after the downloads, never a request; the Python selection path does the same (parity: report.notListedResults)", async () => {
+  const fresh = series([episode(1), episode(2), episode(3)]);
+  const fake = fakeEngine({ discover: async () => fresh });
+  const ref = { kind: /** @type {const} */ ("series"), seriesId: SERIES_ID, episodeHint: null, sourceUrl: SERIES_ID };
+  const run = await runSelectionJob(fake.engine, ref, [2, 5, 3, 5], { lastContactAt: null });
+  assert.deepEqual(run.results.map((r) => [r.episode.number, r.status, r.message]), [
+    [2, "done", "done 2"],
+    [3, "done", "done 3"],
+    [5, "failed-unavailable", NOT_LISTED_AGAIN_MESSAGE],
+  ]);
+  assert.deepEqual(fake.downloads, [2, 3]);
+  assert.deepEqual(fake.shown.at(-1)?.message, NOT_LISTED_AGAIN_MESSAGE);
+  assert.deepEqual(run.report.gaps, [4, 5]); // what the line names: up to the highest number wanted
+  assert.equal(run.report.failed, 0);
+  assert.equal(reportLine(run.report), "incomplete: 2 of 5 — 1 not downloaded; episodes 4, 5 missing from TikTok's list");
+  // every wanted number missing: rows only, no request at all, no rest taken
+  const none = fakeEngine({ discover: async () => fresh });
+  const gone = await runSelectionJob(none.engine, ref, [7], { lastContactAt: null });
+  assert.deepEqual(gone.results.map((r) => [r.episode.number, r.status, r.message]), [[7, "failed-unavailable", NOT_LISTED_AGAIN_MESSAGE]]);
+  assert.deepEqual(none.downloads, []);
+  assert.equal(gone.contacted, true); // it listed the series
+});
+
 /**
  * A fake `chrome` with the tabs and the session storage the discovery's tab handling uses.
  * @param {{completeAfter?: number}} [options] how many `tabs.get` calls see the tab still loading
@@ -1585,6 +1656,8 @@ class FakeElement {
     this.parts = new Map();
     /** @type {Map<string, ((event: unknown) => unknown)[]>} */
     this.listeners = new Map();
+    /** @type {FakeElement | null} the element it was appended to last (`remove` takes it out of there) */
+    this.parentNode = null;
   }
   get textContent() {
     return this.text;
@@ -1664,7 +1737,17 @@ class FakeElement {
   }
   /** @param {...(FakeElement | string)} nodes */
   append(...nodes) {
-    for (const node of nodes) if (node instanceof FakeElement) this.children.push(node);
+    for (const node of nodes) {
+      if (!(node instanceof FakeElement)) continue;
+      this.children.push(node);
+      node.parentNode = this;
+    }
+  }
+  /** Out of the element it was appended to (as Chrome's `Element.remove`). */
+  remove() {
+    const parent = this.parentNode;
+    if (parent !== null) parent.children = parent.children.filter((child) => child !== this);
+    this.parentNode = null;
   }
   /** @param {...(FakeElement | string)} nodes */
   replaceChildren(...nodes) {
@@ -2917,18 +3000,32 @@ test("the page: at a job's end the failure rows leave the result table for the f
     assert.equal(element("failed-heading").textContent, "Did not download (3)");
     assert.equal(element("retry-button").textContent, "Retry the episodes that did not download (3)");
     assert.equal(element("retry-button").disabled, false);
-    // the button: one selection job per series; the block hidden and emptied as the first one starts
+    // the button: one selection job per series
     page.hold();
     element("retry-button").fire("click");
     await page.turn();
     assert.equal(element("retry-button").disabled, true);
     assert.equal(element("progress-current").textContent, "Retry 2 of One");
     assert.deepEqual(waitingRows(page), [whatRow("Retry E01", OTHER_ID)]); // its records never named it: its id, whole
-    assert.equal(element("failed-block").hidden, true);
-    assert.deepEqual(failed.children, []);
-    assert.equal(element("failed-heading").textContent, "");
-    // a job in which nothing failed: the block stays hidden, the button disabled
+    // 3.0.1 (§11, the owner's report of 2026-11-27): the block stays as the first one starts — it
+    // used to be hidden and emptied — and a job's end replaces only the rows of the episodes it took
+    assert.equal(element("failed-block").hidden, false);
+    assert.deepEqual(failed.children.map(keys), [
+      [SERIES_ID, "2", "failed-unavailable"],
+      [SERIES_ID, "4", "failed"],
+      [OTHER_ID, "1", "failed-rate-limited"],
+    ]);
+    assert.equal(element("failed-heading").textContent, "Did not download (3)");
+    // a job that took E01 and E02 of One and saved them: E02 leaves, E04 and Two's E01 stay
     module.renderFailed([seriesRecord(SERIES_ID, "One", [[1, "done"], [2, "skipped-exists"]])]);
+    assert.equal(element("failed-block").hidden, false);
+    assert.deepEqual(failed.children.map(keys), [
+      [SERIES_ID, "4", "failed"],
+      [OTHER_ID, "1", "failed-rate-limited"],
+    ]);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    // the jobs that took the last two saved them: the block hides, the button with it
+    module.renderFailed([seriesRecord(SERIES_ID, "One", [[4, "done"]]), seriesRecord(OTHER_ID, "Two", [[1, "done"]])]);
     assert.equal(element("failed-block").hidden, true);
     assert.equal(element("retry-button").disabled, true);
     assert.deepEqual(failed.children, []);
@@ -3459,8 +3556,37 @@ test("the page: at a job's end with failures the report is saved once under Dram
         [4, "free", []],
       ],
     );
-    assert.deepEqual(Object.keys(run.episodes_digest[0]), ["number", "access", "lock_hints", "duration_s", "music_duration_s", "music_original", "size", "bitrate", "is_preview", "preview_type"]);
-    assert.deepEqual(run.episodes_digest[0], { number: 1, access: "free", lock_hints: [], duration_s: 3, music_duration_s: null, music_original: null, size: null, bitrate: null, is_preview: null, preview_type: null });
+    // 3.0.1: the digest also says whether DramaFetch only guessed the episode was locked, and the sound's id and title
+    assert.deepEqual(Object.keys(run.episodes_digest[0]), [
+      "number",
+      "access",
+      "lock_hints",
+      "guessed_lock",
+      "duration_s",
+      "music_id",
+      "music_title",
+      "music_duration_s",
+      "music_original",
+      "size",
+      "bitrate",
+      "is_preview",
+      "preview_type",
+    ]);
+    assert.deepEqual(run.episodes_digest[0], {
+      number: 1,
+      access: "free",
+      lock_hints: [],
+      guessed_lock: false,
+      duration_s: 3,
+      music_id: null,
+      music_title: null,
+      music_duration_s: null,
+      music_original: null,
+      size: null,
+      bitrate: null,
+      is_preview: null,
+      preview_type: null,
+    });
     assert.equal(report.summary.length, 3);
     // the signed links live in the raw items only: no attempt keeps its query, and outside `raw` no signed link remains
     const attempts = run.not_downloaded.flatMap((/** @type {{attempts: Record<string, unknown>[]}} */ row) => row.attempts);
@@ -3479,11 +3605,21 @@ test("the page: at a job's end with failures the report is saved once under Dram
     await module.reportJobEnd({ kind: "batch", label: "2 series" }, OUTCOME, null, TRACES.of);
     assert.equal(downloads.length, 2);
     assert.equal(element("report-button").disabled, true);
-    // a job in which nothing failed: no report (a locked skip alone is no failure)
+    // a job in which nothing failed: no report (a locked skip alone is no failure) — over a whole list
+    // (3.0.1: the list the run's rows alone make lacks number 2, which is worth a report of its own, below)
     const clean = reportRows().filter((row) => row.status !== "failed");
-    await module.reportJobEnd({ kind: "selection", label: "clean" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", clean)], TRACES.of);
+    const whole = finishedRun(SERIES_ID, "Test Series", clean);
+    whole.series = { .../** @type {import("../src/lib/catalog.js").Series} */ (whole.series), episodes: reportRows().map((row) => row.episode) };
+    await module.reportJobEnd({ kind: "selection", label: "clean" }, OUTCOME, [whole], TRACES.of);
     assert.equal(downloads.length, 2);
     assert.equal(element("report-button").disabled, true);
+    // 3.0.1: nothing failed, but TikTok's list lacks episode 2: the report is saved, its listing section says so
+    await module.reportJobEnd({ kind: "selection", label: "short list" }, OUTCOME, [finishedRun(SERIES_ID, "Test Series", clean)], TRACES.of);
+    assert.equal(downloads.length, 3);
+    const short = JSON.parse(/** @type {string} */ (downloads[2]?.text));
+    assert.deepEqual(short.series[0].listing.missing_numbers, [2]);
+    assert.equal(short.series[0].listing.incomplete, true);
+    downloads.pop();
     // several series: the file is named after their count
     await module.reportJobEnd(
       { kind: "batch", label: "2 series" },
@@ -5757,8 +5893,12 @@ function fakeNotifications(options = {}) {
  * of `runBatch` and `runSelectionJob`; nothing is asked of anything.
  * @param {Awaited<ReturnType<typeof fakePage>>} page
  * @param {import("../src/app/app.js").Job} job
- * `onDownload` is told of every episode the run asks for, before its result.
- * @param {{episodes?: number, locked?: Record<string, number[]>, statuses?: Record<string, string>, onDownload?: (ep: import("../src/lib/catalog.js").Episode) => void}} [options]
+ * `onDownload` is told of every episode the run asks for, before its result. `absent[seriesId]`
+ * (3.0.1): the numbers TikTok's list leaves out of that series every time it is listed — TikTok
+ * still counts them (`totalHint`), and they are the series' `missingNumbers`. `guessed[seriesId]`
+ * (3.0.1): the numbers DramaFetch's own rules only guessed were locked (no play address): skipped,
+ * `looks locked: no play address`, as the locked ones.
+ * @param {{episodes?: number, locked?: Record<string, number[]>, guessed?: Record<string, number[]>, statuses?: Record<string, string>, onDownload?: (ep: import("../src/lib/catalog.js").Episode) => void, absent?: Record<string, number[]>}} [options]
  */
 function scriptedEngine(page, job, options = {}) {
   /** @type {import("../src/app/app.js").JobRecord} */
@@ -5786,12 +5926,26 @@ function scriptedEngine(page, job, options = {}) {
     wallClock: fake.engine.wallClock,
     rng: fake.engine.rng,
     cooldownStore: fake.engine.cooldownStore,
-    discover: async (/** @type {import("../src/lib/urls.js").SeriesRef} */ ref) =>
-      series(
-        Array.from({ length: options.episodes ?? 3 }, (_, index) => episode(index + 1, { seriesId: ref.seriesId, locked: options.locked?.[ref.seriesId]?.includes(index + 1) })),
+    discover: async (/** @type {import("../src/lib/urls.js").SeriesRef} */ ref) => {
+      const count = options.episodes ?? 3;
+      const absent = options.absent?.[ref.seriesId] ?? [];
+      const listed = series(
+        Array.from({ length: count }, (_, index) =>
+          episode(index + 1, {
+            seriesId: ref.seriesId,
+            locked: options.locked?.[ref.seriesId]?.includes(index + 1),
+            guessed: options.guessed?.[ref.seriesId]?.includes(index + 1), // 3.0.1
+          }),
+        ).filter(
+          (ep) => !absent.includes(ep.number),
+        ),
         `Drama ${ref.seriesId.slice(-4)}`,
         ref.seriesId,
-      ),
+      );
+      if (absent.length === 0) return listed;
+      const missing = [...absent].sort((a, b) => a - b);
+      return { ...listed, totalHint: count, itemsReceived: count - missing.length, missingNumbers: missing, warnings: [`TikTok announces ${count} episodes, ${count - missing.length} listed`] };
+    },
     downloader,
     view: fake.engine.view,
     readState: fake.engine.readState,
@@ -7235,7 +7389,11 @@ test("Stop pressed while the Did not download block is kept for the first of its
       ["Automatic retry: 1 of Drama 2399", "stopped by you", []],
       ["Automatic retry: 1 of Drama 2388", "not started: batch stopped in Automatic retry: 1 of Drama 2399 (stopped by you)", []],
     ]);
-    assert.equal(element("failed-block").hidden, true); // its own end: nothing of its own to show
+    // 3.0.1 (§11): its own end takes nothing (it was stopped before its list: no row of its own) —
+    // the block used to hide then —, so job 7's rows stay, their Retry with them
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    assert.equal(element("failed-auto").hidden, true);
     assert.deepEqual(notes.created, [first, second, second, first]);
     for (const id of [first, second]) {
       assert.equal(notes.shown.get(id)?.["contextMessage"], "Not retried automatically: stopped by you", id);
@@ -7306,7 +7464,7 @@ test("the duplicate guard lets go of a selection job done with its drama (1.8.0)
   }
 });
 
-test("the Did not download block (1.8.0): a line says how many of its episodes will be retried automatically, once — hidden when none —; the block stays, line, table and Retry, while that automatic retry runs, and goes as any other job starts", async () => {
+test("the Did not download block (1.8.0): a line says how many of its episodes will be retried automatically, once — hidden when none —; the block stays, line, table and Retry, while that automatic retry runs; as any other job starts the line goes and (3.0.1) the block stays", async () => {
   const records = [seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed-unavailable", DRM_MESSAGE], [4, "failed"]])];
   const page = await fakePage();
   try {
@@ -7323,8 +7481,9 @@ test("the Did not download block (1.8.0): a line says how many of its episodes w
     assert.equal(element("failed-auto").textContent, "2 of them will be retried automatically, once.");
     module.renderFailed(records, [auto([2])]);
     assert.equal(element("failed-auto").textContent, "1 of them will be retried automatically, once.");
-    // nothing failed: the block and its line hidden
-    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"]])], [auto([2])]);
+    // nothing failed: the block and its line hidden — 3.0.1 (§11): a job's end replaces only the rows
+    // of the episodes it took, so this one takes all four (it used to take E01 alone)
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "done"], [3, "done"], [4, "done"]])], [auto([2])]);
     assert.equal(element("failed-block").hidden, true);
     assert.equal(element("failed-auto").hidden, true);
     // the job's end as runJob draws it, that retry waiting — then it starts: the block stays
@@ -7345,7 +7504,8 @@ test("the Did not download block (1.8.0): a line says how many of its episodes w
   } finally {
     page.restore();
   }
-  // any other job — a download, an automatic retry another job queued — starts: the block goes
+  // any other job — a download, an automatic retry another job queued — starts: the line goes; 3.0.1
+  // (§11, the owner's report of 2026-11-27): the block, its rows and its Retry stay — they used to go
   for (const next of ["paste", "another retry"]) {
     const other = await fakePage();
     try {
@@ -7360,11 +7520,12 @@ test("the Did not download block (1.8.0): a line says how many of its episodes w
         await batchOfOther(other, 7, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed" } });
       }
       assert.equal(element("app-status").dataset["state"], "running", next);
-      assert.equal(element("failed-block").hidden, true, next);
+      assert.equal(element("failed-block").hidden, false, next);
       assert.equal(element("failed-auto").hidden, true, next);
       assert.equal(element("failed-auto").textContent, "", next);
-      assert.equal(element("failed-heading").textContent, "", next);
-      assert.equal(element("retry-button").disabled, true, next);
+      assert.equal(element("failed-heading").textContent, "Did not download (3)", next);
+      assert.equal(element("failed-table").querySelector("tbody").children.length, 3, next);
+      assert.equal(element("retry-button").disabled, false, next);
     } finally {
       other.restore();
     }
@@ -7392,7 +7553,7 @@ test("the Did not download block counts only the automatic retries its own job q
   }
 });
 
-test("the Did not download block kept while its automatic retry runs keeps its Save the report (1.8.0): the report setting off, the job's report is saved on demand then — every row, the short-served one the retry leaves too —; the retry's own end takes that report's line away; a block any other job takes away takes its report too, as in 1.7.0", async () => {
+test("the Did not download block kept while its automatic retry runs keeps its Save the report (1.8.0): the report setting off, the job's report is saved on demand then — every row, the short-served one the retry leaves too —; the retry's own end takes that report's line away; any other job takes the report away (the last job's), the block (3.0.1) staying", async () => {
   const truncated = "download looks incomplete or wrong: truncated body (100000 of 131072 bytes) from v16-webapp-prime.tiktok.com";
   const results = [
     { episode: episode(1, { seriesId: OTHER_ID }), status: /** @type {const} */ ("done"), path: "/dl/E1.mp4", message: "saved E1.mp4 (0.1 MiB)", downloadId: 1 },
@@ -7448,7 +7609,10 @@ test("the Did not download block kept while its automatic retry runs keeps its S
     assert.equal(element("report-button").disabled, false);
     assert.equal(paste(other, SERIES_ID), true); // another download starts first
     await other.turn();
-    assert.equal(element("failed-block").hidden, true);
+    // 3.0.1 (§11): the block stays, its rows and Retry with it — it used to go —; Save the report
+    // saves the last job's, so it goes as before
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
     assert.equal(element("report-button").disabled, true);
   } finally {
     other.restore();
@@ -7548,7 +7712,9 @@ test("the automatic retry in Spanish under a Spanish Chrome (1.8.0): its queue l
     // done yet — holds
     module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed"]])], [{ numbers: [2, 3], autoRetry: { alertId: "x", name: null } }]);
     assert.equal(element("failed-auto").textContent, "Se reintentarán automáticamente 2, una vez.");
-    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"]])], [{ numbers: [2], autoRetry: { alertId: "x", name: null } }]);
+    // 3.0.1 (§11): a job's end replaces only the rows of the episodes it took — this one takes E03
+    // too (saved), so the block holds E02 alone, which the waiting retry holds
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "done"]])], [{ numbers: [2], autoRetry: { alertId: "x", name: null } }]);
     assert.equal(element("failed-auto").textContent, "Se reintentará automáticamente 1, una vez.");
     element("retry-button").fire("click");
     await page.turn();
@@ -8568,6 +8734,934 @@ test("the page: a download in full (3.0.0) whose drama's records the storage ref
     assert.deepEqual(cardState(page, PAPER), ["idle", undefined, undefined, undefined]);
   } finally {
     local.get = get;
+    page.restore();
+  }
+});
+
+// ------------------------------- DramaFetch 3.0.1: no episode left out of TikTok's list without a word
+
+test("3.0.1, the page: the list's warnings show under the drama's header for a paste too — muted information, warn-coloured when the list itself is short —, in the page's language; none for a drama found complete", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const engine = module.buildEngine({ ...BATCH_JOB, refs: [refOf(SERIES_ID)] }, { pauses: [], inputs: [], taking: true });
+    const body = element("result-table").querySelector("tbody");
+    // a whole list with an item DramaFetch could not read: information only
+    const whole = { ...series([episode(1), episode(2)]), totalHint: 2, itemsReceived: 3, missingNumbers: [], earlyEnd: null, warnings: ["TikTok listed 1 item DramaFetch could not read (no episode number)"] };
+    engine.onStart?.({ ref: refOf(SERIES_ID), series: whole, name: "Test Series", episodes: whole.episodes, skippedComplete: false });
+    // a short list: TikTok counts 4, the pagination fell back, E04 never came
+    const short = { ...series([episode(1, { seriesId: OTHER_ID }), episode(2, { seriesId: OTHER_ID }), episode(3, { seriesId: OTHER_ID })], "Two", OTHER_ID), totalHint: 4, itemsReceived: 3, missingNumbers: [4], earlyEnd: EARLY_END, warnings: [EARLY_END, "TikTok announces 4 episodes, 3 listed"] };
+    engine.onStart?.({ ref: refOf(OTHER_ID), series: short, name: "Two", episodes: short.episodes, skippedComplete: false });
+    // skipped as complete: no list, no warning
+    engine.onStart?.({ ref: refOf(THIRD_ID), series: null, name: "Three", episodes: [], skippedComplete: true });
+    const rows = body.children.map((row) => [row.className, row.getAttribute("data-series-id"), row.children[0]?.textContent]);
+    assert.deepEqual(rows, [
+      ["series-row", SERIES_ID, "Test Series"],
+      ["series-warning", SERIES_ID, "TikTok listed 1 item DramaFetch could not read (no episode number)"],
+      ["series-row", OTHER_ID, "Two"],
+      ["series-warning warn", OTHER_ID, EARLY_END],
+      ["series-warning warn", OTHER_ID, "TikTok announces 4 episodes, 3 listed"],
+      ["series-row", THIRD_ID, "Three — complete on disk, nothing to do"],
+    ]);
+    // a warning row is no failure: the job's end keeps it with its header
+    module.renderFailed([seriesRecord(OTHER_ID, "Two", [[1, "done"], [4, "failed-unavailable", NOT_LISTED_EARLY_END_MESSAGE]])]);
+    assert.ok(body.children.some((row) => row.className === "series-warning warn" && row.getAttribute("data-series-id") === OTHER_ID));
+  } finally {
+    page.restore();
+  }
+  const spanish = await fakePage({ language: "es" });
+  try {
+    const engine = spanish.module.buildEngine({ ...BATCH_JOB, refs: [refOf(OTHER_ID)] }, { pauses: [], inputs: [], taking: true });
+    const short = { ...series([episode(1, { seriesId: OTHER_ID })], "Dos", OTHER_ID), totalHint: 3, itemsReceived: 1, missingNumbers: [2, 3], earlyEnd: null, warnings: ["episodes 2-3 missing (gap)", "TikTok announces 3 episodes, 1 listed"] };
+    engine.onStart?.({ ref: refOf(OTHER_ID), series: short, name: "Dos", episodes: short.episodes, skippedComplete: false });
+    const texts = spanish.element("result-table").querySelector("tbody").children.filter((row) => row.className.startsWith("series-warning")).map((row) => row.children[0]?.textContent);
+    assert.deepEqual(texts, ["faltan los episodios 2-3 (hay un hueco)", "TikTok anuncia 3 episodios, 1 listado"]);
+  } finally {
+    spanish.restore();
+  }
+});
+
+test("3.0.1 (the lead's D2), the page: an uncertain list's warnings are warn-coloured — TikTok counts more than the drama certainly has —, and muted information once everything TikTok counts is placed", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    const engine = module.buildEngine({ ...BATCH_JOB, refs: [refOf(SERIES_ID)] }, { pauses: [], inputs: [], taking: true });
+    const body = element("result-table").querySelector("tbody");
+    // TikTok counts 4; three episodes and a trailer came: nothing named missing, but uncertain
+    const uncertain = {
+      ...series([episode(1), episode(2), episode(3)]),
+      totalHint: 4,
+      itemsReceived: 4,
+      missingNumbers: [],
+      earlyEnd: null,
+      warnings: ["TikTok listed 1 item DramaFetch could not read (no episode number)", "TikTok announces 4 episodes, 3 listed", uncertainText(4, 3, 1)],
+    };
+    engine.onStart?.({ ref: refOf(SERIES_ID), series: uncertain, name: "Test Series", episodes: uncertain.episodes, skippedComplete: false });
+    // TikTok counts 3 for three episodes and a trailer: everything it counts is placed
+    const placed = { ...series([episode(1, { seriesId: OTHER_ID }), episode(2, { seriesId: OTHER_ID }), episode(3, { seriesId: OTHER_ID })], "Two", OTHER_ID), totalHint: 3, itemsReceived: 4, missingNumbers: [], earlyEnd: null, warnings: ["TikTok listed 1 item DramaFetch could not read (no episode number)"] };
+    engine.onStart?.({ ref: refOf(OTHER_ID), series: placed, name: "Two", episodes: placed.episodes, skippedComplete: false });
+    const rows = body.children.filter((row) => row.className.startsWith("series-warning")).map((row) => [row.className, row.getAttribute("data-series-id")]);
+    assert.deepEqual(rows, [
+      ["series-warning warn", SERIES_ID],
+      ["series-warning warn", SERIES_ID],
+      ["series-warning warn", SERIES_ID],
+      ["series-warning", OTHER_ID],
+    ]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("3.0.1, the page: a paste whose list still lacks episodes gives each its row in Did not download — `missing from the list`, `not in TikTok's list` —, counted in the heading and the Retry, which queues them as a selection job (a fresh listing, then those numbers); its alert is ⚠ naming them apart", async () => {
+  const page = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    // TikTok counts 6 for Drama 2399; its list leaves E02 and E06 out (a hole and the last one); E04 fails plainly
+    const { runs } = await batchOfOther(page, 5, { episodes: 6, absent: { [OTHER_ID]: [2, 6] }, statuses: { [`${OTHER_ID}:4`]: "failed" } });
+    const [run] = runs;
+    assert.ok(run !== undefined);
+    assert.deepEqual(run.results.map((r) => [r.episode.number, r.status]), [[1, "done"], [3, "done"], [4, "failed"], [5, "done"], [2, "failed-unavailable"], [6, "failed-unavailable"]]);
+    assert.equal(reportLine(run.report), "incomplete: 3 of 6 — 1 failed (4); episodes 2, 6 missing from TikTok's list");
+    // the job's end: its records → the Did not download block
+    module.renderFailed(recordsOf(runs));
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-heading").textContent, "Did not download (3)");
+    const failed = element("failed-table").querySelector("tbody").children;
+    assert.deepEqual(
+      failed.map((row) => [row.getAttribute("data-number"), row.getAttribute("data-status"), row.children[2]?.children[0]?.textContent, row.children[3]?.textContent]),
+      [
+        ["2", "failed-unavailable", "missing from the list", NOT_LISTED_MESSAGE],
+        ["4", "failed", "failed", "failed 4"],
+        ["6", "failed-unavailable", "missing from the list", NOT_LISTED_MESSAGE],
+      ],
+    );
+    assert.equal(element("retry-button").textContent, "Retry the episodes that did not download (3)");
+    // what its Retry takes: those numbers, the missing ones named
+    assert.deepEqual(module.retryTargets(recordsOf(runs)), [{ seriesId: OTHER_ID, name: "Drama 2399", numbers: [2, 4, 6], missing: [2, 6] }]);
+    // its alert (the setting off: no automatic retry): ⚠ with its Retry, the missing ones named apart
+    const id = `dramafetch-alert:${module.alerts.page}:5:${OTHER_ID}:retry`;
+    assert.equal(notes.shown.get(id)?.["title"], "⚠ Drama 2399 — 3 episodes to retry");
+    assert.equal(notes.shown.get(id)?.["message"], "E04 did not download. E02, E06 are not in TikTok's list.");
+    assert.deepEqual(notes.shown.get(id)?.["buttons"], [{ title: "Retry" }]);
+    assert.deepEqual(module.alerts.retryOf(id)?.numbers, [2, 4, 6]);
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.deepEqual(jobsOf(page), [
+      { kind: "selection", label: "Retry 3 of Drama 2399", refs: [refOf(OTHER_ID)], series: null, numbers: [2, 4, 6], includeLocked: false, recheck: false, missing: [2, 6] },
+    ]);
+  } finally {
+    page.restore();
+  }
+});
+
+test("3.0.1, the automatic retry takes the episodes TikTok's list lacked too — once, its “retrying” alert naming them —; its fresh list still without them: `not in TikTok's list this time`, the ⚠ alert with its Retry, never a second round; never after a stop, never in a cooldown", async () => {
+  const page = await fakePage();
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const first = await batchOfOther(page, 9, { episodes: 5, absent: { [OTHER_ID]: [5] } });
+    const alertId = `dramafetch-alert:${module.alerts.page}:9:${OTHER_ID}:retry`;
+    const [auto] = module.queuedJobs();
+    assert.ok(auto !== undefined);
+    assert.deepEqual(jobsOf(page), [
+      { kind: "selection", label: "Automatic retry: 1 of Drama 2399", refs: [refOf(OTHER_ID)], series: null, numbers: [5], includeLocked: false, recheck: false, missing: [5], autoRetry: { alertId, name: "Drama 2399" } },
+    ]);
+    assert.equal(notes.shown.get(alertId)?.["title"], "↻ Drama 2399 — retrying 1 episode");
+    assert.equal(notes.shown.get(alertId)?.["message"], "E05 is not in TikTok's list. DramaFetch tries once more on its own.");
+    assert.equal(notes.shown.get(alertId)?.["buttons"], undefined);
+    // the automatic retry's own run: a fresh list, still without E05 — its row, no request, its ⚠ with its Retry
+    const scripted = scriptedEngine(page, auto, { episodes: 5, absent: { [OTHER_ID]: [5] } });
+    scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
+    const run = await runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null });
+    assert.deepEqual(run.results.map((r) => [r.episode.number, r.status, r.message]), [[5, "failed-unavailable", NOT_LISTED_AGAIN_MESSAGE]]);
+    module.dramaDone(auto, run, scripted.jobRecord);
+    await page.turn();
+    assert.deepEqual(notes.shown.get(alertId), {
+      type: "basic",
+      iconUrl: ALERT_ICON_URL,
+      title: "⚠ Drama 2399 — 1 episode to retry",
+      message: "E05 is not in TikTok's list.",
+      contextMessage: "After an automatic retry.",
+      priority: 0,
+      requireInteraction: false,
+      silent: false,
+      buttons: [{ title: "Retry" }],
+    });
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [5], missing: [5] });
+    assert.equal(jobsOf(page).length, 1); // the automatic retry alone: no second round
+    assert.equal(scripted.jobRecord.autoRetried, undefined);
+  } finally {
+    page.restore();
+  }
+  // a run that stopped (a 429): no automatic retry, even of a missing number
+  const stopped = await fakePage();
+  try {
+    stopped.hold();
+    fakeNotifications();
+    const { runs } = await batchOfOther(stopped, 3, { episodes: 4, absent: { [OTHER_ID]: [4] }, statuses: { [`${OTHER_ID}:2`]: "failed-rate-limited" } });
+    assert.equal(runs[0]?.stop, true);
+    assert.ok(runs[0]?.results.some((r) => r.episode.number === 4 && r.message === NOT_LISTED_MESSAGE)); // still said
+    assert.deepEqual(jobsOf(stopped), []);
+  } finally {
+    stopped.restore();
+  }
+  // a cooldown in force: none either
+  const now = Date.now() / 1000;
+  const cooling = await fakePage({ storage: { cooldown: { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now } } });
+  try {
+    cooling.hold();
+    fakeNotifications();
+    await batchOfOther(cooling, 3, { episodes: 4, absent: { [OTHER_ID]: [4] } });
+    assert.deepEqual(jobsOf(cooling), []);
+  } finally {
+    cooling.restore();
+  }
+});
+
+test("3.0.1, the alert of an automatic retry that never ran names the episodes TikTok's list lacked apart, with its Retry", async () => {
+  const page = await fakePage();
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    const alertId = `dramafetch-alert:${module.alerts.page}:3:${OTHER_ID}:retry`;
+    module.alertNotRetried({ refs: [refOf(OTHER_ID)], numbers: [2, 5], autoRetry: { alertId, name: "Drama 2399" }, missing: [5] }, "stopped by you");
+    assert.equal(notes.shown.get(alertId)?.["message"], "E02 did not download. E05 is not in TikTok's list.");
+    assert.equal(notes.shown.get(alertId)?.["contextMessage"], "Not retried automatically: stopped by you");
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2, 5], missing: [5] });
+    // one that ran and saved E02 before Stop: only E05 is left, named so
+    module.alertNotRetried({ refs: [refOf(OTHER_ID)], numbers: [2, 5], autoRetry: { alertId, name: "Drama 2399" }, missing: [5] }, "stopped by you", [2]);
+    assert.equal(notes.shown.get(alertId)?.["message"], "E05 is not in TikTok's list.");
+    assert.deepEqual(module.alerts.retryOf(alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [5], missing: [5] });
+  } finally {
+    page.restore();
+  }
+});
+
+/**
+ * The result table's body of a fake page as Chrome keeps it (3.0.1, the lead's D13, the review's T4):
+ * `renderResult` looks for an episode's row first (`tr[data-key="…"]`) and appends one when none is
+ * there — the fake's own lookup finds a stand-in every time, so none of its rows would stay. With
+ * this, the rows the engine's `onResult` draws stay in `body.children`, as the page drew them.
+ * @param {FakeElement} body
+ */
+function keepRows(body) {
+  const lookup = body.querySelector.bind(body);
+  body.querySelector = /** @type {FakeElement["querySelector"]} */ (
+    /** @type {unknown} */ (
+      (/** @type {string} */ selector) => {
+        const key = /^tr\[data-key="(.*)"\]$/.exec(selector)?.[1];
+        if (key === undefined) return lookup(selector);
+        return body.children.find((row) => row.getAttribute("data-key") === key) ?? null;
+      }
+    )
+  );
+}
+
+test("3.0.1 (§9), the page: a free episode DramaFetch only guessed was locked reads `not downloaded (free)`, failure-coloured — a lock of TikTok's keeps `locked, skipped` —, the trimming keeps it; it goes under Did not download beside the failures; the Retry queues one selection job per drama and kind — the failures as ever, the guessed ones asking for them anyway —; the automatic retry never takes it; the drama's alert is ⚠ naming it with its hint", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module } = page;
+    fakeNotifications();
+    page.hold();
+    const results = element("result-table").querySelector("tbody");
+    keepRows(results); // the rows the engine's onResult draws stay, as in Chrome (T4)
+    /** @type {FakeElement[]} the live table as the drama ends — before its automatic retry's job starts and empties it */
+    let drawn = [];
+    const { runs } = await batchOfOther(page, 7, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed" }, guessed: { [OTHER_ID]: [3] }, locked: { [OTHER_ID]: [4] } }, (engine) => {
+      const done = engine.onSeriesDone;
+      engine.onSeriesDone = (index, total, finished) => {
+        drawn = [...results.children];
+        done?.(index, total, finished);
+      };
+    });
+    const [run] = runs;
+    // E03 skipped like the locked E04 — no request —, but not downloaded: the drama is not complete
+    assert.deepEqual(run?.results.map((result) => [result.episode.number, result.status]), [
+      [1, "done"],
+      [2, "failed"],
+      [3, "skipped-locked"],
+      [4, "skipped-locked"],
+    ]);
+    assert.equal(run?.report.complete, false);
+    assert.deepEqual([run?.report.guessedLockedNumbers, run?.report.lockedNumbers], [[3], [4]]);
+    // its line names it apart
+    assert.equal(
+      element("report-lines").children.at(-1)?.textContent,
+      "Drama 2399: incomplete: 1 of 4 — 1 locked (4), 1 failed (2); 1 free episode not asked for (3): TikTok's list made it look locked",
+    );
+    // the live table as renderResult drew it through the engine's onResult (3.0.1, the lead's D13,
+    // the review's T4): E03 marked `data-guessed`, its badge `not downloaded (free)` in the failure
+    // colour — the locked E04 keeps `locked, skipped`
+    const episodeRows = () => results.children.filter((row) => row.getAttribute("data-number") !== null);
+    results.replaceChildren(...drawn);
+    assert.deepEqual(
+      episodeRows().map((row) => [
+        row.getAttribute("data-number"),
+        row.getAttribute("data-status"),
+        row.getAttribute("data-guessed"),
+        row.children[1]?.children[0]?.textContent,
+        row.children[1]?.children[0]?.className,
+      ]),
+      [
+        ["1", "done", null, "downloaded", "badge done"],
+        ["2", "failed", null, "failed", "badge failed"],
+        ["3", "skipped-locked", "1", "not downloaded (free)", "badge failed"],
+        ["4", "skipped-locked", null, "locked, skipped", "badge skipped"],
+      ],
+    );
+    // the trimming takes what completed, never a row that did not download
+    module.trimResultRows(1);
+    assert.deepEqual(
+      episodeRows().map((row) => row.getAttribute("data-number")),
+      ["2", "3"],
+    );
+    // the automatic retry (1.8.0) takes E02 only: never an episode DramaFetch judged locked
+    assert.deepEqual(
+      module.queuedJobs().map((job) => [job.numbers, job.askGuessed === true, job.autoRetry !== undefined]),
+      [[[2], false, true]],
+    );
+    // the job's end: E02 and E03 under Did not download, E03 with its own badge — the records as
+    // the page writes them (the real runRecord, 3.0.1, the lead's D13, the review's T3)
+    module.renderFailed(runs.map((one) => module.runRecord(one)));
+    const failed = element("failed-table").querySelector("tbody");
+    assert.deepEqual(
+      failed.children.map((row) => [
+        row.getAttribute("data-number"),
+        row.getAttribute("data-status"),
+        row.getAttribute("data-guessed"),
+        row.children[2]?.children[0]?.textContent,
+        row.children[2]?.children[0]?.className,
+      ]),
+      [
+        ["2", "failed", null, "failed", "badge failed"],
+        ["3", "skipped-locked", "1", "not downloaded (free)", "badge failed"],
+      ],
+    );
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    assert.equal(element("retry-button").textContent, "Retry the episodes that did not download (2)");
+    // the Retry: E02's job is the automatic retry's already; E03 gets a job of its own that asks for it anyway
+    element("retry-button").fire("click");
+    await page.turn();
+    assert.deepEqual(
+      module.queuedJobs().map((job) => [job.numbers, job.includeLocked, job.askGuessed === true, job.autoRetry !== undefined]),
+      [
+        [[2], false, false, true],
+        [[3], false, true, false],
+      ],
+    );
+    assert.deepEqual(waitingRows(page), [whatRow("Retry E03", OTHER_ID, "Drama 2399")]);
+  } finally {
+    page.restore();
+  }
+  // the alert of such a drama (no automatic retry): ⚠ naming both kinds, the guessed one with its
+  // hint; its Retry queues the same two jobs
+  const quiet = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { module } = quiet;
+    const notes = fakeNotifications();
+    quiet.hold();
+    await batchOfOther(quiet, 7, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed" }, guessed: { [OTHER_ID]: [3] }, locked: { [OTHER_ID]: [4] } });
+    const id = module.alerts.idOf(7, `${OTHER_ID}:retry`);
+    assert.equal(notes.shown.get(id)?.["title"], "⚠ Drama 2399 — 2 episodes to retry");
+    assert.equal(notes.shown.get(id)?.["message"], "E02 did not download. E03 was not asked for: TikTok's list made it look locked (no play address).");
+    assert.deepEqual(notes.shown.get(id)?.["buttons"], [{ title: "Retry" }]);
+    assert.deepEqual(module.alerts.retryOf(id), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [2, 3], guessed: [3] });
+    assert.deepEqual(
+      module.retryJobs([/** @type {import("../src/app/app.js").RetryTarget} */ (module.alerts.retryOf(id))]).map((job) => [job.numbers, job.askGuessed === true, job.label]),
+      [
+        [[2], false, "Retry 1 of Drama 2399"],
+        [[3], true, "Retry 1 of Drama 2399"],
+      ],
+    );
+  } finally {
+    quiet.restore();
+  }
+});
+
+test("3.0.1 (§9), a selection's alert: a free episode the job did not take, which its report counts as a guessed lock, is named and retried too — never ✓ while one is left", async () => {
+  const page = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const job = { ...BATCH_JOB, id: 9, kind: /** @type {const} */ ("selection"), refs: [refOf(OTHER_ID)], numbers: [1, 2] };
+    const scripted = scriptedEngine(page, job, { episodes: 3, guessed: { [OTHER_ID]: [3] } });
+    const run = await runSelectionJob(scripted.engine, refOf(OTHER_ID), [1, 2], { lastContactAt: null });
+    assert.deepEqual(run.results.map((result) => [result.episode.number, result.status]), [
+      [1, "done"],
+      [2, "done"],
+    ]);
+    assert.deepEqual([run.report.complete, run.report.guessedLockedNumbers], [false, [3]]);
+    module.dramaDone(job, run, scripted.jobRecord);
+    const id = module.alerts.idOf(9, `${OTHER_ID}:retry`);
+    assert.equal(notes.shown.get(id)?.["title"], "⚠ Drama 2399 — 1 episode to retry");
+    assert.equal(notes.shown.get(id)?.["message"], "E03 was not asked for: TikTok's list made it look locked (no play address).");
+    assert.deepEqual(module.alerts.retryOf(id), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [3], guessed: [3] });
+  } finally {
+    page.restore();
+  }
+});
+
+test("3.0.1 (§11), the page: every job's outcome stays on screen — a second paste keeps the first drama's line and its rows in Did not download, with its Retry; a drama's retry replaces only the numbers it took; each line styled by its outcome, the newest MAX_REPORT_LINES kept", async () => {
+  const page = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { element, module } = page;
+    fakeNotifications();
+    page.hold();
+    // drama A: E02 failed, E05 missing from TikTok's list
+    const first = await batchOfOther(page, 7, { episodes: 5, statuses: { [`${OTHER_ID}:2`]: "failed" }, absent: { [OTHER_ID]: [5] } });
+    module.renderFailed(first.runs.map((one) => module.runRecord(one)));
+    // drama B, complete
+    const second = await batchOfOther(page, 8, {}, undefined, THIRD_ID);
+    module.renderFailed(second.runs.map((one) => module.runRecord(one)));
+    const lines = element("report-lines");
+    assert.deepEqual(
+      lines.children.map((line) => [line.getAttribute("data-series-id"), line.className]),
+      [
+        [OTHER_ID, "incomplete"],
+        [THIRD_ID, "complete"],
+      ],
+    );
+    const failed = element("failed-table").querySelector("tbody");
+    const blockRows = () => failed.children.map((row) => [row.getAttribute("data-series-id"), row.getAttribute("data-number"), row.children[3]?.textContent]);
+    assert.deepEqual(blockRows(), [
+      [OTHER_ID, "2", "failed 2"],
+      [OTHER_ID, "5", NOT_LISTED_MESSAGE],
+    ]);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    // a third job starts (a paste): the lines and the block stay, the Retry with them
+    assert.equal(paste(page, SERIES_ID), true);
+    await page.turn();
+    assert.equal(element("app-status").dataset["state"], "running");
+    assert.equal(lines.children.length, 2);
+    assert.equal(element("failed-block").hidden, false);
+    assert.deepEqual(blockRows().length, 2);
+    assert.equal(element("retry-button").disabled, false);
+    // drama A's retry of E02 saved it, E05 is still not in the list: E02 leaves, E05 stays with its new message
+    module.renderFailed([
+      {
+        series_id: OTHER_ID,
+        name: "Drama 2399",
+        rows: [
+          { number: 2, status: "done", message: "saved" },
+          { number: 5, status: "failed-unavailable", message: NOT_LISTED_AGAIN_MESSAGE },
+        ],
+      },
+    ]);
+    assert.deepEqual(blockRows(), [[OTHER_ID, "5", NOT_LISTED_AGAIN_MESSAGE]]);
+    assert.equal(element("failed-heading").textContent, "Did not download (1)");
+  } finally {
+    page.restore();
+  }
+  // a batch of 503 dramas: the newest 500 lines stay, the oldest go first
+  const many = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { element, module } = many;
+    assert.equal(module.MAX_REPORT_LINES, 500);
+    many.hold();
+    const refs = Array.from({ length: 503 }, (_, index) => refOf(`77000000000000${String(index).padStart(5, "0")}`));
+    const job = { ...BATCH_JOB, id: 11, refs };
+    const { engine } = scriptedEngine(many, job, { episodes: 1 });
+    await runBatch(engine, refs);
+    const lines = element("report-lines").children;
+    assert.equal(lines.length, 500);
+    assert.equal(lines[0]?.getAttribute("data-series-id"), refs[3]?.seriesId);
+    assert.equal(lines.at(-1)?.getAttribute("data-series-id"), refs[502]?.seriesId);
+    assert.ok(lines.every((line) => line.className === "complete"));
+  } finally {
+    many.restore();
+  }
+});
+
+test("3.0.1 (§9), the downloader of a Retry of free episodes DramaFetch guessed were locked (`askGuessed`): it asks for such an episode — one request, saved whole — while a lock of TikTok's (a price, a lock flag) stays skipped with no request; without `askGuessed` both are skipped, as ever", async () => {
+  const media = () => new Response(video(), { headers: { "content-type": "video/mp4", "content-length": String(128 * 1024) } });
+  const routes = { "https://v16-webapp-prime.tiktok.com/": media, "https://p16-sign-sg.tiktokcdn.com/": () => new Response(COVER, { headers: { "content-type": "image/jpeg" } }) };
+  const urls = ["https://v16-webapp-prime.tiktok.com/v/3.mp4?expire=99999999999"];
+  // E03: a short header guessed it locked — its play URL is there; E04: TikTok's own lock flag
+  const guessed = makeEpisode({ ...episode(3), access: "locked", lockHints: ["plays 2 s of 3 s"], guessedLock: true, raw: { id: "item3", video: { playAddr: urls } } });
+  const flagged = makeEpisode({ ...episode(4), access: "locked", paid: true, lockHints: ["isLocked=True"], raw: { id: "item4", video: { playAddr: urls } } });
+  /** @type {string[]} */
+  const log = [];
+  const asking = downloader({ fetch: fakeFetch(routes, log), askGuessed: true, thumbnail: "none" });
+  assert.equal(asking.asks(guessed), true);
+  assert.equal(asking.asks(flagged), false);
+  assert.equal(asking.needsNetwork(guessed, CONTEXT), true);
+  assert.equal(asking.needsNetwork(flagged, CONTEXT), false);
+  const result = await asking.download(guessed, CONTEXT);
+  assert.equal(result.status, "done");
+  assert.equal(log.length, 1); // one request, the usual one
+  const refused = await asking.download(flagged, CONTEXT);
+  assert.deepEqual([refused.status, refused.message], ["skipped-locked", "looks locked: isLocked=True"]);
+  assert.equal(log.length, 1); // none for it
+  // without askGuessed (a paste, the automatic retry, any other job): skipped, no request
+  /** @type {string[]} */
+  const quiet = [];
+  const plain = downloader({ fetch: fakeFetch(routes, quiet), thumbnail: "none" });
+  assert.equal(plain.asks(guessed), false);
+  assert.equal(plain.needsNetwork(guessed, CONTEXT), false);
+  assert.deepEqual([(await plain.download(guessed, CONTEXT)).status, quiet.length], ["skipped-locked", 0]);
+});
+
+
+test("3.0.1 (§9), a guessed lock with no play address asked for anyway: one fresh episode list decides — still guessed and still no URL: `failed-unavailable`, no media request; now locked by TikTok (a lock flag): refused, its URLs never requested; now with a URL: downloaded", async () => {
+  /** @param {Record<string, unknown>} fresh the fresh list's item for E03 @param {string[]} log */
+  const subject = (fresh, log) => {
+    const asking = downloader({
+      fetch: fakeFetch({ "https://v16-webapp-prime.tiktok.com/": () => new Response(video(), { headers: { "content-type": "video/mp4", "content-length": String(128 * 1024) } }) }, log),
+      askGuessed: true,
+      thumbnail: "none",
+    });
+    let listings = 0;
+    asking.config.rediscover = async () => {
+      listings += 1;
+      const item = { id: "item3", ...fresh };
+      return { seriesId: SERIES_ID, name: "Test Series", episodes: [makeEpisode({ ...episode(3), itemId: "item3", raw: item })], totalHint: null, warnings: [] };
+    };
+    return { asking, listings: () => listings };
+  };
+  const guessed = makeEpisode({ ...episode(3), itemId: "item3", access: "locked", lockHints: ["no play address"], guessedLock: true, raw: { id: "item3", video: {} } });
+  const url = "https://v16-webapp-prime.tiktok.com/v/3.mp4?expire=99999999999";
+  /** @type {string[]} */
+  const still = [];
+  const one = subject({ video: {} }, still);
+  const result = await one.asking.download(guessed, CONTEXT);
+  assert.equal(result.status, "failed-unavailable");
+  assert.match(result.message, /no play url, even in a fresh episode list/);
+  assert.deepEqual([one.listings(), still.length], [1, 0]);
+  /** @type {string[]} */
+  const flaggedLog = [];
+  const two = subject({ dramaInfo: { isLocked: true }, video: { playAddr: [url] } }, flaggedLog);
+  const flagged = await two.asking.download({ ...guessed }, CONTEXT);
+  assert.equal(flagged.status, "failed-unavailable");
+  assert.match(flagged.message, /locked in a fresh episode list: isLocked=True/);
+  assert.deepEqual([two.listings(), flaggedLog.length], [1, 0]);
+  /** @type {string[]} */
+  const servedLog = [];
+  const three = subject({ video: { playAddr: [url] } }, servedLog);
+  const served = await three.asking.download({ ...guessed }, CONTEXT);
+  assert.equal(served.status, "done");
+  assert.deepEqual([three.listings(), servedLog.length], [1, 1]);
+});
+
+test("3.0.1 (the lead's D12, the review's M3): the batch table counts the free episodes DramaFetch did not ask for — TikTok's list made them look locked — in a column of their own, `Not asked` (`Sin pedir`), between Locked and Failed; a locked one TikTok's list gives no reason to doubt stays under Locked", async () => {
+  // the header, in the page's order, and its words in both languages
+  const html = readFileSync(new URL("../src/app/app.html", import.meta.url), "utf8");
+  const head = /<table id="batch-table"[\s\S]*?<\/thead>/.exec(html)?.[0] ?? "";
+  assert.deepEqual(
+    [...head.matchAll(/data-i18n="([A-Za-z]+)"/g)].map((match) => match[1]),
+    ["colSeries", "colStatus", "colListed", "colDone", "colOnDisk", "colLocked", "colNotAsked", "colFailed"],
+  );
+  for (const [language, words] of [
+    ["en", "Not asked"],
+    ["es", "Sin pedir"],
+  ]) {
+    const catalog = JSON.parse(readFileSync(new URL(`../_locales/${language}/messages.json`, import.meta.url), "utf8"));
+    assert.equal(catalog["colNotAsked"]?.message, words);
+  }
+  const page = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { element, module } = page;
+    fakeNotifications();
+    page.hold();
+    const { runs } = await batchOfOther(page, 7, { episodes: 4, statuses: { [`${OTHER_ID}:2`]: "failed" }, guessed: { [OTHER_ID]: [3] }, locked: { [OTHER_ID]: [4] } });
+    module.renderBatchTable(runs);
+    const table = element("batch-table");
+    assert.equal(table.hidden, false);
+    const rows = table.querySelector("tbody").children;
+    assert.deepEqual(
+      rows.map((row) => row.children.map((cell) => cell.textContent)),
+      [["Drama 2399", "incomplete", "4", "1", "0", "1", "1", "1"]], // listed, downloaded, on disk, locked, not asked, failed
+    );
+  } finally {
+    page.restore();
+  }
+});
+
+test("3.0.1 (the lead's D9, the review's V3): a report saved only because a drama's list came short — no row under Did not download — is shown all the same: the block shows its `Report saved: …` line and its Save the report, without a heading, a Retry or a table, until the next job takes the report away; (D14) a block a Retry emptied keeps no stale count", async () => {
+  const page = await fakePage();
+  try {
+    const { element, module, downloads } = page;
+    // the list ended early and TikTok gave no count: every episode it listed downloaded, no row
+    const results = [1, 2, 3].map((number) => ({
+      episode: episode(number),
+      status: /** @type {const} */ ("done"),
+      path: `/home/me/Downloads/DramaFetch/E${number}.mp4`,
+      message: `saved E${number}.mp4 (0.1 MiB)`,
+    }));
+    /** @type {import("../src/lib/catalog.js").Series} */
+    const short = { ...series(results.map((result) => result.episode)), earlyEnd: NO_LIST_WARNING };
+    const report = seriesReport(short, results);
+    assert.deepEqual([report.complete, report.endedEarly], [false, true]);
+    /** @type {import("../src/app/engine.js").SeriesRun} */
+    const run = { ref: refOf(SERIES_ID), series: short, results, report, error: null, stop: false, exitCode: 0, errorKind: null, contacted: true };
+    module.renderFailed([seriesRecord(SERIES_ID, "Test Series", [[1, "done"], [2, "done"], [3, "done"]])]);
+    assert.equal(element("failed-block").hidden, true); // nothing yet: no row, no report
+    await module.reportJobEnd({ kind: "batch", label: "Series 7699393770256782354" }, OUTCOME, [run], TRACES.of);
+    assert.equal(downloads.length, 1); // saved: the setting is on
+    assert.equal(element("failed-block").hidden, false);
+    assert.equal(element("failed-report").hidden, false);
+    assert.match(String(element("failed-report").textContent), /^Report saved: Test Series - did not download \d{4}-\d{2}-\d{2} \d{4}\.json$/);
+    assert.deepEqual([element("report-button").hidden, element("report-button").disabled], [false, false]);
+    // no row: no heading, no Retry, no table
+    assert.deepEqual(
+      ["failed-heading", "retry-button", "failed-table"].map((id) => [id, element(id).hidden, element(id).textContent]),
+      [
+        ["failed-heading", true, ""],
+        ["retry-button", true, ""],
+        ["failed-table", true, ""],
+      ],
+    );
+    // Save the report saves it once more
+    element("report-button").fire("click");
+    for (let turns = 0; turns < 20 && downloads.length < 2; turns += 1) await page.turn();
+    assert.equal(downloads.length, 2);
+    // the next job's start takes the last job's report away, and the block with it
+    page.hold();
+    assert.equal(paste(page, OTHER_ID), true);
+    await page.turn();
+    assert.equal(element("app-status").dataset["state"], "running");
+    assert.equal(element("failed-block").hidden, true);
+  } finally {
+    page.restore();
+  }
+  // D14: a Retry that saved every episode of the block empties it — no count left in its hidden heading
+  const retried = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { element, module } = retried;
+    module.renderFailed([seriesRecord(OTHER_ID, "Two", [[1, "done"], [2, "failed"], [3, "failed"]])]);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    assert.equal(element("retry-button").textContent, "Retry the episodes that did not download (2)");
+    assert.equal(element("failed-block").hidden, false);
+    module.renderFailed([seriesRecord(OTHER_ID, "Two", [[2, "done"], [3, "done"]])]);
+    assert.equal(element("failed-block").hidden, true);
+    assert.deepEqual([element("failed-heading").textContent, element("retry-button").textContent], ["", ""]);
+  } finally {
+    retried.restore();
+  }
+});
+
+test("3.0.1 (the lead's D8, the review's V1 = M2): the automatic retry of a drama's plain failure carries the drama's free episode DramaFetch only guessed was locked — its “retrying” alert names it, with its hint —; when that retry never runs or Stop ends it, the drama's ⚠ alert names both and its Retry queues two jobs: the failure's, and one that asks for the free episode anyway", async () => {
+  const GUESSED_E03 = "E03 was not asked for: TikTok's list made it look locked (no play address).";
+  /** The drama: E03 a guessed lock, E05 cut short — run as a batch whose automatic retry it queues. */
+  const shape = { episodes: 5, statuses: { [`${OTHER_ID}:5`]: "failed" }, guessed: { [OTHER_ID]: [3] } };
+  /**
+   * The ⚠ alert under the id of “retrying” and the two jobs its Retry queues.
+   * @param {Awaited<ReturnType<typeof fakePage>>} page
+   * @param {ReturnType<typeof fakeNotifications>} notes
+   * @param {string} alertId
+   * @param {string} context
+   * @param {boolean} [throughPage] its Retry also pressed as Chrome hands it over (not while a cooldown is in force or a job runs)
+   */
+  const bothNamed = async (page, notes, alertId, context, throughPage = true) => {
+    const shown = notes.shown.get(alertId);
+    assert.deepEqual(
+      [shown?.["title"], shown?.["message"], shown?.["contextMessage"], shown?.["buttons"]],
+      ["⚠ Drama 2399 — 2 episodes to retry", `E05 did not download. ${GUESSED_E03}`, context, [{ title: "Retry" }]],
+    );
+    const target = page.module.alerts.retryOf(alertId);
+    assert.deepEqual(target, { seriesId: OTHER_ID, name: "Drama 2399", numbers: [3, 5], guessed: [3] });
+    assert.deepEqual(
+      page.module.retryJobs([/** @type {import("../src/app/app.js").RetryTarget} */ (target)]).map((job) => [job.numbers, job.askGuessed === true]),
+      [
+        [[5], false],
+        [[3], true],
+      ],
+    );
+    if (!throughPage) return;
+    page.hold();
+    assert.deepEqual(page.message({ type: "dramafetch:retry", notificationId: alertId }, WORKER), [{ ok: true, queued: true, tabId: 1 }]);
+    await page.turn();
+    assert.deepEqual(
+      jobsOf(page).map((queued) => [queued.label, queued.numbers, queued.askGuessed === true, queued.autoRetry]),
+      [
+        ["Retry 1 of Drama 2399", [5], false, undefined],
+        ["Retry 1 of Drama 2399", [3], true, undefined],
+      ],
+    );
+  };
+
+  // queued: it carries E03 (and its hint), never asks for it; “retrying” names it apart
+  const queued = await fakePage();
+  try {
+    const { module } = queued;
+    const notes = fakeNotifications();
+    queued.hold();
+    await batchOfOther(queued, 7, shape);
+    const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    assert.deepEqual(jobsOf(queued), [
+      {
+        kind: "selection",
+        label: "Automatic retry: 1 of Drama 2399",
+        refs: [refOf(OTHER_ID)],
+        series: null,
+        numbers: [5],
+        includeLocked: false,
+        recheck: false,
+        autoRetry: { alertId, name: "Drama 2399", guessed: [3], hints: ["no play address"] },
+      },
+    ]);
+    const shown = notes.shown.get(alertId);
+    assert.deepEqual(
+      [shown?.["title"], shown?.["message"], shown?.["buttons"]],
+      ["↻ Drama 2399 — retrying 1 episode", `E05 did not download — DramaFetch tries it once more on its own. ${GUESSED_E03}`, undefined],
+    );
+  } finally {
+    queued.restore();
+  }
+
+  // Stop takes it out of the queue: at the running job's end, `Not retried automatically: stopped by you`
+  const dropped = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = dropped;
+    const notes = fakeNotifications();
+    const journal = () => dropped.module.journal();
+    const open = gateJobs();
+    assert.equal(paste(dropped, SERIES_ID), true); // job 1, started: waits at the gate
+    await dropped.turn();
+    await batchOfOther(dropped, 7, shape); // its automatic retry waits behind job 1
+    const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    element("stop-button").fire("click");
+    open();
+    for (let turn = 0; turn < 1000 && (journal().length < 2 || element("app-status").dataset["state"] !== "idle"); turn += 1) await dropped.turn();
+    await bothNamed(dropped, notes, alertId, "Not retried automatically: stopped by you");
+  } finally {
+    dropped.restore();
+  }
+
+  // a cooldown refuses it at its gate: `Not retried automatically: <the cooldown>`
+  const refused = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = refused;
+    const notes = fakeNotifications();
+    const journal = () => refused.module.journal();
+    const open = gateJobs();
+    await batchOfOther(refused, 7, shape); // its retry starts: waits at the gate
+    const now = Date.now() / 1000;
+    refused.local.set("cooldown", { until: now + 1800, reason: MEDIA_RATE_LIMIT_MESSAGE, source: "browser", recorded_at: now });
+    open();
+    for (let turn = 0; turn < 1000 && (journal().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await refused.turn();
+    const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    const context = String(notes.shown.get(alertId)?.["contextMessage"]);
+    assert.ok(context.startsWith("Not retried automatically: TikTok refused a request at "), context);
+    await bothNamed(refused, notes, alertId, context, false); // the cooldown in force: its Retry waits for its end
+  } finally {
+    refused.restore();
+  }
+
+  // Stop ends it while it runs (nothing saved yet): the stop's reason, both named
+  const ended = await fakePage();
+  try {
+    const { element, module } = ended;
+    const notes = fakeNotifications();
+    ended.hold();
+    const first = await batchOfOther(ended, 7, shape);
+    const [auto] = module.queuedJobs(); // started, held
+    assert.ok(auto?.autoRetry !== undefined);
+    const scripted = scriptedEngine(ended, auto, { ...shape, statuses: {} });
+    scripted.states.set(OTHER_ID, first.states.get(OTHER_ID));
+    const listing = scripted.engine.discover;
+    // its fresh list asked for, Stop pressed meanwhile: the engine meets it before E05
+    scripted.engine.discover = async (ref) => {
+      element("stop-button").fire("click");
+      return listing(ref);
+    };
+    await assert.rejects(runSelectionJob(scripted.engine, refOf(OTHER_ID), auto.numbers, { lastContactAt: null }), StopRequested);
+    assert.equal(scripted.jobRecord.saved, undefined); // nothing on disk
+    module.alertNotRetried(auto, "stopped by you", scripted.jobRecord.saved ?? []);
+    await bothNamed(ended, notes, auto.autoRetry.alertId, "stopped by you", false); // runJob's end not run here
+    // one that saved E05 before Stop: E03 alone is left, still named — “retrying” never just goes
+    module.alertNotRetried(auto, "stopped by you", [5]);
+    const alone = notes.shown.get(auto.autoRetry.alertId);
+    assert.deepEqual([alone?.["title"], alone?.["message"], alone?.["contextMessage"]], ["⚠ Drama 2399 — 1 episode to retry", GUESSED_E03, "stopped by you"]);
+    assert.deepEqual(module.alerts.retryOf(auto.autoRetry.alertId), { seriesId: OTHER_ID, name: "Drama 2399", numbers: [3], guessed: [3] });
+  } finally {
+    ended.restore();
+  }
+});
+
+test("3.0.1 (the lead's D11, the review's M1): Stop keeps the Did not download block true — a stopped retry's saved episodes leave it and the ones it never reached keep their rows; a stopped batch's finished dramas get their rows, and the drama Stop interrupted loses only the rows of what it saved (no new row: a run Stop cuts short keeps none)", async () => {
+  const blockRows = (/** @type {Awaited<ReturnType<typeof fakePage>>} */ page) =>
+    page.element("failed-table").querySelector("tbody").children.map((row) => [row.getAttribute("data-series-id"), row.getAttribute("data-number")]);
+  // a retry of E02 and E03 that Stop ends after it saved E02
+  const retry = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { element, module } = retry;
+    fakeNotifications();
+    retry.hold();
+    module.renderFailed([seriesRecord(OTHER_ID, "Drama 2399", [[1, "done"], [2, "failed"], [3, "failed"]])]);
+    assert.equal(element("failed-heading").textContent, "Did not download (2)");
+    const job = { ...BATCH_JOB, id: 9, kind: /** @type {const} */ ("selection"), label: "Retry 2 of Drama 2399", refs: [refOf(OTHER_ID)], numbers: [2, 3] };
+    const scripted = scriptedEngine(retry, job, {
+      onDownload: (ep) => {
+        if (ep.number === 2) element("stop-button").fire("click"); // the engine meets it before E03
+      },
+    });
+    await assert.rejects(runSelectionJob(scripted.engine, refOf(OTHER_ID), job.numbers, { lastContactAt: null }), StopRequested);
+    const records = module.stoppedRecords(job, scripted.jobRecord);
+    assert.deepEqual(
+      records.map((record) => [record["series_id"], record["name"], /** @type {Record<string, unknown>[]} */ (record["rows"]).map((row) => [row["number"], row["status"]])]),
+      [[OTHER_ID, "Drama 2399", [[2, "done"]]]],
+    );
+    module.renderFailed(records);
+    assert.deepEqual(blockRows(retry), [[OTHER_ID, "3"]]);
+    assert.equal(element("failed-heading").textContent, "Did not download (1)");
+    assert.equal(element("retry-button").textContent, "Retry the episodes that did not download (1)");
+  } finally {
+    retry.restore();
+  }
+  // a batch of two dramas that Stop ends in the second — its E01 failed, its E02 saved, Stop met before E03
+  const batch = await fakePage({ storage: NO_AUTO_RETRY });
+  try {
+    const { element, module } = batch;
+    fakeNotifications();
+    batch.hold();
+    // an earlier job left the second drama's E02 under Did not download
+    module.renderFailed([seriesRecord(THIRD_ID, "Drama 2388", [[2, "failed"]])]);
+    const job = { ...BATCH_JOB, id: 11, refs: [refOf(OTHER_ID), refOf(THIRD_ID)] };
+    const scripted = scriptedEngine(batch, job, {
+      statuses: { [`${OTHER_ID}:2`]: "failed", [`${THIRD_ID}:1`]: "failed" },
+      onDownload: (ep) => {
+        if (ep.seriesId === THIRD_ID && ep.number === 2) element("stop-button").fire("click");
+      },
+    });
+    await assert.rejects(runBatch(scripted.engine, job.refs), StopRequested);
+    const records = module.stoppedRecords(job, scripted.jobRecord);
+    assert.deepEqual(
+      records.map((record) => [record["series_id"], /** @type {Record<string, unknown>[]} */ (record["rows"]).map((row) => [row["number"], row["status"]])]),
+      [
+        [OTHER_ID, [[1, "done"], [2, "failed"], [3, "done"]]], // finished: its whole record
+        [THIRD_ID, [[2, "done"]]], // interrupted: only what it saved — its failed E01 makes no row
+      ],
+    );
+    module.renderFailed(records);
+    assert.deepEqual(blockRows(batch), [[OTHER_ID, "2"]]); // the first drama's row in; the second's saved E02 out, no row for its E01
+    assert.equal(element("failed-heading").textContent, "Did not download (1)");
+  } finally {
+    batch.restore();
+  }
+});
+
+test("3.0.1 (the lead's D13, the review's T2): the automatic retry never takes a free episode DramaFetch only guessed was locked — a drama whose only episode not downloaded is one, the automatic retry on, queues nothing on its own; its alert is the ⚠ one with its Retry, never “retrying”", async () => {
+  const page = await fakePage(); // the automatic retry on: the default
+  try {
+    const { module } = page;
+    const notes = fakeNotifications();
+    page.hold();
+    const { runs } = await batchOfOther(page, 7, { episodes: 3, guessed: { [OTHER_ID]: [3] } });
+    assert.deepEqual(runs[0]?.results.map((result) => [result.episode.number, result.status, isGuessedLocked(result)]), [
+      [1, "done", false],
+      [2, "done", false],
+      [3, "skipped-locked", true],
+    ]);
+    assert.deepEqual(jobsOf(page), []); // nothing asks TikTok on its own for an episode DramaFetch judged locked
+    const id = module.alerts.idOf(7, `${OTHER_ID}:retry`);
+    assert.deepEqual(notes.created, [id]); // no “retrying” before it
+    const shown = notes.shown.get(id);
+    assert.deepEqual(
+      [shown?.["title"], shown?.["message"], shown?.["buttons"]],
+      ["⚠ Drama 2399 — 1 episode to retry", "E03 was not asked for: TikTok's list made it look locked (no play address).", [{ title: "Retry" }]],
+    );
+    // its Retry: the job that asks for it anyway, the user's
+    assert.deepEqual(
+      module.retryJobs([/** @type {import("../src/app/app.js").RetryTarget} */ (module.alerts.retryOf(id))]).map((job) => [job.numbers, job.askGuessed === true, job.autoRetry]),
+      [[[3], true, undefined]],
+    );
+  } finally {
+    page.restore();
+  }
+});
+
+test("3.0.1: an automatic retry whose fresh list never comes — no list, no row: a login wall, no episode list in time, a closed tab — ends in its drama's ⚠ alert with its Retry under the id of “retrying”: titled with the drama's name, naming the episode it retried and the free one it carried, the listing's reason its context; never a `not complete` with no button", async () => {
+  const GUESSED_E03 = "E03 was not asked for: TikTok's list made it look locked (no play address).";
+  const page = await fakePage({ testSettings: QUICK });
+  try {
+    const { element, module } = page;
+    const notes = fakeNotifications();
+    const alertId = `dramafetch-alert:${module.alerts.page}:7:${OTHER_ID}:retry`;
+    /** @type {unknown[]} every title Chrome was asked to show under that id, in order */
+    const titles = [];
+    const create = notes.api.create;
+    notes.api.create = (id, notification) => {
+      if (id === alertId) titles.push(notification["title"]);
+      return create(id, notification);
+    };
+    const open = gateJobs();
+    // E03 a guessed lock, E05 cut short: its automatic retry of E05 starts, carrying E03, and waits at the gate
+    await batchOfOther(page, 7, { episodes: 5, statuses: { [`${OTHER_ID}:5`]: "failed" }, guessed: { [OTHER_ID]: [3] } });
+    const [auto] = module.queuedJobs();
+    assert.deepEqual(auto?.autoRetry, { alertId, name: "Drama 2399", guessed: [3], hints: ["no play address"] });
+    // it runs: its fresh listing fails before any list comes (no TikTok tab can be opened here)
+    const tabs = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (globalThis.chrome.tabs));
+    tabs["create"] = async () => {
+      throw new Error("No tab with id: 404.");
+    };
+    open();
+    const journal = () => module.journal();
+    for (let turn = 0; turn < 1000 && (journal().length < 1 || element("app-status").dataset["state"] !== "idle"); turn += 1) await page.turn();
+    const [ended] = journal();
+    assert.equal(ended?.["label"], "Automatic retry: 1 of Drama 2399");
+    assert.equal(ended?.["stopped"], "the episode list could not be fetched");
+    // “retrying”, then the ⚠ alert in its place — nothing in between
+    assert.deepEqual(titles, ["↻ Drama 2399 — retrying 1 episode", "⚠ Drama 2399 — 2 episodes to retry"]);
+    const shown = notes.shown.get(alertId);
+    assert.deepEqual(
+      [shown?.["title"], shown?.["message"], shown?.["contextMessage"], shown?.["buttons"]],
+      ["⚠ Drama 2399 — 2 episodes to retry", `E05 did not download. ${GUESSED_E03}`, "the episode list could not be fetched", [{ title: "Retry" }]],
+    );
+    // its Retry: the failure's job, and the one that asks for the free episode anyway
+    const target = module.alerts.retryOf(alertId);
+    assert.deepEqual(target, { seriesId: OTHER_ID, name: "Drama 2399", numbers: [3, 5], guessed: [3] });
+    assert.deepEqual(
+      module.retryJobs([/** @type {import("../src/app/app.js").RetryTarget} */ (target)]).map((job) => [job.numbers, job.askGuessed === true, job.autoRetry]),
+      [
+        [[5], false, undefined],
+        [[3], true, undefined],
+      ],
+    );
+  } finally {
+    page.restore();
+  }
+});
+
+test("3.0.1 (D9), the report setting off: a report kept only because a drama's list came short — no row under Did not download — keeps its block on screen with Save the report (no heading, Retry or table, no `Report saved` line: nothing saved); Save the report saves it and says so", async () => {
+  const page = await fakePage({ storage: { settings: { report: false } } });
+  try {
+    const { element, module, downloads } = page;
+    // the list ended early and TikTok gave no count: every episode it listed downloaded, no row
+    const results = [1, 2, 3].map((number) => ({
+      episode: episode(number),
+      status: /** @type {const} */ ("done"),
+      path: `/home/me/Downloads/DramaFetch/E${number}.mp4`,
+      message: `saved E${number}.mp4 (0.1 MiB)`,
+    }));
+    /** @type {import("../src/lib/catalog.js").Series} */
+    const short = { ...series(results.map((result) => result.episode)), earlyEnd: NO_LIST_WARNING };
+    /** @type {import("../src/app/engine.js").SeriesRun} */
+    const run = { ref: refOf(SERIES_ID), series: short, results, report: seriesReport(short, results), error: null, stop: false, exitCode: 0, errorKind: null, contacted: true };
+    module.renderFailed([seriesRecord(SERIES_ID, "Test Series", [[1, "done"], [2, "done"], [3, "done"]])]);
+    assert.equal(element("failed-block").hidden, true); // no row, no report yet
+    await module.reportJobEnd({ kind: "batch", label: "Series 7699393770256782354" }, OUTCOME, [run], TRACES.of);
+    assert.deepEqual(downloads, []); // the setting is off: nothing saved
+    assert.equal(element("failed-block").hidden, false); // the block shows the report all the same
+    assert.deepEqual([element("report-button").hidden, element("report-button").disabled], [false, false]);
+    assert.deepEqual([element("failed-report").hidden, element("failed-report").textContent], [true, ""]);
+    assert.deepEqual(
+      ["failed-heading", "retry-button", "failed-table"].map((id) => [id, element(id).hidden, element(id).textContent]),
+      [
+        ["failed-heading", true, ""],
+        ["retry-button", true, ""],
+        ["failed-table", true, ""],
+      ],
+    );
+    element("report-button").fire("click");
+    for (let turns = 0; turns < 20 && downloads.length < 1; turns += 1) await page.turn();
+    assert.equal(downloads.length, 1);
+    assert.equal(element("failed-report").hidden, false);
+    assert.match(String(element("failed-report").textContent), /^Report saved: Test Series - did not download \d{4}-\d{2}-\d{2} \d{4}\.json$/);
+  } finally {
     page.restore();
   }
 });

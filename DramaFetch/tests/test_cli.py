@@ -796,13 +796,44 @@ def test_download_selection_and_absent_numbers(fake_discovery, fake_downloader, 
             "0",
         ]
     )
-    assert code == 0
+    # 3.0.1 (changed on purpose): a requested number TikTok's list lacks up to the series' last
+    # episode (E04, a hole) gets a row of its own — failed-unavailable, so exit 2 —; one past it (9:
+    # TikTok counts 5) is no episode and stays an ignored note
+    assert code == 2
     captured = capsys.readouterr()
-    assert "requested episodes the series does not list (ignored): 4, 9" in captured.err
+    assert "requested episodes TikTok's list does not hold: 4" in captured.err
+    assert "requested episodes the series does not list (ignored): 9" in captured.err
     assert "warning: episode 4 missing (gap)" in captured.err
     (downloader,) = fake_downloader.instances
-    assert [episode.number for episode, _ in downloader.calls] == [2, 3]
-    assert "Summary: 2 done" in captured.out
+    assert [episode.number for episode, _ in downloader.calls] == [2, 3]  # no request for E04
+    assert "E04  failed-unavailable     not in TikTok's list this time" in captured.out
+    assert "Summary: 2 done, 1 failed-unavailable" in captured.out
+    assert "episode 4 missing from TikTok's list" in captured.out
+
+
+def test_download_says_every_episode_tiktoks_list_lacks(
+    fake_discovery, fake_downloader, tmp_path, capsys
+):
+    """3.0.1: a list that ended early short of TikTok's count — the list's warnings on stderr, the
+    report line naming the hole and the episodes that never came (the extension's texts)."""
+    early = "in-page pagination fetch returned no episode list; scrolled the page instead"
+    episodes = [_episode(1), _episode(3)]
+    series = Series(series_id=SERIES_ID, name=NAME, episodes=episodes, total_hint=5)
+    series.items_received, series.early_end, series.missing_numbers = 2, early, [2, 4, 5]
+    series.warnings = [early, *catalog_warnings(episodes, 5, items_received=2)]
+    fake_discovery.series = series
+    code = cli.main(
+        ["download", SERIES_URL, "--out", str(tmp_path), "--delay-min", "0", "--delay-max", "0"]
+    )
+    assert code == 0  # the whole-series results: what the downloads gave
+    captured = capsys.readouterr()
+    assert f"warning: {early}" in captured.err
+    assert "warning: episode 2 missing (gap)" in captured.err
+    assert "warning: TikTok announces 5 episodes, 2 listed" in captured.err
+    assert (
+        "incomplete: 2 of 5 — episode 2 missing from TikTok's list; TikTok's list ended early: "
+        "episodes 4, 5 not received"
+    ) in captured.out
 
 
 def test_download_nothing_selected(fake_discovery, fake_downloader, tmp_path, capsys):
@@ -1325,9 +1356,10 @@ def test_download_runs_several_series_one_after_the_other(
     assert lines[10] == "complete: 3 of 3 (3 downloaded)"
     assert "Summary:" not in captured.out  # several series: the table instead
     assert lines[11:13] == ["", "Batch: 2 series — 1 incomplete, 1 complete"]
+    # 3.0.1 (the lead's D12): a `not asked` column between `locked` and `failed` (none here)
     assert _batch_rows(captured.out) == [
-        [f"{NAME} [{SERIES_ID}]", "incomplete", "4", "3", "0", "1", "0"],
-        [f"{NAME_2} [{SERIES_2}]", "complete", "3", "3", "0", "0", "0"],
+        [f"{NAME} [{SERIES_ID}]", "incomplete", "4", "3", "0", "1", "0", "0"],
+        [f"{NAME_2} [{SERIES_2}]", "complete", "3", "3", "0", "0", "0", "0"],
     ]
     err = captured.err.splitlines()
     assert err.count("  … resting 95 s before the next series") == 1
@@ -1358,6 +1390,7 @@ def test_download_runs_several_series_one_after_the_other(
         "0",
         "3",
         "0",
+        "0",  # not asked (3.0.1, the lead's D12)
         "0",
     ]
     assert "resting" not in captured.err  # no rest before a series that makes no request
@@ -1369,6 +1402,50 @@ def test_download_runs_several_series_one_after_the_other(
     captured = capsys.readouterr()
     assert "complete: 3 of 3 (3 already on disk)" in captured.out
     assert captured.err.count("  … resting 95 s before the next series") == 1
+
+
+def test_the_batch_table_counts_a_free_episode_not_asked_for_in_its_own_column():
+    """3.0.1 (the lead's D12, the review's M3): a free episode DramaFetch only guessed was locked
+    (the owner's real shape, `item_list_series4_limited_free.json`: E03's sound is listed shorter
+    than its video) left the Locked column with 3.0.1 — it is not downloaded, not locked — and the
+    batch table counts it in a column of its own, `not asked`, so its counts explain the
+    `incomplete`; a paid locked episode stays under `locked`, as ever."""
+    limited_id = "7699393770256782366"
+    fixture = Path(__file__).parent / "fixtures" / "item_list_series4_limited_free.json"
+    page = parse_item_list_payload(json.loads(fixture.read_text(encoding="utf-8")), limited_id)
+    limited = Series(limited_id, "Limited Free Drama", page.episodes, total_hint=page.total_hint)
+    assert [(e.number, e.access, e.guessed_lock) for e in limited.episodes] == [
+        (1, "free", False),
+        (2, "free", False),
+        (3, "locked", True),
+    ]
+    paid = make_series()  # its E05 is paid and locked: TikTok's own lock flag
+    runs = []
+    for series in (limited, paid):
+        results = [
+            locked_result(episode)
+            if episode.locked
+            else DownloadResult(episode, DownloadStatus.DONE, Path("/x.mp4"), "saved")
+            for episode in series.episodes
+        ]
+        report = engine.series_report(series, results)
+        ref = engine.SeriesRef(series_id=series.series_id, source_url=series.series_id)
+        runs.append(engine.SeriesRun(ref, series, results, report, None, False, 0, contacted=True))
+    lines = cli.format_batch_summary(runs)
+    assert re.split(r"\s{2,}", lines[2].strip()) == [
+        "series",
+        "status",
+        "listed",
+        "done",
+        "on disk",
+        "locked",
+        "not asked",
+        "failed",
+    ]
+    assert _batch_rows("\n".join(lines)) == [
+        [f"Limited Free Drama [{limited_id}]", "incomplete", "3", "2", "0", "0", "1", "0"],
+        [f"{NAME} [{SERIES_ID}]", "incomplete", "4", "3", "0", "1", "0", "0"],
+    ]
 
 
 def test_a_stop_in_the_first_series_ends_the_batch_without_a_request(

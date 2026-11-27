@@ -684,6 +684,11 @@ export async function saveFile(bytes, mime, filename, conflictAction = "uniquify
  * @property {string} thumbnail `embed`, `both`, `file` or `none`
  * @property {string} nameFormat
  * @property {boolean} includeLocked
+ * @property {boolean} [askGuessed] ask TikTok anyway for the episodes DramaFetch's own rules only
+ *   GUESSED were locked (`Episode.guessedLock`: a short header and/or no play address, no price,
+ *   entitlement, TikTok lock or DRM clue) — 3.0.1, the `selection` job a **Retry** of such
+ *   episodes queues: what `includeLocked` does, for those episodes only; one the list now shows
+ *   with a price, a TikTok lock flag or DRM stays skipped as locked, no request
  * @property {boolean} [overwrite] download an episode again in full even when Chrome's history
  *   shows it saved at its target (`DownloadOptions.overwrite`; DramaFetch 3.0.0: **See episodes**'
  *   jobs and their retries): no existing-file skip, and its files are saved with `conflictAction`
@@ -800,15 +805,28 @@ export class Downloader {
   }
 
   /**
+   * Whether this run asks TikTok for the episode: one the session may play, or a locked one with
+   * `includeLocked` — or (3.0.1, `askGuessed`) one DramaFetch's own rules only guessed was locked
+   * (`Episode.guessedLock`). Every other locked episode is skipped without a request.
+   * @param {{access: string, guessedLock?: boolean}} episode
+   * @returns {boolean}
+   */
+  asks(episode) {
+    if (episode.access !== "locked" || this.config.includeLocked) return true;
+    return this.config.askGuessed === true && episode.guessedLock === true;
+  }
+
+  /**
    * Whether the episode needs the network (`engine._needs_network`): not locked (unless
-   * includeLocked) and not already saved — with `overwrite`, every episode the session may play
-   * ({@link existingResult} is null then).
+   * includeLocked, or — `askGuessed` — a lock DramaFetch only guessed: {@link asks}) and not
+   * already saved — with `overwrite`, every episode the session may play ({@link existingResult}
+   * is null then).
    * @param {Episode} episode
    * @param {EpisodeContext} context
    * @returns {boolean}
    */
   needsNetwork(episode, context) {
-    if (episode.access === "locked" && !this.config.includeLocked) return false;
+    if (!this.asks(episode)) return false;
     return this.existingResult(episode, context) === null;
   }
 
@@ -821,7 +839,7 @@ export class Downloader {
    */
   async download(episode, context) {
     this.traces.set(traceKey(episode), { attempts: [], refreshes: [] }); // a fresh trace per download
-    if (episode.access === "locked" && !this.config.includeLocked) return lockedResult(episode);
+    if (!this.asks(episode)) return lockedResult(episode);
     const existing = this.existingResult(episode, context);
     if (existing !== null) return existing;
     try {
@@ -1153,7 +1171,8 @@ export class Downloader {
    * long series is listed again only as often as its play URLs run out. The extension's own extra:
    * a re-discovery that FAILED is not tried again for that series in the run. A fresh entry that
    * reads as `locked` (a lapsed entitlement, a lock or paywall flag, a short header, DRM) is not adopted
-   * unless includeLocked: FAILED_UNAVAILABLE, none of its URLs requested.
+   * unless includeLocked — or, with `askGuessed` (3.0.1), a fresh entry DramaFetch's own rules still
+   * only guess is locked ({@link asks}) —: FAILED_UNAVAILABLE, none of its URLs requested.
    * @param {Episode} episode
    * @param {ReadonlySet<string>} stale the URLs requested for this episode so far
    * @returns {Promise<DownloadResult | null>}
@@ -1176,7 +1195,7 @@ export class Downloader {
         series = await this.config.rediscover({
           kind: "series",
           seriesId: episode.seriesId,
-          episodeHint: episode.number,
+          episodeHint: null, // like every listing since 3.0.1, the refresh opens episode 1 (spec §5, the lead's D7)
           sourceUrl: episode.seriesId,
         });
       } catch (error) {
@@ -1198,11 +1217,11 @@ export class Downloader {
       record.outcome = "not listed";
       return null;
     }
-    const { access, drm, hints } = accessOf(cached);
+    const { access, drm, hints, guessedLock } = accessOf(cached);
     record.access = access;
     record.hints = [...hints];
     record.listed_url_count = playUrlCandidates(cached, this.config.quality).length;
-    if (access === "locked" && !this.config.includeLocked) {
+    if (!this.asks({ access, guessedLock })) {
       const listed = hints.join("; ") || "locked";
       const message = drm
         ? `${DRM_MARK} (in a fresh episode list: ${listed}): DramaFetch does not decrypt it`

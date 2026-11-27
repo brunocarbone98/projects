@@ -3,8 +3,8 @@
  * The per-series state the extension keeps in `chrome.storage.local`: a port of `manifest.py`'s
  * `Manifest` semantics over a plain object in the very format of `dramafetch.json` — `{"version":
  * 1, "series_id", "series_name", "episodes": {"1": {number, item_id, status, path, message,
- * updated_at}}, "complete_at", "complete_episodes"}` — plus each entry's `download_id` (Chrome's
- * id of the saved file). Pure: the caller loads and saves the object; whether a recorded file
+ * updated_at}}, "complete_at", "complete_episodes", "complete_rule"}` — plus each entry's
+ * `download_id` (Chrome's id of the saved file). Pure: the caller loads and saves the object; whether a recorded file
  * still exists is an injected answer ({@link FileExists}, from `chrome.downloads.search`).
  *
  * The rules kept from the Python tool: a skip never downgrades a `done` entry whose file still
@@ -28,6 +28,15 @@ import {
 
 /** The `version` of the state format (`manifest.MANIFEST_VERSION`). */
 export const STATE_VERSION = 1;
+/**
+ * The completeness rule a complete mark is written under (`complete_rule`, `manifest.COMPLETE_RULE`;
+ * 3.0.1, the owner's report of 2026-11-27): 2 since 3.0.1, whose `report.seriesReport` counts a free
+ * episode DramaFetch only guessed was locked, the numbers missing from TikTok's list — its last ones
+ * included, held against TikTok's count — and a list that ended early. A mark without it (written by
+ * 3.0.0 or earlier) or under another rule never skips ({@link completeTrusted}): the series is listed
+ * again, one ordinary paced listing; the stored record stays readable.
+ */
+export const COMPLETE_RULE = 2;
 /** Results that mean "nothing was attempted": they never overwrite a finished download's entry. */
 const NON_ATTEMPT_STATUSES = new Set([SKIPPED_EXISTS, SKIPPED_LOCKED, DRY_RUN]);
 /** Entry statuses that mean "the episode's file is on disk". */
@@ -53,6 +62,8 @@ const DRM_VERDICTS = [DRM_MESSAGE, DRM_REMEMBERED_MESSAGE];
  * @property {Record<string, StateEntry>} episodes keyed by the episode number
  * @property {string | null} [complete_at] when a run last found the series complete
  * @property {number | null} [complete_episodes] how many episodes were on disk then
+ * @property {number | null} [complete_rule] the completeness rule it was found complete under
+ *   ({@link COMPLETE_RULE}); absent from a mark of 3.0.0 or earlier
  *
  * @callback FileExists Whether the file an entry recorded is still on disk.
  * @param {StateEntry} entry
@@ -80,6 +91,7 @@ export function newState(seriesId, seriesName = null) {
     episodes: {},
     complete_at: null,
     complete_episodes: null,
+    complete_rule: null,
   };
 }
 
@@ -116,6 +128,12 @@ export function readState(raw, seriesId) {
     completeAt = null;
     completeEpisodes = null;
   }
+  // 3.0.1: the rule the mark was written under; a mark of 3.0.0 or earlier has none (still
+  // readable — it simply never skips), and an odd value is forgotten like the rest
+  let completeRule = get(raw, "complete_rule");
+  if (completeAt === null || typeof completeRule !== "number" || !Number.isInteger(completeRule) || completeRule < 1) {
+    completeRule = null;
+  }
   return {
     version: STATE_VERSION,
     series_id: String(seriesId),
@@ -123,6 +141,7 @@ export function readState(raw, seriesId) {
     episodes: entries,
     complete_at: /** @type {string | null} */ (completeAt),
     complete_episodes: /** @type {number | null} */ (completeEpisodes),
+    complete_rule: /** @type {number | null} */ (completeRule),
   };
 }
 
@@ -333,6 +352,7 @@ export function record(state, result, context) {
     // A new attempt means the series changed: it has to be found complete again before a skip.
     state.complete_at = null;
     state.complete_episodes = null;
+    state.complete_rule = null;
   }
   state.episodes[String(number)] = {
     number,
@@ -348,7 +368,8 @@ export function record(state, result, context) {
 
 /**
  * Remember that a run found the series complete at `when` (seconds since the epoch) with
- * `episodes` on disk (`Manifest.mark_complete`); cleared by the next attempt.
+ * `episodes` on disk, under the completeness rule in force ({@link COMPLETE_RULE}) —
+ * `Manifest.mark_complete`; cleared by the next attempt.
  * @param {SeriesState} state
  * @param {number} when
  * @param {number} episodes
@@ -356,6 +377,7 @@ export function record(state, result, context) {
 export function markComplete(state, when, episodes) {
   state.complete_at = isoUtc(when);
   state.complete_episodes = Math.trunc(episodes);
+  state.complete_rule = COMPLETE_RULE;
 }
 
 /**
@@ -364,10 +386,25 @@ export function markComplete(state, when, episodes) {
  * @returns {boolean}
  */
 export function clearComplete(state) {
-  if ((state.complete_at ?? null) === null && (state.complete_episodes ?? null) === null) return false;
+  if ((state.complete_at ?? null) === null && (state.complete_episodes ?? null) === null && (state.complete_rule ?? null) === null) {
+    return false;
+  }
   state.complete_at = null;
   state.complete_episodes = null;
+  state.complete_rule = null;
   return true;
+}
+
+/**
+ * Whether the complete mark may make a run skip the series (`Manifest.complete_trusted`, 3.0.1): it
+ * was written under the completeness rule in force (`complete_rule` === {@link COMPLETE_RULE}). A
+ * mark of 3.0.0 or earlier carries none — it may hide the list's last episodes or a free episode
+ * DramaFetch guessed was locked — so it never skips: the series is listed again.
+ * @param {SeriesState} state
+ * @returns {boolean}
+ */
+export function completeTrusted(state) {
+  return (state.complete_at ?? null) !== null && state.complete_rule === COMPLETE_RULE;
 }
 
 /**

@@ -48,9 +48,14 @@ Chrome for recorded on its way (`extension_alerts.RECORD_ALERTS_JS`):
   `Not retried automatically: stopped by you`;
 - (i) two pastes, the second while the first downloads, each drama with one transfer cut short
   once: the first drama's automatic retry waits behind the second job, the second's behind it.
-  The second job's **Did not download (1)** says `1 of them will be retried automatically, once.`
-  — its own automatic retry, never the first job's waiting too —, and the block goes the moment
-  the first drama's automatic retry starts: it stays only for its own job's automatic retry.
+  The second job's block says `1 of them will be retried automatically, once.` — its own
+  automatic retry, never the first job's waiting too —, and that line goes the moment the first
+  drama's automatic retry starts: it stays only for its own job's automatic retry. Since 3.0.1 the
+  block itself keeps every job's rows (**Did not download (2)** at the second job's end) and stays
+  while the automatic retries run, each one's end replacing only its own drama's retried number;
+- (j) a paste of two dramas, the first's E02 cut short, **Stop** met in the second drama's pause
+  after E01: the first drama's row stays in **Did not download** with its **Retry** (3.0.1: Stop
+  keeps the block true), the automatic retry it queued taken out of the queue.
 
 No cookie value is set, printed or asserted on; nothing reaches TikTok.
 """
@@ -705,6 +710,17 @@ def test_g_stop_during_an_automatic_retry_names_only_what_it_did_not_save(tmp_pa
         assert sorted(Path(path).name for path in _videos(ext)) == [
             f"{SECOND_SERIES_NAME} - Episode {number:02d}.mp4" for number in (1, 2)
         ]
+        # 3.0.1 (the lead's D11): the Stop keeps the Did not download block true — the retry's
+        # rows before the Stop are its record (E02 saved), so E02 leaves the block and E03, never
+        # reached, keeps its row; the block's Retry takes E03 alone
+        assert page.locator("#failed-heading").text_content() == "Did not download (1)"
+        assert page.locator("#failed-table tbody tr").evaluate_all(
+            "(rows) => rows.map((row) => row.dataset.number)"
+        ) == ["3"]
+        assert page.locator("#retry-button").text_content() == (
+            "Retry the episodes that did not download (1)"
+        )
+        assert [(number, status) for number, status, _ in _rows(automatic)[0][1]] == [(2, "done")]
 
         retrying, alert = recorded_alerts(ext, 2)
         assert len(page.evaluate(ALERTS_JS)) == 2
@@ -734,6 +750,7 @@ def test_g_stop_during_an_automatic_retry_names_only_what_it_did_not_save(tmp_pa
         assert sorted(Path(path).name for path in _videos(ext)) == [
             f"{SECOND_SERIES_NAME} - Episode {number:02d}.mp4" for number in (1, 2, 3)
         ]
+        assert page.locator("#failed-block").is_hidden()  # every episode on disk: none left
 
 
 def test_h_stop_at_a_job_s_very_end_leaves_no_automatic_retry(tmp_path: Path) -> None:
@@ -796,16 +813,19 @@ def test_h_stop_at_a_job_s_very_end_leaves_no_automatic_retry(tmp_path: Path) ->
         )
 
 
-def test_i_a_job_s_block_counts_and_stays_for_its_own_automatic_retry_only(
+def test_i_a_job_s_line_counts_and_stays_for_its_own_automatic_retry_only(
     tmp_path: Path,
 ) -> None:
     """(i) Two pastes — the second while the first downloads —, each drama with one transfer cut
     short once: the first drama's automatic retry waits behind the second job, the second's behind
-    it. At the second job's end its **Did not download (1)** says `1 of them will be retried
-    automatically, once.` — its own automatic retry, never the first job's waiting too —, and the
-    block goes the moment the first drama's automatic retry starts, staying gone while it runs: it
-    stays only for its own job's automatic retry. What the card says is recorded as it changes
-    (`RECORD_BLOCK_JS`)."""
+    it. At the second job's end its block's line says `1 of them will be retried automatically,
+    once.` — its own automatic retry, never the first job's waiting too —, and the line goes the
+    moment the first drama's automatic retry starts, staying gone while it runs: it stays only for
+    its own job's automatic retry. Since 3.0.1 (the owner's report of 2026-11-27; renamed from
+    `test_i_a_job_s_block_counts_…`) the block itself keeps every job's rows: at the second job's
+    end it is **Did not download (2)** — the first drama's E02 is still there —, and it stays while
+    the automatic retries run, each one's end replacing only its own drama's retried number. What
+    the card says is recorded as it changes (`RECORD_BLOCK_JS`)."""
     cut = frozenset({(SECOND_SERIES_ID, 2), (SERIES_ID, 3)})
     with (
         FakeTikTok(truncate_once=cut) as server,
@@ -843,17 +863,89 @@ def test_i_a_job_s_block_counts_and_stays_for_its_own_automatic_retry_only(
         starts = [index for index, (current, *_) in enumerate(log) if current == first_retry]
         assert starts, log
         started = starts[0]
-        # the second job's end, right before: its block, its line counting its own retry alone
+        # the second job's end, right before: its block, its line counting its own retry alone.
+        # 3.0.1 changes this ON PURPOSE (was `Did not download (1)`): the block keeps the first
+        # drama's E02 too — every job's rows stay —, so its heading counts both rows; the line is
+        # 1.8.0's, unchanged
         assert log[started - 1][1:] == [
             False,
-            "Did not download (1)",
+            "Did not download (2)",
             "1 of them will be retried automatically, once.",
             False,
         ], log
-        # the first drama's automatic retry starts: that block goes, and stays gone while it runs —
-        # until the second drama's own automatic retry starts
+        # the first drama's automatic retry starts: that line goes, and stays gone while it runs —
+        # until the second drama's own automatic retry starts. 3.0.1 changes the block ON PURPOSE
+        # (it went with the line before): it stays shown — both rows while the retry runs, the
+        # second drama's E03 alone once the retry's end replaced the first drama's E02, saved
         later = [index for index, (current, *_) in enumerate(log) if current == second_retry]
         until = next((index for index in later if index > started), len(log))
-        assert all(hidden for _, hidden, *_ in log[started:until]), log[started:until]
+        assert all(line_hidden for *_, line_hidden in log[started:until]), log[started:until]
+        assert all(not hidden for _, hidden, *_ in log[started:until]), log[started:until]
+        assert log[started][2] == "Did not download (2)", log[started:until]
+        assert log[until - 1][2] == "Did not download (1)", log[started:until]
+        # and once the second drama's automatic retry saved E03, nothing is left: the block goes
+        assert log[-1][1] is True, log
         # never a line counting another job's automatic retry
         assert all(line != "2 of them will be retried automatically, once." for *_, line, _ in log)
+
+
+def test_j_stop_in_a_batch_s_second_drama_keeps_the_first_drama_s_rows(tmp_path: Path) -> None:
+    """(j) 3.0.1 (the owner's report of 2026-11-27): **Stop** met by the engine in a batch's second
+    drama — in its pause after E01 — keeps the **Did not download** block true: the first drama,
+    finished with E02 cut short (its automatic retry queued, then taken out of the queue by the
+    Stop), keeps its row there with the block's **Retry**; the second drama's E01, saved before
+    the Stop, has none, and the drama Stop cut short gets no new row. Nothing more is asked of
+    TikTok."""
+    cut = frozenset({(SERIES_ID, 2)})
+    pauses = {"delayMinS": 3, "delayMaxS": 3}  # a pause between two episodes, to press Stop in
+    with (
+        FakeTikTok(truncate_once=cut) as server,
+        ExtensionHarness(tmp_path, server.base_url, test_settings=pauses) as ext,
+    ):
+        page = ext.page
+        jobs = ext.finished_jobs()
+        ext.paste(f"{MAIN_LINK}\n{SECOND_LINK}")
+        ext.wait_for(
+            lambda: (
+                _cdn_asked(server, SECOND_SERIES_ID).get(1, 0) > 0
+                and page.locator("#progress-pause").is_visible()
+            ),
+            120,
+            "the second drama's pause after E01 never came",
+        )
+        page.click("#stop-button")  # in that pause: the engine meets it
+        _until_jobs(ext, jobs + 1, 60, "the Stop did not end the batch")
+        journal = ext.journal()
+        (batch,) = [entry for entry in journal if entry["kind"] == "batch"]
+        assert batch["stopped"] == "stopped by you"
+        # the first drama's automatic retry was queued, then taken out of the queue by the Stop
+        (cancelled,) = [
+            entry for entry in journal if entry["label"] == f"Automatic retry: 1 of {SERIES_NAME}"
+        ]
+        assert cancelled["error"] == (
+            f"not started: batch stopped in {batch['label']} (stopped by you)"
+        )
+        assert cancelled["series"] == []
+        # the first drama's record — every row —, the second's rows of what it saved
+        first, second = _rows(batch)
+        assert first[0] == SERIES_ID
+        assert [(number, status) for number, status, _ in first[1]] == [
+            (1, "done"),
+            (2, "failed"),
+            (3, "done"),
+            (4, "done"),
+            (5, "skipped-locked"),
+        ]
+        assert second[0] == SECOND_SERIES_ID
+        assert [(number, status) for number, status, _ in second[1]] == [(1, "done")]
+        assert page.locator("#failed-block").is_visible()
+        assert page.locator("#failed-heading").text_content() == "Did not download (1)"
+        assert page.locator("#failed-table tbody tr").evaluate_all(
+            "(rows) => rows.map((row) => [row.dataset.seriesId, row.dataset.number])"
+        ) == [[SERIES_ID, "2"]]
+        assert page.locator("#retry-button").text_content() == (
+            "Retry the episodes that did not download (1)"
+        )
+        assert page.locator("#failed-auto").is_hidden()  # its automatic retry left the queue
+        assert _cdn_asked(server, SERIES_ID) == {1: 1, 2: 1, 3: 1, 4: 1}  # E02 never asked again
+        assert _cdn_asked(server, SECOND_SERIES_ID) == {1: 1}

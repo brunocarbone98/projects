@@ -58,7 +58,18 @@ import {
   pagePause,
   sleepSeconds,
 } from "../lib/pacing.js";
-import { batchStatus, notStartedMessage, reportLine, reportToDict } from "../lib/report.js";
+import {
+  batchStatus,
+  isGuessedLocked,
+  isNotListed,
+  listIncomplete,
+  listMissing,
+  listOtherItems,
+  listUncertain,
+  notStartedMessage,
+  reportLine,
+  reportToDict,
+} from "../lib/report.js";
 import { doneEntries, drmProtected, readState } from "../lib/state.js";
 import { parseSeriesList, seriesPageUrl } from "../lib/urls.js";
 import {
@@ -66,6 +77,8 @@ import {
   autoRetryAlert,
   dramaAlert,
   episodeLabel,
+  guessedEpisodes,
+  guessedHints,
   namedEpisodes,
   notRetriedAlert,
   stoppedAlert,
@@ -166,13 +179,26 @@ const ENGINE_LOCK = "dramafetch-engine";
  *   the job's status line and its record say, whatever became of the library
  *   ({@link fetchFavorites}: a listing that stops short of TikTok's end leaves a library that held
  *   dramas as it was)
- * @property {{alertId: string, name: string | null}} [autoRetry] a `selection` job DramaFetch
- *   queued on its own (DramaFetch 1.8.0, {@link queueAutoRetry}): the id of its drama's alert —
- *   “retrying”, then what came of it, under that one id — and the drama's name as its records had
- *   it. Never retried automatically again: its failures wait for the user's **Retry**.
+ * @property {{alertId: string, name: string | null, guessed?: number[], hints?: string[]}} [autoRetry]
+ *   a `selection` job DramaFetch queued on its own (DramaFetch 1.8.0, {@link queueAutoRetry}): the id
+ *   of its drama's alert — “retrying”, then what came of it, under that one id — and the drama's name
+ *   as its records had it; since 3.0.1 (the lead's D8) the drama's free episodes DramaFetch only
+ *   guessed were locked (`guessed`, never asked for by it) and, for one, the lock hints its list gave
+ *   (`hints`, engine texts): what its drama's alert names besides should it never run or be stopped
+ *   before that alert ({@link alertNotRetried}) — absent when none. Never retried automatically
+ *   again: its failures wait for the user's **Retry**.
  * @property {"available" | "selected"} [pick] which button of **See episodes** queued a `selection`
  *   job — **Download all available** or **Download selected** ({@link startSelection}) —, as its row
  *   in the Waiting card says (DramaFetch 2.0.0, {@link queueRows}); a **Retry** has none
+ * @property {number[]} [missing] a retry's episodes that were not in TikTok's list when it was
+ *   queued ({@link RetryTarget}.missing, 3.0.1): what its drama's alert names apart should it never
+ *   run or be stopped before its alert ({@link alertNotRetried}); absent otherwise
+ * @property {boolean} [askGuessed] a `selection` job a **Retry** queued for the free episodes
+ *   DramaFetch only guessed were locked ({@link RetryTarget}.guessed, 3.0.1, the owner's report of
+ *   2026-11-27): it asks TikTok for them anyway — one request each, the usual pace, TikTok decides
+ *   (`DownloaderConfig.askGuessed`: what **Also ask for locked episodes** does, but only for the
+ *   episodes its fresh list still marks guessed; one that list now shows with a price, a TikTok
+ *   lock flag or DRM stays skipped as locked). Never queued by the automatic retry; absent otherwise
  *
  * @typedef {object} FavoritesShown The favorites list the library shows: read from one TikTok tab,
  *   or the library kept from an earlier session.
@@ -216,6 +242,13 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @property {number[]} [saved] an automatic retry's episodes on disk as it went — saved, or found
  *   saved already —: when **Stop** or an error ends it before its drama's alert, that alert names
  *   only the others ({@link alertNotRetried})
+ * @property {Record<string, unknown>[]} [records] the per-series records ({@link runRecord}) of the
+ *   dramas a batch finished, pushed as each one is done (`onSeriesDone`; 3.0.1, the lead's D11): what
+ *   its **Did not download** block takes when **Stop** ends the batch before its end
+ *   ({@link stoppedRecords})
+ * @property {{seriesId: string, name: string | null, rows: Record<string, unknown>[]}} [current] the
+ *   drama the job is in — its list came (`onStart`) — and its rows as they come (`onResult`;
+ *   3.0.1, D11): a stopped selection job's record, and what a stopped batch's drama saved
  *
  * @typedef {object} JobOutcome How a job ended, as its report records it ({@link reportJobEnd}).
  * @property {string} startedAt
@@ -232,9 +265,12 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @property {string} seriesId
  * @property {string | null} name the series' stored name, when the job learnt it
  * @property {number} number
- * @property {string} status a `failed-*` status
+ * @property {string} status a `failed-*` status, or `skipped-locked` for a free episode DramaFetch
+ *   only guessed was locked (`guessed`)
  * @property {string} message
  * @property {boolean} [overwrite] its job downloaded again in full (its record says `overwrite`)
+ * @property {boolean} [guessed] a free episode DramaFetch did not ask for because its own rules
+ *   guessed it was locked (3.0.1, `report.isGuessedLocked`: its record row says `guessed`)
  *
  * @typedef {object} RetryTarget What a retry queues for one series ({@link retryTargets}).
  * @property {string} seriesId
@@ -242,6 +278,13 @@ const ENGINE_LOCK = "dramafetch-engine";
  * @property {number[]} numbers the episodes that did not download, ascending, de-duplicated
  * @property {boolean} [overwrite] the failures of a job that downloads again in full (a
  *   {@link Job}.overwrite job): its retry does too (DramaFetch 3.0.0) — absent otherwise
+ * @property {number[]} [missing] those of `numbers` that were not in TikTok's list (3.0.1: their
+ *   rows say `not in TikTok's list…`, `report.isNotListed`), ascending — the alerts name them apart;
+ *   absent when none
+ * @property {number[]} [guessed] those of `numbers` that are free episodes DramaFetch only guessed
+ *   were locked (3.0.1, {@link FailedRow}.guessed), ascending: their retry is a `selection` job of
+ *   their own that asks for them anyway ({@link Job}.askGuessed, {@link retryJobs}); the alerts
+ *   name them apart; absent when none
  */
 
 const app = {
@@ -262,8 +305,16 @@ const app = {
   listedDrm: { seriesId: "", numbers: new Set() },
   /** @type {FavoritesShown | null} the favorites the panel shows (**Your favorite dramas**) */
   favorites: null,
-  /** @type {RetryTarget[] | null} the last finished job's episodes that did not download (the progress card's retry button) */
+  /** @type {RetryTarget[] | null} the episodes of the Did not download block — every job's since 3.0.1 — that its Retry queues */
   failed: null,
+  /**
+   * The **Did not download** block's rows, every job's for the tab's life (3.0.1, the owner's report
+   * of 2026-11-27): by drama, in the order the dramas first came, each drama's by episode number. A
+   * job's end replaces only the rows of the episodes it took ({@link renderFailed}); reloading the
+   * tab clears them.
+   * @type {Map<string, {name: string | null, rows: Map<number, FailedRow>}>}
+   */
+  failedRows: new Map(),
   /**
    * The automatic retries the last finished job queued that still waited at its end (their
    * `autoRetry.alertId`): when one of them is the next job, that job's **Did not download** block
@@ -596,6 +647,7 @@ export function buildEngine(job, jobRecord) {
     thumbnail: app.settings.thumbnail,
     nameFormat: app.settings.nameFormat,
     includeLocked: job.includeLocked,
+    askGuessed: job.askGuessed === true, // 3.0.1: a Retry of free episodes DramaFetch guessed were locked
     overwrite: job.overwrite === true, // See episodes' jobs and their retries: no existing-file skip, files replaced
     hostPatterns: chrome.runtime.getManifest().host_permissions ?? [],
     view,
@@ -649,6 +701,7 @@ export function buildEngine(job, jobRecord) {
     },
     onStart: (start) => {
       jobRecord.begun = current; // its list came (or it was skipped as complete): begun
+      jobRecord.current = { seriesId: start.ref.seriesId, name: start.series?.name ?? null, rows: [] }; // its rows, as they come (D11)
       rememberName(start.ref.seriesId, start.series?.name ?? start.name); // read without asking TikTok for it
       renderQueue(); // the drama leaves the Waiting card
       clearPause();
@@ -659,11 +712,14 @@ export function buildEngine(job, jobRecord) {
         el("tr", { className: "series-row", attrs: { "data-series-id": start.ref.seriesId } }, [
           el("td", { attrs: { colspan: "3" }, text: start.skippedComplete ? t("seriesSkippedComplete", start.name) : start.name }),
         ]),
+        ...warningRows(start.series, start.ref.seriesId),
       );
     },
     onResult: (result) => {
       clearPause();
       renderResult(result);
+      // 3.0.1 (D11): kept for a Stop that ends the job before this drama's record is made
+      if (jobRecord.current?.seriesId === result.episode.seriesId) jobRecord.current.rows.push(rowRecord(result));
       // an automatic retry's episode on disk now: never named as not downloaded should Stop end it
       if (job.autoRetry !== undefined && (result.status === DONE || result.status === SKIPPED_EXISTS)) (jobRecord.saved ??= []).push(result.episode.number);
       // the library's card of the series being downloaded: its count after every episode — one a
@@ -681,6 +737,9 @@ export function buildEngine(job, jobRecord) {
     },
     onSeriesDone: (index, _total, run) => {
       jobRecord.begun = index; // done, whatever came of it: never counted as not started
+      // 3.0.1 (D11): its record now, so that a Stop later in the batch keeps its rows in the block
+      (jobRecord.records ??= []).push(runRecord(run, job.overwrite === true));
+      jobRecord.current = undefined;
       renderQueue(); // refused before its list (a cooldown, a refused write), or not started: it leaves the Waiting card too
       clearPause();
       renderReportLine(run);
@@ -791,10 +850,13 @@ function renderPause() {
 
 /**
  * @param {string} status
+ * @param {boolean} [guessed] a free episode DramaFetch only guessed was locked (3.0.1): not
+ *   downloaded, so the failure colour though its status is `skipped-locked`
  * @returns {string} the CSS class of a status badge
  */
-function statusClass(status) {
+function statusClass(status, guessed = false) {
   if (status === "done") return "done";
+  if (guessed) return "failed";
   if (status.startsWith("skipped")) return "skipped";
   return "failed";
 }
@@ -803,30 +865,55 @@ function statusClass(status) {
  * A status badge: a short label in the page's language, the status code itself in its title.
  * @param {string} status
  * @param {string} message the result's message (a row the run stopped before reads “stopped”)
+ * @param {boolean} [guessed] the row of a free episode DramaFetch only guessed was locked (3.0.1,
+ *   `report.isGuessedLocked`): “not downloaded (free)”, failure-coloured
  * @returns {HTMLElement}
  */
-function statusBadge(status, message) {
+function statusBadge(status, message, guessed = false) {
   return el("span", {
-    className: `badge ${statusClass(status)}`,
-    text: statusLabel(status, { lang: shown.lang, message }),
+    className: `badge ${statusClass(status, guessed)}`,
+    text: statusLabel(status, { lang: shown.lang, message, guessed }),
     title: status,
-    attrs: { "data-status": status },
+    attrs: guessed ? { "data-status": status, "data-guessed": "1" } : { "data-status": status },
   });
+}
+
+/**
+ * The list's warnings under a drama's header row in the result table (3.0.1, the owner's report of
+ * 2026-11-27): what **See episodes** shows under its title — a hole, TikTok's count against what
+ * came, the pagination's fallbacks, the items DramaFetch could not read, a duplicate number —
+ * shown for every job that lists the drama (a paste, a card's **Download**, a **Retry**…), as the
+ * tab shows engine texts (`lib/display`). Muted information only when everything TikTok counts is
+ * placed; warn-coloured when the list itself is incomplete (`report.listIncomplete`: a number
+ * missing — whose episodes also get their rows —, an early end short of TikTok's count, or since
+ * 3.0.1 TikTok counting more than the drama certainly has: the list may be incomplete). Each row carries the drama's id: it stays while the drama
+ * has a row in the table, and the trimming may take it like an episode's ({@link trimResultRows}).
+ * @param {Series | null} series the drama's fresh list; none for a drama skipped as complete
+ * @param {string} seriesId
+ * @returns {HTMLElement[]}
+ */
+function warningRows(series, seriesId) {
+  if (series === null || series.warnings.length === 0) return [];
+  const className = listIncomplete(series) ? "series-warning warn" : "series-warning";
+  return series.warnings.map((warning) =>
+    el("tr", { className, attrs: { "data-series-id": seriesId } }, [el("td", { attrs: { colspan: "3" }, text: shownText(warning) })]),
+  );
 }
 
 /** @param {DownloadResult} result */
 function renderResult(result) {
   const body = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
   const key = `${result.episode.seriesId}:${result.episode.number}`;
-  const row = el(
-    "tr",
-    { attrs: { "data-key": key, "data-series-id": result.episode.seriesId, "data-number": String(result.episode.number), "data-status": result.status } },
-    [
-      el("td", { text: episodeLabel(result.episode.number) }),
-      el("td", {}, [statusBadge(result.status, result.message)]),
-      el("td", { className: "message", text: shownText(result.message) }),
-    ],
-  );
+  // 3.0.1: a free episode DramaFetch only guessed was locked is not downloaded: marked so
+  const guessed = isGuessedLocked(result);
+  /** @type {Record<string, string>} */
+  const attrs = { "data-key": key, "data-series-id": result.episode.seriesId, "data-number": String(result.episode.number), "data-status": result.status };
+  if (guessed) attrs["data-guessed"] = "1";
+  const row = el("tr", { attrs }, [
+    el("td", { text: episodeLabel(result.episode.number) }),
+    el("td", {}, [statusBadge(result.status, result.message, guessed)]),
+    el("td", { className: "message", text: shownText(result.message) }),
+  ]);
   const existing = body.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
   if (existing !== null) existing.replaceWith(row);
   else body.append(row);
@@ -873,11 +960,12 @@ function withoutBareHeaders(rows) {
 /**
  * Keep the result table light (called when a series of a batch is done): over `limit` rows, the
  * OLDEST rows of episodes that completed — done, skipped, dry run — leave, then the header rows
- * of the series left with no row. A failure row never leaves (the job's end shows those apart,
- * {@link renderFailed}), nor does its series' header; every finished series keeps its report
- * line, and `#result-trimmed` says so once rows have left. A display matter
- * only: the results, the job's records and the report are untouched. (Exported for the unit tests,
- * which cannot run a job.)
+ * of the series left with no row. A row of an episode that did not download never leaves — a
+ * failure row, and (3.0.1) the row of a free episode DramaFetch only guessed was locked
+ * (`data-guessed`) —: the job's end shows those apart ({@link renderFailed}), nor does its series'
+ * header; every finished series keeps its report line, and `#result-trimmed` says so once rows
+ * have left. A display matter only: the results, the job's records and the report are untouched.
+ * (Exported for the unit tests, which cannot run a job.)
  * @param {number} [limit] {@link MAX_RESULT_ROWS}; lower only in the test copy of the extension
  */
 export function trimResultRows(limit = (app.testMode ? app.testSettings.maxResultRows : undefined) ?? MAX_RESULT_ROWS) {
@@ -889,7 +977,7 @@ export function trimResultRows(limit = (app.testMode ? app.testSettings.maxResul
   const leaving = new Set();
   for (const row of rows) {
     if (excess <= 0) break;
-    if (isSeriesRow(row) || isFailure(row.getAttribute("data-status"))) continue;
+    if (isSeriesRow(row) || isFailure(row.getAttribute("data-status")) || row.getAttribute("data-guessed") === "1") continue;
     leaving.add(row);
     excess -= 1;
   }
@@ -899,15 +987,39 @@ export function trimResultRows(limit = (app.testMode ? app.testSettings.maxResul
   $("result-trimmed").hidden = false;
 }
 
-/** @param {SeriesRun} run */
+/**
+ * At most this many report lines stay under the progress card (3.0.1): the newest; the oldest go
+ * first. Every job's lines stay for the tab's life (a paste, then another, keeps both).
+ */
+export const MAX_REPORT_LINES = 500;
+
+/**
+ * A drama's report line under the progress card, after the lines of every earlier job (3.0.1, the
+ * owner's report of 2026-11-27: pasting drama B no longer erases drama A's line), styled by its
+ * outcome — `complete` (the drama complete, or found complete and skipped), else `incomplete` (not
+ * complete, something not downloaded, an error) —; past {@link MAX_REPORT_LINES} the oldest go.
+ * Reloading the tab clears them, as ever.
+ * @param {SeriesRun} run
+ */
 function renderReportLine(run) {
   const name = run.report.name || run.series?.name || run.ref.seriesId;
   const text = `${name}: ${shownText(run.error !== null ? run.error : reportLine(run.report))}`;
-  $("report-lines").append(el("li", { text, attrs: { "data-series-id": run.ref.seriesId } }));
+  const outcome = run.error === null && run.report.complete ? "complete" : "incomplete";
+  const lines = $("report-lines");
+  lines.append(el("li", { text, className: outcome, attrs: { "data-series-id": run.ref.seriesId } }));
+  while (lines.children.length > MAX_REPORT_LINES) lines.children[0]?.remove();
 }
 
-/** @param {readonly SeriesRun[]} runs */
-function renderBatchTable(runs) {
+/**
+ * The job's batch table under the progress card: one row per drama — its name, its status and its
+ * counts: listed, downloaded, on disk, locked, not asked, failed. **Not asked** (3.0.1, the lead's
+ * D12): the free episodes DramaFetch did not ask for because TikTok's list made them look locked
+ * (`report.guessedLocked`, `not downloaded (free)`), no longer counted under **Locked**, which keeps
+ * the paid, TikTok-flagged and DRM ones — the Python tool's batch table has the same column.
+ * (Exported for the unit tests, which cannot run a job.)
+ * @param {readonly SeriesRun[]} runs
+ */
+export function renderBatchTable(runs) {
   const table = $("batch-table");
   const body = /** @type {HTMLTableSectionElement} */ (table.querySelector("tbody"));
   body.textContent = "";
@@ -922,6 +1034,7 @@ function renderBatchTable(runs) {
         el("td", { text: String(report.done) }),
         el("td", { text: String(report.onDisk) }),
         el("td", { text: String(report.locked) }),
+        el("td", { text: String(report.guessedLocked) }),
         el("td", { text: String(report.failed) }),
       ]),
     );
@@ -930,32 +1043,31 @@ function renderBatchTable(runs) {
 }
 
 /**
- * A job starts: the progress card shows it, the last job's rows and lines go. The last job's
- * **Did not download** block goes too — this job's comes at its end —, its report with it, except
- * while the job is an automatic retry that job queued (DramaFetch 1.8.0): the block, its line
- * saying what is retried automatically, its **Retry** and its **Save the report** (with its
- * `Report saved: …` line) stay until this job's end, which draws its own ({@link reportJobEnd}) —
- * but the line, which a **Stop** taking the other automatic retries it counted out of the queue
- * takes away at once ({@link dropAutoRetries}).
+ * A job starts: the progress card shows it, the last job's rows go (the result table shows the job
+ * that runs). Since 3.0.1 (the owner's report of 2026-11-27: a paste erased the previous drama's
+ * line, its missing rows and its **Retry**) the report lines under the table and the **Did not
+ * download** block stay — every job's, for the tab's life ({@link renderReportLine},
+ * {@link renderFailed}: a job's end replaces only the rows of the episodes it took). What goes is
+ * the last job's own: its report (**Save the report** saves the last job's) and its `Report saved:
+ * …` line, and the block's line saying what is retried automatically — except while the job is an
+ * automatic retry that job queued (DramaFetch 1.8.0): its line, its **Save the report** and its
+ * `Report saved: …` line stay until this job's end ({@link reportJobEnd}) — but the line, which a
+ * **Stop** taking the other automatic retries it counted out of the queue takes away at once
+ * ({@link dropAutoRetries}).
  * @param {Job} job
  */
 function startProgress(job) {
   $("progress-card").hidden = false;
   /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody")).textContent = "";
   $("result-trimmed").hidden = true;
-  $("report-lines").textContent = "";
   $("batch-table").hidden = true;
   const retrying = job.autoRetry !== undefined && app.failedAuto.has(job.autoRetry.alertId);
   app.failedAuto = new Set();
   if (!retrying) {
-    $("failed-block").hidden = true; // the last job's episodes that did not download; this job's come at its end
-    /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody")).textContent = "";
-    $("failed-heading").textContent = "";
-    $("failed-auto").hidden = true;
+    $("failed-auto").hidden = true; // what the last job's block said it retries automatically
     $("failed-auto").textContent = "";
-    app.failed = null;
-    hideReportLine(); // the last job's report line: this job's report comes at its end
     app.lastReport = null;
+    hideReportLine(); // the last job's report line: this job's report comes at its end
   }
   updateButtons(); // `#report-button` disabled while no report exists
   $("progress-activity").textContent = "";
@@ -976,12 +1088,25 @@ function isFailure(status) {
 }
 
 /**
+ * Whether a stored row (`entry.series[].rows[]`, {@link runRecord}) is an episode that did not
+ * download: a failure ({@link isFailure}), or (3.0.1) a free episode DramaFetch only guessed was
+ * locked (`guessed: true` beside `skipped-locked`).
+ * @param {unknown} status
+ * @param {unknown} guessed
+ * @returns {status is string}
+ */
+function notDownloaded(status, guessed) {
+  return isFailure(status) || (status === SKIPPED_LOCKED && guessed === true);
+}
+
+/**
  * The rows of a finished job's per-series records (`entry.series`, {@link runRecord}) whose
  * episode did not download: in the order of the series, each series' ascending, one per episode
- * (the last row written for it). A record without rows — a failed resolve, a series the batch
- * never started, a listing — contributes nothing. A record that says `overwrite: true` (its job
- * downloaded again in full, DramaFetch 3.0.0) marks its rows so. Stored data: anything malformed
- * is skipped.
+ * (the last row written for it) — a failure, and (3.0.1) a free episode DramaFetch only guessed was
+ * locked ({@link notDownloaded}, `guessed` on the row). A record without rows — a failed resolve, a
+ * series the batch never started, a listing — contributes nothing. A record that says `overwrite:
+ * true` (its job downloaded again in full, DramaFetch 3.0.0) marks its rows so. Stored data:
+ * anything malformed is skipped.
  * @param {readonly unknown[]} seriesRecords
  * @returns {FailedRow[]}
  */
@@ -1000,7 +1125,7 @@ function failedRows(seriesRecords) {
       const row = /** @type {Record<string, unknown>} */ (raw);
       const status = row["status"];
       const number = row["number"];
-      if (!isFailure(status) || typeof number !== "number" || !Number.isInteger(number)) continue;
+      if (!notDownloaded(status, row["guessed"]) || typeof number !== "number" || !Number.isInteger(number)) continue;
       let series = bySeries.get(seriesId);
       if (series === undefined) {
         series = { name: typeof record["name"] === "string" && record["name"] !== "" ? record["name"] : null, rows: new Map() };
@@ -1009,6 +1134,7 @@ function failedRows(seriesRecords) {
       /** @type {FailedRow} */
       const failed = { seriesId, name: series.name, number, status, message: typeof row["message"] === "string" ? row["message"] : "" };
       if (overwrite) failed.overwrite = true;
+      if (row["guessed"] === true && status === SKIPPED_LOCKED) failed.guessed = true;
       series.rows.set(number, failed);
     }
   }
@@ -1018,7 +1144,9 @@ function failedRows(seriesRecords) {
 /**
  * @param {readonly FailedRow[]} rows
  * @returns {RetryTarget[]} one per series, in the rows' order — with `overwrite` when a row of it
- *   came from a job that downloaded again in full: its retry does the same
+ *   came from a job that downloaded again in full: its retry does the same —, `missing`, the
+ *   numbers whose rows say they were not in TikTok's list (3.0.1, `report.isNotListed`), and
+ *   `guessed`, those of free episodes DramaFetch only guessed were locked (3.0.1)
  */
 function targetsOf(rows) {
   /** @type {Map<string, RetryTarget>} */
@@ -1031,8 +1159,27 @@ function targetsOf(rows) {
     }
     target.numbers.push(row.number);
     if (row.overwrite === true) target.overwrite = true;
+    if (isNotListed(row)) (target.missing ??= []).push(row.number);
+    if (row.guessed === true) (target.guessed ??= []).push(row.number);
   }
   return [...targets.values()];
+}
+
+/**
+ * `target` over `numbers` only: its `missing` and `guessed` kept to them (absent when none is left).
+ * @param {RetryTarget} target
+ * @param {number[]} numbers
+ * @returns {RetryTarget}
+ */
+function withNumbers(target, numbers) {
+  const { missing: allMissing, guessed: allGuessed, ...rest } = target;
+  /** @type {RetryTarget} */
+  const kept = { ...rest, numbers };
+  const missing = (allMissing ?? []).filter((number) => numbers.includes(number));
+  const guessed = (allGuessed ?? []).filter((number) => numbers.includes(number));
+  if (missing.length > 0) kept.missing = missing;
+  if (guessed.length > 0) kept.guessed = guessed;
+  return kept;
 }
 
 /**
@@ -1051,14 +1198,19 @@ export function retryTargets(seriesRecords) {
 }
 
 /**
- * The jobs a retry queues: one selection job per series, in the order of the series, over exactly
- * that series' episodes that did not download — the job **Download selected** queues in **See
- * episodes** over those numbers ({@link runSelectionJob}: the cooldown gate, the rest between
+ * The jobs a retry queues: one selection job per series and kind, in the order of the series, over
+ * exactly that series' episodes that did not download — the job **Download selected** queues in
+ * **See episodes** over those numbers ({@link runSelectionJob}: the cooldown gate, the rest between
  * jobs, a fresh resolve, then the downloads; an episode meanwhile on disk is skipped), but with
  * `includeLocked` false: a locked one is not asked for, nor one an earlier download found
  * encrypted, where **Download selected** asks for such a row ticked. A target with `overwrite`
  * (the failures of a job that downloaded again in full) queues a job with `overwrite` (DramaFetch
- * 3.0.0): its episodes are downloaded again in full even when an older copy is on disk.
+ * 3.0.0): its episodes are downloaded again in full even when an older copy is on disk. Since 3.0.1
+ * a target's free episodes DramaFetch only guessed were locked (`guessed`) get a `selection` job of
+ * their own, `askGuessed` ({@link Job}.askGuessed): it asks TikTok for them anyway — one request
+ * each, the usual pace, TikTok decides — while its fresh list still only guesses they are locked;
+ * the drama's other episodes (failures, those TikTok's list lacked) keep their own job, which asks
+ * for no locked one.
  * @param {readonly RetryTarget[]} targets
  * @returns {Omit<Job, "id">[]}
  */
@@ -1067,18 +1219,34 @@ export function retryJobs(targets) {
   const jobs = [];
   for (const target of targets) {
     const seriesId = target.seriesId;
-    /** @type {Omit<Job, "id">} */
-    const job = {
-      kind: "selection",
-      label: t("jobRetry", [target.numbers.length, target.name ?? seriesId]),
-      refs: [{ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId }],
-      series: null,
-      numbers: [...target.numbers],
-      includeLocked: false,
-      recheck: false,
+    const guessed = new Set((target.guessed ?? []).filter((number) => target.numbers.includes(number)));
+    const plain = target.numbers.filter((number) => !guessed.has(number));
+    /**
+     * @param {number[]} numbers
+     * @returns {Omit<Job, "id">}
+     */
+    const jobOf = (numbers) => {
+      /** @type {Omit<Job, "id">} */
+      const job = {
+        kind: "selection",
+        label: t("jobRetry", [numbers.length, target.name ?? seriesId]),
+        refs: [{ kind: "series", seriesId, episodeHint: null, sourceUrl: seriesId }],
+        series: null,
+        numbers,
+        includeLocked: false,
+        recheck: false,
+      };
+      if (target.overwrite === true) job.overwrite = true;
+      return job;
     };
-    if (target.overwrite === true) job.overwrite = true;
-    jobs.push(job);
+    if (plain.length > 0) {
+      const job = jobOf(plain);
+      // the episodes TikTok's list lacked (3.0.1): asked for the same way — a fresh list, then them
+      const missing = (target.missing ?? []).filter((number) => plain.includes(number));
+      if (missing.length > 0) job.missing = missing;
+      jobs.push(job);
+    }
+    if (guessed.size > 0) jobs.push({ ...jobOf([...guessed].sort((a, b) => a - b)), askGuessed: true });
   }
   return jobs;
 }
@@ -1126,7 +1294,7 @@ function queueRetries(targets) {
     const held = heldNumbers(target.seriesId);
     const numbers = target.numbers.filter((number) => !held.has(number));
     if (numbers.length === 0) continue;
-    for (const job of retryJobs([{ ...target, numbers }])) if (enqueue(job)) queued += 1;
+    for (const job of retryJobs([{ ...target, numbers }])) if (enqueue(job)) queued += 1; // `missing` kept to `numbers` there
   }
   return queued;
 }
@@ -1185,18 +1353,23 @@ function retryFromAlert(notificationId) {
  * pressed while the drama's last episode downloaded ends no run, but it is a stop all the same,
  * {@link app}.stopRequested until the job's end); the run left episodes
  * whose last row is exactly `failed` and not `stopped: …` — a cut transfer, a file that failed its
- * check, a network error —, never `failed-unavailable` (short-served, DRM, gone: no retry changes
- * it), a locked one or a stop's; the tab may queue a download now ({@link retryAllowed}); and no
+ * check, a network error — or (3.0.1) says it was not in TikTok's list (`failed-unavailable`, `not in
+ * TikTok's list…`, `report.isNotListed`: a fresh list may hold it), never another
+ * `failed-unavailable` (short-served, DRM, gone: no retry changes it), a locked one or a stop's;
+ * the tab may queue a download now ({@link retryAllowed}); and no
  * `selection` job holds those episodes already ({@link heldNumbers}). It is exactly what the alert's
  * **Retry** would queue the moment the alert appeared — {@link retryJobs} → {@link enqueue}, at the
  * END of the queue (after the rest of this job and every job waiting), `includeLocked` false — so
  * it takes the job gate, the cooldown, the rest between jobs, a fresh list and every pause like any
  * retry: nothing faster, no request a manual **Retry** would not make. Its label is `jobAutoRetry`;
- * `autoRetry` names its drama's alert. Returns what it queued and that alert's id, or null.
+ * `autoRetry` names its drama's alert and (3.0.1, the lead's D8) carries the drama's free episodes
+ * DramaFetch only guessed were locked — never asked for by it — with the hints of one, which that
+ * alert names ({@link alertDrama}, {@link alertNotRetried}). Returns what it queued, that alert's id
+ * and those episodes, or null.
  * @param {Job} job
  * @param {SeriesRun} run
  * @param {Pick<JobRecord, "autoRetried">} jobRecord
- * @returns {{target: RetryTarget, alertId: string} | null}
+ * @returns {{target: RetryTarget, alertId: string, guessed: number[], hints: string[]} | null}
  */
 function queueAutoRetry(job, run, jobRecord) {
   if (!app.settings.autoRetry || job.autoRetry !== undefined) return null;
@@ -1204,23 +1377,33 @@ function queueAutoRetry(job, run, jobRecord) {
   if (!run.contacted || run.stop || run.report.stopped) return null;
   if (app.stopRequested) return null; // Stop pressed after the engine's last look at it: a stop too
   if (!retryAllowed()) return null;
-  // the rows as the tab's Retry reads them (the last per episode), then only the plain failures;
-  // a job that downloaded again in full (See episodes) gets a retry that does too (3.0.0)
-  const rows = failedRows([runRecord(run, job.overwrite === true)]).filter((row) => row.status === FAILED && !row.message.startsWith(STOPPED_PREFIX));
+  // the rows as the tab's Retry reads them (the last per episode), then only the plain failures and
+  // (3.0.1) the episodes TikTok's list lacked; a job that downloaded again in full (See episodes)
+  // gets a retry that does too (3.0.0)
+  const rows = failedRows([runRecord(run, job.overwrite === true)]).filter(
+    (row) => (row.status === FAILED && !row.message.startsWith(STOPPED_PREFIX)) || isNotListed(row),
+  );
   const [failed] = targetsOf(rows);
   if (failed === undefined) return null;
   const held = heldNumbers(failed.seriesId, job.id);
-  const target = { ...failed, numbers: failed.numbers.filter((number) => !held.has(number)) };
+  const target = withNumbers(failed, failed.numbers.filter((number) => !held.has(number)));
   if (target.numbers.length === 0) return null;
   const [retry] = retryJobs([target]);
   if (retry === undefined) return null;
   // the ⚠ alert's: “retrying” takes its place
   const alertId = alerts.idOf(job.id, `${run.ref.seriesId}:retry`);
   const label = t("jobAutoRetry", [target.numbers.length, target.name ?? target.seriesId]);
-  if (!enqueue({ ...retry, label, autoRetry: { alertId, name: target.name } })) return null;
+  // 3.0.1 (the lead's D8): the drama's free episodes DramaFetch only guessed were locked, never asked
+  // for on its own — carried, so that its drama's alert names them whatever becomes of it
+  const guessed = (dramaTarget(run, job.overwrite === true)?.guessed ?? []).filter((number) => !target.numbers.includes(number));
+  const hints = guessed.length === 1 ? guessedHints(run, /** @type {number} */ (guessed[0])) : [];
+  /** @type {NonNullable<Job["autoRetry"]>} */
+  const autoRetry = { alertId, name: target.name };
+  if (guessed.length > 0) Object.assign(autoRetry, { guessed, hints });
+  if (!enqueue({ ...retry, label, autoRetry })) return null;
   if (jobRecord.autoRetried === undefined) jobRecord.autoRetried = [];
   jobRecord.autoRetried.push(alertId);
-  return { target, alertId };
+  return { target, alertId, guessed, hints };
 }
 
 /**
@@ -1237,7 +1420,7 @@ function queueAutoRetry(job, run, jobRecord) {
  */
 export function dramaDone(job, run, jobRecord) {
   if (job.kind === "selection" && app.running !== null && app.running.id === job.id) app.runningDone = true;
-  /** @type {{target: RetryTarget, alertId: string} | null} */
+  /** @type {{target: RetryTarget, alertId: string, guessed: number[], hints: string[]} | null} */
   let queued = null;
   try {
     queued = queueAutoRetry(job, run, jobRecord);
@@ -1248,26 +1431,53 @@ export function dramaDone(job, run, jobRecord) {
 }
 
 /**
+ * What a drama's alert names and its **Retry** takes (3.0.1): the tab's own {@link retryTargets} of
+ * the run's rows, plus every free episode its report counts as one DramaFetch only guessed was
+ * locked (`report.guessedLockedNumbers`: a selection's report reads the whole series, so one outside
+ * the selection too) — named apart and asked for anyway by the **Retry** ({@link retryJobs}); null
+ * when there is nothing to retry.
+ * @param {SeriesRun} run
+ * @param {boolean} overwrite the job downloaded again in full ({@link Job}.overwrite)
+ * @returns {RetryTarget | null}
+ */
+function dramaTarget(run, overwrite) {
+  const target = retryTargets([runRecord(run, overwrite)])[0] ?? null;
+  const extra = (run.report.guessedLockedNumbers ?? []).filter((number) => target === null || !target.numbers.includes(number));
+  if (extra.length === 0) return target;
+  /** @type {RetryTarget} */
+  const merged = target ?? { seriesId: run.ref.seriesId, name: run.report.name || run.series?.name || null, numbers: [] };
+  merged.numbers = [...merged.numbers, ...extra].sort((a, b) => a - b);
+  merged.guessed = [...(merged.guessed ?? []), ...extra].sort((a, b) => a - b);
+  if (overwrite) merged.overwrite = true;
+  return merged;
+}
+
+/**
  * A drama of a download job is done — its rows and records stored —: its notification, while the
  * **Alert me when a drama finishes** setting is on (`alerts.dramaAlert`: complete, episodes to
- * retry — the tab's own {@link retryTargets} for that drama behind its **Retry** —, or not
+ * retry — the tab's own {@link retryTargets} for that drama behind its **Retry**, and since 3.0.1
+ * every free episode DramaFetch only guessed was locked ({@link dramaTarget}) —, or not
  * complete; none for a drama skipped as complete, refused before any request or never started).
  * DramaFetch 1.8.0: when its automatic retry was queued just now (`queued`), “retrying” instead of
- * the ⚠ alert, with no button (`alerts.autoRetryAlert`); an automatic retry's own drama gets its
- * alert under the id of its “retrying” one, which Chrome replaces, `After an automatic retry.` its
- * context unless it stopped. Never throws (the engine calls it between two series), never waits.
+ * the ⚠ alert, with no button (`alerts.autoRetryAlert`) — naming apart (3.0.1, the lead's D8) the
+ * drama's free episodes DramaFetch only guessed were locked, which it does not retry —; an automatic
+ * retry's own drama gets its alert under the id of its “retrying” one, which Chrome replaces, `After
+ * an automatic retry.` its context unless it stopped. Never throws (the engine calls it between two
+ * series), never waits.
  * @param {Job} job
  * @param {SeriesRun} run
- * @param {{target: RetryTarget, alertId: string} | null} [queued]
+ * @param {{target: RetryTarget, alertId: string, guessed: number[], hints: string[]} | null} [queued]
  */
 function alertDrama(job, run, queued = null) {
   if (!app.settings.alerts) return;
+  if (autoRetryUnlisted(job, run)) return; // its ⚠ alert, with its Retry, comes at the job's end
   try {
     if (queued !== null) {
-      alerts.show(queued.alertId, autoRetryAlert(run, queued.target)); // its retry is queued: no button, none kept
+      // its retry is queued: no button, none kept
+      alerts.show(queued.alertId, autoRetryAlert(run, queued.target, guessedEpisodes(queued.guessed, queued.hints, shownText)));
       return;
     }
-    const target = retryTargets([runRecord(run, job.overwrite === true)])[0] ?? null; // its Retry: what the tab's takes
+    const target = dramaTarget(run, job.overwrite === true); // its Retry: what the tab's takes, the guessed locks too
     const auto = job.autoRetry;
     const texts = dramaAlert(run, target, shownText, { afterAutoRetry: auto !== undefined });
     if (texts === null) return;
@@ -1279,20 +1489,38 @@ function alertDrama(job, run, queued = null) {
 }
 
 /**
+ * Whether `run` is an automatic retry's that never got its fresh list — no list and no row: its
+ * listing failed (a login wall, no episode list in time, the tab closed, a 429 or a captcha on the
+ * list) —; its drama's alert is then the ⚠ one of the episodes it carried, with its **Retry**, at the
+ * job's end ({@link alertNotRetried}), never a `not complete` with no button (3.0.1).
+ * @param {Pick<Job, "autoRetry">} job
+ * @param {SeriesRun} run
+ * @returns {boolean}
+ */
+function autoRetryUnlisted(job, run) {
+  return job.autoRetry !== undefined && run.series === null && run.results.length === 0;
+}
+
+/**
  * An automatic retry that did not get to its drama's alert (DramaFetch 1.8.0), under the id of its
  * “retrying” one (Chrome replaces it), its drama's ⚠ alert WITH its **Retry**:
  * - one that never ran — **Stop** or a stop took it out of the queue, it was refused at its own
  *   gate, or **Stop** or an error ended it before any request (`saved` null) —: the job's own
  *   episodes, `Not retried automatically: <reason>` its context (`alerts.notRetriedAlert`);
  * - one that ran — asked TikTok for its list, maybe saved episodes — and that **Stop** or an error
- *   ended before its drama's alert: the episodes it did not get on disk (`saved` the others), the
- *   stop's reason its context, as for an automatic retry whose run stopped
- *   (`alerts.stoppedRetryAlert`); none left — “retrying” goes.
+ *   ended before its drama's alert, or whose fresh list never came (3.0.1: {@link autoRetryUnlisted}):
+ *   the episodes it did not get on disk (`saved` the others), the stop's reason its context, as for
+ *   an automatic retry whose run stopped (`alerts.stoppedRetryAlert`); none left — “retrying” goes.
  * What the alert's **Retry** queues is what it names — downloaded again in full when the
- * automatic retry was (`overwrite`, a **See episodes** job's: DramaFetch 3.0.0). Behind the
+ * automatic retry was (`overwrite`, a **See episodes** job's: DramaFetch 3.0.0) —, the episodes
+ * TikTok's list lacked named apart (`missing`, 3.0.1), and (3.0.1, the lead's D8) the drama's free
+ * episodes DramaFetch only guessed were locked, which the automatic retry carried
+ * (`autoRetry.guessed`, the hints of one with them): named apart, and its **Retry** queues their
+ * job that asks for them anyway beside the others' ({@link retryJobs}) — with every episode it
+ * retried on disk, the alert names those alone; with none left at all, “retrying” goes. Behind the
  * **Alert me when a drama finishes** setting; never throws, never waits. (Exported for the unit
  * tests, which cannot run an automatic retry through its job to a Stop.)
- * @param {Pick<Job, "refs" | "numbers" | "autoRetry" | "overwrite">} job
+ * @param {Pick<Job, "refs" | "numbers" | "autoRetry" | "overwrite" | "missing">} job
  * @param {string} reason why it did not run, or why it ended: the stop's reason, an engine text
  * @param {readonly number[] | null} [saved] null: it never ran; else its episodes on disk
  *   ({@link JobRecord}.saved)
@@ -1302,15 +1530,21 @@ export function alertNotRetried(job, reason, saved = null) {
   const ref = job.refs[0];
   if (auto === undefined || ref === undefined || job.numbers.length === 0 || !app.settings.alerts) return;
   try {
-    const numbers = saved === null ? [...job.numbers] : job.numbers.filter((number) => !saved.includes(number));
-    if (numbers.length === 0) {
+    const left = saved === null ? [...job.numbers] : job.numbers.filter((number) => !saved.includes(number));
+    // 3.0.1 (D8): the drama's free episodes not asked for — never the automatic retry's own
+    const guessed = (auto.guessed ?? []).filter((number) => !left.includes(number) && !(saved ?? []).includes(number));
+    if (left.length === 0 && guessed.length === 0) {
       alerts.clear(auto.alertId); // every episode it retried is on disk: nothing to say “retrying” of
       return;
     }
+    const numbers = [...left, ...guessed].sort((a, b) => a - b);
     /** @type {RetryTarget} */
-    const target = { seriesId: ref.seriesId, name: auto.name, numbers };
+    let target = { seriesId: ref.seriesId, name: auto.name, numbers };
     if (job.overwrite === true) target.overwrite = true; // its Retry downloads them again in full, as it would have
-    const texts = saved === null ? notRetriedAlert(target, reason, shownText) : stoppedRetryAlert(target, reason, shownText);
+    if (guessed.length > 0) target.guessed = guessed; // its Retry asks for them anyway, in a job of their own
+    if (job.missing !== undefined) target = withNumbers({ ...target, missing: job.missing }, numbers); // 3.0.1: named apart
+    const hints = auto.hints ?? [];
+    const texts = saved === null ? notRetriedAlert(target, reason, shownText, hints) : stoppedRetryAlert(target, reason, shownText, hints);
     alerts.show(auto.alertId, texts, target);
   } catch (error) {
     console.warn(error);
@@ -1357,48 +1591,111 @@ export function alertJobEnd(job, stop, runs, jobRecord, cancelled) {
 }
 
 /**
+ * The episodes of `seriesRecords` each record's run took — every number it has a row for: a whole
+ * drama's every listed episode and every number its list lacked, a selection's chosen numbers and
+ * the wanted ones its list lacked — by series id ({@link renderFailed}: the block's rows of those
+ * episodes are replaced, the others stay). Stored data: anything malformed is skipped.
+ * @param {readonly unknown[]} seriesRecords
+ * @returns {Map<string, {name: string | null, numbers: Set<number>}>}
+ */
+function takenBy(seriesRecords) {
+  /** @type {Map<string, {name: string | null, numbers: Set<number>}>} */
+  const taken = new Map();
+  for (const item of seriesRecords) {
+    if (item === null || typeof item !== "object") continue;
+    const record = /** @type {Record<string, unknown>} */ (item);
+    const seriesId = record["series_id"];
+    const rows = record["rows"];
+    if (typeof seriesId !== "string" || seriesId === "" || !Array.isArray(rows)) continue;
+    let entry = taken.get(seriesId);
+    if (entry === undefined) {
+      entry = { name: typeof record["name"] === "string" && record["name"] !== "" ? record["name"] : null, numbers: new Set() };
+      taken.set(seriesId, entry);
+    }
+    for (const raw of rows) {
+      const number = raw !== null && typeof raw === "object" ? /** @type {Record<string, unknown>} */ (raw)["number"] : undefined;
+      if (typeof number === "number" && Number.isInteger(number)) entry.numbers.add(number);
+    }
+  }
+  return taken;
+}
+
+/**
  * The job ended: its episodes that did not download, shown apart from the ones that completed.
- * Every failure row — a `failed-*` status, the rows a stop left `stopped: …` included — leaves
- * `#result-table` for `#failed-table`, under a heading with their count and the button that
- * queues them again ({@link retryJobs}); the result table keeps what completed (done, skipped,
- * dry run). Nothing failed, or nothing was downloaded (a listing, a job the cooldown refused):
- * the block stays hidden. `retrying`: the automatic retries the job queued that still wait
- * (DramaFetch 1.8.0, {@link queueAutoRetry}) — when there are any, `#failed-auto` under the heading
- * says how many of those episodes will be retried automatically, once; hidden otherwise. The
- * button's retry of a job that downloaded again in full (its records say `overwrite`: **See
+ * Every failure row — a `failed-*` status, the rows a stop left `stopped: …` included, since 3.0.1
+ * the row of every episode TikTok's list lacked (`missing from the list`, `report.isNotListed`) and
+ * the row of every free episode DramaFetch only guessed was locked (`not downloaded (free)`,
+ * `report.isGuessedLocked`) — leaves `#result-table` for `#failed-table`, under a heading with the
+ * count and the button that queues them again ({@link retryJobs}: a fresh listing, then those
+ * numbers — the guessed ones in a job of their own that asks for them anyway); the result table
+ * keeps what completed (done, skipped, dry run) and the list's warnings under each drama's header.
+ * Since 3.0.1 (the owner's report of 2026-11-27) the block keeps every job's rows for the tab's
+ * life ({@link app}.failedRows): this job's end replaces only the rows of the episodes it took
+ * ({@link takenBy} — a drama's retry replaces its retried numbers: the ones it saved leave, the ones
+ * still not downloaded stay with their new message) and leaves every other drama's; the heading
+ * counts every row and the button retries every row (one `selection` job per drama and kind). No
+ * row at all: the block stays hidden. `retrying`: the automatic retries the job queued that still
+ * wait (DramaFetch 1.8.0, {@link queueAutoRetry}) — when there are any, `#failed-auto` under the
+ * heading says how many of those episodes will be retried automatically, once; hidden otherwise.
+ * The button's retry of a job that downloaded again in full (its records say `overwrite`: **See
  * episodes**, DramaFetch 3.0.0) does too ({@link retryTargets}). (Exported for the unit tests,
  * which cannot run a job.)
  * @param {readonly unknown[]} seriesRecords the job's per-series records ({@link runRecord})
  * @param {readonly Pick<Job, "numbers" | "autoRetry">[]} [retrying]
  */
 export function renderFailed(seriesRecords, retrying = []) {
-  const rows = failedRows(seriesRecords);
+  const fresh = failedRows(seriesRecords);
+  // the block's rows of the episodes this job took give way to this job's; the others stay
+  for (const [seriesId, taken] of takenBy(seriesRecords)) {
+    let drama = app.failedRows.get(seriesId);
+    if (drama !== undefined) for (const number of taken.numbers) drama.rows.delete(number);
+    for (const row of fresh) {
+      if (row.seriesId !== seriesId) continue;
+      if (drama === undefined) {
+        drama = { name: taken.name, rows: new Map() };
+        app.failedRows.set(seriesId, drama);
+      }
+      if (taken.name !== null) drama.name = taken.name;
+      drama.rows.set(row.number, row);
+    }
+    if (drama !== undefined && drama.rows.size === 0) app.failedRows.delete(seriesId);
+  }
+  /** @type {FailedRow[]} */
+  const rows = [];
+  for (const drama of app.failedRows.values()) {
+    for (const row of [...drama.rows.values()].sort((a, b) => a.number - b.number)) rows.push({ ...row, name: drama.name ?? row.name });
+  }
   const retry = button("retry-button");
   const body = /** @type {HTMLTableSectionElement} */ ($("failed-table").querySelector("tbody"));
   body.textContent = "";
   spentRetries.delete(retry);
   app.failed = rows.length > 0 ? targetsOf(rows) : null;
-  $("failed-block").hidden = rows.length === 0;
-  const automatic = rows.length > 0 ? retrying.reduce((count, job) => count + job.numbers.length, 0) : 0;
+  const automatic = fresh.length > 0 ? retrying.reduce((count, job) => count + job.numbers.length, 0) : 0;
   const line = $("failed-auto");
   line.hidden = automatic === 0;
   line.textContent = automatic === 0 ? "" : automatic === 1 ? t("failedAutoRetryOne") : t("failedAutoRetry", [automatic]);
   // the block stays while the first of them runs (startProgress)
   app.failedAuto = new Set(automatic === 0 ? [] : retrying.flatMap((job) => (job.autoRetry === undefined ? [] : [job.autoRetry.alertId])));
-  if (rows.length > 0) {
-    const leaving = new Set(rows.map((row) => `${row.seriesId}:${row.number}`));
+  if (fresh.length > 0) {
+    // this job's rows of episodes that did not download leave the result table for the block
+    const leaving = new Set(fresh.map((row) => `${row.seriesId}:${row.number}`));
     const results = /** @type {HTMLTableSectionElement} */ ($("result-table").querySelector("tbody"));
     const kept = [...results.children].filter((row) => !leaving.has(`${row.getAttribute("data-series-id")}:${row.getAttribute("data-number")}`));
     results.replaceChildren();
     // a series' header with no row left goes too; never one spread of them all: a table of
     // 125 000 rows would overflow the call
     appendInPieces(results, withoutBareHeaders(kept));
+  }
+  if (rows.length > 0) {
     for (const row of rows) {
+      /** @type {Record<string, string>} */
+      const attrs = { "data-series-id": row.seriesId, "data-number": String(row.number), "data-status": row.status };
+      if (row.guessed === true) attrs["data-guessed"] = "1";
       body.append(
-        el("tr", { attrs: { "data-series-id": row.seriesId, "data-number": String(row.number), "data-status": row.status } }, [
+        el("tr", { attrs }, [
           el("td", { text: row.name ?? row.seriesId }),
           el("td", { text: episodeLabel(row.number) }),
-          el("td", {}, [statusBadge(row.status, row.message)]),
+          el("td", {}, [statusBadge(row.status, row.message, row.guessed === true)]),
           el("td", { className: "message", text: shownText(row.message) }),
         ]),
       );
@@ -1406,14 +1703,62 @@ export function renderFailed(seriesRecords, retrying = []) {
     $("failed-heading").textContent = t("failedHeading", [rows.length]);
     retry.textContent = t("retryButton", [rows.length]);
   }
+  showFailedBlock();
   updateButtons();
+}
+
+/**
+ * What the **Did not download** block shows (3.0.1, the lead's D9): its heading with the count, its
+ * **Retry** and its table while it holds a row ({@link app}.failedRows); its **Save the report** and
+ * its `Report saved: …` line (`#failed-report`) while the last job left a report
+ * ({@link app}.lastReport) or that line says something — with no row too: a drama whose list only
+ * came short (an early end with no count from TikTok, a count it cannot place: `report.listIncomplete`)
+ * has no row to retry, but its report is saved and said, and **Save the report** saves it again.
+ * With neither, the block is hidden; a block with no row keeps no count (D14: a **Retry** that
+ * emptied it leaves no `Did not download (2)` behind).
+ */
+function showFailedBlock() {
+  let rows = 0;
+  for (const drama of app.failedRows.values()) rows += drama.rows.size;
+  const reported = app.lastReport !== null || $("failed-report").textContent !== ""; // a report, or what became of one
+  $("failed-block").hidden = rows === 0 && !reported;
+  for (const id of ["failed-heading", "retry-button", "failed-table"]) $(id).hidden = rows === 0;
+  if (rows === 0) {
+    $("failed-heading").textContent = "";
+    button("retry-button").textContent = "";
+  }
 }
 
 // ------------------------------------------------------- the "did not download" report
 
 /**
+ * What the report's `listing` section reads of a series' fresh list (3.0.1, `lib/diagnosis`
+ * `listingSection`): the pages its listing asked for, the gap filling's among them, TikTok's count,
+ * the items received, the numbers still missing, the early end, the items DramaFetch could not read
+ * and the warnings — copies, never the list's raw items or a URL with its query.
+ * @param {Series} series
+ * @returns {import("../lib/diagnosis.js").ListingInput}
+ */
+function listingInput(series) {
+  return {
+    endpoint: series.listing?.endpoint ?? null,
+    pages: (series.listing?.pages ?? []).map((page) => ({ ...page, numbers: [...page.numbers] })),
+    totalHint: series.totalHint,
+    itemsReceived: series.itemsReceived ?? null,
+    otherItems: listOtherItems(series),
+    uncertain: listUncertain(series),
+    episodesListed: series.episodes.length,
+    missingNumbers: listMissing(series),
+    earlyEnd: series.earlyEnd ?? null,
+    skippedItems: (series.skippedItems ?? []).map((item) => ({ reason: item.reason, itemId: item.itemId })),
+    warnings: [...series.warnings],
+    incomplete: listIncomplete(series),
+  };
+}
+
+/**
  * What the report reads of one series of the job: the run's rows with their episodes and traces,
- * and the list's size and access counts when the series was listed.
+ * the list's size and access counts when the series was listed, and how that list was read.
  * @param {SeriesRun} run
  * @param {(episode: Episode) => EpisodeTrace | null} traceOf
  * @returns {SeriesInput}
@@ -1438,6 +1783,7 @@ function seriesInput(run, traceOf) {
     access,
     listedEpisodes: null,
     episodesDigest: episodes === null ? null : episodes.map(digestEntry), // of every listed episode, made now
+    listing: run.series === null ? null : listingInput(run.series), // how its list was read (3.0.1)
     // the raw item and the trace only of the rows the report describes (`lib/diagnosis.slimRows`)
     episodes: slimRows(
       run.results.map((result) => ({
@@ -1449,6 +1795,7 @@ function seriesInput(run, traceOf) {
         paid: result.episode.paid,
         drm: result.episode.drm,
         lockHints: result.episode.lockHints,
+        guessedLock: isGuessedLocked(result), // 3.0.1: a free episode DramaFetch only guessed was locked
         qualityHint: result.episode.qualityHint,
         raw: result.episode.raw,
         status: result.status,
@@ -1463,9 +1810,10 @@ function seriesInput(run, traceOf) {
 /**
  * The job ended: the report of the episodes it did not download (`lib/diagnosis`), from the runs
  * it produced and the downloader's traces — kept in `app.lastReport` for **Save the report** when
- * at least one episode failed, and saved at once under `DramaFetch/reports/` when the `report`
- * setting is on. A listing, a job that produced no run (it threw before, or the cooldown refused
- * it) or a job in which nothing failed leaves no report. The report before it goes first, its
+ * at least one episode failed or (3.0.1) a drama's list itself was short (`diagnosis.hasFailures`,
+ * the report's `listing` section saying how the list was read), and saved at once under
+ * `DramaFetch/reports/` when the `report` setting is on. A listing, a job that produced no run (it
+ * threw before, or the cooldown refused it) or a job in which nothing failed leaves no report. The report before it goes first, its
  * `Report saved: …` line too (an automatic retry's start keeps them on screen,
  * {@link startProgress}). Never throws: the save must not break the job's end. (Exported for the
  * unit tests, which cannot run a job.)
@@ -1498,9 +1846,10 @@ export async function reportJobEnd(job, outcome, runs, traceOf, taken = []) {
       }
     }
   } catch (error) {
-    console.warn(error); // `#failed-block` may be hidden when the job had no failed row: keep the reason
-    showReportOutcome(t("reportNotSaved", [oneLine(error)]), true);
+    console.warn(error);
+    showReportOutcome(t("reportNotSaved", [oneLine(error)]), true); // the block shows the reason, row or none
   }
+  showFailedBlock(); // the report's line and Save the report, with no row too (D9)
   updateButtons();
   if (app.lastReport !== null && app.settings.report) await saveReport();
 }
@@ -1522,14 +1871,16 @@ async function saveReport() {
   }
 }
 
-/** `#failed-report`, the line of the last report saved (or not), hidden and emptied. */
+/** `#failed-report`, the line of the last report saved (or not), hidden and emptied ({@link showFailedBlock}). */
 function hideReportLine() {
   const line = $("failed-report");
   line.hidden = true;
   line.textContent = "";
+  showFailedBlock();
 }
 
 /**
+ * `#failed-report` says `text` — shown with its block, a row under it or none ({@link showFailedBlock}).
  * @param {string} text
  * @param {boolean} failed
  */
@@ -1538,6 +1889,7 @@ function showReportOutcome(text, failed) {
   line.hidden = false;
   line.className = failed ? "meta error" : "meta";
   line.textContent = text;
+  showFailedBlock();
 }
 
 // --------------------------------------------------------------- the Waiting card (2.0.0)
@@ -1995,16 +2347,65 @@ export function waitingAutoRetries(jobRecord) {
 }
 
 /**
+ * One row of a series' record ({@link runRecord}): the result's episode number, status, message,
+ * file and download id — and (3.0.1) `guessed: true` on the row of a free episode DramaFetch only
+ * guessed was locked: not downloaded ({@link notDownloaded}).
+ * @param {DownloadResult} result
+ * @returns {Record<string, unknown>}
+ */
+function rowRecord(result) {
+  /** @type {Record<string, unknown>} */
+  const row = {
+    number: result.episode.number,
+    status: result.status,
+    message: result.message,
+    path: result.path ?? null,
+    download_id: result.downloadId ?? null,
+  };
+  if (isGuessedLocked(result)) row["guessed"] = true;
+  return row;
+}
+
+/**
+ * The per-series records of a download job **Stop** ended inside its engine — `runBatch` or the
+ * selection's run threw `StopRequested`, so no run came back (3.0.1, the lead's D11: Stop keeps the
+ * **Did not download** block true): a batch's dramas it finished, each one's whole record as it was
+ * done ({@link JobRecord}.records) — their rows enter the block, as any finished drama's —, and of
+ * the drama it was in ({@link JobRecord}.current) a record of the rows it had: a selection job's
+ * every row (the episodes it saved leave the block, one that failed again keeps its row with its
+ * new message, and the ones it never reached keep theirs), a batch's only the rows of episodes now
+ * on disk (they leave the block; the drama Stop interrupted gets no new row — a run Stop cuts short
+ * keeps none, as ever). (Exported for the unit tests, which cannot run a job to a Stop.)
+ * @param {Pick<Job, "kind" | "overwrite">} job
+ * @param {Pick<JobRecord, "records" | "current">} jobRecord
+ * @returns {Record<string, unknown>[]}
+ */
+export function stoppedRecords(job, jobRecord) {
+  const records = [...(jobRecord.records ?? [])];
+  const current = jobRecord.current;
+  if (current === undefined) return records;
+  const rows = job.kind === "selection" ? current.rows : current.rows.filter((row) => row["status"] === DONE || row["status"] === SKIPPED_EXISTS);
+  if (rows.length === 0) return records;
+  /** @type {Record<string, unknown>} */
+  const record = { series_id: current.seriesId, name: current.name, rows: [...rows] };
+  if (job.overwrite === true) record["overwrite"] = true;
+  records.push(record);
+  return records;
+}
+
+/**
  * A series' record of a job, kept in memory while the job ends: what the retries
  * ({@link retryTargets}), the alerts, the automatic retry, the **Did not download** block and — in
- * test mode — the journal read of the drama's run. `overwrite`: the job downloaded every episode
- * again in full ({@link Job}.overwrite, DramaFetch 3.0.0) — the record says `overwrite: true`, and
- * every retry read from it does the same; absent otherwise.
+ * test mode — the journal read of the drama's run (3.0.1: its list's warnings too, and `guessed:
+ * true` on the row of a free episode DramaFetch only guessed was locked: {@link rowRecord}). `overwrite`: the
+ * job downloaded every episode again in full ({@link Job}.overwrite, DramaFetch 3.0.0) — the record
+ * says `overwrite: true`, and every retry read from it does the same; absent otherwise. (Exported
+ * for the unit tests, which build the records a job's end reads with it.)
  * @param {SeriesRun} run
  * @param {boolean} [overwrite]
  * @returns {Record<string, unknown>}
  */
-function runRecord(run, overwrite = false) {
+export function runRecord(run, overwrite = false) {
   /** @type {Record<string, unknown>} */
   const record = {
     series_id: run.ref.seriesId,
@@ -2016,13 +2417,8 @@ function runRecord(run, overwrite = false) {
     contacted: run.contacted,
     line: reportLine(run.report),
     report: reportToDict(run.report),
-    rows: run.results.map((result) => ({
-      number: result.episode.number,
-      status: result.status,
-      message: result.message,
-      path: result.path ?? null,
-      download_id: result.downloadId ?? null,
-    })),
+    warnings: [...(run.series?.warnings ?? [])], // 3.0.1: the list's, as the progress card showed them
+    rows: run.results.map(rowRecord), // 3.0.1: a free episode DramaFetch only guessed was locked says so (`guessed`)
   };
   if (overwrite) record["overwrite"] = true;
   return record;
@@ -2085,7 +2481,9 @@ async function runJob(job) {
       renderBatchTable([run]);
       entry["series"] = [runRecord(run, job.overwrite === true)]; // See episodes' downloads again: the record says so
       dramaDone(job, run, jobRecord); // its rows are stored: its automatic retry when due, its notification, now
-      told = run.contacted || run.results.length > 0; // refused before any request: no alert of its own
+      // refused before any request: no alert of its own; an automatic retry whose fresh list never
+      // came (3.0.1): its ⚠ alert, with its Retry, below
+      told = !autoRetryUnlisted(job, run) && (run.contacted || run.results.length > 0);
       if (run.stop) {
         stopping = run;
         stop = run.report.stopped || run.error || "stopped";
@@ -2096,6 +2494,9 @@ async function runJob(job) {
   } catch (error) {
     if (error instanceof StopRequested) {
       entry["error"] = stop = error.message; // in English, like every engine text
+      // 3.0.1 (D11): what ran before the Stop — the dramas a batch finished, what the drama it was
+      // in saved, a selection's rows — keeps the Did not download block true
+      if (job.kind === "batch" || job.kind === "selection") entry["series"] = stoppedRecords(job, jobRecord);
     } else {
       entry["error"] = stop = oneLine(error);
       setStatus($("input-status"), shownText(stop), "error");

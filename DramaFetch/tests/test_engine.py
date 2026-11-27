@@ -1572,6 +1572,8 @@ def test_a_series_complete_less_than_24_h_ago_costs_no_request(tmp_path):
         ("--dry-run", {"dry_run": True}, None),
         ("an episodes spec", {}, "1-3"),
         ("even the spec all", {}, "all"),
+        # 3.0.1 (§10): a mark of 3.0.0 or earlier carries no completeness rule
+        ("a mark without the rule in force", {}, None),
     ],
 )
 def test_the_complete_skip_never_fires_when(tmp_path, change, overrides, spec):
@@ -1583,6 +1585,11 @@ def test_the_complete_skip_never_fires_when(tmp_path, change, overrides, spec):
         wall = WALL + 25 * 3600
     if change == "a file was deleted":
         (series_dir(tmp_path, series) / "fake - Episode 02.mp4").unlink()
+    if change == "a mark without the rule in force":
+        path = series_dir(tmp_path, series) / MANIFEST_FILENAME
+        data = json.loads(path.read_text(encoding="utf-8"))
+        del data["complete_rule"]
+        path.write_text(json.dumps(data), encoding="utf-8")
     run = _run_series(
         series, _quiet(tmp_path, **overrides), discovery, wall=wall, episodes_spec=spec
     )
@@ -2889,3 +2896,317 @@ def test_yt_dlps_ip_block_stops_the_run_and_records_the_cooldown(tmp_path):
     recorded = active_cooldown()
     assert recorded is not None and recorded.source == "yt-dlp"
     assert "Your IP address is blocked" in recorded.reason
+
+
+# ------------------------------------------------------------------------- 3.0.1: missing episodes
+# The owner's report of 2026-11-27: "que cuente y se dé cuenta si falta un episodio". The report
+# holds TikTok's count against the items received, a list that ended early short of that count is
+# incomplete, every episode a list lacks is named, and a selection's wanted number its fresh list
+# lacks gets a row of its own.
+
+EARLY_END = "in-page pagination fetch returned no episode list; scrolled the page instead"
+
+
+def _all_done(series):
+    return [
+        DownloadResult(e, DownloadStatus.DONE, Path(f"/x/{e.number}.mp4")) for e in series.episodes
+    ]
+
+
+def test_the_report_holds_tiktoks_count_against_the_items_received():
+    # 61 episodes and a trailer: TikTok counts 62, 62 items came. 3.0.1, the lead's decision D2
+    # (changed on purpose): whether TikTok counts the trailer is not known — no gap, no row, but
+    # the list is uncertain: never complete (no mark, no 24-hour skip), and the line says why
+    trailer = make_series(numbers=range(1, 62), total=62)
+    trailer.items_received = 62
+    report = engine.series_report(trailer, _all_done(trailer))
+    assert report.gaps == () and not report.complete and report.total == 61
+    assert (report.uncertain, report.other_items) == (True, 1)
+    assert engine.report_line(report) == (
+        "incomplete: 61 of 61 — TikTok's list may be incomplete: TikTok counts 62 episodes, 61 "
+        "listed and 1 other item (a trailer or a highlight)"
+    )
+    data = engine.report_to_dict(report)
+    assert (data["uncertain"], data["other_items"]) == (True, 1)
+    # the count everything listed accounts for: complete, nothing uncertain
+    placed = make_series(numbers=range(1, 63), total=62)
+    placed.items_received = 63
+    report = engine.series_report(placed, _all_done(placed))
+    assert report.complete and not report.uncertain
+    # one item short of the count: the last episode is missing, named
+    trailer.items_received = 61
+    report = engine.series_report(trailer, _all_done(trailer))
+    assert report.gaps == (62,) and not report.complete and report.total == 62
+    assert engine.report_line(report) == (
+        "incomplete: 61 of 62 — episode 62 missing from TikTok's list"
+    )
+    # more listed than announced stays incomplete, whatever the items say
+    more = make_series(numbers=(1, 2, 3, 4), total=3)
+    more.items_received = 4
+    report = engine.series_report(more, _all_done(more))
+    assert not report.complete
+    assert engine.report_line(report) == (
+        "incomplete: 4 of 4 — TikTok announces 3 episodes, 4 listed"
+    )
+
+
+def test_a_list_that_ended_early_short_of_tiktoks_count_is_incomplete_and_says_what_never_came():
+    unknown = make_series(numbers=(1, 2, 3))
+    unknown.early_end = EARLY_END
+    report = engine.series_report(unknown, _all_done(unknown))
+    assert report.ended_early and report.last_listed == 3 and not report.complete
+    assert engine.report_line(report) == (
+        "incomplete: 3 of 3 — TikTok's list ended early after episode 3"
+    )
+    counted = make_series(numbers=(1, 3, 4), total=6)
+    counted.items_received, counted.early_end = 3, EARLY_END
+    report = engine.series_report(counted, _all_done(counted))
+    assert report.gaps == (2, 5, 6) and report.total == 6
+    assert engine.report_line(report) == (
+        "incomplete: 3 of 6 — episode 2 missing from TikTok's list; TikTok's list ended early: "
+        "episodes 5, 6 not received"
+    )
+    data = engine.report_to_dict(report)
+    assert data["ended_early"] is True and data["last_listed"] == 4
+    assert data["line"] == engine.report_line(report)
+    # every item TikTok counts came: the early end was harmless
+    reached = make_series(numbers=(1, 2, 3), total=3)
+    reached.items_received, reached.early_end = 3, EARLY_END
+    report = engine.series_report(reached, _all_done(reached))
+    assert not report.ended_early and report.complete
+    # nothing listed at all
+    empty = Series(SERIES_ID, NAME, [], early_end=EARLY_END)
+    assert engine.report_line(engine.series_report(empty, [])) == (
+        "incomplete: 0 of 0 — TikTok's list ended early; no episodes listed"
+    )
+
+
+def test_not_listed_results_name_every_number_a_list_lacks_and_the_report_counts_them_as_gaps():
+    series = make_series(numbers=(1, 3, 4))
+    series.early_end = EARLY_END
+    rows = engine.not_listed_results(series, [6, 2, 3, 2, 0, -1, engine.MAX_EPISODE_NUMBER + 1, 5])
+    assert [(r.episode.number, r.status, r.message) for r in rows] == [
+        (2, DownloadStatus.FAILED_UNAVAILABLE, "not in TikTok's list"),
+        (5, DownloadStatus.FAILED_UNAVAILABLE, "not in TikTok's list: it ended early"),
+        (6, DownloadStatus.FAILED_UNAVAILABLE, "not in TikTok's list: it ended early"),
+    ]
+    assert rows[0].episode == Episode(2, "", "", SERIES_ID, NAME) and rows[0].path is None
+    assert all(engine.is_not_listed(row) for row in rows)
+    assert not engine.is_not_listed(DownloadResult(_episode(2), DownloadStatus.FAILED, message="x"))
+    selection = engine.not_listed_results(series, [2, 9], again=True)
+    assert [r.message for r in selection] == ["not in TikTok's list this time"] * 2
+    many = engine.not_listed_results(make_series(numbers=(1,)), range(2, 3000))
+    assert len(many) == engine.MAX_NOT_LISTED_ROWS == 500
+    # the report: missing from the list, never failed; up to the highest number wanted
+    listed = make_series(numbers=(1, 2, 3))
+    report = engine.series_report(
+        listed, [*_all_done(listed), *engine.not_listed_results(listed, [5], again=True)]
+    )
+    assert (report.failed, report.gaps, report.total, report.complete) == (0, (4, 5), 5, False)
+    assert engine.report_line(report) == (
+        "incomplete: 3 of 5 — episodes 4, 5 missing from TikTok's list"
+    )
+
+
+def test_unlisted_and_ignored_requested_numbers():
+    series = make_series(numbers=(1, 2, 3, 5), total=6)  # 4 a hole, 6 counted by TikTok
+    assert engine.unlisted_requested(series, "2-4,6,9") == [4, 6]
+    assert engine.ignored_requested(series, "2-4,6,9") == [(9, 9)]
+    assert engine.unlisted_requested(series, "1-1000") == [4, 6]
+    assert engine.ignored_requested(series, "1-1000") == [(7, 1000)]
+    assert engine.unlisted_requested(series, "5-") == [6]
+    assert engine.ignored_requested(series, "5-") == []
+    assert (
+        engine.unlisted_requested(series, None) == []
+        and engine.unlisted_requested(series, "all") == []
+    )
+    # every item TikTok counts came (a trailer counted): nothing past the highest listed is missing
+    series.items_received = 6
+    assert engine.unlisted_requested(series, "1-9") == [4]
+    assert engine.ignored_requested(series, "1-9") == [(6, 9)]
+
+
+def test_a_requested_episode_whose_lone_highlight_was_listed_gets_its_row():
+    """3.0.1 (the owner's report of 2026-11-27): TikTok left E66 out of its list but listed E66's
+    highlight clip, so the drama has episode 66 (``Series.highlight_numbers``): ``download
+    --episodes 66`` gives it a row of its own, never an ignored note — with no count, and with a
+    count of 66; a number past it stays ignored."""
+    series = make_series(numbers=tuple(range(1, 66)))
+    series.items_received = 66  # the 65 episodes and the clip
+    series.highlight_numbers = [66]
+    for total in (None, 66):
+        series.total_hint = total
+        assert engine.unlisted_requested(series, "66") == [66]
+        assert engine.ignored_requested(series, "66") == []
+        assert engine.unlisted_requested(series, "64-70") == [66]
+        assert engine.ignored_requested(series, "64-70") == [(67, 70)]
+    # without the clip's number, the old reading: E66 is past the drama's last episode
+    series.highlight_numbers = []
+    series.total_hint = None
+    assert engine.unlisted_requested(series, "66") == []
+    assert engine.ignored_requested(series, "66") == [(66, 66)]
+
+
+def test_a_selection_gives_a_requested_number_its_fresh_list_lacks_a_row_and_no_request(tmp_path):
+    series = make_series(numbers=(1, 2, 3, 5), total=5)
+    rows = []
+    downloader = FakeDownloader()
+    run = _run_series(
+        series,
+        _quiet(tmp_path),
+        BatchDiscovery(series),
+        downloader=downloader,
+        episodes_spec="2-4,9",
+        on_result=rows.append,
+    )
+    assert [number for number, _ in downloader.calls] == [2, 3]  # never a request for E04
+    assert [(r.episode.number, r.status.value, r.message) for r in run.results] == [
+        (2, "done", "saved"),
+        (3, "done", "saved"),
+        (4, "failed-unavailable", "not in TikTok's list this time"),
+    ]
+    assert rows == run.results  # the CLI prints it, the web would show it
+    assert run.exit_code == engine.EXIT_FAILED  # a requested episode not obtained
+    assert run.report.gaps == (4,) and run.report.failed == 0
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert 4 not in manifest.entries  # never recorded
+    # every requested number missing: rows only, no download at all
+    downloader = FakeDownloader()
+    run = _run_series(
+        series, _quiet(tmp_path), BatchDiscovery(series), downloader=downloader, episodes_spec="4"
+    )
+    assert downloader.calls == []
+    assert [(r.episode.number, r.status.value) for r in run.results] == [(4, "failed-unavailable")]
+    assert run.exit_code == engine.EXIT_FAILED and run.error is None
+
+
+def test_a_whole_series_run_keeps_its_results_and_names_what_the_list_lacks_in_its_line(tmp_path):
+    """The Python CLI prints the list's warnings and the report line names every missing number;
+    its whole-series results (and exit codes) stay what the downloads gave — the rows of missing
+    numbers are the Chrome extension's (engine.js runSeries)."""
+    series = make_series(numbers=(1, 3, 4), total=6)
+    series.items_received, series.early_end, series.missing_numbers = 3, EARLY_END, [2, 5, 6]
+    run = _run_series(series, _quiet(tmp_path), BatchDiscovery(series))
+    assert [r.episode.number for r in run.results] == [1, 3, 4]
+    assert run.exit_code == engine.EXIT_OK and not run.report.complete
+    assert engine.report_line(run.report) == (
+        "incomplete: 3 of 6 — episode 2 missing from TikTok's list; TikTok's list ended early: "
+        "episodes 5, 6 not received"
+    )
+    assert read_manifest(series_dir(tmp_path, series), SERIES_ID).complete_at is None
+
+
+# --------------------------------------------------------------------------- 3.0.1: guessed locks
+
+
+def _guessed(number, hint="plays 2 s of 3 s"):
+    """A free episode DramaFetch's own rules guessed was locked (SHORT-HEADER / no play address)."""
+    return Episode(
+        number,
+        f"77000000000000000{number:02d}",
+        f"t{number}",
+        SERIES_ID,
+        series_name=NAME,
+        access="locked",
+        lock_hints=(hint,),
+        guessed_lock=True,
+    )
+
+
+def test_a_free_episode_dramafetch_only_guessed_was_locked_is_not_downloaded():
+    """3.0.1 (§9, the owner's report of 2026-11-27): a ``skipped-locked`` row of a free episode
+    locked only by DramaFetch's own guesses counts AGAINST completeness, apart from the locked
+    ones, and the line names it; a paid locked one and a remembered DRM verdict keep today's
+    accounting."""
+    free = [_episode(n) for n in (1, 2)]
+    guessed = _guessed(3)
+    paid = _episode(4, ("isFree=false",))
+    series = Series(SERIES_ID, NAME, [*free, guessed, paid])
+    rows = [
+        *(
+            DownloadResult(e, DownloadStatus.DONE, Path(f"/x/{e.number}.mp4"), "saved")
+            for e in free
+        ),
+        locked_result(guessed),
+        locked_result(paid),
+    ]
+    assert [engine.is_guessed_locked(r) for r in rows] == [False, False, True, False]
+    report = engine.series_report(series, rows)
+    assert not report.complete
+    assert (report.locked, report.locked_numbers) == (1, (4,))
+    assert (report.guessed_locked, report.guessed_locked_numbers) == (1, (3,))
+    assert engine.report_line(report) == (
+        "incomplete: 2 of 4 — 1 locked (4); "
+        "1 free episode not asked for (3): TikTok's list made it look locked"
+    )
+    data = engine.report_to_dict(report)
+    assert (data["guessed_locked"], data["guessed_locked_numbers"]) == (1, [3])
+    # two of them, nothing else wrong
+    two = Series(SERIES_ID, NAME, [_episode(1), _guessed(2, "no play address"), _guessed(3)])
+    report = engine.series_report(
+        two,
+        [
+            DownloadResult(two.episodes[0], DownloadStatus.DONE, Path("/x/1.mp4"), "saved"),
+            locked_result(two.episodes[1]),
+            locked_result(two.episodes[2]),
+        ],
+    )
+    assert engine.report_line(report) == (
+        "incomplete: 1 of 3 — 2 free episodes not asked for (2, 3): "
+        "TikTok's list made them look locked"
+    )
+    # the skip of a DRM verdict the manifest remembers is no guess: locked, as before
+    drm_row = DownloadResult(
+        guessed, DownloadStatus.SKIPPED_LOCKED, message=engine.DRM_REMEMBERED_MESSAGE
+    )
+    assert not engine.is_guessed_locked(drm_row)
+    report = engine.series_report(Series(SERIES_ID, NAME, [*free, guessed]), [*rows[:2], drm_row])
+    assert report.complete and report.locked_numbers == (3,) and not report.guessed_locked
+    # asked for anyway (--include-locked) and saved: downloaded like any episode
+    done = DownloadResult(guessed, DownloadStatus.DONE, Path("/x/3.mp4"), "saved")
+    report = engine.series_report(Series(SERIES_ID, NAME, [*free, guessed]), [*rows[:2], done])
+    assert report.complete and engine.report_line(report) == "complete: 3 of 3 (3 downloaded)"
+
+
+def test_a_series_with_a_guessed_lock_is_never_marked_complete_and_lists_again(tmp_path):
+    """3.0.1 (§9/§10): the run that skips a free episode DramaFetch guessed was locked makes no
+    request for it, exits 0 (a ``skipped-locked`` row keeps its meaning) and never marks the series
+    complete, so the next paste lists it again; the rows of the CLI and the web are unchanged."""
+    series = Series(SERIES_ID, NAME, [_episode(1), _episode(2), _guessed(3)])
+    discovery = BatchDiscovery(series)
+    downloader = FakeDownloader()
+    run = _run_series(series, _quiet(tmp_path), discovery, downloader=downloader)
+    assert [r.status for r in run.results] == [
+        DownloadStatus.DONE,
+        DownloadStatus.DONE,
+        DownloadStatus.SKIPPED_LOCKED,
+    ]
+    assert run.exit_code == engine.EXIT_OK and run.stop is False
+    assert not run.report.complete and run.report.guessed_locked_numbers == (3,)
+    manifest = read_manifest(series_dir(tmp_path, series), SERIES_ID)
+    assert manifest.complete_at is None and manifest.complete_rule is None
+    again = _run_series(series, _quiet(tmp_path), discovery, wall=WALL + 3600)
+    assert discovery.calls == [SERIES_ID, SERIES_ID]  # listed again: no complete skip
+    assert not again.report.skipped_complete and again.report.guessed_locked_numbers == (3,)
+
+
+def test_a_mark_without_the_rule_in_force_lists_the_series_again_and_writes_the_rule(tmp_path):
+    """3.0.1 (§10): the first paste after the update lists a series 3.0.0 marked complete — one
+    ordinary listing, nothing downloaded again — and the complete mark it writes carries the
+    rule, so the paste after that is skipped as complete with no request."""
+    series = make_series(numbers=(1, 2, 3))
+    discovery = BatchDiscovery(series)
+    _run_series(series, _quiet(tmp_path), discovery)
+    path = series_dir(tmp_path, series) / MANIFEST_FILENAME
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["complete_rule"]  # what 3.0.0 wrote
+    path.write_text(json.dumps(data), encoding="utf-8")
+    downloader = FakeDownloader()
+    run = _run_series(series, _quiet(tmp_path), discovery, wall=WALL + 3600, downloader=downloader)
+    assert discovery.calls == [SERIES_ID, SERIES_ID]
+    assert [r.status for r in run.results] == [DownloadStatus.SKIPPED_EXISTS] * 3
+    assert downloader.calls == []  # nothing downloaded again: the manifest's skips need no request
+    assert run.report.complete
+    assert json.loads(path.read_text(encoding="utf-8"))["complete_rule"] == 2
+    third = _run_series(series, _quiet(tmp_path), discovery, wall=WALL + 7200)
+    assert third.report.skipped_complete and discovery.calls == [SERIES_ID, SERIES_ID]

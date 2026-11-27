@@ -7,8 +7,9 @@
  * pytest can compare every answer with the Python function's on the same input.
  *
  * `fn` is `<module>.<export>` of `src/lib/<module>.js` (`catalog.accessOf`, `catalog.listedSizes`,
- * `mp4.verifyVideo`), `$const` with `["<module>.<NAME>"]` (the exported value itself:
- * `catalog.SHORT_HEADER_HINT_PREFIX`, `messages.SHORT_SERVED_PREFIX`, `messages.SHORT_MARK`),
+ * `mp4.verifyVideo`; the module `discovery` is `src/app/discovery.js`), `$const` with
+ * `["<module>.<NAME>"]` (the exported value itself: `catalog.SHORT_HEADER_HINT_PREFIX`,
+ * `messages.SHORT_SERVED_PREFIX`, `messages.SHORT_MARK`, `discovery.GAP_FILL_REQUESTS`),
  * or `parity.<adapter>` (below:
  * calls whose answer includes the state they mutate). Tagged arguments: `{"$bytes": <base64>}` → a
  * Uint8Array; `{"$rng": [r0, r1, …]}` → an Rng whose `uniform(a, b)` is `a + (b - a) * r_i`, like
@@ -25,6 +26,7 @@ import { PacingState } from "../src/lib/pacing.js";
 import {
   clearComplete,
   completeSince,
+  completeTrusted,
   doneEntries,
   drmProtected,
   isDone,
@@ -43,6 +45,12 @@ import { Downloader } from "../src/app/downloader.js";
 
 /** @type {Map<string, Record<string, unknown>>} */
 const modules = new Map();
+/**
+ * The modules of `src/app/` the parity tests read too — their constants and texts (`$const`
+ * `discovery.GAP_FILL_REQUESTS`, the pagination's warnings): nothing of them touches `chrome.*`
+ * until one of its functions is called. Every other name is a module of `src/lib/`.
+ */
+const APP_MODULES = new Set(["discovery"]);
 
 /**
  * @param {string} name
@@ -52,7 +60,8 @@ async function moduleNamed(name) {
   if (!/^[a-z][a-z0-9]*$/.test(name)) throw new Error(`bad module name ${JSON.stringify(name)}`);
   let loaded = modules.get(name);
   if (loaded === undefined) {
-    loaded = /** @type {Record<string, unknown>} */ (await import(new URL(`../src/lib/${name}.js`, import.meta.url).href));
+    const folder = APP_MODULES.has(name) ? "app" : "lib";
+    loaded = /** @type {Record<string, unknown>} */ (await import(new URL(`../src/${folder}/${name}.js`, import.meta.url).href));
     modules.set(name, loaded);
   }
   return loaded;
@@ -190,6 +199,7 @@ function stateRun(plan) {
     drmProtected: plan.numbers.map((number) => drmProtected(state, number)),
     isDone: plan.numbers.map((number) => isDone(state, number, exists)),
     completeSince: completeSince(state),
+    completeTrusted: completeTrusted(state), // 3.0.1: the mark's rule
   };
 }
 

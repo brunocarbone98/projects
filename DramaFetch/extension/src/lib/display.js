@@ -31,7 +31,20 @@
  * parity-tested with the Python tool) do not change: they stay in the job's pauses, for its report.
  */
 
-import { NO_PLAY_ADDRESS, SHORT_HEADER_HINT_PREFIX } from "./catalog.js";
+import {
+  LEFT_OUT_HIGHLIGHT,
+  LEFT_OUT_LATER,
+  LEFT_OUT_LOCKED,
+  LEFT_OUT_REASONS,
+  LEFT_OUT_SHORTER,
+  NO_PLAY_ADDRESS,
+  SHORT_HEADER_HINT_PREFIX,
+  SKIP_HIGHLIGHT,
+  SKIP_NO_ID,
+  SKIP_NO_NUMBER,
+  SKIP_OTHER_DRAMA,
+  UNCERTAIN_TEXT,
+} from "./catalog.js";
 import { EXTENSION_LIFT_TEXT } from "./cooldown.js";
 import {
   BLOCKED_MESSAGE,
@@ -40,6 +53,7 @@ import {
   DRM_MESSAGE,
   DRM_REMEMBERED_MESSAGE,
   DRY_RUN,
+  ENDED_EARLY_TEXT,
   FAILED,
   FAILED_BLOCKED,
   FAILED_LOGIN,
@@ -49,6 +63,10 @@ import {
   LIST_RATE_LIMIT_MESSAGE,
   MANIFEST_SKIP_PREFIX,
   MEDIA_RATE_LIMIT_MESSAGE,
+  NOT_LISTED_AGAIN_MESSAGE,
+  NOT_LISTED_EARLY_END_MESSAGE,
+  NOT_LISTED_MESSAGE,
+  NOT_LISTED_PREFIX,
   NOT_STARTED_PREFIX,
   PAYLOAD_DRM_MESSAGE,
   SHORT_SERVED_PREFIX,
@@ -61,6 +79,7 @@ import {
   UNAVAILABLE_MESSAGE,
 } from "./messages.js";
 import { NAME_PLACEHOLDERS } from "./naming.js";
+import { NOT_ASKED_TEXT } from "./report.js";
 import { JOB_REST, LONG_REST, MAX_PAUSE_S, PACE, PACES, REST, SERIES_REST } from "./pacing.js";
 import {
   CHALLENGE_MESSAGE,
@@ -109,6 +128,17 @@ export const DEFAULT_LABELS = Object.freeze({
 
 /** The status of a row the run gave up on before reaching it (`stopped: …`): its own label. */
 export const STOPPED_LABEL_KEY = "stopped";
+/**
+ * The status of the row of an episode TikTok's list lacked (`failed-unavailable` with a message that
+ * starts with `messages.NOT_LISTED_PREFIX`, 3.0.1): its own label.
+ */
+export const NOT_LISTED_LABEL_KEY = "not-listed";
+/**
+ * The row of a FREE episode DramaFetch did not ask for because its own rules guessed it was locked
+ * (`skipped-locked` whose episode `guessedLock`, `report.isGuessedLocked`; 3.0.1): its own label —
+ * not downloaded, never “locked”.
+ */
+export const GUESSED_LOCK_LABEL_KEY = "guessed-lock";
 
 /**
  * A short human label per status code, per language (the code itself stays in a title attribute).
@@ -126,6 +156,8 @@ export const STATUS_LABELS = Object.freeze({
     [FAILED_BLOCKED]: "blocked by TikTok",
     [FAILED]: "failed",
     [STOPPED_LABEL_KEY]: "stopped",
+    [NOT_LISTED_LABEL_KEY]: "missing from the list",
+    [GUESSED_LOCK_LABEL_KEY]: "not downloaded (free)",
   }),
   es: Object.freeze({
     [DONE]: "descargado",
@@ -138,6 +170,8 @@ export const STATUS_LABELS = Object.freeze({
     [FAILED_BLOCKED]: "bloqueado por TikTok",
     [FAILED]: "falló",
     [STOPPED_LABEL_KEY]: "detenido",
+    [NOT_LISTED_LABEL_KEY]: "falta en la lista",
+    [GUESSED_LOCK_LABEL_KEY]: "no descargado (gratis)",
   }),
 });
 
@@ -157,17 +191,24 @@ export function displayLanguageOf(uiLanguage) {
 
 /**
  * The short label of a status code (`done`, `skipped-locked`, …) in `lang`; a row whose message
- * says the run stopped before it (`stopped: …`) is labelled “stopped”. An unknown status is
- * shown as it is. Never throws.
+ * says the run stopped before it (`stopped: …`) is labelled “stopped”, one whose message says
+ * TikTok's list lacked the episode (`not in TikTok's list…`, 3.0.1) “missing from the list”, and a
+ * `skipped-locked` row of a free episode DramaFetch only guessed was locked (`guessed`, 3.0.1:
+ * `report.isGuessedLocked`) “not downloaded (free)”. An unknown status is shown as it is. Never
+ * throws.
  * @param {unknown} status
- * @param {{lang?: string, message?: unknown}} [options]
+ * @param {{lang?: string, message?: unknown, guessed?: boolean}} [options]
  * @returns {string}
  */
 export function statusLabel(status, options = {}) {
   try {
     const labels = STATUS_LABELS[options.lang === "es" ? "es" : "en"];
+    if (options.guessed === true && status === SKIPPED_LOCKED) return /** @type {string} */ (labels[GUESSED_LOCK_LABEL_KEY]);
     if (typeof options.message === "string" && options.message.startsWith(STOPPED_PREFIX) && status !== DONE) {
       return /** @type {string} */ (labels[STOPPED_LABEL_KEY]);
+    }
+    if (typeof options.message === "string" && options.message.startsWith(NOT_LISTED_PREFIX) && status === FAILED_UNAVAILABLE) {
+      return /** @type {string} */ (labels[NOT_LISTED_LABEL_KEY]);
     }
     if (typeof status !== "string") return String(status ?? "");
     return Object.hasOwn(labels, status) ? /** @type {string} */ (labels[status]) : status;
@@ -428,6 +469,39 @@ function hintsEs(hints) {
   return hints.split("; ").map(hintEs).join("; ");
 }
 
+/** Why TikTok's list held an item that is no episode (`catalog.SKIP_*`), in Spanish. */
+const SKIP_REASONS_ES = new Map([
+  [SKIP_OTHER_DRAMA, "id de otro drama"],
+  [SKIP_NO_ID, "sin id"],
+  [SKIP_NO_NUMBER, "sin número de episodio"],
+  [SKIP_HIGHLIGHT, "un fragmento destacado, un clip de un episodio"],
+]);
+
+/** How the Spanish of an uncertain list starts (3.0.1, `catalog.UNCERTAIN_TEXT`). */
+const UNCERTAIN_ES = "puede que la lista de TikTok esté incompleta";
+
+/**
+ * `1 other item (a trailer or a highlight)` / `2 other items (trailers or highlights)`
+ * (`catalog.otherItemsText`) in Spanish.
+ * @param {string} count digits
+ * @returns {string}
+ */
+function otherItemsEs(count) {
+  return count === "1"
+    ? "1 elemento más (un tráiler o un fragmento destacado)"
+    : `${count} elementos más (tráileres o fragmentos destacados)`;
+}
+
+/** `catalog.otherItemsText`'s words, its count captured. */
+const OTHER_ITEMS = String.raw`(\d+) other (?:item \(a trailer or a highlight\)|items \(trailers or highlights\))`;
+/** Why the merge left an item out for another one with its number (`catalog.LEFT_OUT_*`), in Spanish. */
+const LEFT_OUT_ES = new Map([
+  [LEFT_OUT_HIGHLIGHT, "un fragmento destacado"],
+  [LEFT_OUT_LOCKED, "bloqueado"],
+  [LEFT_OUT_SHORTER, "más corto"],
+  [LEFT_OUT_LATER, "listado después"],
+]);
+
 /**
  * A settings name of a pacing refusal (`delay_min_s`) as the settings call it, quoted.
  * @param {string} name
@@ -525,6 +599,11 @@ const EXACT = new Map(
     [NOT_STARTED_PREFIX, "no iniciada: "],
     [new StopRequested().message, "detenido por ti"],
     [NO_PLAY_ADDRESS, "sin dirección de reproducción"],
+    // report.notListedResults (3.0.1): the row of an episode TikTok's list lacked
+    [NOT_LISTED_MESSAGE, "no está en la lista de TikTok"],
+    [NOT_LISTED_EARLY_END_MESSAGE, "no está en la lista de TikTok: terminó antes de tiempo"],
+    [NOT_LISTED_AGAIN_MESSAGE, "esta vez no está en la lista de TikTok"],
+    [ENDED_EARLY_TEXT, "la lista de TikTok terminó antes de tiempo"],
     // engine.js: the error of a series listed empty, the short reasons of a failed listing
     ["no episodes listed", "no se listó ningún episodio"],
     ["login required", "hace falta iniciar sesión"],
@@ -640,6 +719,8 @@ function detailsEs(text) {
  * @returns {string | null}
  */
 function lineGroupEs(group) {
+  const notAsked = notAskedEs(group);
+  if (notAsked !== null) return notAsked;
   let match = /^(episode|episodes) ([^;]+) missing from TikTok's list$/.exec(group);
   if (match !== null) {
     return match[1] === "episode"
@@ -648,8 +729,58 @@ function lineGroupEs(group) {
   }
   match = /^TikTok announces (\d+) episodes, (\d+) listed$/.exec(group);
   if (match !== null) return announcedEs(String(match[1]), String(match[2]));
+  // 3.0.1: an uncertain list (`report.reportLine`'s group)
+  match = new RegExp(`^${esc(UNCERTAIN_TEXT)}: TikTok counts (\\d+) episodes?, (\\d+) listed and ${OTHER_ITEMS}$`).exec(group);
+  if (match !== null) {
+    const [, total, listed, other] = match;
+    return (
+      `${UNCERTAIN_ES}: TikTok cuenta ${total} ${plural(String(total), "episodio", "episodios")}, ` +
+      `${listed} ${plural(String(listed), "listado", "listados")} y ${otherItemsEs(String(other))}`
+    );
+  }
   if (group === "no episodes listed") return "no se listó ningún episodio";
-  return null;
+  return endedEarlyEs(group);
+}
+
+/** `report.reportLine`'s group of the free episodes DramaFetch did not ask for (3.0.1, `report.NOT_ASKED_TEXT`). */
+const NOT_ASKED_RE = new RegExp(
+  String.raw`^(\d+) free (episode|episodes) ${esc(NOT_ASKED_TEXT)} \(([^()]*)\): TikTok's list made (it|them) look locked$`,
+);
+
+/**
+ * The group of an incomplete line naming the free episodes DramaFetch did not ask for because its
+ * own rules guessed they were locked (3.0.1) — `1 free episode not asked for (17): TikTok's list made
+ * it look locked` → `1 episodio gratis sin pedir (17): la lista de TikTok lo hacía parecer
+ * bloqueado` —, or null for anything else.
+ * @param {string} group
+ * @returns {string | null}
+ */
+function notAskedEs(group) {
+  const match = NOT_ASKED_RE.exec(group);
+  if (match === null) return null;
+  const [, count, noun, numbers] = match;
+  return noun === "episode"
+    ? `${count} episodio gratis sin pedir (${numbers}): la lista de TikTok lo hacía parecer bloqueado`
+    : `${count} episodios gratis sin pedir (${numbers}): la lista de TikTok los hacía parecer bloqueados`;
+}
+
+/** `report.reportLine`'s early-end group (3.0.1, {@link ENDED_EARLY_TEXT}): its numbers captured. */
+const ENDED_EARLY_RE = new RegExp(`^${esc(ENDED_EARLY_TEXT)}(?:: (episode|episodes) ([^;]+) not received| after episode (\\d+))?$`);
+
+/**
+ * The early-end group of an incomplete line in Spanish — `TikTok's list ended early: episodes 61,
+ * 62 not received`, `… ended early after episode 60`, `… ended early` —, or null for anything else.
+ * @param {string} group
+ * @returns {string | null}
+ */
+function endedEarlyEs(group) {
+  const match = ENDED_EARLY_RE.exec(group);
+  if (match === null) return null;
+  const ended = "la lista de TikTok terminó antes de tiempo";
+  if (match[1] === "episode") return `${ended}: no llegó el episodio ${match[2]}`;
+  if (match[1] === "episodes") return `${ended}: no llegaron los episodios ${match[2]}`;
+  if (match[3] !== undefined) return `${ended}, después del episodio ${match[3]}`;
+  return ended;
 }
 
 /**
@@ -865,6 +996,8 @@ const RULES = [
   // a report line's details on their own (`2 locked (61, 62)`: a drama's alert names its locked
   // episodes in the words of its report line, app/alerts.js)
   [/^\d+ (?:paid|locked|failed|not downloaded)\b/, (m) => detailsEs(String(m.input))],
+  // the free episodes DramaFetch did not ask for (3.0.1), a group of a report line on its own
+  [NOT_ASKED_RE, (m) => notAskedEs(String(m.input))],
   [
     new RegExp(`^episode (-?\\d+) (${STATUS_ALTERNATIVES})(?:: (.*))?$`, "s"),
     (m, inner) => `episodio ${m[1]} (${inner(String(m[2]))})${m[3] === undefined ? "" : `: ${inner(m[3])}`}`,
@@ -1028,8 +1161,32 @@ const RULES = [
   // the episode list (catalog.catalogWarnings, discovery.js)
   [/^episode (-?\d+) missing \(gap\)$/, (m) => `falta el episodio ${m[1]} (hay un hueco)`],
   [/^episodes (-?\d+)-(-?\d+) missing \(gap\)$/, (m) => `faltan los episodios ${m[1]}-${m[2]} (hay un hueco)`],
-  [/^duplicate episode number (-?\d+)$/, (m) => `número de episodio repetido: ${m[1]}`],
+  [
+    new RegExp(`^duplicate episode number (\\d+): item (.+) left out \\((${LEFT_OUT_REASONS.map(esc).join("|")})\\), item (.+) kept$`, "s"),
+    (m) =>
+      `número de episodio repetido (${m[1]}): se dejó fuera el elemento ${m[2]} ` +
+      `(${LEFT_OUT_ES.get(String(m[3]))}) y se conservó el elemento ${m[4]}`,
+  ],
+  [
+    /^TikTok listed (\d+) items? DramaFetch could not read \((.*)\)$/s,
+    (m) => {
+      const reason = SKIP_REASONS_ES.get(String(m[2]));
+      if (reason === undefined) return null; // a reason no rule knows: the whole text as it is
+      return `TikTok listó ${m[1]} ${plural(String(m[1]), "elemento", "elementos")} que DramaFetch no pudo leer (${reason})`;
+    },
+  ],
   [/^TikTok announces (\d+) episodes, (\d+) listed$/, (m) => announcedEs(String(m[1]), String(m[2]))],
+  // 3.0.1: an uncertain list (`catalog.uncertainText`)
+  [
+    new RegExp(
+      `^${esc(UNCERTAIN_TEXT)}: TikTok counts (\\d+) episodes?; (\\d+) episodes? and ${OTHER_ITEMS} were listed, so ` +
+        "DramaFetch cannot tell whether an episode is missing — paste the drama again later to check again$",
+    ),
+    (m) =>
+      `${UNCERTAIN_ES}: TikTok cuenta ${m[1]} ${plural(String(m[1]), "episodio", "episodios")}; se listaron ${m[2]} ` +
+      `${plural(String(m[2]), "episodio", "episodios")} y ${otherItemsEs(String(m[3]))}, así que DramaFetch no puede saber si ` +
+      "falta un episodio — vuelve a pegar el drama más tarde para comprobarlo de nuevo",
+  ],
   [/^(\d+) episodes look locked$/, (m) => `${m[1]} episodios parecen bloqueados`],
   [
     /^no episode list within (\S+) s \(page: (.*)\): if this Chrome is not logged in to TikTok, log in in a normal tab and try again$/s,

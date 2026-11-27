@@ -11,12 +11,22 @@
  * What the report holds, and what it never holds: the raw list items (`Episode.raw`) as TikTok
  * served them — the whole point: a payload field that makes DramaFetch call an episode locked, a
  * duration the media contradicts — which carry time-limited signed media links; per series a
- * digest of every LISTED episode (`episodes_digest`: number, access, hints, the video's duration,
- * size and bitrate, the sound's duration and `original` flag, `IsPreview` / `PreviewType` — the
- * fields the SHORT-HEADER rule and the short-served check read, no URL); the requests made as
+ * digest of every LISTED episode (`episodes_digest`: number, access, hints, whether DramaFetch only
+ * guessed it was locked (3.0.1), the video's duration, size and bitrate, the sound's id, title,
+ * duration and `original` flag, `IsPreview` / `PreviewType` — the fields the SHORT-HEADER rule and
+ * the short-served check read, no URL); the requests made as
  * `scheme://host/path` with their HTTP status and sizes, never a query string (TikTok signs it),
- * never a header value, never a cookie or a token. The causes are stored English texts like every
- * engine text and are never shown in the UI (so `lib/display` needs no rule for them).
+ * never a header value, never a cookie or a token; per series (3.0.1, the owner's report of
+ * 2026-11-27) how its episode list was read — the `listing` section: the list request's
+ * `scheme://host/path`, every page asked (its `cursor` and `count`, the items it brought, the
+ * series' numbers among them, `hasMore` and the cursor it returned), the gap filling's requests,
+ * the items DramaFetch could not read with their reasons, the warnings, TikTok's count, the items
+ * received, the numbers still missing and why the listing ended early ({@link listingSection}).
+ * The report is written when an episode did not download — a failure, or (3.0.1) a free episode
+ * DramaFetch only guessed was locked —, and also when the list itself is short (a number missing,
+ * or an early end short of TikTok's count: {@link hasFailures}). The causes are
+ * stored English texts like every engine text and are never shown in the UI (so `lib/display`
+ * needs no rule for them).
  */
 
 import {
@@ -28,6 +38,7 @@ import {
   FAILED_RATE_LIMITED,
   FAILED_UNAVAILABLE,
   INCOMPLETE_PREFIX,
+  NOT_LISTED_PREFIX,
   SHORT_SERVED_PREFIX,
   SKIPPED_EXISTS,
   SKIPPED_LOCKED,
@@ -77,6 +88,15 @@ export const LOCKED_CAUSE_PREFIX = "listed as locked for this session: ";
 export const LOCKED_CAUSE_SUFFIX =
   " — the list TikTok served to your session marks it so; unlock it in the TikTok app, then look again";
 /**
+ * Rule 7, for a free episode DramaFetch only GUESSED was locked (3.0.1, `report.isGuessedLocked`: no
+ * price, entitlement, TikTok lock or DRM clue): `<prefix><hints><suffix>` — what DramaFetch's own
+ * rules read (a short header: `plays 69 s of 106 s`, or no play address) and what settles it.
+ */
+export const GUESSED_LOCKED_CAUSE_PREFIX = "not asked for: free in the list TikTok served, but DramaFetch's own rules guessed it was locked: ";
+export const GUESSED_LOCKED_CAUSE_SUFFIX =
+  " — no price, entitlement, lock flag or DRM clue names it; Retry asks TikTok for it once (TikTok decides): a whole " +
+  "file is saved, a short one is named short-served; the digest's music and video durations show what the list said";
+/**
  * Rule 8, a shorter file of an unlisted size (a listed size is rule 2): `the file plays <a> s where the
  * list announces <e> s<middle><hints or "none">` — the measured fact and both readings, never a verdict.
  */
@@ -93,11 +113,21 @@ export const CUT_SHORT_CAUSE_SUFFIX = "): a network or server problem, worth a r
 export const INVALID_FILE_CAUSE_PREFIX = "the file TikTok served is not a valid episode video (";
 export const INVALID_FILE_CAUSE_SUFFIX =
   "): worth one retry; if it repeats, the rendition TikTok serves this session is broken";
-/** Rule 11: `<prefix><message><suffix>`. */
+/**
+ * Rule 11 (3.0.1): an episode TikTok's list lacked — a `failed-unavailable` row whose message starts
+ * with `NOT_LISTED_PREFIX`, made without a request (`report.notListedResults`). True whether or not
+ * the gap filling reached its page (the lead's D10: the filling stops after `GAP_FILL_REQUESTS`
+ * requests, or at an answer without a list): the listing section says which pages were asked.
+ */
+export const NOT_LISTED_CAUSE =
+  "missing from the episode list TikTok served to your session (this series' listing section shows each page asked, " +
+  "the gap filling's included, and what it brought): a later listing may hold it, and Retry lists the drama again; " +
+  "if tiktok.com does not show it either, TikTok's web list lacks it";
+/** Rule 12: `<prefix><message><suffix>`. */
 export const UNAVAILABLE_CAUSE_PREFIX = "no playable stream this session may use (";
 export const UNAVAILABLE_CAUSE_SUFFIX =
   "): locked, region-restricted, not logged in, or TikTok served no video at any play URL";
-/** Rule 12: `<prefix><message>`. */
+/** Rule 13: `<prefix><message>`. */
 export const FAILED_CAUSE_PREFIX = "download failed: ";
 
 /** The verification reason of a file whose duration disagrees with the list (`lib/mp4.verifyVideo`). */
@@ -138,6 +168,8 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s �
  * @property {readonly string[]} lockHints
  * @property {boolean} drm
  * @property {number | null} durationS
+ * @property {boolean} [guessedLock] the row of a free episode DramaFetch only guessed was locked
+ *   (3.0.1, `report.isGuessedLocked`)
  *
  * @typedef {object} EpisodeInput One result row of a run, with its episode and its trace.
  * @property {number} number
@@ -148,6 +180,9 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s �
  * @property {boolean} paid
  * @property {boolean} drm
  * @property {readonly string[]} lockHints
+ * @property {boolean} [guessedLock] the row is a free episode DramaFetch only guessed was locked —
+ *   `skipped-locked`, no price, entitlement, TikTok lock or DRM clue (3.0.1,
+ *   `report.isGuessedLocked`): not downloaded, so the report is written
  * @property {string | null} qualityHint
  * @property {Record<string, unknown> | null} raw the list item as TikTok served it
  * @property {string} status
@@ -159,6 +194,7 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s �
  * @property {number} number
  * @property {string} access
  * @property {readonly string[]} lockHints
+ * @property {boolean} [guessedLock] DramaFetch only guessed it was locked (3.0.1, `catalog.accessOf`)
  * @property {number | null} durationS
  * @property {Record<string, unknown> | null} raw the list item as TikTok served it
  *
@@ -179,6 +215,39 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s �
  *   ({@link digestEntry} of every listed episode, in the list's order; null when the series was not
  *   listed): when present it is the report's digest and `listedEpisodes` is not read — a batch
  *   takes it when a series is done, so the list's raw items need not stay until the job ends
+ * @property {ListingInput | null} [listing] how the series' episode list was read (3.0.1); null (or
+ *   absent) when the series was not listed
+ *
+ * @typedef {object} ListingPageInput One episode-list page the listing asked for or read
+ *   (`catalog.ListingPage`).
+ * @property {string} kind `first`, `next`, `scroll` or `fill` (the gap filling)
+ * @property {string | null} cursorAsked the request's `cursor`, null without one
+ * @property {string | null} countAsked the request's `count`, null without one
+ * @property {boolean} listed whether the answer held an episode list
+ * @property {number} items every item of the answer (any drama)
+ * @property {readonly number[]} numbers the series' episode numbers in it, as listed
+ * @property {boolean | null} hasMore
+ * @property {number | string | null} cursor the cursor the answer returned
+ *
+ * @typedef {object} ListingInput What the report reads of a series' listing (3.0.1, the series as
+ *   `app/discovery.js` built it).
+ * @property {string | null} endpoint the list request's `scheme://host/path`, never its query
+ * @property {readonly ListingPageInput[]} pages every page, in the order it came
+ * @property {number | null} totalHint TikTok's count of the series' episodes
+ * @property {number | null} itemsReceived the distinct items TikTok listed for the series
+ * @property {number} [otherItems] the drama's items received besides its episode numbers — a
+ *   trailer, a highlight, … (3.0.1, `catalog.countCheck`)
+ * @property {boolean} [uncertain] TikTok counts more than the drama certainly has (3.0.1,
+ *   `catalog.countCheck`): its count may include the other items, or episodes may be missing
+ * @property {number} episodesListed the episodes the list holds (one per number)
+ * @property {readonly number[]} missingNumbers the numbers the list still lacks
+ * @property {string | null} earlyEnd why the listing ended before TikTok said the list was over
+ * @property {readonly {reason: string, itemId: string | null}[]} skippedItems the items DramaFetch
+ *   could not read, with their reasons
+ * @property {readonly string[]} warnings the list's warnings
+ * @property {boolean} incomplete the list itself is short — a number missing, an early end short of
+ *   TikTok's count, or (3.0.1) TikTok counting more than the drama certainly has
+ *   (`report.listIncomplete`): the report is written even when every row downloaded
  *
  * @typedef {object} JobInput The job as its report records it.
  * @property {string} kind
@@ -213,22 +282,27 @@ export const LOCKED_RAW_KEPT = 3;
 /**
  * The rows of one series as the report reads them, and nothing more: `raw` only for the rows it
  * describes (every status but the downloaded ones) — of the `skipped-locked` ones the first
- * {@link LOCKED_RAW_KEPT} by number — and for its reference row (the first `done`, else the
- * first `skipped-exists`); `trace` only for the rows it describes. {@link buildReport} applies it
- * to whatever it is given, so the rows may be reduced as soon as a series is done: the report is
- * the same.
+ * {@link LOCKED_RAW_KEPT} by number, and (3.0.1) of the free ones DramaFetch only guessed were
+ * locked (`guessedLock`) the first {@link LOCKED_RAW_KEPT} too, apart: their items are the evidence
+ * that settles the guess — and for its reference row (the first `done`, else the first
+ * `skipped-exists`); `trace` only for the rows it describes. {@link buildReport} applies it to
+ * whatever it is given, so the rows may be reduced as soon as a series is done: the report is the
+ * same.
  * @param {readonly EpisodeInput[]} episodes every result row of the run, in order
  * @returns {EpisodeInput[]}
  */
 export function slimRows(episodes) {
   const reference = referenceRow(episodes);
-  const lockedWithRaw = new Set(
-    episodes
-      .filter((episode) => episode.status === SKIPPED_LOCKED)
-      .map((episode) => episode.number)
-      .sort((a, b) => a - b)
-      .slice(0, LOCKED_RAW_KEPT),
-  );
+  /** @param {boolean} guessed @returns {Set<number>} */
+  const firstLocked = (guessed) =>
+    new Set(
+      episodes
+        .filter((episode) => episode.status === SKIPPED_LOCKED && (episode.guessedLock === true) === guessed)
+        .map((episode) => episode.number)
+        .sort((a, b) => a - b)
+        .slice(0, LOCKED_RAW_KEPT),
+    );
+  const lockedWithRaw = new Set([...firstLocked(false), ...firstLocked(true)]);
   return episodes.map((episode) => {
     const described = !DOWNLOADED_STATUSES.has(episode.status);
     const keepsRaw = described ? episode.status !== SKIPPED_LOCKED || lockedWithRaw.has(episode.number) : episode === reference;
@@ -257,6 +331,7 @@ export function probableCause(row, _trace) {
   if (status === FAILED_BLOCKED) return BLOCKED_CAUSE;
   if (status === FAILED_LOGIN) return LOGIN_CAUSE;
   if (message.includes(DRM_MARK)) return DRM_CAUSE;
+  if (status === SKIPPED_LOCKED && row.guessedLock === true) return `${GUESSED_LOCKED_CAUSE_PREFIX}${hints || "no clue"}${GUESSED_LOCKED_CAUSE_SUFFIX}`;
   if (status === SKIPPED_LOCKED) return `${LOCKED_CAUSE_PREFIX}${hints || "no clue"}${LOCKED_CAUSE_SUFFIX}`;
   if (message.startsWith(INCOMPLETE_PREFIX)) {
     const reason = message.slice(INCOMPLETE_PREFIX.length);
@@ -276,6 +351,7 @@ export function probableCause(row, _trace) {
     if (truncated !== null) return `${CUT_SHORT_CAUSE_PREFIX}${truncated[1]}${CUT_SHORT_CAUSE_SUFFIX}`;
     return `${INVALID_FILE_CAUSE_PREFIX}${reason}${INVALID_FILE_CAUSE_SUFFIX}`;
   }
+  if (status === FAILED_UNAVAILABLE && message.startsWith(NOT_LISTED_PREFIX)) return NOT_LISTED_CAUSE;
   if (status === FAILED_UNAVAILABLE) return `${UNAVAILABLE_CAUSE_PREFIX}${message}${UNAVAILABLE_CAUSE_SUFFIX}`;
   // the downloader's own failures already start with the prefix: never `download failed: download failed: …`
   const rest = message.startsWith(FAILED_CAUSE_PREFIX) ? message.slice(FAILED_CAUSE_PREFIX.length) : message;
@@ -293,12 +369,69 @@ function isFailure(status) {
 }
 
 /**
- * Whether any row of any series failed: the report is built (and saved) only then.
+ * Whether any row of any series did not download — a failure, or (3.0.1) a free episode DramaFetch
+ * only guessed was locked (`guessedLock`) — or (3.0.1) the episode list of one is itself short (its
+ * `listing.incomplete`: a number missing, or an early end short of TikTok's count): the report is
+ * built (and saved) only then.
  * @param {readonly SeriesInput[]} series
  * @returns {boolean}
  */
 export function hasFailures(series) {
-  return series.some((input) => input.episodes.some((episode) => isFailure(episode.status)));
+  return series.some(
+    (input) =>
+      input.listing?.incomplete === true ||
+      input.episodes.some((episode) => isFailure(episode.status) || (episode.status === SKIPPED_LOCKED && episode.guessedLock === true)),
+  );
+}
+
+/**
+ * `url` as the report may hold it: its `scheme://host/path`, the query and the fragment (TikTok
+ * signs the query) and any `user:password@` dropped; null for nothing.
+ * @param {string | null} url
+ * @returns {string | null}
+ */
+function bareUrl(url) {
+  if (url === null || url === "") return null;
+  const path = url.split(/[?#]/, 1)[0] ?? "";
+  return path.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1");
+}
+
+/**
+ * The report's `listing` section of one series (3.0.1, the owner's report of 2026-11-27: “que cuente
+ * y se dé cuenta si falta un episodio”): how its episode list was read — the list request's
+ * `scheme://host/path` (never its query: TikTok signs it), TikTok's count, the items received, the
+ * episodes listed, the numbers still missing, why the listing ended early, every page asked (its
+ * `cursor` and `count`, the items it brought, the series' numbers among them, `hasMore` and the
+ * cursor it returned), how many of them the gap filling asked for, the items DramaFetch could not
+ * read with their reasons, the warnings. No URL with a query, no cookie, no signed parameter.
+ * @param {ListingInput} listing
+ * @returns {Record<string, unknown>}
+ */
+export function listingSection(listing) {
+  return {
+    endpoint: bareUrl(listing.endpoint),
+    tiktok_count: listing.totalHint,
+    items_received: listing.itemsReceived,
+    other_items: listing.otherItems ?? 0,
+    uncertain: listing.uncertain ?? false,
+    episodes_listed: listing.episodesListed,
+    missing_numbers: [...listing.missingNumbers],
+    ended_early: listing.earlyEnd,
+    incomplete: listing.incomplete,
+    fill_requests: listing.pages.filter((page) => page.kind === "fill").length,
+    pages: listing.pages.map((page) => ({
+      kind: page.kind,
+      cursor_asked: page.cursorAsked,
+      count_asked: page.countAsked,
+      listed: page.listed,
+      items: page.items,
+      numbers: [...page.numbers],
+      has_more: page.hasMore,
+      cursor: page.cursor,
+    })),
+    skipped_items: listing.skippedItems.map((item) => ({ reason: item.reason, item_id: item.itemId })),
+    warnings: [...listing.warnings],
+  };
 }
 
 /**
@@ -322,6 +455,7 @@ function causeRow(episode) {
     lockHints: episode.lockHints,
     drm: episode.drm,
     durationS: episode.durationS,
+    guessedLock: episode.guessedLock === true,
   };
 }
 
@@ -341,6 +475,7 @@ function notDownloadedEntry(episode) {
     paid: episode.paid,
     drm: episode.drm,
     lock_hints: [...episode.lockHints],
+    guessed_lock: episode.guessedLock === true, // 3.0.1
     quality_hint: episode.qualityHint,
     status: episode.status,
     message: episode.message,
@@ -377,7 +512,9 @@ function fieldOf(dict, key) {
  * The digest of one listed episode (snake_case): what the list said of it and the fields the
  * SHORT-HEADER rule and the short-served check read — `video.duration`, `music.duration`,
  * `music.original`, `video.size`, `video.bitrateInfo[0].Bitrate`, `dramaInfo.DramaVideoData.
- * IsPreview` / `PreviewType` —, null when absent; no URL, nothing else.
+ * IsPreview` / `PreviewType` —, since 3.0.1 whether DramaFetch only guessed it was locked
+ * (`guessed_lock`) and the sound's `music.id` and `music.title` (what tells the episode's own sound
+ * from another; a number id as its digits), null when absent; no URL, nothing else.
  * @param {ListedEpisode} episode
  * @returns {Record<string, unknown>}
  */
@@ -389,11 +526,16 @@ export function digestEntry(episode) {
   const first = Array.isArray(bitrateInfo) ? bitrateInfo[0] : undefined;
   const videoData = fieldOf(fieldOf(raw, "dramaInfo"), "DramaVideoData");
   const original = fieldOf(music, "original");
+  const musicId = fieldOf(music, "id");
+  const musicTitle = fieldOf(music, "title");
   return {
     number: episode.number,
     access: episode.access,
     lock_hints: [...episode.lockHints],
+    guessed_lock: episode.guessedLock === true,
     duration_s: numberOrNull(fieldOf(video, "duration")) ?? episode.durationS,
+    music_id: typeof musicId === "string" ? musicId : typeof musicId === "number" && Number.isFinite(musicId) ? String(musicId) : null,
+    music_title: typeof musicTitle === "string" ? musicTitle : null,
     music_duration_s: numberOrNull(fieldOf(music, "duration")),
     music_original: typeof original === "boolean" ? original : null,
     size: numberOrNull(fieldOf(video, "size")),
@@ -438,8 +580,8 @@ function referenceEntry(episodes) {
  * probable cause, its attempts and re-discoveries and its raw list item (of a series' locked rows
  * only the first {@link LOCKED_RAW_KEPT}: {@link slimRows}); one downloaded row for comparison;
  * and the digest of every LISTED episode ({@link digestEntry}; null when the series was not
- * listed). The `summary` has one line per such row, series-prefixed when the run had several
- * series.
+ * listed), and how its list was read ({@link listingSection}; null when it was not listed). The
+ * `summary` has one line per such row, series-prefixed when the run had several series.
  * @param {ReportInput} input
  * @returns {Record<string, unknown>}
  */
@@ -470,6 +612,7 @@ export function buildReport(input) {
       not_downloaded: notDownloaded,
       reference: referenceEntry(rows),
       episodes_digest: run.episodesDigest !== undefined ? run.episodesDigest : (run.listedEpisodes?.map(digestEntry) ?? null),
+      listing: run.listing === undefined || run.listing === null ? null : listingSection(run.listing),
     };
   });
   const job = input.job;

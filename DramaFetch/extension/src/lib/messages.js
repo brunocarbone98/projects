@@ -86,6 +86,27 @@ export const LIST_RATE_LIMIT_MESSAGE =
   "before trying again";
 /** Message of the rows of an episode the state knows to be on disk (`engine.MANIFEST_SKIP_PREFIX`). */
 export const MANIFEST_SKIP_PREFIX = "already downloaded (manifest): ";
+/**
+ * Every row of an episode TikTok's list lacks starts with this (`models.NOT_LISTED_PREFIX`; 3.0.1,
+ * the owner's report of 2026-11-27: an episode missing from the list gets a row of its own, never
+ * silence): `failed-unavailable`, made without a request (`report.notListedResults`), never
+ * recorded in the state, never counted in the failure streak; the report counts it as missing from
+ * TikTok's list (a gap), not as a failed download. The tab's **Retry**, the alert's and the
+ * automatic retry take it like a plain failure: a fresh listing, then that number.
+ */
+export const NOT_LISTED_PREFIX = "not in TikTok's list";
+/** The row of a number a whole series' listing lacks once its gap filling is over (`models.NOT_LISTED_MESSAGE`). */
+export const NOT_LISTED_MESSAGE = NOT_LISTED_PREFIX;
+/** The same, past the highest number listed when the listing ended early (`models.NOT_LISTED_EARLY_END_MESSAGE`). */
+export const NOT_LISTED_EARLY_END_MESSAGE = `${NOT_LISTED_PREFIX}: it ended early`;
+/** The row of a number a selection wanted that its fresh list does not hold (`models.NOT_LISTED_AGAIN_MESSAGE`). */
+export const NOT_LISTED_AGAIN_MESSAGE = `${NOT_LISTED_PREFIX} this time`;
+/**
+ * How an incomplete report line says the listing ended before TikTok said the list was over
+ * (`engine.ENDED_EARLY_TEXT`): `TikTok's list ended early: episodes 61, 62 not received`, or
+ * `TikTok's list ended early after episode 60` when TikTok's count is unknown.
+ */
+export const ENDED_EARLY_TEXT = "TikTok's list ended early";
 /** Every result written for an episode a run gave up on starts with this (`engine.STOPPED_PREFIX`). */
 export const STOPPED_PREFIX = "stopped: ";
 /** Every series a stop left untouched starts its error with this (`web.jobs.NOT_STARTED_PREFIX`). */

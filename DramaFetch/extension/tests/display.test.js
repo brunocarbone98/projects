@@ -9,7 +9,18 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { NO_PLAY_ADDRESS, SHORT_HEADER_HINT_PREFIX, catalogWarnings, makeEpisode } from "../src/lib/catalog.js";
+import {
+  LEFT_OUT_REASONS,
+  NO_PLAY_ADDRESS,
+  SHORT_HEADER_HINT_PREFIX,
+  SKIP_HIGHLIGHT,
+  SKIP_NO_ID,
+  SKIP_NO_NUMBER,
+  SKIP_OTHER_DRAMA,
+  catalogWarnings,
+  makeEpisode,
+  uncertainText,
+} from "../src/lib/catalog.js";
 import { EXTENSION_LIFT_TEXT, cooldownMessage, cooldownStopReason, cooldownSummary, makeCooldown } from "../src/lib/cooldown.js";
 import { DEFAULT_LABELS, STATUS_LABELS, displayLanguageOf, displayText, formatDuration, pauseLine, statusLabel } from "../src/lib/display.js";
 import * as messages from "../src/lib/messages.js";
@@ -35,6 +46,7 @@ import {
   drmMemorySkip,
   lockedResult,
   manifestSkip,
+  notListedResults,
   notStartedMessage,
   reportLine,
   seriesReport,
@@ -232,10 +244,22 @@ function reportLines() {
   lines.push(reportLine(seriesReport(series(four), [row(four[0], "failed"), row(four[1], "failed")], { stopped: "3 consecutive failures" })));
   lines.push(reportLine(seriesReport(series(four), [], { stopped: cooldownStopReason(makeCooldown("x", "browser", { now: 1_800_000_000 }).cooldown) })));
   lines.push(reportLine(seriesReport(series(four), [row(four[0], "done"), lockedResult(four[3])])));
+  // 3.0.1: free episodes DramaFetch only guessed were locked (one, several), beside a failure
+  const notAsked = [1, 2].map((number) =>
+    makeEpisode({ number, itemId: `78${number}`, title: `Capitulo ${number}`, seriesId: SERIES_ID, seriesName: SERIES_NAME, access: "locked", lockHints: [NO_PLAY_ADDRESS], guessedLock: true }),
+  );
+  lines.push(reportLine(seriesReport(series([notAsked[0], four[1]]), [lockedResult(/** @type {import("../src/lib/catalog.js").Episode} */ (notAsked[0])), row(four[1], "done")])));
+  lines.push(reportLine(seriesReport(series([...notAsked, four[2]]), [...notAsked.map(lockedResult), row(four[2], "failed", "boom")])));
   lines.push(reportLine(seriesReport(null, [], { seriesId: SERIES_ID, stopped: "login required" })));
   lines.push(reportLine(seriesReport(null, [], { seriesId: SERIES_ID, stopped: "rate limited (HTTP 429)" })));
   lines.push(reportLine(seriesReport(null, [], { seriesId: SERIES_ID, stopped: "the episode list could not be fetched" })));
   lines.push(reportLine(seriesReport(series([]), [])));
+  // 3.0.1 (D2): an uncertain list — TikTok counts more than the drama certainly has — with one other
+  // item and with several, alone and after an early end
+  const counted = { ...series(four.slice(0, 3), 4), itemsReceived: 4 };
+  lines.push(reportLine(seriesReport(counted, four.slice(0, 3).map((ep) => row(ep, "done")))));
+  const several = { ...series(four.slice(0, 2), 4), itemsReceived: 4, earlyEnd: "in-page pagination fetch returned no episode list; scrolled the page instead" };
+  lines.push(reportLine(seriesReport(several, four.slice(0, 2).map((ep) => row(ep, "done")))));
   // the complete skip, with and without locked episodes (RECHECK_HINT), at every age
   for (const [locked, age] of /** @type {const} */ ([[true, 30], [true, 600], [false, 7200], [true, 90_000]])) {
     const state = newState(SERIES_ID, SERIES_NAME);
@@ -375,9 +399,27 @@ function refusals() {
 /** @returns {string[]} the list's warnings (catalog.catalogWarnings and the discovery's) */
 function warnings() {
   const listed = [episode(2), episode(3), episode(3), episode(7), episode(8, { access: "locked" })];
+  const clip = { ...episode(2), itemId: "7699400000000000692" };
   return [
     ...catalogWarnings(listed, 9),
     ...catalogWarnings([episode(1), episode(2, { access: "locked" }), episode(3, { access: "locked" })], null),
+    // 3.0.1: every item left out for another one's number (each reason), every item that is no
+    // episode (each reason, one and several), TikTok's count against the items received
+    ...catalogWarnings([episode(1), episode(2)], 4, {
+      duplicates: LEFT_OUT_REASONS.map((why) => ({ number: 2, kept: episode(2), leftOut: clip, why })),
+      skipped: [
+        { reason: SKIP_OTHER_DRAMA, itemId: "7600000000000000077" },
+        { reason: SKIP_NO_ID, itemId: null },
+        { reason: SKIP_NO_NUMBER, itemId: "7699400000000000690" },
+        { reason: SKIP_NO_NUMBER, itemId: "7699400000000000691" },
+        // 3.0.1 (D3): a highlight no episode of its number came with
+        { reason: SKIP_HIGHLIGHT, itemId: "7699400000000000692" },
+      ],
+      itemsReceived: 3,
+    }),
+    // 3.0.1 (D2): an uncertain list, with one other item and with several
+    ...catalogWarnings([episode(1), episode(2)], 3, { itemsReceived: 3 }),
+    ...catalogWarnings([episode(1)], 1, { itemsReceived: 3 }),
     NO_CURSOR_WARNING,
     NO_LIST_WARNING,
     NOTHING_NEW_WARNING,
@@ -748,6 +790,55 @@ test("the list's warnings and the cooldown read in Spanish", () => {
   assert.match(spanish, /\(faltan 30 min\) antes de volver a contactar a TikTok — la extensión no tiene forma de levantarla antes de tiempo$/);
 });
 
+test("the list's 3.0.1 warnings read in Spanish: the item left out and why, the items DramaFetch could not read", () => {
+  const left = "7699400000009999017";
+  const kept = "769940000000001017";
+  for (const [why, spanish] of [
+    ["a highlight", "un fragmento destacado"],
+    ["locked", "bloqueado"],
+    ["shorter", "más corto"],
+    ["listed later", "listado después"],
+  ]) {
+    assert.equal(
+      es(`duplicate episode number 17: item ${left} left out (${why}), item ${kept} kept`),
+      `número de episodio repetido (17): se dejó fuera el elemento ${left} (${spanish}) y se conservó el elemento ${kept}`,
+    );
+  }
+  assert.equal(es("TikTok listed 1 item DramaFetch could not read (no episode number)"), "TikTok listó 1 elemento que DramaFetch no pudo leer (sin número de episodio)");
+  assert.equal(es("TikTok listed 2 items DramaFetch could not read (another drama's id)"), "TikTok listó 2 elementos que DramaFetch no pudo leer (id de otro drama)");
+  assert.equal(es("TikTok listed 3 items DramaFetch could not read (no id)"), "TikTok listó 3 elementos que DramaFetch no pudo leer (sin id)");
+  // 3.0.1 (D3): a highlight no episode of its number came with
+  assert.equal(
+    es("TikTok listed 1 item DramaFetch could not read (a highlight, a clip of an episode)"),
+    "TikTok listó 1 elemento que DramaFetch no pudo leer (un fragmento destacado, un clip de un episodio)",
+  );
+  // 3.0.1 (D2): an uncertain list, its warning and its line group, one other item and several
+  assert.equal(
+    es(uncertainText(66, 65, 1)),
+    "puede que la lista de TikTok esté incompleta: TikTok cuenta 66 episodios; se listaron 65 episodios y 1 elemento más " +
+      "(un tráiler o un fragmento destacado), así que DramaFetch no puede saber si falta un episodio — vuelve a pegar el drama " +
+      "más tarde para comprobarlo de nuevo",
+  );
+  assert.equal(
+    es(uncertainText(1, 1, 2)),
+    "puede que la lista de TikTok esté incompleta: TikTok cuenta 1 episodio; se listaron 1 episodio y 2 elementos más " +
+      "(tráileres o fragmentos destacados), así que DramaFetch no puede saber si falta un episodio — vuelve a pegar el drama " +
+      "más tarde para comprobarlo de nuevo",
+  );
+  assert.equal(
+    es("incomplete: 65 of 65 — TikTok's list may be incomplete: TikTok counts 66 episodes, 65 listed and 1 other item (a trailer or a highlight)"),
+    "incompleta: 65 de 65 — puede que la lista de TikTok esté incompleta: TikTok cuenta 66 episodios, 65 listados y 1 elemento más (un tráiler o un fragmento destacado)",
+  );
+  // a reason or a why no rule knows: the whole text as it is, never half translated
+  for (const odd of [
+    "TikTok listed 1 item DramaFetch could not read (an odd reason)",
+    `duplicate episode number 17: item ${left} left out (an odd reason), item ${kept} kept`,
+  ]) {
+    assert.equal(es(odd), odd);
+    assert.equal(en(odd), odd);
+  }
+});
+
 test("a count of one reads in the singular: one episode announced or listed, one minute left", () => {
   const ep = (/** @type {number} */ number) => episode(number);
   assert.deepEqual(catalogWarnings([ep(1)], 30).map(es), ["TikTok anuncia 30 episodios, 1 listado"]);
@@ -1051,4 +1142,89 @@ test("the pause line (2.0.0): its message from the pause's kind — one per kind
       assert.equal(Object.keys(entry.placeholders ?? {}).length, filled, `${language}: ${key}`);
     }
   }
+});
+
+test("3.0.1: the episodes missing from TikTok's list read in Spanish — the early end's groups of a report line, the rows of a missing number, their badge —, the numbers kept", () => {
+  const listed = [episode(1), episode(3), episode(4)];
+  /** @param {Partial<import("../src/lib/catalog.js").Series>} extra */
+  const short = (extra) => ({ ...series(listed, 6), itemsReceived: 3, ...extra });
+  const ended = short({ earlyEnd: NO_LIST_WARNING });
+  /** @type {[string, string][]} */
+  const expected = [
+    [
+      reportLine(seriesReport(ended, [row(listed[0], "done"), row(listed[1], "done"), row(listed[2], "done"), ...notListedResults(ended, [2, 5, 6])])),
+      "incompleta: 3 de 6 — falta el episodio 2 en la lista de TikTok; la lista de TikTok terminó antes de tiempo: no llegaron los episodios 5, 6",
+    ],
+    [
+      reportLine(seriesReport(short({ earlyEnd: NO_LIST_WARNING, totalHint: 5 }), [row(listed[0], "done"), row(listed[1], "done"), row(listed[2], "done")])),
+      "incompleta: 3 de 5 — falta el episodio 2 en la lista de TikTok; la lista de TikTok terminó antes de tiempo: no llegó el episodio 5",
+    ],
+    [
+      reportLine(seriesReport({ ...series([episode(1), episode(2)]), earlyEnd: NO_LIST_WARNING }, [row(episode(1), "done"), row(episode(2), "done")])),
+      "incompleta: 2 de 2 — la lista de TikTok terminó antes de tiempo, después del episodio 2",
+    ],
+    [
+      reportLine(seriesReport(short({}), [row(listed[0], "done"), row(listed[1], "failed", "boom"), row(listed[2], "done")])),
+      "incompleta: 2 de 6 — 1 fallido (3); faltan los episodios 2, 5, 6 en la lista de TikTok",
+    ],
+  ];
+  for (const [line, spanish] of expected) {
+    assert.equal(es(line), spanish, line);
+    assertSpanish(line);
+  }
+  // the rows of a missing number, the early end alone, and their badge
+  for (const [text, spanish] of /** @type {const} */ ([
+    [messages.NOT_LISTED_MESSAGE, "no está en la lista de TikTok"],
+    [messages.NOT_LISTED_EARLY_END_MESSAGE, "no está en la lista de TikTok: terminó antes de tiempo"],
+    [messages.NOT_LISTED_AGAIN_MESSAGE, "esta vez no está en la lista de TikTok"],
+    [messages.ENDED_EARLY_TEXT, "la lista de TikTok terminó antes de tiempo"],
+  ])) {
+    assert.equal(es(text), spanish);
+    assert.equal(en(text), text);
+  }
+  for (const message of [messages.NOT_LISTED_MESSAGE, messages.NOT_LISTED_EARLY_END_MESSAGE, messages.NOT_LISTED_AGAIN_MESSAGE]) {
+    assert.equal(statusLabel("failed-unavailable", { lang: "en", message }), "missing from the list");
+    assert.equal(statusLabel("failed-unavailable", { lang: "es", message }), "falta en la lista");
+  }
+  // only that status: a failed row with such words keeps its own label, and a stopped one is “stopped”
+  assert.equal(statusLabel("failed", { lang: "en", message: messages.NOT_LISTED_MESSAGE }), "failed");
+  assert.equal(statusLabel("failed-unavailable", { lang: "en", message: `stopped: ${messages.NOT_LISTED_MESSAGE}` }), "stopped");
+  assert.equal(statusLabel("failed-unavailable", { lang: "en", message: messages.UNAVAILABLE_MESSAGE }), "unavailable");
+});
+
+test("3.0.1 (§9): the free episodes DramaFetch did not ask for read in Spanish — the report line's group, one or several, beside the other groups —, their badge “not downloaded (free)”, the numbers kept", () => {
+  /** @param {number} number @param {string} hint */
+  const guessed = (number, hint) =>
+    makeEpisode({ number, itemId: `77${number}`, title: `Capitulo ${number}`, seriesId: SERIES_ID, seriesName: SERIES_NAME, access: "locked", lockHints: [hint], guessedLock: true });
+  const one = [episode(1), episode(2), guessed(3, "plays 2 s of 3 s")];
+  const several = [episode(1), guessed(2, NO_PLAY_ADDRESS), guessed(3, "plays 69 s of 106 s"), episode(4, { access: "locked" })];
+  /** @type {[string, string][]} */
+  const expected = [
+    [
+      reportLine(seriesReport(series(one), [row(one[0], "done"), row(one[1], "done"), lockedResult(one[2])])),
+      "incompleta: 2 de 3 — 1 episodio gratis sin pedir (3): la lista de TikTok lo hacía parecer bloqueado",
+    ],
+    [
+      reportLine(seriesReport(series(several), [row(several[0], "done"), lockedResult(several[1]), lockedResult(several[2]), lockedResult(several[3])])),
+      "incompleta: 1 de 4 — 1 bloqueado (4); 2 episodios gratis sin pedir (2, 3): la lista de TikTok los hacía parecer bloqueados",
+    ],
+    [
+      reportLine(seriesReport(series(several, 6), [row(several[0], "failed", "boom"), lockedResult(several[1]), lockedResult(several[2]), lockedResult(several[3])])),
+      "incompleta: 0 de 6 — 1 bloqueado (4), 1 fallido (1); 2 episodios gratis sin pedir (2, 3): la lista de TikTok los hacía parecer bloqueados; " +
+        "faltan los episodios 5, 6 en la lista de TikTok",
+    ],
+  ];
+  for (const [line, spanish] of expected) {
+    assert.equal(es(line), spanish, line);
+    assertSpanish(line);
+    assert.equal(en(line), line);
+  }
+  // the group on its own, and the row's badge: never “locked” for such a row
+  assert.equal(es("1 free episode not asked for (3): TikTok's list made it look locked"), "1 episodio gratis sin pedir (3): la lista de TikTok lo hacía parecer bloqueado");
+  assert.equal(statusLabel("skipped-locked", { lang: "en", guessed: true }), "not downloaded (free)");
+  assert.equal(statusLabel("skipped-locked", { lang: "es", guessed: true }), "no descargado (gratis)");
+  assert.equal(statusLabel("skipped-locked", { lang: "es" }), "bloqueado, omitido"); // a paid lock keeps its label
+  assert.equal(statusLabel("done", { lang: "en", guessed: true }), "downloaded"); // only for that status
+  // the row's own message (`looks locked: …`) reads as before
+  assert.equal(es(lockedResult(one[2]).message), "parece bloqueado: reproduce 2 s de 3 s");
 });

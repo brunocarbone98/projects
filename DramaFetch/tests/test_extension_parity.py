@@ -73,6 +73,9 @@ SERIES_ID = "7699393770256782354"
 SECOND_SERIES_ID = "7699393770256782399"
 PAID_SERIES_ID = "7699393770256782388"
 LIMITED_FREE_SERIES_ID = "7699393770256782366"
+#: The fifth series (3.0.1): a highlight numbered like its episode, an EpisodeNumber of 0 whose
+#: number is in dramaInfo, a trailer, another drama's item, TikTok's count in numVideos.
+HIGHLIGHT_SERIES_ID = "7699393770256782377"
 FIXTURE_PAGES = (
     ("item_list_page1.json", SERIES_ID),
     ("item_list_page2.json", SERIES_ID),
@@ -80,6 +83,8 @@ FIXTURE_PAGES = (
     ("item_list_series3_logged_in.json", PAID_SERIES_ID),
     ("item_list_series3_logged_out.json", PAID_SERIES_ID),
     ("item_list_series4_limited_free.json", LIMITED_FREE_SERIES_ID),
+    ("item_list_series5_page1.json", HIGHLIGHT_SERIES_ID),
+    ("item_list_series5_page2.json", HIGHLIGHT_SERIES_ID),
 )
 #: How many generated items the access fuzz corpus holds (the spec asks for at least 2,000).
 FUZZ_ITEMS = 3000
@@ -163,12 +168,59 @@ def js_episode(episode: Episode) -> dict[str, Any]:
         "access": episode.access,
         "paid": episode.paid,
         "drm": episode.drm,
+        "guessedLock": episode.guessed_lock,
     }
 
 
 def js_episode_in(episode: Episode) -> dict[str, Any]:
     """An episode as an argument (``raw`` is not compared, so it is not sent)."""
     return {**js_episode(episode), "raw": None}
+
+
+def js_episode_raw(episode: Episode) -> dict[str, Any]:
+    """An episode as an argument WITH its payload: the merge's highlight rule reads ``raw``."""
+    return {**js_episode(episode), "raw": episode.raw}
+
+
+def js_skipped(item: models.SkippedItem) -> dict[str, Any]:
+    return {"reason": item.reason, "itemId": item.item_id}
+
+
+def js_page_in(page: catalog.PagePayload) -> dict[str, Any]:
+    """A parsed page as ``catalog.mergePages`` takes it, its episodes with their payloads."""
+    return {
+        "episodes": [js_episode_raw(episode) for episode in page.episodes],
+        "cursor": page.cursor,
+        "hasMore": page.has_more,
+        "seenItems": page.seen_items,
+        "skippedItems": page.skipped_items,
+        "skipped": [js_skipped(item) for item in page.skipped],
+        "totalHint": page.total_hint,
+        # 3.0.1 (D4): the canonical JSON of each id-less skipped item, the merge's dedupe key
+        "skippedKeys": list(page.skipped_keys),
+    }
+
+
+def js_duplicate(duplicate: catalog.Duplicate, *, raw: bool = False) -> dict[str, Any]:
+    shape = js_episode_raw if raw else js_episode
+    return {
+        "number": duplicate.number,
+        "kept": shape(duplicate.kept),
+        "leftOut": shape(duplicate.left_out),
+        "why": duplicate.why,
+    }
+
+
+def js_listing(listing: catalog.Listing) -> dict[str, Any]:
+    return {
+        "episodes": [js_episode(episode) for episode in listing.episodes],
+        "duplicates": [js_duplicate(duplicate) for duplicate in listing.duplicates],
+        "skipped": [js_skipped(item) for item in listing.skipped],
+        "itemsReceived": listing.items_received,
+        "totalHint": listing.total_hint,
+        # 3.0.1: the numbers of the lone highlights, which the count rule reaches
+        "highlightNumbers": list(listing.highlight_numbers),
+    }
 
 
 def js_rendition(rendition: Rendition) -> dict[str, Any]:
@@ -188,6 +240,11 @@ def js_series(series: Series) -> dict[str, Any]:
         "episodes": [js_episode_in(episode) for episode in series.episodes],
         "totalHint": series.total_hint,
         "warnings": list(series.warnings),
+        # 3.0.1: what the report holds TikTok's count against, and how the listing ended
+        "itemsReceived": series.items_received,
+        "highlightNumbers": list(series.highlight_numbers),
+        "earlyEnd": series.early_end,
+        "missingNumbers": list(series.missing_numbers),
     }
 
 
@@ -220,6 +277,12 @@ def js_report(report: engine.SeriesReport) -> dict[str, Any]:
         "checkedAgoS": report.checked_ago_s,
         "unlocked": report.unlocked,
         "unlockedNumbers": list(report.unlocked_numbers),
+        "endedEarly": report.ended_early,
+        "lastListed": report.last_listed,
+        "guessedLocked": report.guessed_locked,
+        "guessedLockedNumbers": list(report.guessed_locked_numbers),
+        "uncertain": report.uncertain,
+        "otherItems": report.other_items,
     }
 
 
@@ -766,6 +829,11 @@ def test_the_shared_texts_and_constants_are_the_python_ones() -> None:
         "messages.MEDIA_RATE_LIMIT_MESSAGE": MEDIA_RATE_LIMIT_MESSAGE,
         "messages.LIST_RATE_LIMIT_MESSAGE": discovery_browser.RATE_LIMIT_MESSAGE,
         "messages.MANIFEST_SKIP_PREFIX": engine.MANIFEST_SKIP_PREFIX,
+        "messages.NOT_LISTED_PREFIX": models.NOT_LISTED_PREFIX,
+        "messages.NOT_LISTED_MESSAGE": models.NOT_LISTED_MESSAGE,
+        "messages.NOT_LISTED_EARLY_END_MESSAGE": models.NOT_LISTED_EARLY_END_MESSAGE,
+        "messages.NOT_LISTED_AGAIN_MESSAGE": models.NOT_LISTED_AGAIN_MESSAGE,
+        "messages.ENDED_EARLY_TEXT": engine.ENDED_EARLY_TEXT,
         "messages.STOPPED_PREFIX": engine.STOPPED_PREFIX,
         "messages.NOT_STARTED_PREFIX": jobs.NOT_STARTED_PREFIX,
         "messages.STATUSES": [status.value for status in DownloadStatus],
@@ -787,6 +855,18 @@ def test_the_shared_texts_and_constants_are_the_python_ones() -> None:
         "catalog.UNKNOWN_CODEC": catalog.UNKNOWN_CODEC,
         "catalog.UNKNOWN_HEIGHT": catalog.UNKNOWN_HEIGHT,
         "catalog.VIDEO_ONLY_PATH_SUFFIX": catalog.VIDEO_ONLY_PATH_SUFFIX,
+        "catalog.SKIP_OTHER_DRAMA": catalog.SKIP_OTHER_DRAMA,
+        "catalog.SKIP_NO_ID": catalog.SKIP_NO_ID,
+        "catalog.SKIP_NO_NUMBER": catalog.SKIP_NO_NUMBER,
+        "catalog.SKIP_REASONS": list(catalog.SKIP_REASONS),
+        # 3.0.1 (the lead's D2, D3): a lone highlight's reason, an uncertain list's words
+        "catalog.SKIP_HIGHLIGHT": catalog.SKIP_HIGHLIGHT,
+        "catalog.UNCERTAIN_TEXT": catalog.UNCERTAIN_TEXT,
+        "catalog.LEFT_OUT_HIGHLIGHT": catalog.LEFT_OUT_HIGHLIGHT,
+        "catalog.LEFT_OUT_LOCKED": catalog.LEFT_OUT_LOCKED,
+        "catalog.LEFT_OUT_SHORTER": catalog.LEFT_OUT_SHORTER,
+        "catalog.LEFT_OUT_LATER": catalog.LEFT_OUT_LATER,
+        "catalog.LEFT_OUT_REASONS": list(catalog.LEFT_OUT_REASONS),
         "naming.NAME_PLACEHOLDERS": list(manifest.NAME_PLACEHOLDERS),
         "naming.MAX_STEM_LEN": manifest.MAX_STEM_LEN,
         "pacing.PACE": engine.PACE,
@@ -808,9 +888,20 @@ def test_the_shared_texts_and_constants_are_the_python_ones() -> None:
         "pacing.NO_NETWORK_STATUSES": sorted(status.value for status in engine.NO_NETWORK_STATUSES),
         "pacing.PACING_DEFAULTS": js_pacing_options(DownloadOptions()),
         "report.MAX_EPISODE_NUMBER": engine.MAX_EPISODE_NUMBER,
+        "report.MAX_NOT_LISTED_ROWS": engine.MAX_NOT_LISTED_ROWS,
+        "discovery.GAP_FILL_REQUESTS": discovery_browser.GAP_FILL_REQUESTS,
+        "discovery.NO_CURSOR_WARNING": discovery_browser.NO_CURSOR_WARNING,
+        "discovery.NO_LIST_WARNING": discovery_browser.NO_LIST_WARNING,
+        "discovery.NOTHING_NEW_WARNING": discovery_browser.NOTHING_NEW_WARNING,
+        "discovery.SCROLL_ROUNDS_WITHOUT_NEWS": discovery_browser.SCROLL_ROUNDS_WITHOUT_NEWS,
+        "discovery.PAGE_COUNT": models.DiscoveryOptions().page_count,
+        "discovery.MAX_PAGES": models.DiscoveryOptions().max_pages,
         "cooldown.COOLDOWN_MINUTES": cooldown.COOLDOWN_MINUTES,
         "cooldown.COOLDOWN_SOURCES": list(cooldown.COOLDOWN_SOURCES),
         "state.STATE_VERSION": manifest.MANIFEST_VERSION,
+        # 3.0.1: the completeness rule a complete mark is written under, and the line's words
+        "state.COMPLETE_RULE": manifest.COMPLETE_RULE,
+        "report.NOT_ASKED_TEXT": engine.NOT_ASKED_TEXT,
     }
     names = list(expected)
     values = js_values([call("$const", name) for name in names])
@@ -828,18 +919,18 @@ def test_the_shared_texts_and_constants_are_the_python_ones() -> None:
 # --------------------------------------------------------------------------- catalog: access
 
 
-def python_access(item: dict[str, Any]) -> tuple[str, bool, bool, list[str]]:
-    access, paid, drm, hints = catalog.access_of(item)
-    return access, paid, drm, list(hints)
+def python_access(item: dict[str, Any]) -> tuple[str, bool, bool, list[str], bool]:
+    access, paid, drm, hints, guessed_lock = catalog.access_of(item)
+    return access, paid, drm, list(hints), guessed_lock
 
 
-def js_access(value: dict[str, Any]) -> tuple[str, bool, bool, list[str]]:
-    return value["access"], value["paid"], value["drm"], value["hints"]
+def js_access(value: dict[str, Any]) -> tuple[str, bool, bool, list[str], bool]:
+    return value["access"], value["paid"], value["drm"], value["hints"], value["guessedLock"]
 
 
 def test_access_of_matches_on_every_fixture_item() -> None:
     items = fixture_items()
-    assert len(items) == 44  # 22 items in the six fixture pages, as served and wrapped
+    assert len(items) == 60  # 30 items in the eight fixture pages, as served and wrapped
     values = js_values([call("catalog.accessOf", item) for item in items])
     assert_same(
         [
@@ -868,20 +959,115 @@ def test_access_of_matches_on_a_seeded_fuzz_corpus_that_covers_every_clue_class(
     for kind in ("drm", "entitled", "not-entitled", "viewer-lock", "ambiguous", "pricing", "free"):
         assert classes.get(kind, 0) >= 25, (kind, classes)
     decisions = [python_access(item) for item in corpus]
-    assert {access for access, _, _, _ in decisions} == {"free", "unlocked", "locked"}
-    assert sum(1 for _, _, drm, _ in decisions if drm) >= 25
-    assert sum(1 for access, paid, _, _ in decisions if access == "unlocked" and paid) >= 25
-    assert sum(1 for access, paid, _, _ in decisions if access == "locked" and paid) >= 25
-    assert sum(1 for *_, hints in decisions if catalog.NO_PLAY_ADDRESS in hints) >= 25
+    assert {access for access, *_ in decisions} == {"free", "unlocked", "locked"}
+    assert sum(1 for _, _, drm, *_ in decisions if drm) >= 25
+    assert sum(1 for access, paid, *_ in decisions if access == "unlocked" and paid) >= 25
+    assert sum(1 for access, paid, *_ in decisions if access == "locked" and paid) >= 25
+    assert sum(1 for _, _, _, hints, _ in decisions if catalog.NO_PLAY_ADDRESS in hints) >= 25
     windows = [
         hint
-        for *_, hints in decisions
+        for _, _, _, hints, _ in decisions
         for hint in hints
         if hint.startswith(catalog.SHORT_HEADER_HINT_PREFIX)
     ]
     assert len(windows) >= 25 and any("." in hint for hint in windows)  # ints and floats
-    assert sum(1 for access, paid, _, hints in decisions if access == "free" and paid) >= 20
-    assert sum(1 for *_, hints in decisions if "isLimitedFree=True" in hints) >= 10
+    assert sum(1 for access, paid, *_ in decisions if access == "free" and paid) >= 20
+    assert sum(1 for _, _, _, hints, _ in decisions if "isLimitedFree=True" in hints) >= 10
+    # 3.0.1: the guessed lock — locked only by SHORT-HEADER and/or no play address — and the
+    # locked episodes it must leave out (DRM, a price, TikTok's own lock flag) are all there
+    guessed = [decision for decision in decisions if decision[4]]
+    assert len(guessed) >= 25
+    assert all(access == "locked" and not paid and not drm for access, paid, drm, _, _ in guessed)
+    assert any(catalog.NO_PLAY_ADDRESS in hints for _, _, _, hints, _ in guessed)
+    assert any(
+        any(hint.startswith(catalog.SHORT_HEADER_HINT_PREFIX) for hint in hints)
+        for _, _, _, hints, _ in guessed
+    )
+    not_guessed = [d for d in decisions if d[0] == "locked" and not d[4]]
+    assert sum(1 for _, paid, drm, _, _ in not_guessed if not paid and not drm) >= 25  # flags
+
+
+#: A play address the access rules accept (``video.playAddr``, a real-looking signed URL).
+_PLAYABLE_URL = "https://v16-webapp-prime.tiktok.com/video/tos/x.mp4?expire=4102444800"
+
+
+def _guess_item(
+    *, drama_info: dict[str, Any] | None = None, playable: bool = True, sound: float | None = None
+) -> dict[str, Any]:
+    """One crafted item for the guessed-lock table: ``playable`` gives it a play address, ``sound``
+    an ``original`` sound of that length beside a 106 s video (69 s fires SHORT-HEADER)."""
+    video: dict[str, Any] = {"duration": 106}
+    if playable:
+        video["playAddr"] = _PLAYABLE_URL
+    item: dict[str, Any] = {"id": "7699400000000000999", "video": video}
+    if sound is not None:
+        item["music"] = {"id": "7699400000000099999", "duration": sound, "original": True}
+    if drama_info is not None:
+        item["dramaInfo"] = drama_info
+    return item
+
+
+#: ``(why, item, guessed)``: the guessed lock (3.0.1) on crafted items — locked only by DramaFetch's
+#: own structural guesses (SHORT-HEADER, no play address), never with DRM, a price or an
+#: entitlement clue, or one of TikTok's lock flags.
+GUESSED_LOCK_TABLE: tuple[tuple[str, dict[str, Any], bool], ...] = (
+    ("a short header alone", _guess_item(sound=69), True),
+    ("no play address alone", _guess_item(playable=False), True),
+    ("no video at all", {"id": "7699400000000000999"}, True),
+    ("both structural rules", _guess_item(playable=False, sound=69), True),
+    (
+        "free with conditions, short",
+        _guess_item(drama_info={"isLimitedFree": True}, sound=69),
+        True,
+    ),
+    ("an ambiguous status beside", _guess_item(drama_info={"payStatus": 1}, playable=False), True),
+    ("the free intro flag beside", _guess_item(drama_info={"IsFreeIntro": False}, sound=60), True),
+    ("a whole episode", _guess_item(sound=106), False),
+    ("a price, no address", _guess_item(drama_info={"unlockPrice": 30}, playable=False), False),
+    ("a price, short", _guess_item(drama_info={"unlockPrice": 30}, sound=69), False),
+    ("sold: isFree false, short", _guess_item(drama_info={"isFree": False}, sound=69), False),
+    ("TikTok's isLocked", _guess_item(drama_info={"isLocked": True}), False),
+    ("TikTok's needPay, no address", _guess_item(drama_info={"needPay": 1}, playable=False), False),
+    ("TikTok's lockStatus string", _guess_item(drama_info={"lockStatus": "locked"}), False),
+    (
+        "not entitled, no address",
+        _guess_item(drama_info={"isUnlocked": False}, playable=False),
+        False,
+    ),
+    ("entitled, no address", _guess_item(drama_info={"isUnlocked": True}, playable=False), False),
+    ("DRM flagged", _guess_item(drama_info={"isDrm": True}), False),
+    ("DRM flagged and short", _guess_item(drama_info={"drmType": "widevine"}, sound=69), False),
+    ("a vip episode, short", _guess_item(drama_info={"isVip": True}, sound=69), False),
+)
+
+
+def test_the_guessed_lock_matches_on_crafted_items_and_the_owners_series() -> None:
+    """3.0.1 (the owner's report of 2026-11-27): ``access_of`` / ``accessOf`` flag an episode
+    locked only by DramaFetch's own guesses the same way, on the crafted table and on the owner's
+    real shape (fixture series 4: E03's own sound lasts 2 s of 3 s, ``isLimitedFree``)."""
+    items = [item for _, item, _ in GUESSED_LOCK_TABLE]
+    values = js_values([call("catalog.accessOf", item) for item in items])
+    rows = []
+    for (why, item, guessed), value in zip(GUESSED_LOCK_TABLE, values, strict=True):
+        decision = catalog.access_of(item)
+        assert decision.guessed_lock is guessed, why
+        assert decision.access == "locked" or not guessed, why
+        rows.append((why, python_access(item), js_access(value)))
+    assert_same(rows)
+    page = json.loads((FIXTURES / "item_list_series4_limited_free.json").read_text("utf-8"))
+    parsed = catalog.parse_item_list_payload(page, LIMITED_FREE_SERIES_ID)
+    assert [episode.guessed_lock for episode in parsed.episodes] == [False, False, True]
+    assert [episode.access for episode in parsed.episodes] == ["free", "free", "locked"]
+    [js_page] = js_values(
+        [call("catalog.parseItemListPayload", page, LIMITED_FREE_SERIES_ID, omit=("raw",))]
+    )
+    assert [episode["guessedLock"] for episode in js_page["episodes"]] == [False, False, True]
+    assert_same(
+        [
+            (episode.number, js_episode(episode), js)
+            for episode, js in zip(parsed.episodes, js_page["episodes"], strict=True)
+        ]
+    )
 
 
 def test_listed_sizes_matches_on_every_fixture_item_and_on_the_fuzz_corpus() -> None:
@@ -1017,6 +1203,8 @@ def python_page(page: catalog.PagePayload) -> dict[str, Any]:
         "hasMore": page.has_more,
         "seenItems": page.seen_items,
         "skippedItems": page.skipped_items,
+        "skipped": [js_skipped(item) for item in page.skipped],
+        "totalHint": page.total_hint,
     }
 
 
@@ -1028,7 +1216,7 @@ def test_parse_item_list_payload_matches_on_every_fixture_page() -> None:
     ]
     values = js_values(
         [
-            call("catalog.parseItemListPayload", payload, sid, omit=("raw",))
+            call("catalog.parseItemListPayload", payload, sid, omit=("raw", "skippedKeys"))
             for _, payload, sid in cases
         ]
     )
@@ -1058,16 +1246,17 @@ def test_merge_episodes_and_catalog_warnings_match() -> None:
     page_sets = [[page1.episodes, page2.episodes], [page2.episodes, page1.episodes]]
     page_sets += [[rng.choice(pools) for _ in range(rng.randint(1, 3))] for _ in range(60)]
     hints = (None, 0, -2, 3, 4, 5, 9)
+    # the episodes go WITH their payloads: the merge's highlight rule reads them
     calls = [
         call(
             "catalog.mergeEpisodes",
-            [[js_episode_in(e) for e in page] for page in pages],
+            [[js_episode_raw(e) for e in page] for page in pages],
             omit=("raw",),
         )
         for pages in page_sets
     ]
     calls += [
-        call("catalog.catalogWarnings", [js_episode_in(e) for e in pool], hint)
+        call("catalog.catalogWarnings", [js_episode_raw(e) for e in pool], hint)
         for pool in pools
         for hint in hints
     ]
@@ -1121,7 +1310,14 @@ def test_parse_item_list_payload_find_item_lists_and_details_match_on_generated_
     pages = fuzz_pages(rng, fuzz_corpus())
     details: list[Any] = []
     names = ("dramaName", "title", "name")
-    totals = ("totalEpisode", "totalEpisodes", "episodeCount", "total", "episodeTotal")
+    totals = (
+        "numVideos",
+        "totalEpisode",
+        "totalEpisodes",
+        "episodeCount",
+        "total",
+        "episodeTotal",
+    )
     for _ in range(300):
         inner = {
             rng.choice((*names, *totals, "x")): rng.choice(
@@ -1141,7 +1337,10 @@ def test_parse_item_list_payload_find_item_lists_and_details_match_on_generated_
             details.append({"data": [{"detail": inner}, {"drama": {"dramaInfo": inner}}]})
         else:
             details.append(rng.choice((inner, [inner], "x", None, {"total": 4, "title": "T"})))
-    calls = [call("catalog.parseItemListPayload", page, "s", omit=("raw",)) for page in pages]
+    calls = [
+        call("catalog.parseItemListPayload", page, "s", omit=("raw", "skippedKeys"))
+        for page in pages
+    ]
     calls += [call("catalog.findItemLists", page) for page in pages]
     calls += [call("catalog.parseDetailPayload", detail) for detail in details]
     values = js_values(calls)
@@ -1166,6 +1365,693 @@ def test_parse_item_list_payload_find_item_lists_and_details_match_on_generated_
             for index, (detail, value) in enumerate(zip(details, detail_values, strict=True))
         ]
     )
+
+
+# ------------------------------------------------------------------------- catalog: the whole list
+
+#: How many generated items the listing corpus holds (3.0.1: numbers, highlights, counts, skips).
+LISTING_ITEMS = 1500
+LISTING_SEED = FUZZ_SEED + 3
+_SERIES_ID_KEYS = ("dramaID", "dramaId", "DramaID", "albumId")
+_EPISODE_NUMBER_KEYS = ("EpisodeNumber", "episodeNumber", "episode_number")
+
+
+def fuzz_listing_item(rng: random.Random, index: int) -> dict[str, Any]:
+    """One generated item for the listing rules: an id (or junk, or none); a drama id of the
+    series, of another drama or none; ``numVideos`` of every type; an ``EpisodeNumber`` that is
+    usable, junk or absent, with the other number keys behind it; TikTok's highlight marks of
+    every type, in ``DramaVideoData`` or ``dramaInfo``; a duration; a play address or none, a
+    viewer lock now and then (the access the merge prefers) — sometimes in ``itemStruct``."""
+    item: dict[str, Any] = {}
+    roll = rng.random()
+    if roll < 0.85:
+        item["id"] = f"76994000000{index:08d}"
+    elif roll < 0.9:
+        item["id"] = rng.choice([7699400 + index, f" {index} "])
+    elif roll < 0.95:
+        item["id"] = rng.choice(["", " ", None, True, 1.5])
+    if rng.random() < 0.95:
+        drama: dict[str, Any] = {}
+        roll = rng.random()
+        if roll < 0.5:
+            drama["dramaID"] = "s"
+        elif roll < 0.62:
+            drama[rng.choice(_SERIES_ID_KEYS)] = rng.choice(["other", 5, " s ", ""])
+        if rng.random() < 0.8:
+            drama["numVideos"] = rng.choice(
+                [7, 7, 12, "7", " 9 ", 0, -1, 2.5, True, None, "x", [7], "٣"]
+            )
+        video_data: dict[str, Any] = {}
+        roll = rng.random()
+        if roll < 0.7:
+            video_data["EpisodeNumber"] = rng.choice([1, 2, 3, 4, 5, 6, 2, 3, "3", " 4 "])
+        elif roll < 0.9:
+            video_data["EpisodeNumber"] = rng.choice(
+                [0, None, "", " ", "x", 2.5, -1, True, {}, [2], "²"]
+            )
+        if rng.random() < 0.15:
+            video_data[rng.choice(_EPISODE_NUMBER_KEYS[1:])] = rng.choice([4, "5", 0, None])
+        if rng.random() < 0.15:
+            drama[rng.choice(_EPISODE_NUMBER_KEYS)] = rng.choice([6, "2", 0, None, "x"])
+        marks = drama if rng.random() < 0.15 else video_data
+        if rng.random() < 0.6:
+            marks["IsHighlight"] = rng.choice(
+                [False, False, True, 1, 0, "true", "false", "0", None, {}, [1], 2.5]
+            )
+        if rng.random() < 0.6:
+            marks["LinkedEpisodeID"] = rng.choice(
+                ["0", "0", 0, "", None, " 0 ", "7699400000000000602", 7699400, True, 1.5, "00"]
+            )
+        roll = rng.random()
+        drama["DramaVideoData"] = video_data if roll < 0.92 else rng.choice(["x", None, [{}]])
+        if rng.random() < 0.1:
+            drama["isLocked"] = True
+        item["dramaInfo"] = drama if rng.random() < 0.97 else rng.choice(["x", None, [drama]])
+    video: dict[str, Any] = {}
+    if rng.random() < 0.8:
+        video["playAddr"] = rng.choice(PLAY_URLS)
+    if rng.random() < 0.9:
+        video["duration"] = rng.choice([41, 90, 98, 98, 95, None, -1, "95", 0, 2.5])
+    item["video"] = video
+    return {"itemStruct": item} if rng.random() < 0.1 else item
+
+
+def listing_corpus() -> list[dict[str, Any]]:
+    rng = random.Random(LISTING_SEED)
+    return [fuzz_listing_item(rng, index) for index in range(LISTING_ITEMS)]
+
+
+def test_skip_reason_is_highlight_item_total_hint_and_the_number_match_on_the_listing_corpus() -> (
+    None
+):
+    items = listing_corpus()
+    calls: list[dict[str, Any]] = []
+    for item in items:
+        calls += [
+            call("catalog.skipReason", item, "s"),
+            call("catalog.isHighlight", item),
+            call("catalog.itemTotalHint", item, "s"),
+            call("catalog.episodeFromItem", item, "s", omit=("raw",)),
+        ]
+    calls += [call("catalog.skipReason", junk, "s") for junk in (None, "x", 5, [])]
+    calls += [call("catalog.isHighlight", junk) for junk in (None, "x", 5, [])]
+    calls += [call("catalog.itemTotalHint", junk, "s") for junk in (None, "x", 5, [])]
+    values = js_values(calls)
+    rows = []
+    for index, item in enumerate(items):
+        episode = catalog.episode_from_item(item, "s")
+        python = [
+            catalog.skip_reason(item, "s"),
+            catalog.is_highlight(item),
+            catalog.item_total_hint(item, "s"),
+            js_episode(episode) if episode is not None else None,
+        ]
+        rows.append((index, python, values[4 * index : 4 * index + 4]))
+    assert_same(rows)
+    junk_values = values[4 * len(items) :]
+    assert junk_values == [catalog.SKIP_NO_ID] * 4 + [False] * 4 + [None] * 4
+    # the corpus reaches every rule
+    reasons = [catalog.skip_reason(item, "s") for item in items]
+    assert all(reasons.count(reason) >= 20 for reason in catalog.SKIP_REASONS)
+    assert sum(1 for item in items if catalog.is_highlight(item)) >= 150
+    assert sum(1 for item in items if catalog.item_total_hint(item, "s") is not None) >= 400
+    fell_through = [
+        item
+        for item in items
+        if isinstance(item.get("dramaInfo"), dict)
+        and isinstance(item["dramaInfo"].get("DramaVideoData"), dict)
+        and "EpisodeNumber" in item["dramaInfo"]["DramaVideoData"]
+        and catalog._as_int(item["dramaInfo"]["DramaVideoData"]["EpisodeNumber"]) in (None, 0, -1)
+        and catalog.episode_from_item(item, "s") is not None
+    ]
+    assert len(fell_through) >= 10
+
+
+def test_merge_pages_and_the_listing_warnings_match() -> None:
+    items = listing_corpus()
+    rng = random.Random(LISTING_SEED + 1)
+    payloads: list[dict[str, Any]] = []
+    start = 0
+    while start < len(items):
+        size = rng.randint(1, 6)
+        payloads.append(
+            {
+                "itemList": items[start : start + size],
+                "cursor": start + size,
+                "hasMore": start + size < len(items),
+            }
+        )
+        start += size
+    pages = [catalog.parse_item_list_payload(payload, "s") for payload in payloads]
+    fifth = [
+        catalog.parse_item_list_payload(load_fixture(f"item_list_series5_page{n}.json"), sid)
+        for n in (1, 2)
+        for sid in (HIGHLIGHT_SERIES_ID,)
+    ]
+    # 3.0.1 (D3): the fifth series with its E02 never listed — the highlight alone holds 2
+    lone = load_fixture("item_list_series5_page1.json")
+    lone["itemList"] = [i for i in lone["itemList"] if i.get("id") != "7699400000000000602"]
+    alone = [catalog.parse_item_list_payload(lone, HIGHLIGHT_SERIES_ID), fifth[1]]
+    # 3.0.1 (D4): one id-less item served on two pages (its keys reordered the second time)
+    idless = {"dramaInfo": {"dramaID": "s", "numVideos": 7, "DramaVideoData": {"EpisodeNumber": 3}}}
+    again = {"dramaInfo": {"DramaVideoData": {"EpisodeNumber": 3}, "numVideos": 7, "dramaID": "s"}}
+    twice = [
+        catalog.parse_item_list_payload({"itemList": [items[0], idless], "hasMore": True}, "s"),
+        catalog.parse_item_list_payload({"itemList": [again], "hasMore": False}, "s"),
+    ]
+
+    # 3.0.1 (D3 at the top of the list): the last episodes never listed, their highlights
+    # numbered like them — the numbers past the highest one listed are the lone highlights'
+    def numbered(number: int, *, highlight: bool = False) -> dict[str, Any]:
+        video_data: dict[str, Any] = {"EpisodeNumber": number}
+        if highlight:
+            video_data["IsHighlight"] = True
+        return {
+            "id": f"7700000000000000{(900 if highlight else 100) + number:03d}",
+            "dramaInfo": {"dramaID": "s", "DramaVideoData": video_data},
+            "video": {"duration": 41 if highlight else 90},
+        }
+
+    top_items = [numbered(1), numbered(2), numbered(3), numbered(5, highlight=True)]
+    top_items.append(numbered(6, highlight=True))
+    top = [catalog.parse_item_list_payload({"itemList": top_items, "hasMore": False}, "s")]
+    listings = [fifth, fifth[:1], fifth[::-1], [fifth[0], fifth[0]], [], alone, alone[:1], twice]
+    listings.append(top)
+    listings += [[rng.choice(pages) for _ in range(rng.randint(1, 4))] for _ in range(220)]
+    run = 0
+    while run + 4 <= len(pages) and len(listings) < 300:  # consecutive pages: a real listing
+        listings.append(pages[run : run + rng.randint(1, 4)])
+        run += 4
+    calls = [
+        call("catalog.parseItemListPayload", p, "s", omit=("raw", "skippedKeys")) for p in payloads
+    ]
+    calls += [
+        call("catalog.mergePages", [js_page_in(page) for page in listing], omit=("raw",))
+        for listing in listings
+    ]
+    expected_warnings: list[list[str]] = []
+    for listing in listings:
+        merged = catalog.merge_pages(listing)
+        received = merged.items_received
+        for total in (None, merged.total_hint, received, received + 2, max(received - 1, 1)):
+            for items_received in (received, None):
+                calls.append(
+                    call(
+                        "catalog.catalogWarnings",
+                        [js_episode_raw(e) for e in merged.episodes],
+                        total,
+                        {
+                            "duplicates": [js_duplicate(d, raw=True) for d in merged.duplicates],
+                            "skipped": [js_skipped(item) for item in merged.skipped],
+                            "itemsReceived": items_received,
+                            "highlights": list(merged.highlight_numbers),
+                        },
+                    )
+                )
+                expected_warnings.append(
+                    catalog.catalog_warnings(
+                        merged.episodes,
+                        total,
+                        duplicates=merged.duplicates,
+                        skipped=merged.skipped,
+                        items_received=items_received,
+                        highlights=merged.highlight_numbers,
+                    )
+                )
+    for listing in listings[:100]:  # a list that still holds its duplicates: the same rules
+        flat = [episode for page in listing for episode in page.episodes]
+        calls.append(call("catalog.catalogWarnings", [js_episode_raw(e) for e in flat], None))
+        expected_warnings.append(catalog.catalog_warnings(flat, None))
+    values = js_values(calls)
+    parsed = values[: len(payloads)]
+    merged_values = values[len(payloads) : len(payloads) + len(listings)]
+    warnings = values[len(payloads) + len(listings) :]
+    assert_same(
+        [
+            (index, python_page(page), value)
+            for index, (page, value) in enumerate(zip(pages, parsed, strict=True))
+        ]
+    )
+    assert_same(
+        [
+            (index, js_listing(catalog.merge_pages(listing)), value)
+            for index, (listing, value) in enumerate(zip(listings, merged_values, strict=True))
+        ]
+    )
+    assert_same(
+        [
+            (index, py, js)
+            for index, (py, js) in enumerate(zip(expected_warnings, warnings, strict=True))
+        ]
+    )
+    # the corpus reaches every rule of the merge and every warning
+    whys = {d["why"] for value in merged_values for d in value["duplicates"]}
+    assert whys == set(catalog.LEFT_OUT_REASONS)
+    texts = [text for value in warnings for text in value]
+    assert any(text.startswith("duplicate episode number ") for text in texts)
+    for reason in (*catalog.SKIP_REASONS, catalog.SKIP_HIGHLIGHT):
+        assert any(text.endswith(f"could not read ({reason})") for text in texts), reason
+    assert any(" items DramaFetch could not read " in text for text in texts)
+    assert any(text.startswith("TikTok announces ") for text in texts)
+    # 3.0.1: an uncertain list (D2), the lone highlight's number missing (D3), and an id-less item
+    # a listing served twice counted once (D4: a page repeated in a listing)
+    assert any(text.startswith(f"{catalog.UNCERTAIN_TEXT}: ") for text in texts)
+    assert merged_values[5]["skipped"][-1] == {
+        "reason": catalog.SKIP_HIGHLIGHT,
+        "itemId": "7699400000000000692",
+    }
+    assert [e["number"] for e in merged_values[5]["episodes"]] == [1, 3, 4, 5]
+    assert merged_values[5]["highlightNumbers"] == [2]
+    assert [item["itemId"] for item in merged_values[7]["skipped"]].count(None) == 1
+    # the lone highlights past the highest number listed: their numbers missing, named a gap
+    assert merged_values[8]["highlightNumbers"] == [5, 6]
+    assert [e["number"] for e in merged_values[8]["episodes"]] == [1, 2, 3]
+    assert "episodes 4-6 missing (gap)" in texts
+
+
+def test_the_canonical_item_key_makes_the_same_items_the_same_in_both() -> None:
+    """3.0.1 (the lead's D4): ``catalog.item_key`` / ``itemKey`` — what the merge dedupes id-less
+    items by — make the same items the same in both front ends (the strings may differ): the
+    listing corpus, each item again with its keys in reverse order and a whole number written as
+    a float, and some crafted ones."""
+    items: list[Any] = list(listing_corpus())
+
+    def reordered(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: reordered(value[key]) for key in reversed(list(value))}
+        if isinstance(value, list):
+            return [reordered(inner) for inner in value]
+        if isinstance(value, int) and not isinstance(value, bool) and abs(value) < 2**52:
+            return float(value)
+        return value
+
+    items += [reordered(item) for item in items[:300]]
+    items += [
+        {"a": 1, "b": [1, 2]},
+        {"b": [1.0, 2], "a": 1.0},
+        {"a": "1"},
+        {"a": True},
+        {"a": None},
+        {"a": -0.0},
+        {"a": 0},
+        {"x": "é\u2028\n"},
+        {"x": "é\u2028\n", "y": {}},
+        [],
+        {},
+        "x",
+        5,
+        None,
+    ]
+    values = js_values([call("catalog.itemKey", item) for item in items])
+    python = [catalog.item_key(item) for item in items]
+
+    def classes(keys: list[str]) -> list[int]:
+        first: dict[str, int] = {}
+        return [first.setdefault(key, index) for index, key in enumerate(keys)]
+
+    assert classes(python) == classes(values)
+    assert len(set(python)) < len(python)  # the reordered copies are the same items
+
+
+def test_the_count_rule_missing_numbers_and_the_detail_of_one_drama_match() -> None:
+    """3.0.1 (the lead's D2): ``count_check`` / ``countCheck`` — the one count rule — and the
+    numbers it names missing, on a table of listings, TikTok's counts and items received."""
+    table = [
+        (total, received)
+        for total in (None, 0, -1, 1, 5, 7, 62)
+        for received in (None, 0, 4, 5, 7, 9)
+    ]
+    number_sets: list[list[int]] = [[], [1, 2, 3], [1, 2, 3, 5, 7], [2, 4], [3, 1], [1, 9], [7]]
+    checks: list[tuple[list[int], int | None, int | None]] = [
+        (numbers, total, received) for numbers in number_sets for total, received in table
+    ]
+    # the review's cases (3.0.1, D2): (a) 66 + a trailer, E66 never listed; (b) 6 + a trailer
+    # counted 7, E04 never listed; (c) no other item, E66 never listed
+    sixty_five = list(range(1, 66))
+    checks += [(sixty_five, 66, 66), ([1, 2, 3, 5, 6], 7, 6), (sixty_five, 66, 65)]
+    calls = [call("catalog.countCheck", *check) for check in checks]
+    cases = [
+        (numbers, total, received, limit)
+        for numbers in number_sets
+        for total, received in table
+        for limit in (12, 10_000, 0)
+    ]
+    cases += [(numbers, total, received, 10_000) for numbers, total, received in checks[-3:]]
+    calls += [call("catalog.missingNumbers", *case) for case in cases]
+    rng = random.Random(LISTING_SEED + 2)
+    details: list[Any] = []
+    for _ in range(300):
+        container: dict[str, Any] = {}
+        if rng.random() < 0.7:
+            container[rng.choice(_SERIES_ID_KEYS)] = rng.choice(["s", "other", 5, None, "", " s "])
+        if rng.random() < 0.7:
+            container["dramaName"] = rng.choice(["Mine", "Other", " ", None])
+        if rng.random() < 0.8:
+            container[rng.choice(("numVideos", "totalEpisode", "total"))] = rng.choice(
+                [7, 12, "62", 0, -1, None, "x", True]
+            )
+        other = {"dramaInfo": {"dramaID": "other", "dramaName": "Other", "numVideos": 40}}
+        roll = rng.random()
+        if roll < 0.4:
+            details.append({"data": {"related": other, "dramaInfo": container}})
+        elif roll < 0.7:
+            details.append({"dramaInfo": container, "more": [other]})
+        else:
+            details.append(rng.choice([container, {"drama": container}, [other, container]]))
+    calls += [
+        call("catalog.parseDetailPayload", detail, series_id)
+        for detail in details
+        for series_id in (None, "s", "other")
+    ]
+    values = js_values(calls)
+    checked = values[: len(checks)]
+    missing = values[len(checks) : len(checks) + len(cases)]
+    detail_values = values[len(checks) + len(cases) :]
+    assert_same(
+        [
+            (
+                check,
+                catalog.count_check(*check),
+                (value["certainTop"], value["otherItems"], value["uncertain"]),
+            )
+            for check, value in zip(checks, checked, strict=True)
+        ]
+    )
+    assert any(value["uncertain"] for value in checked)
+    assert any(not value["uncertain"] and value["otherItems"] for value in checked)
+    assert [
+        [value["certainTop"], value["otherItems"], value["uncertain"]] for value in checked[-3:]
+    ] == [[65, 1, True], [6, 1, True], [66, 0, False]]
+    assert missing[-3:] == [[], [4], [66]]
+    assert_same(
+        [
+            (
+                case,
+                catalog.missing_numbers(case[0], case[1], case[2], limit=case[3]),
+                value,
+            )
+            for case, value in zip(cases, missing, strict=True)
+        ]
+    )
+    expected_details = [
+        list(catalog.parse_detail_payload(detail, series_id))
+        for detail in details
+        for series_id in (None, "s", "other")
+    ]
+    assert_same(
+        [
+            (index, py, [value["name"], value["total"]])
+            for index, (py, value) in enumerate(zip(expected_details, detail_values, strict=True))
+        ]
+    )
+    assert any(value["total"] == 40 for value in detail_values)  # a related drama's, without id
+    assert any(value["name"] == "Mine" for value in detail_values)
+
+
+def test_the_count_rule_reaches_a_lone_highlight_s_number_in_both() -> None:
+    """3.0.1 (D3 at the top of the list): a lone highlight's number (``Listing.highlight_numbers``)
+    is a number the drama has — ``count_check`` / ``countCheck``, ``missing_numbers`` /
+    ``missingNumbers`` and ``fill_target`` / ``fillTarget`` reach it, past the highest number
+    listed too —: the same answers in both front ends on a table of listings, counts, items
+    received, spans covered and highlights."""
+    sixty_five = list(range(1, 66))
+    checks: list[tuple[list[int], int | None, int | None, list[int]]] = [
+        (numbers, total, received, clips)
+        for numbers in ([], [1, 2, 3], [1, 2, 3, 5])
+        for total, received in ((None, None), (None, 5), (5, 4), (6, 5), (7, 5), (3, 4), (0, 3))
+        for clips in ([], [4], [6], [2], [4, 9])
+    ]
+    checks += [(sixty_five, 66, 66, [66]), (sixty_five, None, 66, [66]), (sixty_five, 67, 66, [66])]
+    targets = [
+        (numbers, total, received, early_end, covered, limit, clips)
+        for numbers in ([1, 2, 3], [1, 2, 3, 5])
+        for total, received in ((None, None), (None, 5), (6, 5), (7, 5))
+        for early_end in (True, False)
+        for covered in ([], [(4, None)], [(4, 6)], [(6, 6)])
+        for limit in (10_000, 5)
+        for clips in ([6], [4], [2, 8])
+    ]
+    calls = [call("catalog.countCheck", *check) for check in checks]
+    calls += [
+        call("catalog.missingNumbers", numbers, total, received, limit, clips)
+        for numbers, total, received, clips in checks
+        for limit in (10_000, 5)
+    ]
+    calls += [
+        call(
+            "catalog.fillTarget",
+            numbers,
+            total,
+            received,
+            {
+                "earlyEnd": early_end,
+                "covered": [list(span) for span in covered],
+                "limit": limit,
+                "highlights": clips,
+            },
+        )
+        for numbers, total, received, early_end, covered, limit, clips in targets
+    ]
+    values = js_values(calls)
+    checked = values[: len(checks)]
+    missing = values[len(checks) : 3 * len(checks)]
+    target_values = values[3 * len(checks) :]
+    assert_same(
+        [
+            (
+                check,
+                catalog.count_check(*check[:3], highlights=check[3]),
+                (value["certainTop"], value["otherItems"], value["uncertain"]),
+            )
+            for check, value in zip(checks, checked, strict=True)
+        ]
+    )
+    expected_missing = [
+        catalog.missing_numbers(numbers, total, received, limit=limit, highlights=clips)
+        for numbers, total, received, clips in checks
+        for limit in (10_000, 5)
+    ]
+    assert_same(
+        [
+            (index, py, js)
+            for index, (py, js) in enumerate(zip(expected_missing, missing, strict=True))
+        ]
+    )
+    expected_targets = [
+        catalog.fill_target(
+            numbers,
+            total,
+            received,
+            early_end=early_end,
+            covered=covered,
+            limit=limit,
+            highlights=clips,
+        )
+        for numbers, total, received, early_end, covered, limit, clips in targets
+    ]
+    assert_same(
+        [
+            (case, py, js)
+            for case, py, js in zip(targets, expected_targets, target_values, strict=True)
+        ]
+    )
+    # the review's case: E66 lost, its highlight listed — 66 missing, uncertain only past it
+    assert [[v["certainTop"], v["otherItems"], v["uncertain"]] for v in checked[-3:]] == [
+        [66, 1, False],
+        [66, 1, False],
+        [66, 1, True],
+    ]
+    assert missing[-6:] == [[66], [], [66], [], [66], []]  # the limit of 5 names none of them
+    assert any(value is not None and value > 5 for value in target_values)
+
+
+def test_the_gap_filling_rules_match() -> None:
+    """3.0.1: what the gap filling asks for next (``fill_target``), what an answer covered
+    (``fill_covered``), when a page says the list is over (``page_ends_list``) and the ids it adds
+    (``series_item_ids``) give the extension's answers — on pages cut from the listing corpus and
+    a few made by hand, and on a table of listings."""
+    items = listing_corpus()
+    rng = random.Random(LISTING_SEED + 3)
+    payloads: list[dict[str, Any]] = []
+    start = 0
+    while start < len(items):
+        size = rng.randint(0, 6)  # an empty page now and then
+        payloads.append(
+            {
+                "itemList": items[start : start + size],
+                "cursor": start + size,
+                "hasMore": rng.random() < 0.5,
+            }
+        )
+        start += max(size, 1)
+    other = {"id": "7699400000000000777", "dramaInfo": {"dramaID": "o", "episodeNumber": 1}}
+    idless = {"dramaInfo": {"dramaID": "s", "DramaVideoData": {"EpisodeNumber": 4}}}
+    payloads += [
+        {"itemList": [], "hasMore": False, "cursor": 9},  # an empty last page
+        {"itemList": [other], "hasMore": False},  # only another drama's item
+        {"itemList": [idless], "hasMore": False},  # only an item without an id
+        {"itemList": [other, idless], "hasMore": True},
+    ]
+    pages = [catalog.parse_item_list_payload(payload, "s") for payload in payloads]
+    cases: list[tuple[int, list[str], bool, bool]] = []
+    for index, page in enumerate(pages):
+        own = catalog.series_item_ids(page)
+        previous = catalog.series_item_ids(pages[index - 1]) if index else []
+        for seen in ([], own, own[: len(own) // 2], previous, ["7699400000000000001"]):
+            cases.append((index, seen, True, False))
+            cases.append((index, seen, True, True))  # 3.0.1 (D5): more was expected of it
+        cases.append((index, own[:1], False, False))  # an answer that holds no list ends nothing
+    covers = [
+        (index, target, count, with_page)
+        for index in range(0, len(pages), 3)
+        for target in (1, 4, 40)
+        for count in (0, 1, 10, 30)
+        for with_page in (True, False)
+    ]
+    number_sets = [[], [1, 2, 3], [1, 2, 3, 5, 7], [2, 4], [1, 9], [7], [3, 4, 5]]
+    counts = [
+        (None, None),
+        (None, 5),
+        (0, 3),
+        (7, 3),
+        (7, 7),
+        (7, 9),
+        (12, 5),
+        (62, 60),
+        (3, 5),
+        (5, 6),
+    ]
+    spans: list[list[tuple[int, int | None]]] = [
+        [],
+        [(1, None)],
+        [(4, 6)],
+        [(6, 6), (8, 10)],
+        [(2, 2)],
+        [(8, None)],
+    ]
+    targets = [
+        (numbers, total, received, early_end, covered, limit)
+        for numbers in number_sets
+        for total, received in counts
+        for early_end in (True, False)
+        for covered in spans
+        for limit in (10_000, 6, 0)
+    ]
+    # the review's cases (3.0.1, D2), as the filling meets them
+    sixty_five = list(range(1, 66))
+    review: list[tuple[list[int], int | None, int | None, bool, list[tuple[int, int | None]], int]]
+    review = [
+        (sixty_five, 66, 66, False, [], 10_000),  # (a): the page after 65, once
+        (sixty_five, 66, 66, False, [(66, None)], 10_000),
+        ([1, 2, 3, 5, 6], 7, 6, False, [], 10_000),  # (b): E04 first
+        ([1, 2, 3, 5, 6], 7, 6, False, [(4, None)], 10_000),
+        ([1, 2, 3, 5, 6], 7, 6, False, [(4, 6)], 10_000),
+        (sixty_five, 66, 65, False, [], 10_000),  # (c): E66
+    ]
+    targets += review
+    calls = [call("catalog.seriesItemIds", js_page_in(page)) for page in pages]
+    calls += [
+        call("catalog.pageEndsList", js_page_in(pages[index]), seen, listed, expected)
+        for index, seen, listed, expected in cases
+    ]
+    calls += [
+        call(
+            "catalog.fillCovered",
+            target,
+            count,
+            js_page_in(pages[index]) if with_page else None,
+        )
+        for index, target, count, with_page in covers
+    ]
+    calls += [
+        call(
+            "catalog.fillTarget",
+            numbers,
+            total,
+            received,
+            {"earlyEnd": early_end, "covered": [list(span) for span in covered], "limit": limit},
+        )
+        for numbers, total, received, early_end, covered, limit in targets
+    ]
+    values = js_values(calls)
+    ids = values[: len(pages)]
+    ends = values[len(pages) : len(pages) + len(cases)]
+    covered_values = values[len(pages) + len(cases) : len(pages) + len(cases) + len(covers)]
+    target_values = values[len(pages) + len(cases) + len(covers) :]
+    assert_same(
+        [
+            (index, catalog.series_item_ids(page), value)
+            for index, (page, value) in enumerate(zip(pages, ids, strict=True))
+        ]
+    )
+    expected_ends = [
+        catalog.page_ends_list(pages[index], seen, listed=listed, expected_more=expected)
+        for index, seen, listed, expected in cases
+    ]
+    assert_same([(case, py, js) for case, py, js in zip(cases, expected_ends, ends, strict=True)])
+    expected_covers = [
+        list(catalog.fill_covered(target, count, pages[index] if with_page else None))
+        for index, target, count, with_page in covers
+    ]
+    assert_same(
+        [
+            (case, py, js)
+            for case, py, js in zip(covers, expected_covers, covered_values, strict=True)
+        ]
+    )
+    expected_targets = [
+        catalog.fill_target(
+            numbers, total, received, early_end=early_end, covered=covered, limit=limit
+        )
+        for numbers, total, received, early_end, covered, limit in targets
+    ]
+    assert_same(
+        [
+            (case, py, js)
+            for case, py, js in zip(targets, expected_targets, target_values, strict=True)
+        ]
+    )
+    # the cases reach every rule: an empty last page, a fresh one, a repeat; each kind of span
+    assert any(ends) and not all(ends)
+    assert any(
+        end and not pages[index].episodes and not pages[index].skipped
+        for (index, _, _, _), end in zip(cases, ends, strict=True)
+    )
+    # 3.0.1 (D5): an empty last page more was expected of ends nothing
+    assert not any(
+        end and not pages[index].episodes and not pages[index].skipped
+        for (index, _, _, expected), end in zip(cases, ends, strict=True)
+        if expected
+    )
+    assert {value[1] is None for value in covered_values} == {True, False}
+    assert any(
+        value[1] not in (None, value[0] + count - 1)
+        for value, (_, _, count, _) in zip(covered_values, covers, strict=True)
+        if count > 0
+    )
+    # every rule of the target, the extension's answer named: a hole, a number up to TikTok's
+    # count past the spans covered, the episode after the highest listed once the holes are
+    # covered (an early end, no count), the limit, a count the items reach
+    answer = {
+        (tuple(numbers), total, received, early_end, tuple(covered), limit): value
+        for (numbers, total, received, early_end, covered, limit), value in zip(
+            targets, target_values, strict=True
+        )
+    }
+    seven = (1, 2, 3, 5, 7)
+    assert answer[(seven, None, None, False, (), 10_000)] == 4  # a hole
+    assert answer[(seven, 12, 5, False, ((4, 6),), 10_000)] == 8  # up to the count
+    assert answer[(seven, None, None, True, ((4, 6),), 10_000)] == 8  # after the highest
+    assert answer[(seven, None, None, False, ((4, 6),), 10_000)] is None  # no early end
+    assert answer[(seven, None, None, True, ((4, 6),), 6)] is None  # past the limit
+    # 3.0.1 (the lead's D2, changed on purpose): 9 items for TikTok's 7 no longer silence the
+    # count — 6 of them are other items, the list is uncertain: the page after 3 is asked for once
+    assert answer[((1, 2, 3), 7, 9, True, (), 10_000)] == 4
+    assert answer[((1, 2, 3), 7, 9, False, ((4, 6),), 10_000)] is None  # once
+    assert answer[((1, 2, 3), 3, 5, True, (), 10_000)] is None  # the count placed
+    assert answer[((3, 4, 5), 5, 6, False, (), 10_000)] == 1  # a hole first
+    assert answer[((), None, None, True, (), 10_000)] == 1  # nothing listed yet
+    assert target_values[-len(review) :] == [66, None, 4, None, 7, 66]
 
 
 # --------------------------------------------------------------------------- catalog: renditions
@@ -1666,7 +2552,12 @@ def test_episode_stem_matches_with_the_python_length_and_no_shortening() -> None
 
 
 def report_episode(
-    number: int, access: str = "free", *, drm: bool = False, hints: tuple[str, ...] = ()
+    number: int,
+    access: str = "free",
+    *,
+    drm: bool = False,
+    hints: tuple[str, ...] = (),
+    guessed: bool = False,
 ) -> Episode:
     paid = access == "unlocked" or "paid" in hints
     return Episode(
@@ -1679,6 +2570,7 @@ def report_episode(
         paid=paid,
         drm=drm,
         lock_hints=hints,
+        guessed_lock=guessed,
     )
 
 
@@ -1686,7 +2578,9 @@ def generated_runs(
     rng: random.Random, count: int
 ) -> list[tuple[Series | None, list[DownloadResult], dict[str, Any]]]:
     """Synthetic series and results for series_report: every status, the three accesses, a DRM
-    payload flag, gaps, announced totals, repeated rows, never-resolved series."""
+    payload flag, a free episode DramaFetch only guessed was locked (3.0.1) — skipped as locked or
+    as a DRM verdict the records remember —, gaps, announced totals, repeated rows,
+    never-resolved series."""
     statuses = list(DownloadStatus)
     runs: list[tuple[Series | None, list[DownloadResult], dict[str, Any]]] = []
     for _ in range(count):
@@ -1697,10 +2591,16 @@ def generated_runs(
             numbers = sorted(rng.sample(range(1, 16), rng.randint(0, 10)))
         episodes = []
         for number in numbers:
-            access = rng.choice(["free", "free", "unlocked", "locked"])
+            access = rng.choice(["free", "free", "unlocked", "locked", "guessed"])
+            if access == "guessed":  # 3.0.1: locked by a short header and/or no play address
+                hints: tuple[str, ...] = rng.choice(
+                    [("plays 69 s of 106 s",), (catalog.NO_PLAY_ADDRESS,)]
+                )
+                episodes.append(report_episode(number, "locked", hints=hints, guessed=True))
+                continue
             drm = access == "locked" and rng.random() < 0.3
             if drm:
-                hints: tuple[str, ...] = ("drmType=widevine",)
+                hints = ("drmType=widevine",)
             else:
                 hints = ("isLocked=True",) if access == "locked" else ()
             episodes.append(report_episode(number, access, drm=drm, hints=hints))
@@ -1719,7 +2619,13 @@ def generated_runs(
                 continue
             if rng.random() < 0.85:
                 status = rng.choice(statuses)
-                results.append(DownloadResult(episode, status, message=f"m{episode.number}"))
+                # 3.0.1: a skip of a DRM verdict the records remember is no guess
+                message = (
+                    models.DRM_REMEMBERED_MESSAGE
+                    if status is DownloadStatus.SKIPPED_LOCKED and rng.random() < 0.2
+                    else f"m{episode.number}"
+                )
+                results.append(DownloadResult(episode, status, message=message))
             if rng.random() < 0.1:
                 results.append(DownloadResult(episode, rng.choice(statuses), message="again"))
         options: dict[str, Any] = {
@@ -1775,6 +2681,11 @@ def test_series_report_report_line_and_report_to_dict_match_on_a_table_of_runs()
     assert any(
         line.startswith("incomplete: ") and "missing from TikTok's list" in line for line in lines
     )
+    # 3.0.1: the free episodes DramaFetch only guessed were locked, named apart, never complete
+    assert any("1 free episode not asked for (" in line for line in lines)
+    assert any("free episodes not asked for (" in line for line in lines)
+    assert not any("not asked for" in line for line in lines if line.startswith("complete"))
+    assert any(value["guessed_locked"] for value in values)
 
 
 def test_report_line_matches_on_the_documented_lines_and_the_complete_skip() -> None:
@@ -1876,6 +2787,30 @@ def test_report_line_matches_on_the_documented_lines_and_the_complete_skip() -> 
             checked_ago_s=3599.9999,
         ),
         replace(base, locked=12, locked_numbers=tuple(range(1, 40, 3)), complete=False),
+        # 3.0.1: a list that ended early — its holes, then what never came; or where it ended
+        replace(
+            base,
+            complete=False,
+            gaps=(2, 61, 62),
+            total=62,
+            total_hint=62,
+            ended_early=True,
+            last_listed=60,
+        ),
+        replace(base, complete=False, gaps=(5,), total=5, ended_early=True, last_listed=4),
+        replace(base, complete=False, ended_early=True, last_listed=4),
+        replace(base, complete=False, listed=0, done=0, ended_early=True, last_listed=0),
+        # 3.0.1 (the lead's D2): an uncertain list, one other item and several, after an early end
+        replace(base, complete=False, total_hint=5, uncertain=True, other_items=1),
+        replace(
+            base,
+            complete=False,
+            total_hint=7,
+            uncertain=True,
+            other_items=3,
+            ended_early=True,
+            last_listed=4,
+        ),
     ]
     values = js_values([call("report.reportLine", js_report(report)) for report in reports])
     assert_same(
@@ -1890,6 +2825,139 @@ def test_report_line_matches_on_the_documented_lines_and_the_complete_skip() -> 
         "1 locked (4)"
     )
     assert values[10].endswith(f" \u2014 {engine.RECHECK_HINT}")
+    assert values[-6].endswith(
+        "episode 2 missing from TikTok's list; TikTok's list ended early: episodes 61, 62 not "
+        "received"
+    )
+    assert values[-4].endswith("TikTok's list ended early after episode 4")
+    assert values[-2].endswith(
+        "TikTok's list may be incomplete: TikTok counts 5 episodes, 4 listed and 1 other item (a "
+        "trailer or a highlight)"
+    )
+    assert values[-1].endswith(
+        "TikTok's list ended early after episode 4; TikTok's list may be incomplete: TikTok "
+        "counts 7 episodes, 4 listed and 3 other items (trailers or highlights)"
+    )
+
+
+def listing_runs(
+    rng: random.Random, count: int
+) -> list[tuple[Series, list[DownloadResult], dict[str, Any]]]:
+    """3.0.1: series as a listing leaves them — holes, TikTok's count against the items received
+    (a trailer counted, or fewer items), an early end or none — and runs whose rows add the rows of
+    numbers the list does not hold (``engine.not_listed_results``: a whole series' missing numbers,
+    or a selection's wanted ones), with every status on the listed episodes."""
+    statuses = list(DownloadStatus)
+    runs: list[tuple[Series, list[DownloadResult], dict[str, Any]]] = []
+    for _ in range(count):
+        if rng.random() < 0.3:
+            # a list that came whole, every episode obtained: TikTok's count may include a trailer
+            # (one more item than episodes) and an early end may have been harmless
+            size = rng.randint(1, 8)
+            whole = Series("S1", "Name", [report_episode(n, "free") for n in range(1, size + 1)])
+            whole.total_hint = rng.choice([None, size, size + 1])
+            whole.items_received = whole.total_hint if whole.total_hint is not None else size
+            whole.early_end = rng.choice(
+                [None, "in-page pagination fetch returned no episode list"]
+            )
+            done = [
+                DownloadResult(episode, DownloadStatus.DONE, message="saved")
+                for episode in whole.episodes
+            ]
+            runs.append((whole, done, {"stopped": None}))
+            continue
+        numbers = sorted(rng.sample(range(1, 13), rng.randint(0, 9)))
+        episodes = [
+            report_episode(number, rng.choice(["free", "free", "unlocked"])) for number in numbers
+        ]
+        total_hint = rng.choice(
+            [None, None, 0, len(numbers), len(numbers) + 1, len(numbers) + 3, 12]
+        )
+        items_received = rng.choice(
+            [None, len(numbers), len(numbers) + 1, max(len(numbers) - 1, 0), total_hint]
+        )
+        series = Series("S1", rng.choice(["Name", None]), episodes, total_hint=total_hint)
+        series.items_received = items_received
+        series.early_end = rng.choice(
+            [None, None, "in-page pagination fetch returned no episode list"]
+        )
+        results = [
+            DownloadResult(episode, rng.choice(statuses), message=f"m{episode.number}")
+            for episode in episodes
+            if rng.random() < 0.9
+        ]
+        wanted = rng.sample(range(1, 16), rng.randint(0, 4))
+        results.extend(engine.not_listed_results(series, wanted, again=rng.random() < 0.5))
+        options: dict[str, Any] = {"stopped": rng.choice([None, None, "3 consecutive failures"])}
+        runs.append((series, results, options))
+    return runs
+
+
+def test_the_3_0_1_report_matches_on_listings_with_missing_numbers_and_early_ends() -> None:
+    """The gaps up to the highest number listed or wanted and TikTok's count held against the
+    items received, a missing number's row counted missing — never failed —, the early end, the
+    total and the line, in both front ends."""
+    rng = random.Random(FUZZ_SEED + 301)
+    runs = listing_runs(rng, 400)
+    calls = [
+        call(
+            "parity.seriesReportToDict",
+            js_series(series),
+            [js_result(r) for r in results],
+            js_report_options(options),
+        )
+        for series, results, options in runs
+    ]
+    values = js_values(calls)
+    rows = [
+        (index, engine.report_to_dict(engine.series_report(series, results, **options)), value)
+        for index, ((series, results, options), value) in enumerate(zip(runs, values, strict=True))
+    ]
+    assert_same(rows)
+    lines = [value["line"] for value in values]
+    assert any("TikTok's list ended early: episode" in line for line in lines)
+    assert any("TikTok's list ended early after episode" in line for line in lines)
+    assert any(line.startswith("complete: ") for line in lines)
+    assert any(value["ended_early"] for value in values)
+    # 3.0.1 (the lead's D2): an uncertain list, never complete
+    assert any(f"{catalog.UNCERTAIN_TEXT}: TikTok counts " in line for line in lines)
+    assert not any(value["complete"] for value in values if value["uncertain"])
+
+
+def test_not_listed_results_match() -> None:
+    """``engine.not_listed_results`` / ``report.notListedResults``: the rows of the numbers a list
+    does not hold — each once, ascending, bounded, capped —, their messages and episodes."""
+    listed = Series("S1", "Name", [report_episode(n, "free") for n in (1, 3, 4)])
+    early = Series("S1", None, [report_episode(n, "free") for n in (1, 3, 4)])
+    early.early_end = "pagination stopped at max_pages (60); the list may be incomplete"
+    empty = Series("S1", "Name", [])
+    cases: list[tuple[Series, list[int], bool]] = [
+        (listed, [2, 5, 6], False),
+        (early, [6, 2, 3, 2, 0, -1, engine.MAX_EPISODE_NUMBER + 1, 5], False),
+        (early, [2, 9, 9], True),
+        (listed, [], False),
+        (empty, [1, 2], False),
+        (empty, [3], True),
+        (listed, list(range(2, 800)), False),
+        (early, [engine.MAX_EPISODE_NUMBER], False),
+    ]
+    values = js_values(
+        [
+            call("report.notListedResults", js_series(series), numbers, {"again": again})
+            for series, numbers, again in cases
+        ]
+    )
+    rows = []
+    for index, ((series, numbers, again), value) in enumerate(zip(cases, values, strict=True)):
+        python = [js_result(r) for r in engine.not_listed_results(series, numbers, again=again)]
+        rows.append((index, python, value))
+    assert_same(rows)
+    assert len(values[6]) == engine.MAX_NOT_LISTED_ROWS
+    assert [row["message"] for row in values[1]] == [
+        models.NOT_LISTED_MESSAGE,
+        models.NOT_LISTED_EARLY_END_MESSAGE,
+        models.NOT_LISTED_EARLY_END_MESSAGE,
+    ]
 
 
 def test_batch_status_not_started_and_dedupe_match() -> None:
@@ -2567,24 +3635,26 @@ def test_the_state_follows_the_manifest_rules(tmp_path: Path) -> None:
                 n: (e.number, e.item_id, e.status, e.path, e.message)
                 for n, e in kept.entries.items()
             },
-            "complete": (kept.complete_at, kept.complete_episodes),
+            "complete": (kept.complete_at, kept.complete_episodes, kept.complete_rule),
             "doneEntries": [[n, path.name] for n, path in kept.done_entries()],
             "missingFiles": kept.missing_files(),
             "lockedNumbers": kept.locked_numbers(),
             "drmProtected": [kept.drm_protected(n) for n in numbers],
             "isDone": [kept.is_done(n) for n in numbers],
             "completeSince": kept.complete_since(),
+            "completeTrusted": kept.complete_trusted(),
         }
         state = value["state"]
         got = {
             "entries": entries_of(state["episodes"]),
-            "complete": (state["complete_at"], state["complete_episodes"]),
+            "complete": (state["complete_at"], state["complete_episodes"], state["complete_rule"]),
             "doneEntries": value["doneEntries"],
             "missingFiles": value["missingFiles"],
             "lockedNumbers": value["lockedNumbers"],
             "drmProtected": value["drmProtected"],
             "isDone": value["isDone"],
             "completeSince": value["completeSince"],
+            "completeTrusted": value["completeTrusted"],
         }
         rows.append((index, expected, got))
         # what the extension stores reads back as itself
@@ -2612,6 +3682,7 @@ def test_the_state_follows_the_manifest_rules(tmp_path: Path) -> None:
             },
             read.complete_at,
             read.complete_episodes,
+            read.complete_rule,
             read.series_name,
         )
         rows.append(
@@ -2622,11 +3693,18 @@ def test_the_state_follows_the_manifest_rules(tmp_path: Path) -> None:
                     entries_of(value["episodes"]),
                     value["complete_at"],
                     value["complete_episodes"],
+                    value["complete_rule"],
                     value["series_name"],
                 ),
             )
         )
     assert_same(rows)
+    # 3.0.1: every mark written now carries the rule in force, in both front ends
+    assert all(
+        value["state"]["complete_rule"] == manifest.COMPLETE_RULE
+        for value in values
+        if value["state"]["complete_at"]
+    )
 
 
 def test_report_rows_and_the_complete_skip_match(tmp_path: Path) -> None:
@@ -2671,6 +3749,11 @@ def test_report_rows_and_the_complete_skip_match(tmp_path: Path) -> None:
         on_disk = [n for n, _ in kept.done_entries()]
         if rng.random() < 0.8:
             kept.mark_complete(1761200000.0, rng.choice([len(on_disk), len(on_disk) + 1, 0]))
+            if rng.random() < 0.3:  # 3.0.1: a mark of 3.0.0 or earlier — no rule, never a skip
+                path = manifest.manifest_path(directory)
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data.pop("complete_rule")
+                path.write_text(json.dumps(data), encoding="utf-8")
         series = Series(series_id, f"Name {index}", episodes)
         covered = rng.sample(episodes, rng.randint(0, 3))
         results = [
@@ -2750,6 +3833,70 @@ def test_report_rows_and_the_complete_skip_match(tmp_path: Path) -> None:
         value is not None and engine.RECHECK_HINT in value["report"]["line"]
         for value in values[1::2]
     )
+
+
+def test_a_complete_mark_without_the_rule_in_force_never_skips(tmp_path: Path) -> None:
+    """3.0.1 (§10): a complete mark records the completeness rule it was written under
+    (``complete_rule``); one without it — written by 3.0.0 or earlier — or under another rule is
+    read (no error, nothing moved aside) but never skips, in either front end; an odd value is
+    forgotten like the rest of the completeness memory."""
+    out_dir = tmp_path / "out"
+    variants: list[tuple[str, Any]] = [
+        ("the rule in force", manifest.COMPLETE_RULE),
+        ("no rule (3.0.0)", "absent"),
+        ("an older rule", 1),
+        ("a later rule", manifest.COMPLETE_RULE + 1),
+        ("true", True),
+        ("a string", str(manifest.COMPLETE_RULE)),
+        ("zero", 0),
+        ("null", None),
+    ]
+    calls: list[dict[str, Any]] = []
+    cases = []
+    for index, (why, rule) in enumerate(variants):
+        series_id = f"78{index:017d}"
+        directory = out_dir / f"Name {index} [{series_id}]"
+        directory.mkdir(parents=True)
+        video = directory / "E01.mp4"
+        video.write_bytes(b"v")
+        kept = manifest.Manifest(directory, series_id, f"Name {index}")
+        episode = Episode(1, "id-1", "t1", series_id, series_name=f"Name {index}")
+        kept.record(DownloadResult(episode, DownloadStatus.DONE, path=video, message="saved"))
+        kept.mark_complete(1761200000.0, 1)
+        path = manifest.manifest_path(directory)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if rule == "absent":
+            data.pop("complete_rule")
+        else:
+            data["complete_rule"] = rule
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cases.append((why, series_id, directory, rule))
+        calls.append(
+            call(
+                "parity.completeSkip",
+                data,
+                {"seriesId": series_id, "nowS": 1761200000.0 + 3600},
+                {"$exists": ["E01.mp4"]},
+            )
+        )
+        calls.append(call("state.readState", data, series_id))
+    values = js_values(calls)
+    rows = []
+    for index, (why, series_id, directory, rule) in enumerate(cases):
+        read = manifest.read_manifest(directory, series_id)
+        assert read is not None, why  # readable, whatever the rule says
+        skipped = engine._skip_if_complete(
+            SeriesRef(series_id), DownloadOptions(out_dir=out_dir), lambda: 1761200000.0 + 3600
+        )
+        trusted = rule == manifest.COMPLETE_RULE and not isinstance(rule, bool)
+        assert (skipped is not None) is trusted, why
+        assert read.complete_trusted() is trusted, why
+        assert read.complete_at is not None and read.complete_episodes == 1, why
+        js_skip, js_state = values[index * 2], values[index * 2 + 1]
+        rows.append(((why, "skips"), skipped is not None, js_skip is not None))
+        rows.append(((why, "rule"), read.complete_rule, js_state["complete_rule"]))
+        rows.append(((why, "mark"), read.complete_at, js_state["complete_at"]))
+    assert_same(rows)
 
 
 # --------------------------------------------------------------------------- Python's text rules

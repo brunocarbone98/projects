@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -12,16 +13,20 @@ from typing import Any
 
 import pytest
 
+from dramafetch import cooldown, engine
+from dramafetch.catalog import uncertain_text
 from dramafetch.discovery import (
     AutoDiscovery,
     PlaywrightDiscovery,
     StaticHtmlDiscovery,
+    _partial,
     choose_discovery,
 )
-from dramafetch.discovery.browser import _with_query_params
+from dramafetch.discovery.browser import _build_series, _Capture, _with_query_params
 from dramafetch.discovery.static import (
     DEFAULT_CHROME_MAJOR,
     IMPERSONATED_HEADERS,
+    LACKING_WARNING,
     PARTIAL_WARNING,
     RATE_LIMIT_MESSAGE,
     _urllib_fetch,
@@ -119,12 +124,59 @@ def test_embedded_first_page_becomes_a_partial_series(item_list_pages) -> None:
     assert all(e.item_id != "7699400000000000099" for e in series.episodes)
     assert "TikTok announces 5 episodes, 3 listed" in series.warnings
     assert any(w.startswith(PARTIAL_WARNING) for w in series.warnings)
+    # 3.0.1: the embedded page's own `hasMore` is kept, and what the series lacks is in it —
+    # since the lead's decision D2 (changed on purpose) only what it certainly lacks: TikTok counts
+    # 5, three episodes and the trailer came, so E04 is missing and E05 may be the trailer
+    assert series.early_end == PARTIAL_WARNING
+    assert series.missing_numbers == [4]
+    assert uncertain_text(5, 3, 1) in series.warnings
 
     ((url, headers),) = fetch.calls
-    assert url == f"{BASE}/shortdrama/episode/{SERIES_ID}/2"
+    # 3.0.1: episode 1's page, whatever episode the reference names (2 here)
+    assert url == f"{BASE}/shortdrama/episode/{SERIES_ID}/1"
     assert "Chrome/" in headers["User-Agent"] and "Headless" not in headers["User-Agent"]
     assert headers["Accept-Language"].startswith("en-US")
     assert "Cookie" not in headers
+
+
+def test_an_embedded_first_page_that_says_tiktok_has_more_is_partial_without_a_count(
+    item_list_pages,
+) -> None:
+    """3.0.1: each embedded list is read with its own holder's `hasMore` and `cursor` — re-wrapped
+    bare, a first page that says TikTok has more passed for the whole series when no count was
+    known (no `totalEpisode`, no `numVideos`): complete, marked complete, skipped for 24 h."""
+    fetch = FakeFetch(
+        _hydration_html(_embedded([item_list_pages[0]["itemList"]], total=None, has_more=True))
+    )
+    series = StaticHtmlDiscovery(fetch=fetch).discover(SeriesRef(SERIES_ID), DiscoveryOptions())
+    assert series.total_hint is None
+    assert series.numbers == [1, 2, 3]
+    assert series.early_end == PARTIAL_WARNING
+    assert series.missing_numbers == []  # nothing to name them by
+    assert f"{PARTIAL_WARNING}; use --strategy browser for the full list" in series.warnings
+    assert series.listing is not None
+    assert series.listing.endpoint == f"{BASE}/shortdrama/episode/{SERIES_ID}/1"
+    assert [
+        (p.kind, p.cursor_asked, p.listed, p.items, p.numbers, p.has_more, p.cursor)
+        for p in series.listing.pages
+    ] == [("embedded", None, True, 4, (1, 2, 3), True, None)]
+
+
+def test_a_hole_in_the_embedded_list_is_partial_too(item_list_pages) -> None:
+    """3.0.1: a number missing below the highest one listed makes the static result partial (the
+    `auto` strategy then lets the browser list it, and ask again for what it lacks)."""
+    without_two = [
+        item for item in item_list_pages[0]["itemList"] if item["id"] != "7699400000000000002"
+    ]
+    fetch = FakeFetch(_hydration_html(_embedded([without_two], total=None, has_more=False)))
+    series = StaticHtmlDiscovery(fetch=fetch).discover(SeriesRef(SERIES_ID), DiscoveryOptions())
+    assert series.numbers == [1, 3]
+    assert (series.missing_numbers, series.early_end) == ([2], None)
+    assert "episode 2 missing (gap)" in series.warnings
+    # 3.0.1 (changed on purpose): the page's list is whole, so it lacks the episode — never "only
+    # the embedded first page was read"
+    assert f"{LACKING_WARNING}; use --strategy browser to ask TikTok again" in series.warnings
+    assert not any(w.startswith(PARTIAL_WARNING) for w in series.warnings)
 
 
 def test_full_embedded_list_has_no_partial_warning(item_list_pages) -> None:
@@ -138,6 +190,7 @@ def test_full_embedded_list_has_no_partial_warning(item_list_pages) -> None:
     assert "isFree=false" in series.episode(5).lock_hints
     assert not any(w.startswith(PARTIAL_WARNING) for w in series.warnings)
     assert not any("gap" in w or "duplicate" in w for w in series.warnings)
+    assert (series.missing_numbers, series.early_end) == ([], None)
 
 
 def test_series_name_falls_back_to_the_episodes(item_list_pages) -> None:
@@ -147,6 +200,113 @@ def test_series_name_falls_back_to_the_episodes(item_list_pages) -> None:
     )
     assert series.name == SERIES_NAME
     assert series.total_hint is None
+
+
+FIFTH_SERIES_ID = "7699393770256782377"
+FIXTURES = Path(__file__).parent / "fixtures"
+#: The fifth series' duplicate and skipped items, as the warnings name them.
+FIFTH_WARNINGS = [
+    "duplicate episode number 2: item 7699400000000000692 left out (a highlight), "
+    "item 7699400000000000602 kept",
+    "TikTok listed 1 item DramaFetch could not read (another drama's id)",
+    "TikTok listed 1 item DramaFetch could not read (no episode number)",
+]
+
+
+def _fifth_items(*names: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for name in names:
+        page = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+        items.extend(page["itemList"])
+    return items
+
+
+def test_static_reads_tiktok_s_count_from_the_items_and_holds_the_items_received_against_it() -> (
+    None
+):
+    """No detail total: the items' `numVideos` (7) is the count — never another drama's (12) —
+    and the five episodes, the highlight and the trailer meet it; the highlight never takes
+    episode 2; the skipped items keep their reasons. 3.0.1, the lead's decision D2 (changed on
+    purpose): whether TikTok counts the highlight and the trailer is not known — no number is
+    named missing, but the list is uncertain: said, and partial for ``auto``, whose browser listing
+    asks once more."""
+    every = _fifth_items("item_list_series5_page1.json", "item_list_series5_page2.json")
+    # a related drama's object first in the page: its name and count are not this drama's
+    related = {
+        "dramaInfo": {"dramaID": "7600000000000000000", "dramaName": "Other", "numVideos": 12}
+    }
+    payload = {"recommended": related, "itemList": every}
+    series = StaticHtmlDiscovery(fetch=FakeFetch(_hydration_html(payload))).discover(
+        SeriesRef(FIFTH_SERIES_ID), DiscoveryOptions()
+    )
+    assert series.name == "Highlight Drama"
+    assert series.total_hint == 7
+    assert series.numbers == [1, 2, 3, 4, 5]
+    episode_2 = series.episode(2)
+    assert episode_2 is not None and episode_2.item_id == "7699400000000000602"
+    assert series.warnings == [
+        *FIFTH_WARNINGS,
+        "TikTok announces 7 episodes, 5 listed",
+        uncertain_text(7, 5, 2),
+    ]
+    assert (series.missing_numbers, series.early_end) == ([], None)
+    assert _partial(series)  # `auto` completes it with the browser
+    assert [(item.reason, item.item_id) for item in series.skipped_items] == [
+        ("no episode number", "7699400000000000690"),
+        ("another drama's id", "7699400000000000778"),
+    ]
+    assert series.items_received == 7
+
+    # only the first page embedded: five of TikTok's seven items — partial, said with the count
+    first = _fifth_items("item_list_series5_page1.json")
+    series = StaticHtmlDiscovery(fetch=FakeFetch(_hydration_html({"itemList": first}))).discover(
+        SeriesRef(FIFTH_SERIES_ID), DiscoveryOptions()
+    )
+    assert series.total_hint == 7 and series.items_received == 5
+    assert series.numbers == [1, 2, 3]
+    assert "TikTok announces 7 episodes, 3 listed" in series.warnings
+    # 3.0.1 (changed on purpose): no `hasMore` reached this page, so to the static strategy its
+    # list is whole and lacks what TikTok's count places past it — `auto` lists it again
+    assert series.missing_numbers == [4, 5]
+    assert f"{LACKING_WARNING}; use --strategy browser to ask TikTok again" in series.warnings
+    assert _partial(series)
+
+
+def test_the_browser_build_reads_the_items_count_when_the_detail_gives_none() -> None:
+    """`browser._build_series`: the pages merged by the catalog's rules, the detail's count when
+    it has one (a related drama's never), else the items' `numVideos`."""
+    pages = [
+        json.loads((FIXTURES / f"item_list_series5_page{n}.json").read_text(encoding="utf-8"))
+        for n in (1, 2)
+    ]
+    capture = _Capture(series_id=FIFTH_SERIES_ID)
+    for page in pages:
+        capture.ingest("https://www.tiktok.com/api/drama/episode/item_list/?cursor=0", page)
+    ref = SeriesRef(FIFTH_SERIES_ID)
+    series = _build_series(ref, DiscoveryOptions(), capture)
+    assert (series.name, series.total_hint, series.items_received) == ("Highlight Drama", 7, 7)
+    assert series.numbers == [1, 2, 3, 4, 5]
+    # 3.0.1, the lead's decision D2 (changed on purpose): TikTok's 7 may count the highlight and
+    # the trailer — the list is uncertain and says so
+    assert series.warnings == [
+        *FIFTH_WARNINGS,
+        "TikTok announces 7 episodes, 5 listed",
+        uncertain_text(7, 5, 2),
+    ]
+    assert len(series.skipped_items) == 2
+    # a detail that names its count wins; a related drama's object in it gives nothing
+    capture.detail = {
+        "related": [{"dramaInfo": {"dramaID": "1", "dramaName": "Other", "numVideos": 40}}],
+        "dramaInfo": {"dramaID": FIFTH_SERIES_ID, "dramaName": "Detail Name", "numVideos": 9},
+    }
+    series = _build_series(ref, DiscoveryOptions(), capture)
+    assert (series.name, series.total_hint) == ("Detail Name", 9)
+    assert series.warnings == [
+        *FIFTH_WARNINGS,
+        "TikTok announces 9 episodes, 5 listed",
+        uncertain_text(9, 5, 2),
+    ]
+    assert series.missing_numbers == [6, 7]  # 9 less the 2 other items: 6 and 7, not 8 and 9
 
 
 def test_sigi_state_script_is_accepted_too(item_list_pages) -> None:
@@ -496,6 +656,141 @@ def test_auto_returns_the_partial_static_result_when_the_browser_fails_too() -> 
     assert (
         "browser strategy could not complete the list (no episode list arrived)"
         in series.warnings[1]
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ChallengeError("captcha"), RateLimitedError("HTTP 429 on the episode list")],
+    ids=["a captcha", "an HTTP 429"],
+)
+def test_auto_stops_on_a_refusal_the_browser_meets_while_completing_a_partial_result(
+    error: Exception,
+) -> None:
+    """3.0.1 (the review's L1): a 429 or a captcha the browser meets while it completes a partial
+    static result — its pagination or its gap filling — is a refusal, as it is on the static path:
+    it propagates (a stop, and through ``engine.resolve`` the 30-minute cooldown), never a warning
+    over the embedded first page. A login wall keeps its pinned swallow (above)."""
+    partial = _series([1, 2], [PARTIAL_WARNING])
+    partial.early_end = PARTIAL_WARNING
+    browser = RecordingDiscovery(error=error)
+    with pytest.raises(type(error)):
+        AutoDiscovery(static=RecordingDiscovery(result=partial), browser=browser).discover(
+            SeriesRef(SERIES_ID), DiscoveryOptions()
+        )
+    assert browser.calls == 1
+    # through the engine's resolve, as a run lists a series: the cooldown, source discovery
+    assert cooldown.active_cooldown() is None
+    again = AutoDiscovery(static=RecordingDiscovery(result=partial), browser=browser)
+    with pytest.raises(type(error)):
+        engine.resolve(SeriesRef(SERIES_ID), DiscoveryOptions(), again)
+    recorded = cooldown.active_cooldown()
+    assert recorded is not None
+    assert (recorded.reason, recorded.source) == (str(error), "discovery")
+
+
+@pytest.mark.parametrize(
+    "lacking",
+    [{"missing_numbers": [3]}, {"early_end": PARTIAL_WARNING}],
+    ids=["a missing number", "an early end"],
+)
+def test_auto_completes_a_static_result_that_lacks_part_of_the_list(
+    lacking: dict[str, Any],
+) -> None:
+    """3.0.1: what the static result lacks — a missing number, an early end — makes it partial on
+    its own, warning or not: the browser lists the series (and asks again for what it lacks)."""
+    partial = _series([1, 2, 4])
+    for name, value in lacking.items():
+        setattr(partial, name, value)
+    browser = RecordingDiscovery(result=_series([1, 2, 3, 4]))
+    series = AutoDiscovery(static=RecordingDiscovery(result=partial), browser=browser).discover(
+        SeriesRef(SERIES_ID), DiscoveryOptions()
+    )
+    assert browser.calls == 1
+    assert series.numbers == [1, 2, 3, 4]
+
+
+def test_auto_completes_an_uncertain_static_result_with_the_browser() -> None:
+    """3.0.1 (the lead's D2): a static result TikTok counts more items of than it can place — its
+    count may include the trailer it lists — is partial: the static strategy asks nothing, so the
+    browser lists the series and its gap filling asks once for the page after the highest number;
+    a count everything listed accounts for keeps the static result. The warnings say what
+    happened — the page's list was whole, TikTok counts more —, never that the static strategy saw
+    only the first page; when the browser fails, the list the page embeds is shown."""
+    uncertain = _series([1, 2, 3])
+    uncertain.total_hint, uncertain.items_received = 4, 4  # three episodes and a trailer
+    browser = RecordingDiscovery(result=_series([1, 2, 3, 4]))
+    series = AutoDiscovery(static=RecordingDiscovery(result=uncertain), browser=browser).discover(
+        SeriesRef(SERIES_ID), DiscoveryOptions()
+    )
+    assert (browser.calls, series.numbers) == (1, [1, 2, 3, 4])
+    assert series.warnings[0] == (
+        "static strategy: TikTok counts more episodes than the page lists; listed again with the "
+        "browser"
+    )
+    whole = _series([1, 2, 3])
+    whole.total_hint, whole.items_received = 4, 4
+    failed = RecordingDiscovery(error=LoginRequiredError("no episode list arrived"))
+    series = AutoDiscovery(static=RecordingDiscovery(result=whole), browser=failed).discover(
+        SeriesRef(SERIES_ID), DiscoveryOptions()
+    )
+    assert (failed.calls, series.numbers) == (1, [1, 2, 3])
+    assert series.warnings[-1] == (
+        "browser strategy could not list it again (no episode list arrived); showing the list the "
+        "page embeds"
+    )
+    placed = _series([1, 2, 3])
+    placed.total_hint, placed.items_received = 3, 4
+    kept = RecordingDiscovery(result=_series([1, 2, 3, 4]))
+    series = AutoDiscovery(static=RecordingDiscovery(result=placed), browser=kept).discover(
+        SeriesRef(SERIES_ID), DiscoveryOptions()
+    )
+    assert (kept.calls, series.numbers) == (0, [1, 2, 3])
+
+
+def test_a_whole_embedded_list_lacking_an_episode_says_so_and_auto_lists_it_again(
+    item_list_pages,
+) -> None:
+    """3.0.1 (the owner's report of 2026-11-27): a list the page embeds whole (no ``hasMore``)
+    that lacks an episode — here E04, which TikTok left out while listing its highlight clip —
+    names the episode missing (``Series.highlight_numbers`` carried: a ``--strategy static`` run
+    never calls the drama complete) and says the page's list lacks it, never that only the first
+    page was read; `auto` lists the drama again with the browser, and when the browser fails it
+    shows the list the page embeds."""
+    items = list(item_list_pages[0]["itemList"])
+    clip = copy.deepcopy(next(item for item in items if item["id"] == "7699400000000000003"))
+    clip["id"] = "7699400000000000904"
+    clip["dramaInfo"]["DramaVideoData"]["EpisodeNumber"] = 4
+    clip["dramaInfo"]["DramaVideoData"]["IsHighlight"] = True
+    page = _hydration_html(_embedded([[*items, clip]], total=None, has_more=False))
+    series = StaticHtmlDiscovery(fetch=FakeFetch(page)).discover(
+        SeriesRef(SERIES_ID), DiscoveryOptions(strategy="static")
+    )
+    assert series.numbers == [1, 2, 3]
+    assert (series.missing_numbers, series.highlight_numbers, series.early_end) == ([4], [4], None)
+    assert "episode 4 missing (gap)" in series.warnings
+    assert f"{LACKING_WARNING}; use --strategy browser to ask TikTok again" in series.warnings
+    assert not any(w.startswith(PARTIAL_WARNING) for w in series.warnings)
+    report = engine.series_report(series, [])
+    assert (report.gaps, report.complete) == ((4,), False)
+    # auto: listed again with the browser, said for what it was
+    browser = RecordingDiscovery(result=_series([1, 2, 3, 4]))
+    completed = AutoDiscovery(
+        static=StaticHtmlDiscovery(fetch=FakeFetch(page)), browser=browser
+    ).discover(SeriesRef(SERIES_ID), DiscoveryOptions())
+    assert (browser.calls, completed.numbers) == (1, [1, 2, 3, 4])
+    assert completed.warnings[0] == (
+        "static strategy: the episode list the page embeds lacks an episode; listed again with "
+        "the browser"
+    )
+    failed = RecordingDiscovery(error=LoginRequiredError("no episode list arrived"))
+    shown = AutoDiscovery(
+        static=StaticHtmlDiscovery(fetch=FakeFetch(page)), browser=failed
+    ).discover(SeriesRef(SERIES_ID), DiscoveryOptions())
+    assert (failed.calls, shown.numbers, shown.missing_numbers) == (1, [1, 2, 3], [4])
+    assert shown.warnings[-1] == (
+        "browser strategy could not list it again (no episode list arrived); showing the list the "
+        "page embeds"
     )
 
 

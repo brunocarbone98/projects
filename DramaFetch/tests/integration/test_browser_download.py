@@ -5,7 +5,11 @@ quality modes, the cooldown a rate limit starts and the CLI's refusal under it; 
 series with and without the session cookie (what THIS account unlocked downloads, what it did not
 is never requested), an encrypted episode refused and remembered, a batch of all three, and the
 fourth series, free with conditions: its short header read from the list alone, and a short-served
-file named for what it is."""
+file named for what it is. Since 3.0.1 (the owner's report of 2026-11-27): an episode TikTok's list
+never holds is named in the line and keeps the series from its complete mark, a last page it never
+brings is named as an early end, a complete mark written before 3.0.1 is not trusted (the series is
+listed again), and the fifth series' highlight, numbered like its episode, is never downloaded in
+its place."""
 
 from __future__ import annotations
 
@@ -27,9 +31,11 @@ from dramafetch.catalog import (
     merge_episodes,
     parse_item_list_payload,
     play_url_candidates,
+    uncertain_text,
     url_expiry,
 )
 from dramafetch.cooldown import active_cooldown, clear_cooldown
+from dramafetch.discovery.browser import NO_CURSOR_WARNING, NOTHING_NEW_WARNING
 from dramafetch.downloader import existing_episode_file
 from dramafetch.downloader_browser import BrowserDownloader
 from dramafetch.manifest import read_manifest
@@ -48,11 +54,16 @@ from dramafetch.thumbnails import EMBED_SUFFIX, cover_sidecar, extract_cover
 
 from .fake_tiktok import (
     COVER_MIN_SIZE,
+    FIFTH_HIGHLIGHT_ITEM,
+    FIFTH_ITEMS,
+    FIFTH_SERIES_ID,
+    FIFTH_SERIES_NAME,
     FOURTH_ITEMS,
     FOURTH_SERIES_ID,
     FOURTH_SERIES_NAME,
     JPEG_EOI,
     JPEG_SOI,
+    MEDIA_LABEL_PREFIX,
     MEDIA_SIZE,
     SECOND_ITEMS,
     SECOND_SERIES_ID,
@@ -1023,8 +1034,10 @@ def test_a_free_series_with_conditions_is_free_and_a_short_served_file_is_named_
     makes it free, `IsFreeIntro: false` / `IsPreview` / `PreviewType` say nothing, and episode 3's
     `music.duration` (2 s of its 3 s) gives its short header away in the list itself. `info`
     shows episodes 1-2 `free` and 3 `locked: plays 2 s of 3 s`; a download saves 1-2
-    (one media and one cover request each) and skips 3 without a request — the series is
-    complete, 1 locked. Then, with `--include-locked` and the CDN serving episode 3 as TikTok
+    (one media and one cover request each) and skips 3 without a request — since 3.0.1 the
+    series is NOT complete: episode 3 is a free one DramaFetch only guessed was locked (no price,
+    no lock flag), named apart in the line and never marked complete (the exit code keeps its
+    meaning: 0). Then, with `--include-locked` and the CDN serving episode 3 as TikTok
     served the owner's 7 (the WHOLE file by size, a header that plays 2 s of the 10 s the list
     now announces): one request, `failed-unavailable` with the short-served message, the file
     kept untouched as `… - Episode 03 (short).mp4`, no cover requested, the manifest remembering
@@ -1057,7 +1070,9 @@ def test_a_free_series_with_conditions_is_free_and_a_short_served_file_is_named_
         _assert_video_file(folder / name, name, item, embedded=True)
         assert _row(number, "done", f"{folder / name} + cover embedded") in lines
     assert _row(3, "skipped-locked", f"looks locked: {WINDOW_HINT}") in lines
-    assert "complete: 2 of 3 (2 downloaded) — 1 locked (3)" in lines
+    # 3.0.1 (§9): it used to read `complete: 2 of 3 (2 downloaded) — 1 locked (3)`
+    not_asked = "1 free episode not asked for (3): TikTok's list made it look locked"
+    assert f"incomplete: 2 of 3 — {not_asked}" in lines
     assert media == [
         path for item in FOURTH_ITEMS[:2] for path in (f"/cdn/{item}/0.mp4", f"/cover/{item}.jpg")
     ]
@@ -1112,10 +1127,272 @@ def test_a_free_series_with_conditions_is_free_and_a_short_served_file_is_named_
     # episode 3 before any request — the owner watches it in the app, then `--recheck`
     manifest = read_manifest(folder, FOURTH_SERIES_ID)
     assert manifest is not None and not manifest.drm_protected(3)
-    assert manifest.entries[3].status == "skipped-locked" and manifest.complete_episodes == 2
+    # 3.0.1 (§9/§10): never marked complete while the free episode 3 is not on disk (it used to be
+    # marked, `complete_episodes == 2`, and the line said `complete: … — 1 locked (3)`)
+    assert manifest.entries[3].status == "skipped-locked" and manifest.complete_episodes is None
     again = next_run.out.splitlines()
     assert any(r.path == "/api/drama/episode/item_list/" for r in next_requests)
     window = f"{SHORT_HEADER_HINT_PREFIX}2 s of {SHORT_HEADER_LISTED_DURATION_S} s"
     assert _row(3, "skipped-locked", f"looks locked: {window}") in again
-    assert "complete: 2 of 3 (2 already on disk) — 1 locked (3)" in again
+    assert f"incomplete: 2 of 3 — {not_asked}" in again
     assert _media_paths(next_requests) == []
+
+
+# ------------------------------- 3.0.1: no episode missing from TikTok's list without a word
+
+FIFTH_FOLDER = f"{FIFTH_SERIES_NAME} [{FIFTH_SERIES_ID}]"
+#: The main series' item ids by episode number (`7699400000000000001` … `…005`).
+MAIN_ITEMS = {number: f"769940000000000000{number}" for number in range(1, 6)}
+
+
+def _main_name(number: int) -> str:
+    return f"{SERIES_NAME} - Episode {number:02d}.mp4"
+
+
+def test_an_episode_tiktok_s_list_never_holds_is_named_and_the_series_never_marked_complete(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The owner's report of 2026-11-27 (3.0.1), in the Python tool: TikTok's list never holds
+    episode 4 of the main series (`omit_always`). The listing asks for its page once more (the
+    gap filling: the very request, `cursor` 3), then the run downloads what the list holds and
+    SAYS what it lacks — `warning: episode 4 missing (gap)` and the line `…; episode 4 missing
+    from TikTok's list` — where 3.0.0 passed over it without a word; the series is never marked
+    complete (the exit code keeps its meaning: nothing failed, 0), so the next run lists it again
+    — TikTok's list holds episode 4 by then — and downloads E04 alone, the series complete."""
+    out = tmp_path / "out"
+    folder = out / FIRST_FOLDER
+    with FakeTikTok(omit_always=frozenset({(SERIES_ID, 4)})) as server:
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        asked = [r.query["cursor"] for r in server.item_list_requests]
+        media = [r.path for r in server.media_requests]
+    lines = captured.out.splitlines()
+    assert "incomplete: 3 of 5 — 1 locked (5); episode 4 missing from TikTok's list" in lines
+    assert "warning: episode 4 missing (gap)" in captured.err.splitlines()
+    assert asked == ["0", "3", "3"]  # the page's own, the next page, the filling's one request
+    assert media == [f"/cdn/{MAIN_ITEMS[n]}/0.mp4" for n in (1, 2, 3)]
+    assert sorted(p.name for p in folder.iterdir()) == [
+        *(_main_name(n) for n in (1, 2, 3)),
+        "dramafetch.json",
+    ]
+    manifest = read_manifest(folder, SERIES_ID)
+    assert manifest is not None and manifest.complete_at is None  # never the complete skip
+
+    with FakeTikTok() as server:  # TikTok's list holds episode 4 again
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        again = capsys.readouterr()
+        media = [r.path for r in server.media_requests]
+    assert media == [f"/cdn/{MAIN_ITEMS[4]}/0.mp4"]
+    lines = again.out.splitlines()
+    assert _row(4, "done", f"{folder / _main_name(4)} + cover embedded") in lines
+    assert "missing" not in again.out and "missing" not in again.err
+    _assert_video_file(folder / _main_name(4), _main_name(4), MAIN_ITEMS[4], embedded=True)
+    manifest = read_manifest(folder, SERIES_ID)
+    assert manifest is not None and manifest.complete_trusted()
+    assert manifest.complete_episodes == 4
+
+
+def test_a_last_page_tiktok_never_brings_is_named_as_an_early_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The owner's "sometimes the last one of the list" (3.0.1): TikTok never brings the main
+    series' second page (`lose_page_always`). The pagination and then the gap filling ask for it,
+    once each; what the run downloads is E01-E03, and its line says the list ended early and which
+    episode was not received — never a short list taken for the drama; the warnings say the
+    fallback and the count; no complete mark. 3.0.1, the lead's decision D2 (changed on purpose):
+    three episodes and the trailer came for TikTok's 5, so E04 is certainly missing and E05 may be
+    the trailer TikTok counts — the line says the list may be incomplete, and names no E05."""
+    out = tmp_path / "out"
+    folder = out / FIRST_FOLDER
+    with FakeTikTok(lose_page_always=frozenset({(SERIES_ID, "3")})) as server:
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        asked = [r.query["cursor"] for r in server.item_list_requests]
+        media = [r.path for r in server.media_requests]
+    lines = captured.out.splitlines()
+    assert (
+        "incomplete: 3 of 4 — TikTok's list ended early: episode 4 not received; TikTok's list "
+        "may be incomplete: TikTok counts 5 episodes, 3 listed and 1 other item (a trailer or a "
+        "highlight)"
+    ) in lines
+    warnings = captured.err.splitlines()
+    for warning in (
+        "in-page pagination fetch returned no episode list; scrolled the page instead",
+        "TikTok announces 5 episodes, 3 listed",
+        uncertain_text(5, 3, 1),
+    ):
+        assert f"warning: {warning}" in warnings
+    assert asked == ["0", "3", "3"]  # the page's own, the lost next page, the filling's request
+    assert media == [f"/cdn/{MAIN_ITEMS[n]}/0.mp4" for n in (1, 2, 3)]
+    manifest = read_manifest(folder, SERIES_ID)
+    assert manifest is not None and manifest.complete_at is None
+
+
+def test_a_complete_mark_written_before_3_0_1_is_not_trusted_the_series_is_listed_again(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A complete mark without `complete_rule` — what 3.0.0 and earlier wrote, under the old
+    completeness rule that could hide the list's last episodes or a free episode guessed locked —
+    never skips the series (3.0.1): the next run lists it again (its page, its two list pages),
+    finds every file on disk (no media, no cover request) and writes the mark anew under the rule
+    in force; the run after that is the complete skip, with no request at all."""
+    out = tmp_path / "out"
+    folder = out / FIRST_FOLDER
+    manifest_path = folder / "dramafetch.json"
+    with FakeTikTok() as server:
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        capsys.readouterr()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert (data["complete_episodes"], data["complete_rule"]) == (4, 2)
+        del data["complete_rule"]  # the mark as DramaFetch 3.0.0 wrote it
+        manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        old = read_manifest(folder, SERIES_ID)
+        assert old is not None and old.complete_at is not None and not old.complete_trusted()
+
+        before = len(server.requests)
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        relisted = capsys.readouterr().out.splitlines()
+        second = server.requests[before:]
+        before = len(server.requests)
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        skipped = capsys.readouterr().out.splitlines()
+        third = server.requests[before:]
+
+    pages = [r.path for r in second if r.path.startswith("/shortdrama/")]
+    assert pages == [f"/shortdrama/episode/{SERIES_ID}/1"]  # listed again, once
+    lists = [r.query["cursor"] for r in second if r.path == "/api/drama/episode/item_list/"]
+    assert lists == ["0", "3"]
+    assert _media_paths(second) == []  # every file was on disk
+    for number in range(1, 5):
+        assert _row(number, "skipped-exists", str(folder / _main_name(number))) in relisted
+    assert "complete: 4 of 5 (4 already on disk) — 1 locked (5)" in relisted
+    marked = read_manifest(folder, SERIES_ID)
+    assert marked is not None and marked.complete_trusted()  # the mark written anew, rule 2
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["complete_rule"] == 2
+    assert third == []  # the complete skip: not one request
+    assert (
+        "complete, nothing to do: 4 episodes already on disk, 1 locked (5) (checked just now) — "
+        f"{RECHECK}"
+    ) in skipped
+
+
+def test_a_highlight_numbered_like_its_episode_is_never_downloaded_in_its_place(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fifth series (the owner's real item shape): a highlight numbered 2 is listed BEFORE
+    episode 2. The list keeps the real episode — the highlight is left out and said
+    (`duplicate episode number 2: … left out (a highlight), … kept`) —, episode 3 numbered only in
+    `dramaInfo.episodeNumber` downloads like the others, and the trailer and the other drama's
+    item are said, not dropped silently: one media and one cover request per real episode, the
+    highlight's never, each file the CDN's media of its own item; TikTok's count of 7 (with the
+    highlight and the trailer) raises no missing episode. 3.0.1, the lead's decision D2 (changed
+    on purpose): it may also mean two episodes past 5 — the line says the list may be incomplete,
+    the warnings say what TikTok counts, and the series is not marked complete (exit code 0)."""
+    out = tmp_path / "out"
+    folder = out / FIFTH_FOLDER
+    with FakeTikTok() as server:
+        assert cli.main(_download_argv(server, out, FIFTH_SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        media = _media_paths(server.requests)
+    assert media == [
+        path
+        for item in FIFTH_ITEMS.values()
+        for path in (f"/cdn/{item}/0.mp4", f"/cover/{item}.jpg")
+    ]
+    assert not [path for path in media if FIFTH_HIGHLIGHT_ITEM in path]
+    for number, item in FIFTH_ITEMS.items():
+        name = f"{FIFTH_SERIES_NAME} - Episode {number:02d}.mp4"
+        _assert_video_file(folder / name, name, item, embedded=True)
+        assert MEDIA_LABEL_PREFIX + item.encode() in (folder / name).read_bytes()  # its own media
+    lines = captured.out.splitlines()
+    assert (
+        "incomplete: 5 of 5 — TikTok's list may be incomplete: TikTok counts 7 episodes, 5 listed "
+        "and 2 other items (trailers or highlights)"
+    ) in lines
+    warnings = captured.err.splitlines()
+    assert (
+        f"warning: duplicate episode number 2: item {FIFTH_HIGHLIGHT_ITEM} left out (a highlight), "
+        f"item {FIFTH_ITEMS[2]} kept"
+    ) in warnings
+    assert "warning: TikTok listed 1 item DramaFetch could not read (no episode number)" in warnings
+    assert "warning: TikTok announces 7 episodes, 5 listed" in warnings
+    assert f"warning: {uncertain_text(7, 5, 2)}" in warnings
+    assert not any("missing (gap)" in line for line in warnings)
+    manifest = read_manifest(folder, FIFTH_SERIES_ID)
+    assert manifest is not None and manifest.complete_at is None
+
+
+def test_the_main_series_without_its_last_episode_may_be_incomplete_and_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """3.0.1, the lead's decision D2 (the review's L2), in the Python tool: TikTok's list never
+    holds E05 of the main series, whose detail counts 5 and whose list also holds a trailer. Four
+    episodes and the trailer make five items: whether TikTok's 5 counts the trailer nothing tells,
+    so the filling asks once for the page after episode 4, no number is named missing, and the line
+    and a warning say the list may be incomplete — the numbers named; the series is never marked
+    complete, so the next run lists it again; the exit code keeps its meaning (nothing failed, 0).
+    """
+    out = tmp_path / "out"
+    folder = out / FIRST_FOLDER
+    with FakeTikTok(omit_always=frozenset({(SERIES_ID, 5)})) as server:
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        asked = [r.query["cursor"] for r in server.item_list_requests]
+        media = [r.path for r in server.media_requests]
+    lines = captured.out.splitlines()
+    assert (
+        "incomplete: 4 of 4 — TikTok's list may be incomplete: TikTok counts 5 episodes, 4 listed "
+        "and 1 other item (a trailer or a highlight)"
+    ) in lines
+    warnings = captured.err.splitlines()
+    assert "warning: TikTok announces 5 episodes, 4 listed" in warnings
+    assert f"warning: {uncertain_text(5, 4, 1)}" in warnings
+    assert not any("missing" in line for line in lines)  # no number named missing, no row
+    assert asked == ["0", "3", "4"]  # the page's own, the next page, the filling's one request
+    assert media == [f"/cdn/{MAIN_ITEMS[n]}/0.mp4" for n in (1, 2, 3, 4)]
+    manifest = read_manifest(folder, SERIES_ID)
+    assert manifest is not None and manifest.complete_at is None  # never the complete skip
+
+
+def test_a_page_with_more_and_no_cursor_ends_the_pagination_early_and_the_filling_asks_on(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """3.0.1, the lead's decision D6 (the review's T1), in the Python tool: TikTok answers the
+    main series' first page with `hasMore` and no cursor at all (`no_cursor_pages`): the
+    pagination cannot ask for the next page — an early end, its fallback said — and the gap
+    filling asks for the page that should hold E04 (`cursor` 3), which brings the rest: E01-E04
+    downloaded, E05 locked, complete."""
+    out = tmp_path / "out"
+    with FakeTikTok(no_cursor_pages=frozenset({(SERIES_ID, "0")})) as server:
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        asked = [r.query["cursor"] for r in server.item_list_requests]
+    assert "complete: 4 of 5 (4 downloaded) — 1 locked (5)" in captured.out.splitlines()
+    assert f"warning: {NO_CURSOR_WARNING}" in captured.err.splitlines()
+    assert asked == ["0", "3"]  # the page's own (no cursor: no next page), the filling's request
+    manifest = read_manifest(out / FIRST_FOLDER, SERIES_ID)
+    assert manifest is not None and manifest.complete_trusted()
+
+
+def test_a_page_that_repeats_the_first_one_ends_the_pagination_early_and_is_said(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """3.0.1, the lead's decision D6 (the review's T1), in the Python tool: TikTok answers the
+    main series' second page with the first one again (`repeat_pages`) — nothing new: an early
+    end, its fallback said. The gap filling asks once for the page that should hold E04 (`cursor`
+    3) and gets the repeat again: E04 is certainly missing and the list ended early, in the line;
+    E05 may be the trailer TikTok counts; no complete mark."""
+    out = tmp_path / "out"
+    with FakeTikTok(repeat_pages=frozenset({(SERIES_ID, "3")})) as server:
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        asked = [r.query["cursor"] for r in server.item_list_requests]
+    assert (
+        "incomplete: 3 of 4 — TikTok's list ended early: episode 4 not received; TikTok's list "
+        "may be incomplete: TikTok counts 5 episodes, 3 listed and 1 other item (a trailer or a "
+        "highlight)"
+    ) in captured.out.splitlines()
+    assert f"warning: {NOTHING_NEW_WARNING}" in captured.err.splitlines()
+    assert asked == ["0", "3", "3"]  # the page's own, the repeated next page, the filling's
+    manifest = read_manifest(out / FIRST_FOLDER, SERIES_ID)
+    assert manifest is not None and manifest.complete_at is None

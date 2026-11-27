@@ -72,6 +72,39 @@ export const UNKNOWN_HEIGHT = "?p";
  * a candidate, whatever the quality mode — the saved file could only be quarantined.
  */
 export const VIDEO_ONLY_PATH_SUFFIX = "/media-video-hvc1/";
+/**
+ * Why {@link skipReason} leaves an item out of a series (`catalog.SKIP_*`), in the order it
+ * checks them: the item names another drama, it has no id, or neither `DramaVideoData` nor
+ * `dramaInfo` gives a usable episode number (a trailer). {@link catalogWarnings} says each one.
+ */
+export const SKIP_OTHER_DRAMA = "another drama's id";
+export const SKIP_NO_ID = "no id";
+export const SKIP_NO_NUMBER = "no episode number";
+export const SKIP_REASONS = [SKIP_OTHER_DRAMA, SKIP_NO_ID, SKIP_NO_NUMBER];
+/**
+ * The reason of a highlight no episode of its number was listed with (3.0.1, the review's L3;
+ * `catalog.SKIP_HIGHLIGHT`): a highlight never stands for an episode, so {@link mergePages} keeps
+ * it as a skipped item — not {@link skipReason}'s, which reads one item alone — and its number stays
+ * missing. {@link catalogWarnings} says it after {@link SKIP_REASONS}.
+ */
+export const SKIP_HIGHLIGHT = "a highlight, a clip of an episode";
+/**
+ * How the warnings and the report line start for a list TikTok counts more items of than
+ * DramaFetch can place (3.0.1, {@link countCheck}'s `uncertain`; `catalog.UNCERTAIN_TEXT`) — the
+ * words of the alert's title too.
+ */
+export const UNCERTAIN_TEXT = "TikTok's list may be incomplete";
+/**
+ * Why the merge left an item out for another one with its number (`catalog.LEFT_OUT_*`): the
+ * first rule of the preference order that tells the two apart — the kept one is no highlight
+ * ({@link isHighlight}), or reads free or unlocked where the other reads locked, or is longer
+ * (`video.duration`); else it was listed first.
+ */
+export const LEFT_OUT_HIGHLIGHT = "a highlight";
+export const LEFT_OUT_LOCKED = "locked";
+export const LEFT_OUT_SHORTER = "shorter";
+export const LEFT_OUT_LATER = "listed later";
+export const LEFT_OUT_REASONS = [LEFT_OUT_HIGHLIGHT, LEFT_OUT_LOCKED, LEFT_OUT_SHORTER, LEFT_OUT_LATER];
 
 /**
  * @typedef {"free" | "unlocked" | "locked"} Access
@@ -90,6 +123,11 @@ export const VIDEO_ONLY_PATH_SUFFIX = "/media-video-hvc1/";
  * @property {Access} access
  * @property {boolean} paid a pricing or entitlement clue is present
  * @property {boolean} drm the payload itself flags DRM (then always `locked`)
+ * @property {boolean} guessedLock `locked` ONLY by DramaFetch's own structural guesses — the
+ *   SHORT-HEADER rule and/or no play address — with no DRM, price, entitlement or TikTok lock clue
+ *   ({@link accessOf}, `Episode.guessed_lock`; 3.0.1, the owner's report of 2026-11-27): a free
+ *   episode DramaFetch guessed was locked — still skipped before any request, but counted as not
+ *   downloaded (`report.seriesReport`), and the tab's **Retry** asks TikTok for it once
  * @property {Record<string, unknown> | null} raw the item payload (null for an episode built by hand)
  *
  * @typedef {object} Rendition One `video.bitrateInfo` entry with at least one play URL.
@@ -99,25 +137,103 @@ export const VIDEO_ONLY_PATH_SUFFIX = "/media-video-hvc1/";
  * @property {number | null} heightHint
  * @property {string} label `720p h264`, `?p h264`
  *
+ * @typedef {object} SkippedItem An item TikTok listed that is no episode of the series
+ *   (`models.SkippedItem`): said in the warnings, never only counted.
+ * @property {string} reason one of {@link SKIP_REASONS}
+ * @property {string | null} itemId the item's id when it has one
+ *
  * @typedef {object} PagePayload What one `item_list` page contributed for the requested series.
  * @property {Episode[]} episodes
  * @property {number | string | null} cursor
  * @property {boolean} hasMore
  * @property {number} seenItems
- * @property {number} skippedItems
+ * @property {number} skippedItems how many of the page's items are no episode of the series
+ * @property {SkippedItem[]} skipped those items, with their reasons, in page order
+ * @property {number | null} totalHint TikTok's count of the series' episodes as the page's items
+ *   carry it: the first positive `dramaInfo.numVideos` of an item of the series ({@link itemTotalHint})
+ * @property {(string | null)[]} [skippedKeys] one entry per `skipped` item (3.0.1, the review's L4):
+ *   the canonical JSON of the raw item ({@link itemKey}) for an item without an id, null for one
+ *   with an id — what {@link mergePages} dedupes id-less items by; absent for a page built by hand,
+ *   whose id-less items then count each
  *
- * @typedef {object} AccessDecision The result of {@link accessOf}.
+ * @typedef {object} Duplicate Two items TikTok listed with one episode number (`catalog.Duplicate`).
+ * @property {number} number
+ * @property {Episode} kept the episode the series keeps
+ * @property {Episode} leftOut the other item
+ * @property {string} why the rule that decided, one of {@link LEFT_OUT_REASONS}
+ *
+ * @typedef {object} Listing What the pages of one listing add up to ({@link mergePages}).
+ * @property {Episode[]} episodes one per number, sorted
+ * @property {Duplicate[]} duplicates every item left out for another one's number
+ * @property {SkippedItem[]} skipped every item that is no episode, with its reason (a highlight no
+ *   episode of its number came with among them, {@link SKIP_HIGHLIGHT})
+ * @property {number} itemsReceived the distinct items of the series that came
+ * @property {number | null} totalHint TikTok's count as the items carry it (the first page's)
+ * @property {number[]} highlightNumbers the numbers of the highlights no episode of their number
+ *   came with, ascending and distinct (3.0.1): each a clip of an episode TikTok did not list, so the
+ *   drama has that number — {@link countCheck} reaches it, so it is missing, asked for and named
+ *   even above the highest episode number listed
+ *
+ * @typedef {object} CountCheck What a listing's numbers say against TikTok's count ({@link countCheck},
+ *   `catalog.CountCheck`, 3.0.1).
+ * @property {number} certainTop the highest episode number the drama certainly has (listed, held by
+ *   a lone highlight, or up to TikTok's count less the other items)
+ * @property {number} otherItems the drama's items received besides its episode numbers (a trailer, a
+ *   highlight, an item left out for another one's number, one without a number or an id)
+ * @property {boolean} uncertain TikTok counts more than `certainTop`: its count may include the
+ *   other items, or episodes past the highest number listed may be missing — nothing tells which
+ *
+ * @typedef {object} AccessDecision The result of {@link accessOf} (`catalog.AccessDecision`).
  * @property {Access} access
  * @property {boolean} paid
  * @property {boolean} drm
  * @property {string[]} hints
+ * @property {boolean} guessedLock `locked` only by SHORT-HEADER and/or no play address, with no
+ *   DRM, PRICING, ENTITLED, VIEWER-LOCK or NOT-ENTITLED clue (3.0.1): see {@link accessOf}
+ *
+ * @typedef {object} ListingPage One episode-list page a listing asked for (`models.ListingPage`), as
+ *   the "did not download" report shows it: how it was asked and what came back — never a URL, a
+ *   query or a cookie.
+ * @property {string} kind `first` (the page's own first request, replayed byte for byte), `next`
+ *   (the pagination's next page), `scroll` (a request of the page's the scroll fallback asked for
+ *   again) or `fill` (the gap filling); the Python tool also says `page` and `embedded`
+ * @property {string | null} cursorAsked the request's `cursor` parameter, null without one
+ * @property {string | null} countAsked the request's `count` parameter, null without one
+ * @property {boolean} listed whether the answer held an episode list at all
+ * @property {number} items every item of the answer (any drama); 0 without a list
+ * @property {number[]} numbers the series' episode numbers in it, as listed
+ * @property {boolean | null} hasMore what the answer said; null without a list
+ * @property {number | string | null} cursor the cursor the answer returned; null without a list
+ *
+ * @typedef {object} ListingRecord What a listing asked TikTok for (`models.ListingRecord`).
+ * @property {string | null} endpoint the list request's scheme, host and path — never its query
+ * @property {ListingPage[]} pages every page, in the order it came, the gap filling's among them
  *
  * @typedef {object} Series A resolved series, as the discovery builds it (`models.Series`).
  * @property {string} seriesId
  * @property {string | null} name
  * @property {Episode[]} episodes
- * @property {number | null} totalHint
+ * @property {number | null} totalHint TikTok's count of the episodes: the detail's total, else the
+ *   items' `numVideos`
  * @property {string[]} warnings
+ * @property {SkippedItem[]} [skippedItems] the items TikTok listed that are no episode of the series
+ * @property {number | null} [itemsReceived] the distinct items TikTok listed for the series — the
+ *   episodes before the number merge plus the skipped items of THIS drama — what
+ *   {@link countCheck} holds against `totalHint`; absent or null when unknown
+ * @property {number[]} [highlightNumbers] the numbers of the highlights no episode of their number
+ *   came with (3.0.1, `Listing.highlightNumbers`): {@link countCheck} reaches them; absent for a
+ *   series built by hand
+ * @property {number[]} [missingNumbers] the episode numbers the listing still certainly lacks once
+ *   it is over, the gap filling included ({@link missingNumbers}): the holes below the highest
+ *   number listed and the numbers up to TikTok's count less the drama's other items received;
+ *   empty when nothing is known missing
+ * @property {string | null} [earlyEnd] why the listing ended before TikTok said the list was over —
+ *   the warning of the fallback the pagination stopped on (`discovery.FIRST_PAGE_WARNING`,
+ *   `NO_CURSOR_WARNING`, `NO_LIST_WARNING`, `NOTHING_NEW_WARNING`, the max-pages warning) while no
+ *   page said `hasMore` false since; null when the list reached its end. TikTok's count, when
+ *   known, says whether anything is missing all the same (`missingNumbers`)
+ * @property {ListingRecord | null} [listing] the pages the listing asked for, the gap filling's
+ *   included; absent or null for a series built by hand
  */
 
 const ITEM_LIST_KEYS = ["itemList", "item_list"];
@@ -174,10 +290,23 @@ const KNOWN_STATUS_VALUES = new Set([...ENTITLED_STATUS_VALUES, ...LOCKED_STATUS
 const PRICE_KEY_RE = /price|coin|cost|charge/;
 const SOLD_KEY_RE = /vip|paid/;
 const SERIES_ID_KEYS = ["dramaID", "dramaId", "DramaID", "albumId"];
+/**
+ * Where an item's episode number lives, read in order — `DramaVideoData`'s keys, then
+ * `dramaInfo`'s — the first usable one wins (an int ≥ 1: a `0`, `null`, `""` or any other value
+ * falls through to the next key instead of dropping the item).
+ */
 const EPISODE_NUMBER_KEYS = ["EpisodeNumber", "episodeNumber", "episode_number"];
 const NAME_KEYS = ["dramaName", "title", "name"];
-const TOTAL_KEYS = ["totalEpisode", "totalEpisodes", "episodeCount", "total", "episodeTotal"];
+/** TikTok's own count of a drama's episodes: every captured `dramaInfo` carries it. */
+const NUM_VIDEOS_KEY = "numVideos";
+const TOTAL_KEYS = [NUM_VIDEOS_KEY, "totalEpisode", "totalEpisodes", "episodeCount", "total", "episodeTotal"];
 const DETAIL_CONTAINER_KEYS = ["dramaInfo", "drama", "detail"];
+/**
+ * TikTok's highlight marks ({@link isHighlight}), on `dramaInfo.DramaVideoData` in every capture
+ * (`IsHighlight: false`, `LinkedEpisodeID: "0"` on the owner's episodes).
+ */
+const HIGHLIGHT_KEY = "IsHighlight";
+const LINKED_EPISODE_KEY = "LinkedEpisodeID";
 /** Where an item's cover lives, best first: the full frame, the cropped poster, the animated preview. */
 const COVER_KEYS = ["originCover", "cover", "dynamicCover"];
 const FALSY_STRINGS = new Set(["", "0", "false", "no", "none", "null"]);
@@ -293,7 +422,10 @@ function walkItemLists(node, depth, maxDepth, found) {
  * calls free is free); PRICING → `unlocked` with a real play URL ({@link playUrlCandidates})
  * and no NOT-ENTITLED clue, else `locked` (without a URL, hint {@link NO_PLAY_ADDRESS}); else
  * `free`. `paid` is any PRICING or ENTITLED clue; `hints` are unique, in scan order, the two
- * structural hints last (the short header's before the play address').
+ * structural hints last (the short header's before the play address'). `guessedLock` (3.0.1,
+ * `catalog.AccessDecision.guessed_lock`): `locked` with no DRM clue, no PRICING or ENTITLED clue
+ * (`paid` false) and no VIEWER-LOCK or NOT-ENTITLED clue — locked only by SHORT-HEADER and/or no
+ * play address, DramaFetch's own guesses; it changes no decision.
  * @param {unknown} item
  * @returns {AccessDecision}
  */
@@ -342,7 +474,10 @@ export function accessOf(item) {
     access = "free";
   }
   const paid = classes.has(PRICING) || classes.has(ENTITLED);
-  return { access, paid, drm, hints: [...new Set(hints)] };
+  // 3.0.1: locked only by DramaFetch's own structural guesses (SHORT-HEADER, no play address) —
+  // nothing of TikTok's says DRM, a price, an entitlement or a lock
+  const guessedLock = access === "locked" && !drm && !paid && !classes.has(VIEWER_LOCK) && !classes.has(NOT_ENTITLED);
+  return { access, paid, drm, hints: [...new Set(hints)], guessedLock };
 }
 
 /**
@@ -604,22 +739,29 @@ function hasPlayAddress(video) {
 /**
  * An {@link Episode} built the way `models.Episode(...)` builds one: an empty `access` derives
  * `locked` from non-empty `lockHints` (or `drm`), else `free`; an access outside `ACCESS_MODES`,
- * or `drm` without `locked`, throws (DramaFetch never decrypts).
+ * or `drm` without `locked`, throws (DramaFetch never decrypts), and so does `guessedLock` on an
+ * episode that is not `locked`, or is `drm` or `paid` (3.0.1).
  * @param {{number: number, itemId: string, title: string, seriesId: string,
  *   seriesName?: string | null, author?: string | null, durationS?: number | null,
  *   lockHints?: readonly string[], coverUrl?: string | null, qualityHint?: string | null,
- *   access?: string, paid?: boolean, drm?: boolean, raw?: Record<string, unknown> | null}} fields
+ *   access?: string, paid?: boolean, drm?: boolean, guessedLock?: boolean,
+ *   raw?: Record<string, unknown> | null}} fields
  * @returns {Episode}
  */
 export function makeEpisode(fields) {
   const lockHintsList = [...(fields.lockHints ?? [])];
   const drm = fields.drm ?? false;
+  const paid = fields.paid ?? false;
+  const guessedLock = fields.guessedLock ?? false;
   const access = fields.access || (lockHintsList.length > 0 || drm ? "locked" : "free");
   if (access !== "free" && access !== "unlocked" && access !== "locked") {
     throw new Error(`Episode.access must be one of free, unlocked, locked, not ${pyRepr(access)}`);
   }
   if (drm && access !== "locked") {
     throw new Error("a DRM-protected episode is always locked: DramaFetch never decrypts");
+  }
+  if (guessedLock && (access !== "locked" || drm || paid)) {
+    throw new Error("a guessed lock is a locked episode with no DRM, price or entitlement clue");
   }
   return {
     number: fields.number,
@@ -633,8 +775,9 @@ export function makeEpisode(fields) {
     coverUrl: fields.coverUrl ?? null,
     qualityHint: fields.qualityHint ?? null,
     access,
-    paid: fields.paid ?? false,
+    paid,
     drm,
+    guessedLock,
     raw: fields.raw ?? null,
   };
 }
@@ -649,24 +792,115 @@ export function isLocked(episode) {
 }
 
 /**
- * One `itemList` entry as an {@link Episode}, or null when it must be skipped: no item id; no
- * (or invalid) `dramaInfo.DramaVideoData.EpisodeNumber` (trailers); a `dramaInfo` series id that
- * differs from `seriesId`. The item may be wrapped in `{"itemStruct": {...}}`.
+ * One `itemList` entry as an {@link Episode}, or null when it must be skipped ({@link skipReason}
+ * says why): a `dramaInfo` series id that differs from `seriesId`; no item id; no usable episode
+ * number — `DramaVideoData`'s `EpisodeNumber` / `episodeNumber` / `episode_number`, then
+ * `dramaInfo`'s, the first that is an int ≥ 1 (junk falls through to the next key): trailers. The
+ * item may be wrapped in `{"itemStruct": {...}}`.
  * @param {unknown} item
  * @param {string} seriesId
  * @returns {Episode | null}
  */
 export function episodeFromItem(item, seriesId) {
   if (!isDict(item)) return null;
-  const itemId = asId(field(item, "id"));
-  if (itemId === null) return null;
-  const dramaInfoRaw = field(item, "dramaInfo");
-  const dramaInfo = isDict(dramaInfoRaw) ? dramaInfoRaw : {};
+  const found = identify(item, seriesId);
+  if (found.reason !== null || found.itemId === null || found.number === null) return null;
+  return buildEpisode(item, seriesId, found.itemId, found.number);
+}
+
+/**
+ * Why {@link episodeFromItem} leaves an item out of series `seriesId` (`catalog.skip_reason`) —
+ * the first that holds of {@link SKIP_OTHER_DRAMA}, {@link SKIP_NO_ID} and {@link SKIP_NO_NUMBER}
+ * — or null when it reads as one of the series' episodes. A non-object is {@link SKIP_NO_ID}.
+ * @param {unknown} item
+ * @param {string} seriesId
+ * @returns {string | null}
+ */
+export function skipReason(item, seriesId) {
+  if (!isDict(item)) return SKIP_NO_ID;
+  return identify(item, seriesId).reason;
+}
+
+/**
+ * Whether an item is one of TikTok's highlights — a clip of an episode, numbered like it — rather
+ * than the episode (`catalog.is_highlight`): a truthy `IsHighlight` (a bool, a number or a string,
+ * read as {@link isTruthy} reads one; a container or null never counts) or a `LinkedEpisodeID`
+ * that is an id other than `"0"`, in `dramaInfo.DramaVideoData` or in `dramaInfo`. Absent keys,
+ * `false`, `"0"` and `0` are an episode's: every captured episode carries `IsHighlight: false` and
+ * `LinkedEpisodeID: "0"`.
+ * @param {unknown} item
+ * @returns {boolean}
+ */
+export function isHighlight(item) {
+  if (!isDict(item)) return false;
+  const dramaInfo = dramaInfoOf(item);
+  const videoData = get(dramaInfo, "DramaVideoData");
+  const containers = isDict(videoData) ? [videoData, dramaInfo] : [dramaInfo];
+  for (const container of containers) {
+    const flag = get(container, HIGHLIGHT_KEY);
+    if (isScalar(flag) && isTruthy(flag)) return true;
+    const linked = asId(get(container, LINKED_EPISODE_KEY));
+    if (linked !== null && linked !== "0") return true;
+  }
+  return false;
+}
+
+/**
+ * TikTok's count of the episodes of the item's drama (`catalog.item_total_hint`):
+ * `dramaInfo.numVideos` when it is a positive int ({@link asInt}) and the item does not name
+ * another drama than `seriesId`; else null.
+ * @param {unknown} item
+ * @param {string} seriesId
+ * @returns {number | null}
+ */
+export function itemTotalHint(item, seriesId) {
+  if (!isDict(item)) return null;
+  const dramaInfo = dramaInfoOf(item);
   const foundSeriesId = seriesIdOf(dramaInfo);
   if (foundSeriesId !== null && foundSeriesId !== String(seriesId)) return null;
-  const number = episodeNumber(dramaInfo);
-  if (number === null) return null;
+  const total = asInt(get(dramaInfo, NUM_VIDEOS_KEY));
+  return total !== null && total > 0 ? total : null;
+}
 
+/**
+ * The item's `dramaInfo` (an `itemStruct` wrapper's too), `{}` when it is no object.
+ * @param {Record<string, unknown>} item
+ * @returns {Record<string, unknown>}
+ */
+function dramaInfoOf(item) {
+  const found = field(item, "dramaInfo");
+  return isDict(found) ? found : {};
+}
+
+/**
+ * `catalog._identify`: the skip reason, the item id and the episode number of an item, the checks
+ * of {@link skipReason} in order; the reason is null — and the id and the number are set — for an
+ * episode.
+ * @param {Record<string, unknown>} item
+ * @param {string} seriesId
+ * @returns {{reason: string | null, itemId: string | null, number: number | null}}
+ */
+function identify(item, seriesId) {
+  const dramaInfo = dramaInfoOf(item);
+  const itemId = asId(field(item, "id"));
+  const foundSeriesId = seriesIdOf(dramaInfo);
+  if (foundSeriesId !== null && foundSeriesId !== String(seriesId)) return { reason: SKIP_OTHER_DRAMA, itemId, number: null };
+  if (itemId === null) return { reason: SKIP_NO_ID, itemId: null, number: null };
+  const number = episodeNumber(dramaInfo);
+  if (number === null) return { reason: SKIP_NO_NUMBER, itemId, number: null };
+  return { reason: null, itemId, number };
+}
+
+/**
+ * The {@link Episode} of an item {@link identify} read as episode `number` of the series.
+ * @param {Record<string, unknown>} item
+ * @param {string} seriesId
+ * @param {string} itemId
+ * @param {number} number
+ * @returns {Episode}
+ */
+function buildEpisode(item, seriesId, itemId, number) {
+  const dramaInfo = dramaInfoOf(item);
   const seriesName = cleanStr(get(dramaInfo, "dramaName"));
   const desc = cleanStr(field(item, "desc"));
   let title;
@@ -679,7 +913,7 @@ export function episodeFromItem(item, seriesId) {
   const video = field(item, "video");
   let duration = isDict(video) ? asInt(get(video, "duration")) : null;
   if (duration !== null && duration < 0) duration = null;
-  const { access, paid, drm, hints } = accessOf(item);
+  const { access, paid, drm, hints, guessedLock } = accessOf(item);
   const chosen = chooseRendition(item);
   return makeEpisode({
     number,
@@ -695,6 +929,7 @@ export function episodeFromItem(item, seriesId) {
     access,
     paid,
     drm,
+    guessedLock,
     raw: item,
   });
 }
@@ -776,6 +1011,9 @@ function seriesIdOf(dramaInfo) {
 }
 
 /**
+ * `catalog._episode_number`: the first usable episode number (an int ≥ 1) among `DramaVideoData`'s
+ * number keys, then `dramaInfo`'s; a key present with junk (`0`, `null`, `""`, `2.5`) falls
+ * through to the next one; null when none is usable.
  * @param {Record<string, unknown>} dramaInfo
  * @returns {number | null}
  */
@@ -786,7 +1024,7 @@ function episodeNumber(dramaInfo) {
     for (const key of EPISODE_NUMBER_KEYS) {
       if (Object.hasOwn(container, key)) {
         const number = asInt(container[key]);
-        return number !== null && number >= 1 ? number : null;
+        if (number !== null && number >= 1) return number;
       }
     }
   }
@@ -797,7 +1035,9 @@ function episodeNumber(dramaInfo) {
  * One `item_list` page: the episodes of the series, the pagination cursor and `hasMore`.
  * `cursor` is read from the top level first, else the first one found recursively (items
  * themselves are not searched); `hasMore` is true only for `hasMore`/`has_more` being `true`
- * (also `1` / `"true"`).
+ * (also `1` / `"true"`). Every item that is no episode of the series is kept in `skipped` with its
+ * reason ({@link skipReason}) and its id; `totalHint` is the first positive `dramaInfo.numVideos`
+ * of an item of the series ({@link itemTotalHint}).
  * @param {unknown} payload
  * @param {string} seriesId
  * @returns {PagePayload}
@@ -805,19 +1045,65 @@ function episodeNumber(dramaInfo) {
 export function parseItemListPayload(payload, seriesId) {
   /** @type {Episode[]} */
   const episodes = [];
+  /** @type {SkippedItem[]} */
+  const skipped = [];
+  /** @type {(string | null)[]} */
+  const keys = [];
   let seen = 0;
-  let skipped = 0;
+  /** @type {number | null} */
+  let total = null;
   for (const items of findItemLists(payload)) {
     for (const item of items) {
       seen += 1;
-      const episode = episodeFromItem(item, seriesId);
-      if (episode === null) skipped += 1;
-      else episodes.push(episode);
+      const found = identify(item, seriesId);
+      if (found.reason === null && found.itemId !== null && found.number !== null) {
+        episodes.push(buildEpisode(item, seriesId, found.itemId, found.number));
+      } else {
+        skipped.push({ reason: found.reason ?? SKIP_NO_ID, itemId: found.itemId });
+        keys.push(found.itemId === null ? itemKey(item) : null);
+      }
+      if (total === null) total = itemTotalHint(item, seriesId);
     }
   }
   const cursor = asCursor(firstValue(payload, ["cursor"]));
   const hasMore = asFlag(firstValue(payload, ["hasMore", "has_more"]));
-  return { episodes, cursor, hasMore, seenItems: seen, skippedItems: skipped };
+  return { episodes, cursor, hasMore, seenItems: seen, skippedItems: skipped.length, skipped, totalHint: total, skippedKeys: keys };
+}
+
+/** How deep {@link itemKey} writes a raw item before it writes a marker instead (`catalog._canonical`). */
+const MAX_KEY_DEPTH = MAX_DEPTH * 4;
+
+/**
+ * The canonical JSON of a raw item (3.0.1, the review's L4; `catalog.item_key`): its keys sorted at
+ * every depth, no spaces, a number that is not finite written as `null` — so that two copies of one
+ * item give one key. {@link mergePages} dedupes the items without an id by it. The Python tool's
+ * agrees on which items are the same (parity-tested); the strings themselves may differ. Pure;
+ * never throws.
+ * @param {unknown} item
+ * @returns {string}
+ */
+export function itemKey(item) {
+  return canonical(item, 0);
+}
+
+/**
+ * @param {unknown} value
+ * @param {number} depth
+ * @returns {string}
+ */
+function canonical(value, depth) {
+  if (Array.isArray(value)) {
+    if (depth > MAX_KEY_DEPTH) return JSON.stringify("<list>"); // deeper than any item: its kind only
+    return `[${value.map((inner) => canonical(inner, depth + 1)).join(",")}]`;
+  }
+  if (isDict(value)) {
+    if (depth > MAX_KEY_DEPTH) return JSON.stringify("<dict>");
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonical(value[key], depth + 1)}`).join(",")}}`;
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (typeof value === "string" || typeof value === "boolean" || value === null) return JSON.stringify(value);
+  return JSON.stringify(String(value));
 }
 
 /**
@@ -882,52 +1168,443 @@ function asFlag(value) {
 }
 
 /**
- * Combine pages: dedupe by item id, then by number (first seen wins); sort by number.
+ * Combine pages: dedupe by item id (the first seen stays), then keep one episode per number by the
+ * preference order of {@link mergePages}; sort by number. A highlight no episode of its number came
+ * with is no episode (3.0.1): left out.
  * @param {Iterable<Iterable<Episode>>} pages
  * @returns {Episode[]}
  */
 export function mergeEpisodes(pages) {
+  return merge(pages).episodes;
+}
+
+/**
+ * The pages of one listing as a {@link Listing} (`catalog.merge_pages`). The episodes are deduped
+ * by item id, THEN merged by number: of several items with one number the series keeps the one
+ * that is no highlight ({@link isHighlight}), then one that reads free or unlocked over one that
+ * reads locked, then the longer `video.duration` (an unknown one is the shortest), then the first
+ * listed — every other item is a {@link Duplicate} naming the rule that decided. A highlight never
+ * stands for an episode (3.0.1, the review's L3): when no item that is no highlight holds its
+ * number, it is a skipped item ({@link SKIP_HIGHLIGHT}, after the pages' own, by number) and its
+ * number is missing (`highlightNumbers`, which {@link countCheck} reaches). The skipped items keep their reasons, once per item id (an id read as an
+ * episode on another page is no skipped item), and an item without an id once per listing (3.0.1,
+ * the review's L4: its canonical JSON, `PagePayload.skippedKeys`; a page built by hand without keys
+ * counts each one). `itemsReceived` counts the distinct items of the series: every episode before
+ * the number merge (a lone highlight among them) plus the skipped items that do not name another
+ * drama. `totalHint` is the first page's count.
+ * @param {Iterable<PagePayload>} pages
+ * @returns {Listing}
+ */
+export function mergePages(pages) {
+  const listed = [...pages];
+  const { episodes, duplicates, highlights } = merge(listed.map((page) => page.episodes));
+  /** @type {Set<string>} */
+  const episodeIds = new Set();
+  for (const page of listed) for (const episode of page.episodes) episodeIds.add(episode.itemId);
+  /** @type {SkippedItem[]} */
+  const skipped = [];
+  /** @type {Set<string>} */
+  const skippedIds = new Set();
+  /** @type {Set<string>} */
+  const skippedKeys = new Set();
+  for (const page of listed) {
+    for (const [index, item] of page.skipped.entries()) {
+      if (typeof item.itemId === "string") {
+        if (episodeIds.has(item.itemId) || skippedIds.has(item.itemId)) continue;
+        skippedIds.add(item.itemId);
+      } else {
+        const key = page.skippedKeys?.[index] ?? null;
+        if (key !== null) {
+          if (skippedKeys.has(key)) continue;
+          skippedKeys.add(key);
+        }
+      }
+      skipped.push(item);
+    }
+  }
+  const received = episodeIds.size + skipped.filter((item) => item.reason !== SKIP_OTHER_DRAMA).length;
+  for (const highlight of highlights) skipped.push({ reason: SKIP_HIGHLIGHT, itemId: highlight.itemId });
+  /** @type {number | null} */
+  let total = null;
+  for (const page of listed) {
+    if (page.totalHint !== null && page.totalHint > 0) {
+      total = page.totalHint;
+      break;
+    }
+  }
+  const highlightNumbers = [...new Set(highlights.map((highlight) => highlight.number))].sort((a, b) => a - b);
+  return { episodes, duplicates, skipped, itemsReceived: received, totalHint: total, highlightNumbers };
+}
+
+/**
+ * `catalog._merge`: the episodes of `pages` deduped by item id, then one per number by the
+ * preference order, sorted by number; every item left out, by number then as listed; and the
+ * highlights of a number no other item holds (3.0.1: never an episode), by number then as listed.
+ * @param {Iterable<Iterable<Episode>>} pages
+ * @returns {{episodes: Episode[], duplicates: Duplicate[], highlights: Episode[]}}
+ */
+function merge(pages) {
   /** @type {Map<string, Episode>} */
   const byItem = new Map();
   for (const page of pages) {
     for (const episode of page) if (!byItem.has(episode.itemId)) byItem.set(episode.itemId, episode);
   }
-  /** @type {Map<number, Episode>} */
+  /** @type {Map<number, Episode[]>} */
   const byNumber = new Map();
   for (const episode of byItem.values()) {
-    if (!byNumber.has(episode.number)) byNumber.set(episode.number, episode);
+    const candidates = byNumber.get(episode.number);
+    if (candidates === undefined) byNumber.set(episode.number, [episode]);
+    else candidates.push(episode);
   }
-  return [...byNumber.values()].sort((a, b) => a.number - b.number);
+  /** @type {Episode[]} */
+  const episodes = [];
+  /** @type {Duplicate[]} */
+  const duplicates = [];
+  /** @type {Episode[]} */
+  const highlights = [];
+  for (const number of [...byNumber.keys()].sort((a, b) => a - b)) {
+    const candidates = /** @type {Episode[]} */ (byNumber.get(number));
+    if (candidates.every((candidate) => isHighlight(candidate.raw))) {
+      highlights.push(...candidates); // a clip of an episode TikTok did not list
+      continue;
+    }
+    let kept = /** @type {Episode} */ (candidates[0]);
+    for (const candidate of candidates.slice(1)) if (comparePreference(candidate, kept) < 0) kept = candidate;
+    episodes.push(kept);
+    for (const other of candidates) {
+      if (other !== kept) duplicates.push({ number, kept, leftOut: other, why: leftOutWhy(kept, other) });
+    }
+  }
+  return { episodes, duplicates, highlights };
 }
 
 /**
- * Human-readable oddities: gaps, duplicate numbers, announced-vs-listed total, locked count.
- * @param {readonly Episode[]} episodes
- * @param {number | null} totalHint
+ * `catalog._preference`: the merge's sort key, smaller kept — a highlight last, then a locked
+ * episode, then the shorter `video.duration` (an unknown duration below every known one).
+ * @param {Episode} episode
+ * @returns {number[]}
+ */
+function preference(episode) {
+  const duration = episode.durationS ?? -1;
+  return [isHighlight(episode.raw) ? 1 : 0, isLocked(episode) ? 1 : 0, -duration];
+}
+
+/**
+ * Python's tuple order on two {@link preference} keys: negative when `a` is kept over `b`.
+ * @param {Episode} a
+ * @param {Episode} b
+ * @returns {number}
+ */
+function comparePreference(a, b) {
+  const left = preference(a);
+  const right = preference(b);
+  for (let index = 0; index < left.length; index += 1) {
+    const x = /** @type {number} */ (left[index]);
+    const y = /** @type {number} */ (right[index]);
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * The first rule of the preference order that tells `leftOut` from `kept`.
+ * @param {Episode} kept
+ * @param {Episode} leftOut
+ * @returns {string}
+ */
+function leftOutWhy(kept, leftOut) {
+  const keptKey = preference(kept);
+  const leftKey = preference(leftOut);
+  const whys = [LEFT_OUT_HIGHLIGHT, LEFT_OUT_LOCKED, LEFT_OUT_SHORTER];
+  for (let index = 0; index < whys.length; index += 1) {
+    if (leftKey[index] !== keptKey[index]) return /** @type {string} */ (whys[index]);
+  }
+  return LEFT_OUT_LATER;
+}
+
+/**
+ * THE count rule of a listing (3.0.1, the owner's report of 2026-11-27; `catalog.count_check`,
+ * parity-tested): with C TikTok's count (`totalHint`, unknown when it is not a positive number), E
+ * the distinct episode numbers listed, H their highest — or the highest number of a lone highlight
+ * (`highlights`: `Listing.highlightNumbers`, a clip of an episode TikTok did not list) when that is
+ * higher, within C when C is known ({@link placedHighlights}); 0 for none — and S = `itemsReceived`
+ * - |E| the drama's other items received (0 when `itemsReceived` is unknown: a series built by
+ * hand), the numbers certainly an episode of the drama are 1..`certainTop` = max(H, C - S) — H when
+ * C is unknown —, and the list is `uncertain` when C is known and above `certainTop` (only possible
+ * when S > 0): whether TikTok counts the S other items or S episodes past H are missing, nothing in
+ * the list tells. Pure.
+ * @param {Iterable<number>} numbers
+ * @param {number | null | undefined} totalHint
+ * @param {number | null | undefined} itemsReceived
+ * @param {Iterable<number>} [highlights]
+ * @returns {CountCheck}
+ */
+export function countCheck(numbers, totalHint, itemsReceived, highlights = []) {
+  const listed = new Set(numbers);
+  let highest = 0;
+  for (const number of listed) if (number > highest) highest = number;
+  for (const number of placedHighlights(highlights, totalHint, listed)) if (number > highest) highest = number;
+  const otherItems = itemsReceived === null || itemsReceived === undefined ? 0 : Math.max(0, itemsReceived - listed.size);
+  if (totalHint === null || totalHint === undefined || !(totalHint > 0)) return { certainTop: highest, otherItems, uncertain: false };
+  const certainTop = Math.max(highest, totalHint - otherItems);
+  return { certainTop, otherItems, uncertain: totalHint > certainTop };
+}
+
+/**
+ * The lone highlights' numbers {@link countCheck} reaches (3.0.1; `catalog._placed_highlights`,
+ * parity-tested): every one while TikTok's count is unknown or the list itself goes past it
+ * (`numbers`, the episode numbers listed: a count the list contradicts, a stale one say, holds
+ * nothing back), else those within it — TikTok counts every episode of the drama, so a clip
+ * numbered past its count is no episode number DramaFetch can place, whatever TikTok numbered it
+ * by: it raises no missing number, no row and no request, and stays one of the drama's other items
+ * received.
+ * @param {Iterable<number>} highlights
+ * @param {number | null | undefined} totalHint
+ * @param {Iterable<number>} numbers
+ * @returns {number[]}
+ */
+function placedHighlights(highlights, totalHint, numbers) {
+  const clips = [...highlights];
+  if (totalHint === null || totalHint === undefined || !(totalHint > 0)) return clips;
+  let highest = 0;
+  for (const number of numbers) if (number > highest) highest = number;
+  if (totalHint < highest) return clips; // a count the list contradicts holds nothing back
+  return clips.filter((number) => number <= totalHint);
+}
+
+/**
+ * The episode numbers a listing certainly lacks, ascending (`catalog.missing_numbers`): every
+ * number from 1 up to {@link countCheck}'s `certainTop` that is not listed — a hole below the
+ * highest number listed (5, then 7 without 6), the numbers above it up to a lone highlight's
+ * (`highlights`, within TikTok's count when it is known) and up to TikTok's count less the drama's
+ * other items received —; never above `limit`. A number past `certainTop` is never named: an
+ * uncertain list is said, not given rows (3.0.1).
+ * @param {Iterable<number>} numbers
+ * @param {number | null | undefined} totalHint
+ * @param {number | null | undefined} itemsReceived
+ * @param {number} limit
+ * @param {Iterable<number>} [highlights]
+ * @returns {number[]}
+ */
+export function missingNumbers(numbers, totalHint, itemsReceived, limit, highlights = []) {
+  const listed = new Set(numbers);
+  const top = Math.min(countCheck(listed, totalHint, itemsReceived, highlights).certainTop, limit);
+  /** @type {number[]} */
+  const missing = [];
+  for (let number = 1; number <= top; number += 1) if (!listed.has(number)) missing.push(number);
+  return missing;
+}
+
+/**
+ * The ids of the page's items of the series (`catalog.series_item_ids`) — its episodes, then the
+ * items DramaFetch could not read that do not name another drama — in page order; an item without
+ * an id gives none.
+ * @param {PagePayload} page
  * @returns {string[]}
  */
-export function catalogWarnings(episodes, totalHint) {
+export function seriesItemIds(page) {
+  const ids = page.episodes.map((episode) => episode.itemId);
+  for (const item of page.skipped) {
+    if (item.reason !== SKIP_OTHER_DRAMA && item.itemId !== null) ids.push(item.itemId);
+  }
+  return ids;
+}
+
+/**
+ * Whether an episode-list page says the series' list is over (`catalog.page_ends_list`): an answer
+ * that holds a list (`listed`: an answer without one — TikTok's error JSON, say — ends nothing)
+ * whose `hasMore` is false and that is no repeat: it holds no item of the series at all (an empty
+ * last page), or one whose id `seenIds` — the ids of the series' items earlier pages brought —
+ * does not hold. A page that only repeats items already listed (TikTok answering a later cursor
+ * with the first page again) ends nothing, whatever its `hasMore` says; and (3.0.1, the review's L5)
+ * an answer with no item of the series ends nothing when more was expected (`expectedMore`: it
+ * answers a cursor an earlier page announced with `hasMore` true, or a gap-filling request) — TikTok
+ * may answer a re-signed request with an empty list; a last page that brings items of the series
+ * still ends the list.
+ * @param {PagePayload} page
+ * @param {Iterable<string>} seenIds
+ * @param {boolean} [listed]
+ * @param {boolean} [expectedMore]
+ * @returns {boolean}
+ */
+export function pageEndsList(page, seenIds, listed = true, expectedMore = false) {
+  if (!listed || page.hasMore) return false;
+  /** @type {(string | null)[]} */
+  const own = page.episodes.map((episode) => episode.itemId);
+  for (const item of page.skipped) if (item.reason !== SKIP_OTHER_DRAMA) own.push(item.itemId);
+  if (own.length === 0) return !expectedMore;
+  const seen = new Set(seenIds);
+  return own.some((itemId) => itemId !== null && !seen.has(itemId));
+}
+
+/**
+ * The episode number the gap filling asks TikTok for next — the list page from `cursor` = that
+ * number - 1 — or null when nothing is left to ask (`catalog.fill_target`): the first number
+ * {@link missingNumbers} names (a hole below the highest number listed, a number up to a lone
+ * highlight's — `options.highlights` — or up to TikTok's count less the drama's other items
+ * received: {@link countCheck}) that no earlier filling answer covered (`options.covered`: the
+ * spans {@link fillCovered} gave, `[low, high]` with `high` null for no bound); else, once every
+ * such number is covered, the number after the highest one listed or held by a lone highlight,
+ * unless an answer covered it, when the list ended early (`options.earlyEnd`) and TikTok's count is
+ * unknown, or when the list is uncertain (3.0.1: TikTok counts more than the drama certainly has —
+ * the page after the highest number listed is asked for once). A known count everything listed
+ * accounts for leaves nothing to ask past the highest number listed.
+ * @param {Iterable<number>} numbers
+ * @param {number | null | undefined} totalHint
+ * @param {number | null | undefined} itemsReceived
+ * @param {{earlyEnd: boolean, covered?: readonly (readonly [number, number | null])[], limit: number, highlights?: readonly number[]}} options
+ * @returns {number | null}
+ */
+export function fillTarget(numbers, totalHint, itemsReceived, options) {
+  const spans = options.covered ?? [];
+  const isCovered = (/** @type {number} */ number) =>
+    spans.some(([low, high]) => low <= number && (high === null || number <= high));
+  const listed = [...numbers];
+  const clips = [...(options.highlights ?? [])];
+  for (const number of missingNumbers(listed, totalHint, itemsReceived, options.limit, clips)) {
+    if (!isCovered(number)) return number;
+  }
+  const unknown = totalHint === null || totalHint === undefined || !(totalHint > 0);
+  if ((options.earlyEnd && unknown) || countCheck(listed, totalHint, itemsReceived, clips).uncertain) {
+    let highest = 0;
+    for (const number of [...listed, ...placedHighlights(clips, totalHint, listed)]) if (number > highest) highest = number;
+    const after = highest + 1;
+    if (after <= options.limit && !isCovered(after)) return after;
+  }
+  return null;
+}
+
+/**
+ * The episode numbers one filling answer covered, from `target` on (`catalog.fill_covered`) —
+ * those the filling stops asking for once the answer did not bring them: every number from
+ * `target` on when the answer says the list is over (`hasMore` false; null: no upper bound); while
+ * it says more, up to the highest number at or above `target` it listed (TikTok sent a shorter page
+ * than asked), else up to `target + count - 1` (the page asked; `count` at least 1).
+ * @param {number} target
+ * @param {number} count
+ * @param {PagePayload | null} answer
+ * @returns {[number, number | null]}
+ */
+export function fillCovered(target, count, answer) {
+  if (answer !== null && !answer.hasMore) return [target, null];
+  /** @type {number | null} */
+  let reached = null;
+  for (const episode of answer === null ? [] : answer.episodes) {
+    if (episode.number >= target && (reached === null || episode.number > reached)) reached = episode.number;
+  }
+  if (reached !== null) return [target, reached];
+  return [target, target + Math.max(1, count) - 1];
+}
+
+/**
+ * Human-readable oddities of a listing (`catalog.catalog_warnings`), in this order: the gaps below
+ * the highest number listed or held by a lone highlight (`options.highlights`, 3.0.1: a clip of an
+ * episode TikTok did not list — the numbers above the highest episode listed up to it are missing
+ * too, within TikTok's count when it is known, as {@link countCheck} reads them); one line per item
+ * left out for another one's number — those
+ * `episodes` holds itself (found by {@link mergePages}' rules), then `options.duplicates` —
+ * naming the number, the item left out and why, and the item kept; one line per reason of the
+ * `options.skipped` items, with their count ({@link SKIP_REASONS} first, then
+ * {@link SKIP_HIGHLIGHT}); TikTok's count against the numbers listed whenever they differ (`TikTok
+ * announces N episodes, M listed`: more listed than it announces, or fewer — 3.0.1, the review's
+ * L2: other items received never silence it); when {@link countCheck} finds the list uncertain,
+ * what TikTok counts, what was listed and that DramaFetch cannot tell ({@link uncertainText}); the
+ * locked count.
+ * @param {readonly Episode[]} episodes
+ * @param {number | null} totalHint
+ * @param {{duplicates?: readonly Duplicate[], skipped?: readonly SkippedItem[], itemsReceived?: number | null, highlights?: readonly number[]}} [options]
+ * @returns {string[]}
+ */
+export function catalogWarnings(episodes, totalHint, options = {}) {
   /** @type {string[]} */
   const warnings = [];
   const numbers = [...new Set(episodes.map((episode) => episode.number))].sort((a, b) => a - b);
+  const clips = placedHighlights(options.highlights ?? [], totalHint, numbers);
   let expected = 1;
   for (const number of numbers) {
     if (number > expected) warnings.push(gapText(expected, number - 1));
     expected = number + 1;
   }
-  /** @type {Map<number, number>} */
-  const counts = new Map();
-  for (const episode of episodes) counts.set(episode.number, (counts.get(episode.number) ?? 0) + 1);
-  for (const [number, count] of [...counts.entries()].sort((a, b) => a[0] - b[0])) {
-    if (count > 1) warnings.push(`duplicate episode number ${number}`);
+  let clipTop = 0;
+  for (const number of clips) if (number > clipTop) clipTop = number;
+  if (clipTop >= expected) warnings.push(gapText(expected, clipTop));
+  const found = [...merge([episodes]).duplicates, ...(options.duplicates ?? [])];
+  found.sort((a, b) => a.number - b.number);
+  for (const duplicate of found) warnings.push(duplicateText(duplicate));
+  /** @type {Map<string, number>} */
+  const reasons = new Map();
+  for (const item of options.skipped ?? []) reasons.set(item.reason, (reasons.get(item.reason) ?? 0) + 1);
+  const known = [...SKIP_REASONS, SKIP_HIGHLIGHT];
+  const order = [...known, ...[...reasons.keys()].filter((reason) => !known.includes(reason))];
+  for (const reason of order) {
+    const count = reasons.get(reason) ?? 0;
+    if (count > 0) warnings.push(skippedText(count, reason));
   }
   if (totalHint !== null && totalHint > 0 && numbers.length !== totalHint) {
     warnings.push(`TikTok announces ${totalHint} episodes, ${numbers.length} listed`);
   }
+  const check = countCheck(numbers, totalHint, options.itemsReceived ?? null, clips);
+  if (check.uncertain && totalHint !== null) warnings.push(uncertainText(totalHint, numbers.length, check.otherItems));
   const locked = episodes.filter(isLocked).length;
   if (locked === 1) warnings.push("1 episode looks locked");
   else if (locked > 1) warnings.push(`${locked} episodes look locked`);
   return warnings;
+}
+
+/**
+ * @param {Duplicate} duplicate
+ * @returns {string}
+ */
+function duplicateText(duplicate) {
+  return (
+    `duplicate episode number ${duplicate.number}: item ${duplicate.leftOut.itemId} left out (${duplicate.why}), ` +
+    `item ${duplicate.kept.itemId} kept`
+  );
+}
+
+/**
+ * `1 other item (a trailer or a highlight)` / `2 other items (trailers or highlights)`
+ * (`catalog.other_items_text`).
+ * @param {number} count
+ * @returns {string}
+ */
+export function otherItemsText(count) {
+  return count === 1 ? "1 other item (a trailer or a highlight)" : `${count} other items (trailers or highlights)`;
+}
+
+/**
+ * `1 episode` / `2 episodes`.
+ * @param {number} count
+ * @returns {string}
+ */
+function episodesText(count) {
+  return count === 1 ? "1 episode" : `${count} episodes`;
+}
+
+/**
+ * The warning of an uncertain list (3.0.1, the review's L2; `catalog.uncertain_text`): `TikTok's
+ * list may be incomplete: TikTok counts 66 episodes; 65 episodes and 1 other item (a trailer or a
+ * highlight) were listed, so DramaFetch cannot tell whether an episode is missing — paste the drama
+ * again later to check again`.
+ * @param {number} total
+ * @param {number} listed
+ * @param {number} other
+ * @returns {string}
+ */
+export function uncertainText(total, listed, other) {
+  return (
+    `${UNCERTAIN_TEXT}: TikTok counts ${episodesText(total)}; ${episodesText(listed)} and ${otherItemsText(other)} ` +
+    "were listed, so DramaFetch cannot tell whether an episode is missing — paste the drama again later to check again"
+  );
+}
+
+/**
+ * @param {number} count
+ * @param {string} reason
+ * @returns {string}
+ */
+function skippedText(count, reason) {
+  return `TikTok listed ${count} ${count === 1 ? "item" : "items"} DramaFetch could not read (${reason})`;
 }
 
 /**
@@ -943,17 +1620,23 @@ function gapText(low, high) {
 /**
  * Best-effort `{name, total}` from a `/api/drama/detail/` payload: inside `dramaInfo` / `drama` /
  * `detail` objects first (recursively), then the top level; the name is the first string under
- * `dramaName`, `title` or `name`, the total the first positive integer under `totalEpisode`,
- * `totalEpisodes`, `episodeCount`, `total` or `episodeTotal`.
+ * `dramaName`, `title` or `name`, the total the first positive integer under `numVideos` (TikTok's
+ * count), `totalEpisode`, `totalEpisodes`, `episodeCount`, `total` or `episodeTotal`. With
+ * `seriesId`, an object whose own series id names another drama gives neither.
  * @param {unknown} payload
+ * @param {string | null} [seriesId]
  * @returns {{name: string | null, total: number | null}}
  */
-export function parseDetailPayload(payload) {
+export function parseDetailPayload(payload, seriesId = null) {
   /** @type {string | null} */
   let name = null;
   /** @type {number | null} */
   let total = null;
   for (const container of detailContainers(payload)) {
+    if (seriesId !== null && seriesId !== undefined) {
+      const foundSeriesId = seriesIdOf(container);
+      if (foundSeriesId !== null && foundSeriesId !== String(seriesId)) continue;
+    }
     if (name === null) name = firstStr(container, NAME_KEYS);
     if (total === null) total = firstPositiveInt(container, TOTAL_KEYS);
     if (name !== null && total !== null) break;

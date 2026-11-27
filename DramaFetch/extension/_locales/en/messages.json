@@ -136,6 +136,10 @@
     "message": "Locked",
     "description": "Column."
   },
+  "colNotAsked": {
+    "message": "Not asked",
+    "description": "Column of the batch table (3.0.1): free episodes DramaFetch did not ask TikTok for because TikTok's list made them look locked (shown as not downloaded (free))."
+  },
   "colFailed": {
     "message": "Failed",
     "description": "Column."
@@ -1268,6 +1272,54 @@
       }
     }
   },
+  "alertMissingMessage": {
+    "message": "$episodes$ are not in TikTok's list.",
+    "description": "Notification message (3.0.1): the episodes TikTok's list lacked (E61, E62) — at most ten, then alertMore; after alertRetryMessage when some did not download either.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertMissingMessageOne": {
+    "message": "$episode$ is not in TikTok's list.",
+    "description": "The same, for one episode (E61).",
+    "placeholders": {
+      "episode": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertGuessedMessage": {
+    "message": "$episodes$ were not asked for: TikTok's list made them look locked.",
+    "description": "Notification message (3.0.1): the free episodes DramaFetch did not ask TikTok for because its own rules guessed they were locked (a short header, no play address) — E03, E17, at most ten, then alertMore; Retry asks for them anyway.",
+    "placeholders": {
+      "episodes": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertGuessedMessageOne": {
+    "message": "$episode$ was not asked for: TikTok's list made it look locked.",
+    "description": "The same, for one episode (E03), when the list gave no hint.",
+    "placeholders": {
+      "episode": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertGuessedMessageOneHint": {
+    "message": "$episode$ was not asked for: TikTok's list made it look locked ($hint$).",
+    "description": "The same, for one episode (E03), with what the list said of it (plays 2 s of 3 s; no play address).",
+    "placeholders": {
+      "episode": {
+        "content": "$1"
+      },
+      "hint": {
+        "content": "$2"
+      }
+    }
+  },
   "alertMore": {
     "message": "$episodes$ and $count$ more",
     "description": "The first ten episodes named, and how many more did not download.",
@@ -1287,6 +1339,15 @@
   "alertIncompleteTitle": {
     "message": "$name$ — not complete",
     "description": "Notification title: the drama has nothing to retry but is not complete (a gap in TikTok's list, an episode TikTok did not list, a list it refused); its report line is the message.",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      }
+    }
+  },
+  "alertListIncompleteTitle": {
+    "message": "⚠ $name$ — TikTok's list may be incomplete",
+    "description": "Notification title (3.0.1): the drama has nothing to retry but TikTok's list itself is short — a number missing that the job did not take, or the list ended early while TikTok's count is unknown; its report line is the message.",
     "placeholders": {
       "name": {
         "content": "$1"
@@ -1353,6 +1414,10 @@
         "content": "$1"
       }
     }
+  },
+  "alertAutoRetryAgain": {
+    "message": "DramaFetch tries once more on its own.",
+    "description": "Notification message ending (3.0.1), after alertMissingMessage under alertAutoRetryTitle: the automatic retry lists the drama again and asks for those episodes once more."
   },
   "alertAfterAutoRetry": {
     "message": "After an automatic retry.",
