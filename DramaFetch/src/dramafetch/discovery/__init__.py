@@ -86,8 +86,8 @@ class AutoDiscovery:
 #: the browser.
 PARTIAL_COMPLETED = "static strategy saw only the first page; completed with the browser"
 #: What `auto` says of a static result whose whole list (no ``hasMore``) lacks an episode — a hole,
-#: or a number TikTok's count or a lone highlight places past it (3.0.1) —, listed again with the
-#: browser, whose gap filling asks TikTok again for it.
+#: or a number TikTok's count places past it (3.0.1) —, listed again with the browser, whose gap
+#: filling asks TikTok again for it.
 LACKING_LISTED_AGAIN = (
     "static strategy: the episode list the page embeds lacks an episode; listed again with the "
     "browser"
@@ -110,8 +110,8 @@ def _partial(series: Series) -> bool:
 
 def _lacking(series: Series) -> bool:
     """Whether a static result lacks part of the list: it was cut short (:func:`_cut_short`) or a
-    number is missing (``Series.missing_numbers``: a hole, or one TikTok's count or a lone
-    highlight places past the highest episode listed)."""
+    number is missing (``Series.missing_numbers``: a hole, or one TikTok's count places past the
+    highest episode listed)."""
     return _cut_short(series) or bool(series.missing_numbers)
 
 
@@ -126,13 +126,9 @@ def _cut_short(series: Series) -> bool:
 def _uncertain(series: Series) -> bool:
     """Whether TikTok counts more than a static result's list can place (3.0.1,
     ``catalog.count_check``'s ``uncertain``): its count may include the trailer or the highlight
-    the page lists, or episodes past the highest number listed may be missing."""
-    return count_check(
-        series.numbers,
-        series.total_hint,
-        series.items_received,
-        highlights=series.highlight_numbers,
-    ).uncertain
+    the page lists besides the episodes, or episodes past the highest number listed may be
+    missing."""
+    return count_check(series.numbers, series.total_hint, series.items_received).uncertain
 
 
 def choose_discovery(options: DiscoveryOptions) -> Discovery:

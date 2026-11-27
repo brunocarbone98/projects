@@ -520,7 +520,6 @@ class PlaywrightDiscovery:
                 early_end=capture.early_end is not None,
                 covered=covered,
                 limit=MAX_EPISODE_NUMBER,
-                highlights=listing.highlight_numbers,
             )
             if target is None or capture.template_url is None:
                 return
@@ -655,7 +654,6 @@ def _build_series(ref: SeriesRef, options: DiscoveryOptions, capture: _Capture) 
             duplicates=listing.duplicates,
             skipped=listing.skipped,
             items_received=listing.items_received,
-            highlights=listing.highlight_numbers,
         ),
     ]
     return Series(
@@ -666,13 +664,11 @@ def _build_series(ref: SeriesRef, options: DiscoveryOptions, capture: _Capture) 
         warnings=warnings,
         skipped_items=listing.skipped,
         items_received=listing.items_received,
-        highlight_numbers=listing.highlight_numbers,
         missing_numbers=missing_numbers(
             (episode.number for episode in episodes),
             total,
             listing.items_received,
             limit=MAX_EPISODE_NUMBER,
-            highlights=listing.highlight_numbers,
         ),
         early_end=capture.early_end,
         listing=ListingRecord(endpoint=capture.endpoint, pages=list(capture.listing)),

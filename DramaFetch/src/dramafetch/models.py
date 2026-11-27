@@ -281,11 +281,6 @@ class Series:
     # counted: TikTok's count of this drama leaves them out) — what ``catalog.count_check`` holds
     # against ``total_hint``; None when unknown (a series built by hand).
     items_received: int | None = None
-    # The numbers of the highlights no episode of their number came with (3.0.1,
-    # ``catalog.Listing.highlight_numbers``): each a clip of an episode TikTok did not list, so the
-    # drama has that number — ``catalog.count_check`` reaches it, even above the highest number
-    # listed (``missing_numbers``, the report's gaps).
-    highlight_numbers: list[int] = field(default_factory=list)
     # The episode numbers the listing still lacks once it is over, the gap filling included
     # (``catalog.missing_numbers``): the holes below the highest number listed and the numbers up
     # to TikTok's count less the drama's other items received (``catalog.count_check``: a number

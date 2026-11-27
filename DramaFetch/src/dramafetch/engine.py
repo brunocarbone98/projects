@@ -303,7 +303,6 @@ def unlisted_requested(series: Series, spec: str | None) -> list[int]:
         series.total_hint,
         series.items_received,
         limit=MAX_EPISODE_NUMBER,
-        highlights=series.highlight_numbers,
     )
     return [number for number in missing if _in_intervals(number, intervals)]
 
@@ -314,12 +313,7 @@ def ignored_requested(series: Series, spec: str | None) -> list[tuple[int, int]]
     TikTok's count less the drama's other items received —: what ``download --episodes`` reports
     as ignored; the requested numbers up to it are :func:`unlisted_requested`'s, with a row each
     (3.0.1)."""
-    check = count_check(
-        series.numbers,
-        series.total_hint,
-        series.items_received,
-        highlights=series.highlight_numbers,
-    )
+    check = count_check(series.numbers, series.total_hint, series.items_received)
     last = max(max(series.numbers, default=0), min(check.certain_top, MAX_EPISODE_NUMBER))
     return [
         (max(low, last + 1), high)
@@ -1003,7 +997,7 @@ def series_report(
     hint = series.total_hint if series.total_hint and series.total_hint > 0 else None
     # THE count rule (catalog.count_check): the numbers certainly an episode of the drama, and
     # whether TikTok counts more than that (its count may include the other items it listed)
-    check = count_check(numbers, hint, series.items_received, highlights=series.highlight_numbers)
+    check = count_check(numbers, hint, series.items_received)
     # a failure row of a number the list does not hold: missing from TikTok's list, not a failure
     unlisted = {
         n

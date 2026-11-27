@@ -289,7 +289,7 @@ export function seriesReport(series, results, options = {}) {
   const hint = series.totalHint && series.totalHint > 0 ? series.totalHint : null;
   // THE count rule (catalog.countCheck): the numbers certainly an episode of the drama, and whether
   // TikTok counts more than that (its count may include the other items it listed)
-  const check = countCheck(numbers, hint, series.itemsReceived ?? null, series.highlightNumbers ?? []);
+  const check = countCheck(numbers, hint, series.itemsReceived ?? null);
   // a failure row of a number the list does not hold: missing from TikTok's list, not a failure
   const unlisted = new Set(
     numbersWhere((status) => !isOk(status)).filter((number) => !numbers.has(number) && number > 0 && number <= MAX_EPISODE_NUMBER),
@@ -386,14 +386,13 @@ export function listUncertain(series) {
     series.episodes.map((episode) => episode.number),
     series.totalHint,
     series.itemsReceived ?? null,
-    series.highlightNumbers ?? [],
   ).uncertain;
 }
 
 /**
  * The drama's items received besides its episode numbers (3.0.1, `catalog.countCheck`'s
- * `otherItems`): a trailer, a highlight, an item left out for another one's number, one without a
- * number or an id.
+ * `otherItems`): a trailer, an item left out for another one's number (a highlight beside the
+ * episode of its number among them), one without a number or an id.
  * @param {Series} series
  * @returns {number}
  */
@@ -402,7 +401,6 @@ export function listOtherItems(series) {
     series.episodes.map((episode) => episode.number),
     series.totalHint,
     series.itemsReceived ?? null,
-    series.highlightNumbers ?? [],
   ).otherItems;
 }
 
@@ -420,7 +418,6 @@ export function listMissing(series) {
     hint,
     series.itemsReceived ?? null,
     MAX_EPISODE_NUMBER,
-    series.highlightNumbers ?? [],
   );
 }
 

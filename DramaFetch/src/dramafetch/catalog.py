@@ -54,11 +54,13 @@ short header on 2026-11-06, from the owner's real run):
   is held against it by ONE rule (:func:`count_check`, 3.0.1): the numbers certainly missing are
   the holes and those up to the count less the drama's other items received; a count above that
   makes the list uncertain — said, never counted complete, never a row.
-- Every captured item's ``dramaInfo.DramaVideoData`` also carries ``IsHighlight`` (false) and
-  ``LinkedEpisodeID`` (``"0"``): a clip of an episode would be numbered like it, so when two items
-  share a number the merge keeps the episode (:func:`is_highlight`, :func:`merge_pages`) and says
-  which item it left out; a highlight never stands for an episode — with no episode of its number
-  it is a skipped item (:data:`SKIP_HIGHLIGHT`) and its number missing.
+- Every captured item's ``dramaInfo.DramaVideoData`` also carries TikTok's highlight marks,
+  ``IsHighlight`` and ``LinkedEpisodeID`` (false and ``"0"`` on almost every episode:
+  :func:`is_highlight`). They do NOT say an item is no episode: TikTok marks some full episodes
+  this way (the owner's drama of 2026-11-27, 66 items for 66 episodes: episodes 9 and 17 carry
+  them, alone with their numbers, and play on TikTok). So they only decide between items of one
+  number — the merge keeps the one that is no highlight and says which item it left out — and a
+  number only highlights hold keeps one of them as its episode (4.0.1, :func:`merge_pages`).
 - Every item carries the episode's signed play URLs (``video.bitrateInfo[*].PlayAddr.UrlList`` per
   codec and bitrate, plus ``video.playAddr``), valid until their ``expire`` query parameter.
   Each ``bitrateInfo`` entry is one rendition — ``CodecType`` (``h264``, ``h265`` or ``bytevc1``,
@@ -202,7 +204,8 @@ _TOTAL_KEYS = (
 )
 _DETAIL_CONTAINER_KEYS = ("dramaInfo", "drama", "detail")
 #: TikTok's highlight marks (:func:`is_highlight`), on ``dramaInfo.DramaVideoData`` in every
-#: capture (``IsHighlight: false``, ``LinkedEpisodeID: "0"`` on the owner's episodes).
+#: capture (``IsHighlight: false``, ``LinkedEpisodeID: "0"`` on almost every episode;
+#: ``IsHighlight`` truthy on episodes 9 and 17 of the owner's drama of 2026-11-27, full episodes).
 _HIGHLIGHT_KEY = "IsHighlight"
 _LINKED_EPISODE_KEY = "LinkedEpisodeID"
 #: Where an item's cover image lives, best first: the full frame, the cropped poster, the animated
@@ -219,16 +222,11 @@ SKIP_OTHER_DRAMA = "another drama's id"
 SKIP_NO_ID = "no id"
 SKIP_NO_NUMBER = "no episode number"
 SKIP_REASONS = (SKIP_OTHER_DRAMA, SKIP_NO_ID, SKIP_NO_NUMBER)
-#: The reason of a highlight no episode of its number was listed with (3.0.1, the review's L3): a
-#: highlight never stands for an episode, so :func:`merge_pages` keeps it as a skipped item — not
-#: :func:`skip_reason`'s, which reads one item alone — and its number stays missing (a hole the gap
-#: filling asks for, named in the report line). :func:`catalog_warnings` says it after
-#: :data:`SKIP_REASONS`.
-SKIP_HIGHLIGHT = "a highlight, a clip of an episode"
 #: Why the merge left an item out for another one with its number (``Duplicate.why``): the first
 #: rule of the preference order that tells the two apart — the kept one is no highlight
 #: (:func:`is_highlight`), or reads free or unlocked where the other reads locked, or is longer
-#: (``video.duration``); else it was listed first.
+#: (``video.duration``); else it was listed first. Of items that are all highlights, the same
+#: order decides from its second rule on (4.0.1).
 LEFT_OUT_HIGHLIGHT = "a highlight"
 LEFT_OUT_LOCKED = "locked"
 LEFT_OUT_SHORTER = "shorter"
@@ -292,20 +290,14 @@ class Duplicate:
 class Listing:
     """What the pages of one listing add up to (:func:`merge_pages`): the episodes (one per
     number, sorted), every item left out for another one's number, every item that is no
-    episode (with its reason; a highlight no episode of its number came with among them), how
-    many distinct items of the series came, TikTok's count as the items carry it, and the numbers
-    of those lone highlights (3.0.1)."""
+    episode (with its reason), how many distinct items of the series came, and TikTok's count as
+    the items carry it."""
 
     episodes: list[Episode]
     duplicates: list[Duplicate]
     skipped: list[SkippedItem]
     items_received: int
     total_hint: int | None
-    #: The numbers of the highlights no episode of their number came with, ascending and distinct
-    #: (3.0.1): each is a clip of an episode TikTok did not list, so the drama has that number —
-    #: :func:`count_check` reaches it (``highlights``), so it is missing, asked for and named even
-    #: above the highest episode number listed.
-    highlight_numbers: list[int] = field(default_factory=list)
 
 
 def find_item_lists(payload: Any, max_depth: int = MAX_DEPTH) -> list[list[dict[str, Any]]]:
@@ -775,13 +767,16 @@ def skip_reason(item: Any, series_id: str) -> str | None:
 
 
 def is_highlight(item: Any) -> bool:
-    """Whether an item is one of TikTok's highlights — a clip of an episode, numbered like it —
-    rather than the episode: a truthy ``IsHighlight`` (a bool, a number or a string read as
-    ``_truthy`` reads one; a container or None never counts) or a ``LinkedEpisodeID`` that is an
-    id other than ``"0"`` (a string or an int), in ``dramaInfo.DramaVideoData`` or in
-    ``dramaInfo``. Absent keys, ``false``, ``"0"`` and ``0`` are an episode's: every captured
-    episode carries ``IsHighlight: false`` and ``LinkedEpisodeID: "0"``. Pure; never raises; the
-    item may be wrapped in ``{"itemStruct": {...}}``."""
+    """Whether an item carries TikTok's highlight marks: a truthy ``IsHighlight`` (a bool, a
+    number or a string read as ``_truthy`` reads one; a container or None never counts) or a
+    ``LinkedEpisodeID`` that is an id other than ``"0"`` (a string or an int), in
+    ``dramaInfo.DramaVideoData`` or in ``dramaInfo``. Absent keys, ``false``, ``"0"`` and ``0``
+    are no mark: almost every captured episode carries ``IsHighlight: false`` and
+    ``LinkedEpisodeID: "0"``. A mark does not make an item a clip of an episode: TikTok marks some
+    full episodes this way (the owner's drama of 2026-11-27: episodes 9 and 17 of 66, alone with
+    their numbers, play on TikTok), so it only decides between items of one number — the one that
+    is no highlight is kept (:func:`merge_pages`) —, never whether a number has an episode
+    (4.0.1). Pure; never raises; the item may be wrapped in ``{"itemStruct": {...}}``."""
     if not isinstance(item, dict):
         return False
     drama_info = _drama_info(item)
@@ -1094,8 +1089,7 @@ def _as_flag(value: Any) -> bool:
 
 def merge_episodes(pages: Iterable[Iterable[Episode]]) -> list[Episode]:
     """Combine pages: dedupe by item id (the first seen stays), then keep one episode per number
-    by the preference order of :func:`merge_pages`; sort by number. A highlight no episode of its
-    number came with is no episode (3.0.1): left out."""
+    by the preference order of :func:`merge_pages`; sort by number."""
     return _merge(pages)[0]
 
 
@@ -1107,20 +1101,19 @@ def merge_pages(pages: Iterable[PagePayload]) -> Listing:
     the one that is no highlight (:func:`is_highlight`), then one that reads free or unlocked over
     one that reads locked, then the longer ``video.duration`` (an unknown one is the shortest),
     then the first listed — and every other item is a :class:`Duplicate` naming the rule that
-    decided (``LEFT_OUT_*``). A highlight never stands for an episode (3.0.1, the review's L3):
-    when no item that is no highlight holds its number, it is a skipped item
-    (:data:`SKIP_HIGHLIGHT`, after the pages' own, by number) and its number is missing
-    (:attr:`Listing.highlight_numbers`, which :func:`count_check` reaches). The
-    skipped items keep their reasons, once per item id (an id read as an episode on another page
-    is no skipped item), and an item without an id once per listing (3.0.1, the review's L4: its
-    canonical JSON, :attr:`PagePayload.skipped_keys`; a page built by hand without keys counts each
-    one). ``items_received`` counts the distinct items of the series: every episode before the
-    number merge (a lone highlight among them) plus the skipped items that do not name another
-    drama (TikTok's count of this drama leaves those out). ``total_hint`` is the first page's count
-    (:attr:`PagePayload.total_hint`).
+    decided (``LEFT_OUT_*``). A number only highlights hold keeps one of them as its episode, by
+    the same order (4.0.1, the owner's report of 2026-11-27: TikTok marks some full episodes as
+    highlights — episodes 9 and 17 of the owner's drama of 66 —, so a highlight alone with its
+    number is that number's episode and downloads like any other). The skipped items keep their
+    reasons, once per item id (an id read as an episode on another page is no skipped item), and
+    an item without an id once per listing (3.0.1, the review's L4: its canonical JSON,
+    :attr:`PagePayload.skipped_keys`; a page built by hand without keys counts each one).
+    ``items_received`` counts the distinct items of the series: every episode before the number
+    merge plus the skipped items that do not name another drama (TikTok's count of this drama
+    leaves those out). ``total_hint`` is the first page's count (:attr:`PagePayload.total_hint`).
     """
     listed = list(pages)
-    episodes, duplicates, highlights = _merge(page.episodes for page in listed)
+    episodes, duplicates = _merge(page.episodes for page in listed)
     episode_ids = {episode.item_id for page in listed for episode in page.episodes}
     skipped: list[SkippedItem] = []
     skipped_ids: set[str] = set()
@@ -1139,7 +1132,6 @@ def merge_pages(pages: Iterable[PagePayload]) -> Listing:
                     skipped_keys.add(key)
             skipped.append(item)
     received = len(episode_ids) + sum(1 for item in skipped if item.reason != SKIP_OTHER_DRAMA)
-    skipped.extend(SkippedItem(SKIP_HIGHLIGHT, highlight.item_id) for highlight in highlights)
     total = next(
         (page.total_hint for page in listed if page.total_hint is not None and page.total_hint > 0),
         None,
@@ -1150,17 +1142,13 @@ def merge_pages(pages: Iterable[PagePayload]) -> Listing:
         skipped=skipped,
         items_received=received,
         total_hint=total,
-        highlight_numbers=sorted({highlight.number for highlight in highlights}),
     )
 
 
-def _merge(
-    pages: Iterable[Iterable[Episode]],
-) -> tuple[list[Episode], list[Duplicate], list[Episode]]:
+def _merge(pages: Iterable[Iterable[Episode]]) -> tuple[list[Episode], list[Duplicate]]:
     """The episodes of ``pages`` deduped by item id, then one per number by the preference order
-    (:func:`merge_pages`), sorted by number; every item left out, by number then as listed; and
-    the highlights of a number no other item holds (3.0.1: never an episode), by number then as
-    listed."""
+    (:func:`merge_pages`) — a number only highlights hold keeps one of them —, sorted by number;
+    and every item left out, by number then as listed."""
     by_item: dict[str, Episode] = {}
     for page in pages:
         for episode in page:
@@ -1170,12 +1158,8 @@ def _merge(
         by_number.setdefault(episode.number, []).append(episode)
     episodes: list[Episode] = []
     duplicates: list[Duplicate] = []
-    highlights: list[Episode] = []
     for number in sorted(by_number):
         candidates = by_number[number]
-        if all(is_highlight(candidate.raw) for candidate in candidates):
-            highlights.extend(candidates)  # a clip of an episode TikTok did not list
-            continue
         kept = candidates[0]
         for candidate in candidates[1:]:
             if _preference(candidate) < _preference(kept):
@@ -1186,7 +1170,7 @@ def _merge(
             for other in candidates
             if other is not kept
         )
-    return episodes, duplicates, highlights
+    return episodes, duplicates
 
 
 def _preference(episode: Episode) -> tuple[int, int, int]:
@@ -1209,13 +1193,13 @@ class CountCheck(NamedTuple):
     """What a listing's numbers say against TikTok's count (:func:`count_check`, 3.0.1).
 
     ``certain_top``: the highest episode number the drama certainly has — the highest number
-    listed or held by a lone highlight, or TikTok's count less the drama's other items received
-    when that is higher;
+    listed, or TikTok's count less the drama's other items received when that is higher;
     ``other_items``: those other items (``items_received`` less the episode numbers listed: a
-    trailer, a highlight, an item left out for another one's number, an item without a number or
-    an id — never another drama's); ``uncertain``: TikTok counts more than ``certain_top`` — its
-    count may include those other items, or episodes past the highest number listed may be
-    missing, and DramaFetch cannot tell which."""
+    trailer, an item left out for another one's number — a highlight beside the episode of its
+    number among them —, an item without a number or an id — never another drama's);
+    ``uncertain``: TikTok counts more than ``certain_top`` — its count may include those other
+    items, or episodes past the highest number listed may be missing, and DramaFetch cannot tell
+    which."""
 
     certain_top: int
     other_items: int
@@ -1223,46 +1207,24 @@ class CountCheck(NamedTuple):
 
 
 def count_check(
-    numbers: Iterable[int],
-    total_hint: int | None,
-    items_received: int | None,
-    *,
-    highlights: Iterable[int] = (),
+    numbers: Iterable[int], total_hint: int | None, items_received: int | None
 ) -> CountCheck:
     """THE count rule of a listing (3.0.1, the owner's report of 2026-11-27; the extension's
     ``catalog.countCheck``, parity-tested): with C TikTok's count (``total_hint``, unknown when it
-    is not a positive int), E the distinct episode numbers listed, H their highest — or the highest
-    number of a lone highlight (``highlights``: :attr:`Listing.highlight_numbers`, a clip of an
-    episode TikTok did not list) when that is higher, within C when C is known
-    (:func:`_placed_highlights`); 0 for none — and S = ``items_received`` - |E| the drama's other
-    items received (0 when ``items_received`` is unknown: a series built by hand), the numbers
-    certainly an episode of the drama are 1.. ``certain_top`` = max(H, C - S) — H when C is unknown
-    —, and the list is ``uncertain`` when C is known and above ``certain_top`` (only possible when
-    S > 0): whether TikTok counts the S other items or S episodes past H are missing, nothing in
-    the list tells. Pure."""
+    is not a positive int), E the distinct episode numbers listed (an episode TikTok marks as a
+    highlight among them: :func:`merge_pages`), H their highest (0 for none) and S =
+    ``items_received`` - |E| the drama's other items received (0 when ``items_received`` is
+    unknown: a series built by hand), the numbers certainly an episode of the drama are 1..
+    ``certain_top`` = max(H, C - S) — H when C is unknown —, and the list is ``uncertain`` when C
+    is known and above ``certain_top`` (only possible when S > 0): whether TikTok counts the S
+    other items or S episodes past H are missing, nothing in the list tells. Pure."""
     listed = set(numbers)
-    highest = max((*listed, *_placed_highlights(highlights, total_hint, listed)), default=0)
+    highest = max(listed, default=0)
     other = max(0, items_received - len(listed)) if items_received is not None else 0
     if total_hint is None or total_hint <= 0:
         return CountCheck(highest, other, False)
     top = max(highest, total_hint - other)
     return CountCheck(top, other, total_hint > top)
-
-
-def _placed_highlights(
-    highlights: Iterable[int], total_hint: int | None, numbers: Iterable[int]
-) -> list[int]:
-    """The lone highlights' numbers :func:`count_check` reaches (3.0.1; the extension's
-    ``catalog`` does the same, parity-tested): every one while TikTok's count is unknown or the
-    list itself goes past it (``numbers``, the episode numbers listed: a count the list
-    contradicts, a stale one say, holds nothing back), else those within it — TikTok counts every
-    episode of the drama, so a clip numbered past its count is no episode number DramaFetch can
-    place, whatever TikTok numbered it by: it raises no missing number, no row and no request, and
-    stays one of the drama's other items received."""
-    clips = list(highlights)
-    if total_hint is None or total_hint <= 0 or total_hint < max(numbers, default=0):
-        return clips
-    return [number for number in clips if number <= total_hint]
 
 
 def missing_numbers(
@@ -1271,17 +1233,14 @@ def missing_numbers(
     items_received: int | None,
     *,
     limit: int,
-    highlights: Iterable[int] = (),
 ) -> list[int]:
     """The episode numbers a listing certainly lacks, ascending: every number from 1 up to
     :func:`count_check`'s ``certain_top`` that is not listed — a hole below the highest number
-    listed (5, then 7 without 6), the numbers above it up to a lone highlight's (``highlights``,
-    within TikTok's count when it is known) and up to TikTok's count less the drama's other items
-    received —; never above ``limit`` (an
-    absurd count costs nothing). A number past ``certain_top`` is never named: an uncertain list
-    is said, not given rows (3.0.1)."""
+    listed (5, then 7 without 6) and the numbers above it up to TikTok's count less the drama's
+    other items received —; never above ``limit`` (an absurd count costs nothing). A number past
+    ``certain_top`` is never named: an uncertain list is said, not given rows (3.0.1)."""
     listed = set(numbers)
-    check = count_check(listed, total_hint, items_received, highlights=highlights)
+    check = count_check(listed, total_hint, items_received)
     top = min(check.certain_top, limit)
     return [number for number in range(1, top + 1) if number not in listed]
 
@@ -1333,17 +1292,15 @@ def fill_target(
     early_end: bool,
     covered: Iterable[tuple[int, int | None]] = (),
     limit: int,
-    highlights: Iterable[int] = (),
 ) -> int | None:
     """The episode number the gap filling asks TikTok for next — the list page from ``cursor`` =
     that number - 1 — or None when nothing is left to ask.
 
-    The first number :func:`missing_numbers` names (a hole below the highest number listed, a
-    number up to a lone highlight's — ``highlights`` — or up to TikTok's count less the drama's
-    other items received: :func:`count_check`) that no earlier filling answer covered
-    (``covered``: the spans :func:`fill_covered` gave, ``(low, high)`` with ``high`` None for no
-    bound); else, once every such number is covered, the number after the highest one listed or
-    held by a lone highlight, unless an answer covered it, when the list ended early
+    The first number :func:`missing_numbers` names (a hole below the highest number listed, or a
+    number up to TikTok's count less the drama's other items received: :func:`count_check`) that
+    no earlier filling answer covered (``covered``: the spans :func:`fill_covered` gave,
+    ``(low, high)`` with ``high`` None for no bound); else, once every such number is covered, the
+    number after the highest one listed, unless an answer covered it, when the list ended early
     (``early_end``) and TikTok's count is unknown, or when the list is uncertain (3.0.1: TikTok
     counts more than the drama certainly has — the page after the highest number listed is asked
     for once). A known count everything listed accounts for leaves nothing to ask past the highest
@@ -1354,15 +1311,13 @@ def fill_target(
         return any(low <= number and (high is None or number <= high) for low, high in spans)
 
     listed = list(numbers)
-    clips = list(highlights)
-    missing = missing_numbers(listed, total_hint, items_received, limit=limit, highlights=clips)
-    for number in missing:
+    for number in missing_numbers(listed, total_hint, items_received, limit=limit):
         if not is_covered(number):
             return number
     unknown = total_hint is None or total_hint <= 0
-    check = count_check(listed, total_hint, items_received, highlights=clips)
+    check = count_check(listed, total_hint, items_received)
     if (early_end and unknown) or check.uncertain:
-        after = max((*listed, *_placed_highlights(clips, total_hint, listed)), default=0) + 1
+        after = max(listed, default=0) + 1
         if after <= limit and not is_covered(after):
             return after
     return None
@@ -1389,40 +1344,31 @@ def catalog_warnings(
     duplicates: Iterable[Duplicate] = (),
     skipped: Iterable[SkippedItem] = (),
     items_received: int | None = None,
-    highlights: Iterable[int] = (),
 ) -> list[str]:
     """Human-readable oddities of a listing, in this order: the gaps below the highest number
-    listed or held by a lone highlight (``highlights``, 3.0.1: a clip of an episode TikTok did not
-    list — the numbers above the highest episode listed up to it are missing too, within TikTok's
-    count when it is known, as :func:`count_check` reads them); one line per
-    item left out for another one's number — those ``episodes`` holds
+    listed; one line per item left out for another one's number — those ``episodes`` holds
     itself (found by :func:`merge_pages`' rules), then ``duplicates`` (a :class:`Listing`'s) —
     naming the number, the item left out and why, and the item kept; one line per reason of the
-    ``skipped`` items, with their count (:data:`SKIP_REASONS` first, then :data:`SKIP_HIGHLIGHT`);
-    TikTok's count against the numbers listed whenever they differ (``TikTok announces N
-    episodes, M listed``: more listed than it announces, or fewer — 3.0.1, the review's L2: other
-    items received never silence it); when :func:`count_check` finds the list uncertain, what
-    TikTok counts, what was listed and that DramaFetch cannot tell (:func:`uncertain_text`); the
-    locked count."""
+    ``skipped`` items, with their count (:data:`SKIP_REASONS` first); TikTok's count against the
+    numbers listed whenever they differ (``TikTok announces N episodes, M listed``: more listed
+    than it announces, or fewer — 3.0.1, the review's L2: other items received never silence it);
+    when :func:`count_check` finds the list uncertain, what TikTok counts, what was listed and
+    that DramaFetch cannot tell (:func:`uncertain_text`); the locked count."""
     warnings: list[str] = []
     numbers = sorted({episode.number for episode in episodes})
-    clips = _placed_highlights(highlights, total_hint, numbers)
     expected = 1
     for number in numbers:
         if number > expected:
             warnings.append(_gap_text(expected, number - 1))
         expected = number + 1
-    if max(clips, default=0) >= expected:
-        warnings.append(_gap_text(expected, max(clips)))
     found = [*_merge([episodes])[1], *duplicates]
     warnings.extend(_duplicate_text(duplicate) for duplicate in sorted(found, key=_number_of))
     reasons = Counter(item.reason for item in skipped)
-    known = (*SKIP_REASONS, SKIP_HIGHLIGHT)
-    order = [*known, *(reason for reason in reasons if reason not in known)]
+    order = [*SKIP_REASONS, *(reason for reason in reasons if reason not in SKIP_REASONS)]
     warnings.extend(_skipped_text(reasons[reason], reason) for reason in order if reasons[reason])
     if total_hint is not None and total_hint > 0 and len(numbers) != total_hint:
         warnings.append(f"TikTok announces {total_hint} episodes, {len(numbers)} listed")
-    check = count_check(numbers, total_hint, items_received, highlights=clips)
+    check = count_check(numbers, total_hint, items_received)
     if check.uncertain and total_hint is not None:
         warnings.append(uncertain_text(total_hint, len(numbers), check.other_items))
     locked = sum(1 for episode in episodes if episode.locked)

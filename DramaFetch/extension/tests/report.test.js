@@ -330,15 +330,25 @@ test("3.0.1: listIncomplete and listMissing — the list itself short: a number 
   assert.equal(listIncomplete(listOf([1, 2], { earlyEnd: "x", totalHint: 3, itemsReceived: 2, missingNumbers: [] })), true);
 });
 
-test("3.0.1: listUncertain and listOtherItems reach a lone highlight's number — E66's clip with a count of 66 makes E66 missing, not the list uncertain; a count of 67 may hold the clip", () => {
-  const numbers = Array.from({ length: 65 }, (_, index) => index + 1);
-  const counted = listOf(numbers, { totalHint: 66, itemsReceived: 66, highlightNumbers: [66] });
-  assert.deepEqual([listUncertain(counted), listOtherItems(counted), listIncomplete(counted), listMissing(counted)], [false, 1, true, [66]]);
-  const more = listOf(numbers, { totalHint: 67, itemsReceived: 66, highlightNumbers: [66] });
-  assert.deepEqual([listUncertain(more), listOtherItems(more), listIncomplete(more), listMissing(more)], [true, 1, true, [66]]);
-  // without the clip's number, the old reading: a count of 66 may hold the clip — uncertain, no row
-  const bare = listOf(numbers, { totalHint: 66, itemsReceived: 66 });
-  assert.deepEqual([listUncertain(bare), listMissing(bare)], [true, []]);
+test("4.0.1: an episode TikTok marks as a highlight counts like any other — E66 listed as such with a count of 66: not uncertain, no other item, nothing missing, complete; without E66, a count of 66 that may hold a trailer stays uncertain with no row", () => {
+  const numbers = Array.from({ length: 66 }, (_, index) => index + 1);
+  const counted = listOf(numbers, { totalHint: 66, itemsReceived: 66 });
+  // the discovery listed the item TikTok marks as a highlight as episode 66 (catalog.mergePages)
+  counted.episodes[65] = makeEpisode({
+    number: 66,
+    itemId: "id-66",
+    title: "t66",
+    seriesId: "S1",
+    raw: { id: "id-66", dramaInfo: { DramaVideoData: { EpisodeNumber: 66, IsHighlight: true } } },
+  });
+  assert.deepEqual([listUncertain(counted), listOtherItems(counted), listIncomplete(counted), listMissing(counted)], [false, 0, false, []]);
+  const report = seriesReport(counted, allDone(counted));
+  assert.deepEqual([report.complete, report.uncertain, report.gaps], [true, false, []]);
+  assert.equal(reportLine(report), "complete: 66 of 66 (66 downloaded)");
+  // without E66 — 65 episodes and one other item, a trailer say —, a count of 66 may hold that
+  // item: uncertain, no row
+  const bare = listOf(numbers.slice(0, 65), { totalHint: 66, itemsReceived: 66 });
+  assert.deepEqual([listUncertain(bare), listOtherItems(bare), listMissing(bare)], [true, 1, []]);
 });
 
 /**
