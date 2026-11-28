@@ -11,7 +11,16 @@ short header on 2026-11-06, from the owner's real run):
   ``dramaInfo`` block. ``dramaInfo.DramaVideoData.EpisodeNumber`` is the 1-based episode number
   and the only reliable order: series are published in batches, so ``createTime`` is a shuffle.
   Items without a number (trailers) are skipped; items whose ``dramaInfo.dramaID`` names another
-  series are dropped.
+  series are dropped. An item of the series without a number can be an episode, though: on
+  2026-11-27 the owner's drama 7709866030612599814 (56 episodes) read ``episode 53 missing (gap)``
+  beside ``TikTok listed 1 item DramaFetch could not read (no episode number)``; the owner's reports
+  of that day show the item without a number — a later id than every episode's — at index 52, in
+  episode 53's place, in the page asked at ``cursor`` 24 and in the gap filling's answer at
+  ``cursor`` 52 (its raw item was not captured: which key was empty is not known).
+  Since 4.0.2 such an item is numbered by its place in the list — which is in episode order, the
+  gap filling's ``cursor`` = number - 1 relies on it — but only once TikTok, asked again for the
+  page that should hold that number, still sent no item numbered so, and only where nothing else
+  could fill that hole (:func:`placed_number`, :func:`merge_pages`).
 - TikTok sells later episodes (coins, a purchase, a subscription). The fields that say whether
   THIS session may play one are undocumented, so :func:`access_of` applies key-name heuristics to
   the payload TikTok served to the user's own session and sorts each episode into ``free``,
@@ -85,7 +94,7 @@ import json
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlsplit
@@ -273,6 +282,44 @@ class PagePayload:
     #: overlaps the pages read before it) counts once. Empty for a page built by hand: its id-less
     #: items then count each.
     skipped_keys: list[str | None] = field(default_factory=list, compare=False, repr=False)
+    #: The page's items of the series that came without a usable episode number, each with where
+    #: it sat among the page's items of the series (4.0.2, :class:`Unnumbered`): what
+    #: :func:`merge_pages` numbers by its place. Empty for a page built by hand.
+    unnumbered: list[Unnumbered] = field(default_factory=list, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class Unnumbered:
+    """An item of the series TikTok listed with an id but without a usable episode number
+    (:data:`SKIP_NO_NUMBER`), and where it sat in its page (4.0.2, the owner's report of
+    2026-11-27: a drama of 56 episodes whose list held 56 items, one of them without its number —
+    episode 53, named missing). ``before`` / ``after`` are the numbers of the series' episodes
+    right before and right after the run of the series' items without a number it belongs to,
+    in page order (None at the page's edge); ``run_index`` is its place in that run and
+    ``run_length`` the run's length — an item without an id counts in it, as it holds a place in
+    TikTok's list too; another drama's item holds none. ``item`` is the raw item, which
+    :func:`merge_pages` turns into the episode of the number its place gives
+    (:func:`placed_number`)."""
+
+    item_id: str
+    series_id: str
+    before: int | None
+    after: int | None
+    run_index: int
+    run_length: int
+    item: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class Placed:
+    """An item TikTok listed without its episode number that :func:`merge_pages` numbered by its
+    place in TikTok's list (4.0.2): its ``number``, its id, and the episode numbers listed on
+    either side of the hole its run filled. Said in the warnings (:func:`placed_text`)."""
+
+    number: int
+    item_id: str
+    below: int
+    above: int
 
 
 @dataclass
@@ -290,14 +337,16 @@ class Duplicate:
 class Listing:
     """What the pages of one listing add up to (:func:`merge_pages`): the episodes (one per
     number, sorted), every item left out for another one's number, every item that is no
-    episode (with its reason), how many distinct items of the series came, and TikTok's count as
-    the items carry it."""
+    episode (with its reason), how many distinct items of the series came, TikTok's count as
+    the items carry it, and (4.0.2) the items without a number it numbered by their place — among
+    the episodes, no longer among the skipped items."""
 
     episodes: list[Episode]
     duplicates: list[Duplicate]
     skipped: list[SkippedItem]
     items_received: int
     total_hint: int | None
+    placed: list[Placed] = field(default_factory=list)
 
 
 def find_item_lists(payload: Any, max_depth: int = MAX_DEPTH) -> list[list[dict[str, Any]]]:
@@ -965,24 +1014,37 @@ def parse_item_list_payload(payload: Any, series_id: str) -> PagePayload:
     themselves are not searched). ``has_more`` is True only for ``hasMore``/``has_more`` being
     ``true`` (also ``1``/``"true"``). Every item that is no episode of the series is kept in
     ``skipped`` with its reason (:func:`skip_reason`) and its id; ``total_hint`` is the first
-    positive ``dramaInfo.numVideos`` of an item of the series (:func:`item_total_hint`).
+    positive ``dramaInfo.numVideos`` of an item of the series (:func:`item_total_hint`). Each
+    item of the series without a usable number that has an id is also kept in ``unnumbered``
+    with where it sat among the list's items of the series (4.0.2, :class:`Unnumbered`).
     """
     episodes: list[Episode] = []
     skipped: list[SkippedItem] = []
     keys: list[str | None] = []
+    unnumbered: list[Unnumbered] = []
     seen = 0
     total: int | None = None
     for items in find_item_lists(payload):
+        # 4.0.2: the list's items of the series in order — an episode's number, else None (no
+        # usable number, or no id) — and those without a number that have an id, by their place
+        order: list[int | None] = []
+        loose: list[tuple[int, str, dict[str, Any]]] = []
         for item in items:
             seen += 1
             reason, item_id, number = _identify(item, series_id)
             if reason is None and item_id is not None and number is not None:
                 episodes.append(_episode(item, series_id, item_id, number))
+                order.append(number)
             else:
                 skipped.append(SkippedItem(reason or SKIP_NO_ID, item_id))
                 keys.append(item_key(item) if item_id is None else None)
+                if reason != SKIP_OTHER_DRAMA:
+                    if reason == SKIP_NO_NUMBER and item_id is not None:
+                        loose.append((len(order), item_id, item))
+                    order.append(None)
             if total is None:
                 total = item_total_hint(item, series_id)
+        unnumbered.extend(_unnumbered(order, loose, series_id))
     cursor = _as_cursor(_first_value(payload, ("cursor",)))
     has_more = _as_flag(_first_value(payload, ("hasMore", "has_more")))
     return PagePayload(
@@ -994,7 +1056,36 @@ def parse_item_list_payload(payload: Any, series_id: str) -> PagePayload:
         skipped=skipped,
         total_hint=total,
         skipped_keys=keys,
+        unnumbered=unnumbered,
     )
+
+
+def _unnumbered(
+    order: list[int | None], loose: list[tuple[int, str, dict[str, Any]]], series_id: str
+) -> list[Unnumbered]:
+    """Where each item without a number (``loose``: its place in ``order``, its id, the item)
+    sat in one list's items of the series (``order``: an episode's number, else None): the run of
+    places without a number around it, the numbers right before and after that run (None at
+    the list's edge), and its place in the run."""
+    found: list[Unnumbered] = []
+    for place, item_id, item in loose:
+        start, end = place, place
+        while start > 0 and order[start - 1] is None:
+            start -= 1
+        while end + 1 < len(order) and order[end + 1] is None:
+            end += 1
+        found.append(
+            Unnumbered(
+                item_id=item_id,
+                series_id=series_id,
+                before=order[start - 1] if start > 0 else None,
+                after=order[end + 1] if end + 1 < len(order) else None,
+                run_index=place - start,
+                run_length=end - start + 1,
+                item=item,
+            )
+        )
+    return found
 
 
 def item_key(item: Any) -> str:
@@ -1093,7 +1184,9 @@ def merge_episodes(pages: Iterable[Iterable[Episode]]) -> list[Episode]:
     return _merge(pages)[0]
 
 
-def merge_pages(pages: Iterable[PagePayload]) -> Listing:
+def merge_pages(
+    pages: Iterable[PagePayload], *, asked_again: Iterable[tuple[int, int | None]] = ()
+) -> Listing:
     """The pages of one listing as a :class:`Listing`.
 
     The episodes are deduped by item id (the same item served twice is one item), THEN merged by
@@ -1108,20 +1201,40 @@ def merge_pages(pages: Iterable[PagePayload]) -> Listing:
     reasons, once per item id (an id read as an episode on another page is no skipped item), and
     an item without an id once per listing (3.0.1, the review's L4: its canonical JSON,
     :attr:`PagePayload.skipped_keys`; a page built by hand without keys counts each one).
+    An item of the series TikTok listed without a usable number is numbered by its place in
+    TikTok's list when that place leaves no doubt (4.0.2, the owner's report of 2026-11-27):
+    :func:`placed_number` gives the number — its run of items without a number fills a hole of the
+    numbers listed exactly, right after the episode before it in its page or right before the one
+    after it —, and the number must be one TikTok was asked for again and still sent no item for
+    (``asked_again``: the gap filling's :func:`fill_covered` spans whose answers reached that
+    place; none by default — a page's embedded list —, so a number the filling has not asked for
+    again is never numbered, and an episode left out of one answer is asked for again first). It
+    is then an episode like any other, in ``placed`` and no longer a skipped item — unless the
+    pages place it at different numbers, another item claims the same number, or an item of its
+    run does not look like an episode there (:func:`_episode_like`: a clip of an episode listed,
+    no play address, under :data:`PLACE_MIN_SHARE` of the shorter episode around its hole); then
+    it stays skipped.
     ``items_received`` counts the distinct items of the series: every episode before the number
-    merge plus the skipped items that do not name another drama (TikTok's count of this drama
-    leaves those out). ``total_hint`` is the first page's count (:attr:`PagePayload.total_hint`).
+    merge, those numbered by their place too, plus the skipped items that do not name another
+    drama (TikTok's count of this drama leaves those out). ``total_hint`` is the first page's
+    count (:attr:`PagePayload.total_hint`).
     """
     listed = list(pages)
     episodes, duplicates = _merge(page.episodes for page in listed)
     episode_ids = {episode.item_id for page in listed for episode in page.episodes}
+    placed, numbered = _place(listed, episodes, episode_ids, list(asked_again))
+    placed_ids = {found.item_id for found in placed}
+    if numbered:
+        episodes = sorted([*episodes, *numbered], key=_episode_number_of)
     skipped: list[SkippedItem] = []
     skipped_ids: set[str] = set()
     skipped_keys: set[str] = set()
     for page in listed:
         for index, item in enumerate(page.skipped):
             if item.item_id is not None:
-                if item.item_id in episode_ids or item.item_id in skipped_ids:
+                if item.item_id in episode_ids or item.item_id in placed_ids:
+                    continue
+                if item.item_id in skipped_ids:
                     continue
                 skipped_ids.add(item.item_id)
             else:
@@ -1131,7 +1244,11 @@ def merge_pages(pages: Iterable[PagePayload]) -> Listing:
                         continue
                     skipped_keys.add(key)
             skipped.append(item)
-    received = len(episode_ids) + sum(1 for item in skipped if item.reason != SKIP_OTHER_DRAMA)
+    received = (
+        len(episode_ids)
+        + len(placed_ids)
+        + sum(1 for item in skipped if item.reason != SKIP_OTHER_DRAMA)
+    )
     total = next(
         (page.total_hint for page in listed if page.total_hint is not None and page.total_hint > 0),
         None,
@@ -1142,7 +1259,151 @@ def merge_pages(pages: Iterable[PagePayload]) -> Listing:
         skipped=skipped,
         items_received=received,
         total_hint=total,
+        placed=placed,
     )
+
+
+#: An item TikTok listed without its number is never numbered by its place when it lasts less than
+#: this share of the shorter of the two episodes around its hole (4.0.2): a trailer, not an episode.
+PLACE_MIN_SHARE = 0.5
+
+
+def placed_number(record: Unnumbered, numbers: Collection[int]) -> int | None:
+    """The episode number an item TikTok listed without one takes by its place in TikTok's list
+    (4.0.2), against the episode numbers listed (``numbers``), or None. Its run of items without
+    a number (:class:`Unnumbered`) must fill a hole of ``numbers`` exactly, right after the
+    episode before the run in its page (``before``) or right before the one after it (``after``)
+    — a page may begin with an episode of the page before it again —: every number of the hole
+    unlisted, and the numbers right below and right above it both listed; when both neighbours
+    give such a hole, it must be the same one. So an item is never numbered below episode 2, past
+    the highest number listed, or with a number another item holds: a trailer before the first
+    episode, after the last one, or between two consecutive episodes, stays an item without a
+    number. :func:`merge_pages` adds its own conditions. Pure; never raises."""
+    hole = _hole(record, numbers)
+    return None if hole is None else hole[0] + record.run_index
+
+
+def _hole(record: Unnumbered, numbers: Collection[int]) -> tuple[int, int] | None:
+    """The first and last numbers of the hole ``record``'s run fills (:func:`placed_number`), or
+    None: anchored on each neighbour the run has, the one hole they give."""
+    anchors: list[int] = []
+    if record.before is not None:
+        anchors.append(record.before + 1)
+    if record.after is not None:
+        anchors.append(record.after - record.run_length)
+    holes: set[tuple[int, int]] = set()
+    for first in anchors:
+        last = first + record.run_length - 1
+        if first < 2 or first - 1 not in numbers or last + 1 not in numbers:
+            continue
+        if any(number in numbers for number in range(first, last + 1)):
+            continue
+        holes.add((first, last))
+    return holes.pop() if len(holes) == 1 else None
+
+
+def _place(
+    pages: list[PagePayload],
+    episodes: list[Episode],
+    episode_ids: set[str],
+    asked_again: list[tuple[int, int | None]],
+) -> tuple[list[Placed], list[Episode]]:
+    """The items without a number of ``pages`` that their place numbers (:func:`merge_pages`),
+    each once, in the order first listed, with the episode each one is (its first copy's item):
+    every place it was listed at that gives a number gives the same one, no other item claims
+    that number, TikTok was asked for it again (``asked_again``), and every item of its run in that
+    page looks like an episode there (:func:`_episode_like`) — one that does not breaks the run's
+    count, so none of that run is numbered from that page."""
+    if not asked_again:
+        return [], []
+    numbers = {episode.number: episode for episode in episodes}
+    first: dict[str, Unnumbered] = {}
+    holes: dict[str, set[tuple[int, int, int]]] = {}
+    for page in pages:
+        runs: dict[tuple[int | None, int | None, int], list[Unnumbered]] = {}
+        for record in page.unnumbered:
+            if record.item_id in episode_ids:
+                continue
+            first.setdefault(record.item_id, record)
+            runs.setdefault((record.before, record.after, record.run_length), []).append(record)
+        for run in runs.values():
+            hole = _hole(run[0], numbers)
+            if hole is None:
+                continue
+            below, above = numbers[hole[0] - 1], numbers[hole[1] + 1]
+            if not all(_episode_like(record, below, above, episode_ids) for record in run):
+                continue
+            for record in run:
+                found = (hole[0] + record.run_index, hole[0], hole[1])
+                holes.setdefault(record.item_id, set()).add(found)
+    chosen: dict[str, tuple[int, int, int]] = {}
+    for item_id in first:
+        found_holes = holes.get(item_id, set())
+        if len({number for number, _, _ in found_holes}) == 1:
+            chosen[item_id] = min(found_holes)
+    claims = Counter(number for number, _, _ in chosen.values())
+    placed: list[Placed] = []
+    made: list[Episode] = []
+    for item_id, (number, low, high) in chosen.items():
+        if claims[number] > 1 or not _asked(number, asked_again):
+            continue
+        record = first[item_id]
+        placed.append(Placed(number=number, item_id=item_id, below=low - 1, above=high + 1))
+        made.append(_episode(record.item, record.series_id, item_id, number))
+    return placed, made
+
+
+def _episode_like(
+    record: Unnumbered, below: Episode, above: Episode, episode_ids: set[str]
+) -> bool:
+    """Whether an item without a number may be an episode in the hole between ``below`` and
+    ``above``: its ``LinkedEpisodeID`` names no episode listed (else a clip of that one), it
+    carries a play address (:func:`play_url_candidates`: a trailer may be listed without one; an
+    episode this session may not play could not be downloaded anyway), and it lasts at least
+    :data:`PLACE_MIN_SHARE` of the shorter of the two (else a trailer; never judged when a
+    duration is unknown or 0)."""
+    if _linked_episode_id(record.item) in episode_ids or not play_url_candidates(record.item):
+        return False
+    return not _too_short(_duration_of(record.item), below, above)
+
+
+def _asked(number: int, spans: list[tuple[int, int | None]]) -> bool:
+    """Whether one of the gap filling's spans (:func:`fill_covered`) holds ``number``."""
+    return any(low <= number and (high is None or number <= high) for low, high in spans)
+
+
+def _linked_episode_id(item: dict[str, Any]) -> str | None:
+    """The ``LinkedEpisodeID`` string an item carries other than ``"0"`` (in ``DramaVideoData``,
+    else in ``dramaInfo``), or None — a string only, as TikTok sends ids: a number past 2**53 would
+    not read the same in the extension."""
+    drama_info = _drama_info(item)
+    video_data = drama_info.get("DramaVideoData")
+    for container in ([video_data] if isinstance(video_data, dict) else []) + [drama_info]:
+        value = container.get(_LINKED_EPISODE_KEY)
+        linked = _as_id(value) if isinstance(value, str) else None
+        if linked is not None and linked != "0":
+            return linked
+    return None
+
+
+def _duration_of(item: dict[str, Any]) -> int | None:
+    """An item's ``video.duration`` as :func:`_episode` reads it (an int, a whole float or a
+    digit string), else None."""
+    video = _field(item, "video")
+    return _as_int(video.get("duration")) if isinstance(video, dict) else None
+
+
+def _too_short(duration: int | None, below: Episode, above: Episode) -> bool:
+    """Whether an item lasting ``duration`` seconds lasts less than :data:`PLACE_MIN_SHARE` of the
+    shorter of the two episodes around its hole; never when a duration is unknown or 0."""
+    known = [e.duration_s for e in (below, above) if e.duration_s is not None and e.duration_s > 0]
+    if duration is None or duration <= 0 or not known:
+        return False
+    return duration < PLACE_MIN_SHARE * min(known)
+
+
+def _episode_number_of(episode: Episode) -> int:
+    return episode.number
 
 
 def _merge(pages: Iterable[Iterable[Episode]]) -> tuple[list[Episode], list[Duplicate]]:
@@ -1344,11 +1605,14 @@ def catalog_warnings(
     duplicates: Iterable[Duplicate] = (),
     skipped: Iterable[SkippedItem] = (),
     items_received: int | None = None,
+    placed: Iterable[Placed] = (),
 ) -> list[str]:
     """Human-readable oddities of a listing, in this order: the gaps below the highest number
     listed; one line per item left out for another one's number — those ``episodes`` holds
     itself (found by :func:`merge_pages`' rules), then ``duplicates`` (a :class:`Listing`'s) —
-    naming the number, the item left out and why, and the item kept; one line per reason of the
+    naming the number, the item left out and why, and the item kept; one line per item TikTok
+    listed without its number that its place numbered (4.0.2, a :class:`Listing`'s ``placed``:
+    :func:`placed_text`), by number; one line per reason of the
     ``skipped`` items, with their count (:data:`SKIP_REASONS` first); TikTok's count against the
     numbers listed whenever they differ (``TikTok announces N episodes, M listed``: more listed
     than it announces, or fewer — 3.0.1, the review's L2: other items received never silence it);
@@ -1363,6 +1627,7 @@ def catalog_warnings(
         expected = number + 1
     found = [*_merge([episodes])[1], *duplicates]
     warnings.extend(_duplicate_text(duplicate) for duplicate in sorted(found, key=_number_of))
+    warnings.extend(placed_text(item) for item in sorted(placed, key=_placed_number_of))
     reasons = Counter(item.reason for item in skipped)
     order = [*SKIP_REASONS, *(reason for reason in reasons if reason not in SKIP_REASONS)]
     warnings.extend(_skipped_text(reasons[reason], reason) for reason in order if reasons[reason])
@@ -1381,6 +1646,25 @@ def catalog_warnings(
 
 def _number_of(duplicate: Duplicate) -> int:
     return duplicate.number
+
+
+def _placed_number_of(placed: Placed) -> int:
+    return placed.number
+
+
+#: The words of the warning of an item TikTok listed without its episode number that DramaFetch
+#: numbered by its place in the list (4.0.2, :func:`placed_text`; the extension's display
+#: translates it).
+PLACED_TEXT = "came without its number: placed by its position in TikTok's list"
+
+
+def placed_text(placed: Placed) -> str:
+    """The warning of an item numbered by its place (4.0.2): ``episode 53 came without its
+    number: placed by its position in TikTok's list (between episodes 52 and 54)``."""
+    return (
+        f"episode {placed.number} {PLACED_TEXT} (between episodes {placed.below} and "
+        f"{placed.above})"
+    )
 
 
 #: How the warnings and the report line start for a list TikTok counts more items of than

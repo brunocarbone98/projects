@@ -760,6 +760,7 @@ test("3.0.1, the listing section: every page asked — its cursor and count, the
     "fill_requests",
     "pages",
     "skipped_items",
+    "placed_items",
     "warnings",
   ]);
   assert.equal(section["endpoint"], "https://www.tiktok.com/api/drama/episode/item_list/");
@@ -776,6 +777,13 @@ test("3.0.1, the listing section: every page asked — its cursor and count, the
   assert.deepEqual(pages[0], { kind: "first", cursor_asked: "0", count_asked: "30", listed: true, items: 31, numbers: Array.from({ length: 30 }, (_, index) => index + 1), has_more: true, cursor: 30 });
   assert.deepEqual(pages[3], { kind: "fill", cursor_asked: "60", count_asked: "30", listed: false, items: 0, numbers: [], has_more: null, cursor: null });
   assert.deepEqual(section["skipped_items"], [{ reason: "no episode number", item_id: "7699393770256782000" }]);
+  assert.deepEqual(section["placed_items"], []); // 4.0.2: none numbered by its place in this listing
+  // 4.0.2: an item TikTok listed without its number that its place numbered, with the episodes
+  // around its hole — what a report of a mislabel is triaged by
+  const placedItems = [{ number: 53, itemId: "7700000000000000553", below: 52, above: 54 }];
+  assert.deepEqual(listingSection(listing({ placedItems }))["placed_items"], [
+    { number: 53, item_id: "7700000000000000553", below: 52, above: 54 },
+  ]);
   assert.deepEqual(section["warnings"], [
     "TikTok listed 1 item DramaFetch could not read (no episode number)",
     "TikTok announces 62 episodes, 60 listed",

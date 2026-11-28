@@ -186,6 +186,29 @@ def js_skipped(item: models.SkippedItem) -> dict[str, Any]:
     return {"reason": item.reason, "itemId": item.item_id}
 
 
+def js_unnumbered(record: catalog.Unnumbered) -> dict[str, Any]:
+    """4.0.2: an item without a number and where it sat in its page (``catalog.Unnumbered``)."""
+    return {
+        "itemId": record.item_id,
+        "seriesId": record.series_id,
+        "before": record.before,
+        "after": record.after,
+        "runIndex": record.run_index,
+        "runLength": record.run_length,
+        "item": record.item,
+    }
+
+
+def js_placed(placed: catalog.Placed) -> dict[str, Any]:
+    """4.0.2: an item numbered by its place (``catalog.Placed``)."""
+    return {
+        "number": placed.number,
+        "itemId": placed.item_id,
+        "below": placed.below,
+        "above": placed.above,
+    }
+
+
 def js_page_in(page: catalog.PagePayload) -> dict[str, Any]:
     """A parsed page as ``catalog.mergePages`` takes it, its episodes with their payloads."""
     return {
@@ -198,6 +221,8 @@ def js_page_in(page: catalog.PagePayload) -> dict[str, Any]:
         "totalHint": page.total_hint,
         # 3.0.1 (D4): the canonical JSON of each id-less skipped item, the merge's dedupe key
         "skippedKeys": list(page.skipped_keys),
+        # 4.0.2: the items without a number, where they sat — what the merge numbers by place
+        "unnumbered": [js_unnumbered(record) for record in page.unnumbered],
     }
 
 
@@ -218,6 +243,7 @@ def js_listing(listing: catalog.Listing) -> dict[str, Any]:
         "skipped": [js_skipped(item) for item in listing.skipped],
         "itemsReceived": listing.items_received,
         "totalHint": listing.total_hint,
+        "placed": [js_placed(placed) for placed in listing.placed],
     }
 
 
@@ -1201,6 +1227,7 @@ def python_page(page: catalog.PagePayload) -> dict[str, Any]:
         "skippedItems": page.skipped_items,
         "skipped": [js_skipped(item) for item in page.skipped],
         "totalHint": page.total_hint,
+        "unnumbered": [js_unnumbered(record) for record in page.unnumbered],
     }
 
 
@@ -1570,6 +1597,7 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
     ]
     listings = [fifth, fifth[:1], fifth[::-1], [fifth[0], fifth[0]], [], alone, alone[:1], twice]
     listings += [top, among, owners]
+
     listings += [[rng.choice(pages) for _ in range(rng.randint(1, 4))] for _ in range(220)]
     run = 0
     while run + 4 <= len(pages) and len(listings) < 300:  # consecutive pages: a real listing
@@ -1597,6 +1625,7 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
                             "duplicates": [js_duplicate(d, raw=True) for d in merged.duplicates],
                             "skipped": [js_skipped(item) for item in merged.skipped],
                             "itemsReceived": items_received,
+                            "placed": [js_placed(placed) for placed in merged.placed],
                         },
                     )
                 )
@@ -1607,6 +1636,7 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
                         duplicates=merged.duplicates,
                         skipped=merged.skipped,
                         items_received=items_received,
+                        placed=merged.placed,
                     )
                 )
     for listing in listings[:100]:  # a list that still holds its duplicates: the same rules
@@ -1676,6 +1706,152 @@ def test_merge_pages_and_the_listing_warnings_match() -> None:
     assert (owners_value["itemsReceived"], owners_value["totalHint"]) == (66, 66)
     owners_warnings = expected_warnings[10 * 10 : 11 * 10]  # 5 totals x 2 items_received each
     assert owners_warnings[2] == []  # its own count (66) and its items received: nothing to say
+
+
+def test_the_numbering_by_place_matches() -> None:
+    """4.0.2 (the owner's report of 2026-11-27): ``merge_pages`` / ``mergePages`` number an item
+    TikTok listed without its number by its place in both front ends alike — only for a number the
+    gap filling asked TikTok for again (``asked_again`` / ``askedAgain``), never otherwise —, with
+    the same warnings: a drama of 56 shaped like the owner's (its page boundary in the middle of a
+    page, at a page's start, at its end), runs, id-less items and another drama's items in a run,
+    and every case its place never numbers (a play address missing among them); then the listing
+    corpus, merged both ways."""
+    play = {"playAddr": PLAY_URLS[0]}
+
+    def loose(ident: int, video_data: Any = None, duration: Any = 95) -> dict[str, Any]:
+        video: dict[str, Any] = {**play} if duration is None else {"duration": duration, **play}
+        return {
+            "id": f"7700000000000000{ident:03d}",
+            "dramaInfo": {
+                "dramaID": "s",
+                "numVideos": 56,
+                "DramaVideoData": {"EpisodeNumber": 0, **(video_data or {})},
+            },
+            "video": video,
+        }
+
+    def episode_item(number: int) -> dict[str, Any]:
+        return {
+            "id": f"7699400000000001{number:03d}",
+            "dramaInfo": {
+                "dramaID": "s",
+                "numVideos": 56,
+                "DramaVideoData": {"EpisodeNumber": number},
+            },
+            "video": {"duration": 95, **play},
+        }
+
+    def page_of(page_items: list[Any], more: bool = False) -> catalog.PagePayload:
+        return catalog.parse_item_list_payload({"itemList": page_items, "hasMore": more}, "s")
+
+    siren = [episode_item(n) if n != 53 else loose(553) for n in range(1, 57)]
+    one, two, three, four, six = (episode_item(n) for n in (1, 2, 3, 4, 6))
+    idless = {"dramaInfo": {"dramaID": "s", "DramaVideoData": {"EpisodeNumber": 0}}}
+    other = {"id": "7699400000000009999", "dramaInfo": {"dramaID": "o"}, "video": {**play}}
+    listings: list[list[catalog.PagePayload]] = [
+        [page_of(siren[:30], True), page_of(siren[30:])],
+        [page_of(siren[:52], True), page_of(siren[52:])],
+        [page_of(siren[:53], True), page_of(siren[53:])],
+        [page_of([one, loose(502), loose(503), four])],
+        [page_of([one, idless, other, loose(510), four])],
+        [page_of([one, loose(520, {"LinkedEpisodeID": "7699400000000008888"}), three])],
+        [page_of([one, loose(522, duration=None), three])],
+        [page_of([one, loose(523, duration=47.5), three])],
+        [page_of([loose(900), one, two])],
+        [page_of([loose(907), two, three])],
+        [page_of([one, two, loose(901)])],
+        [page_of([one, loose(902), two])],
+        [page_of([one, loose(903), loose(904), three])],
+        [page_of([one, loose(905), three], True), page_of([four, loose(905), six])],
+        [page_of([one, loose(908), three], True), page_of([one, loose(909), three])],
+        [page_of([one, loose(910, {"LinkedEpisodeID": "7699400000000001001"}), three])],
+        [page_of([one, loose(911, duration=47), three])],
+        [page_of([one, two], True), page_of([loose(906)], True), page_of([four])],
+        [page_of([one, {**loose(912), "video": {"duration": 95}}, three])],
+        [page_of([one, {**loose(913), "video": {"duration": 95}}, loose(914), four])],
+        [page_of([one, loose(915, duration=0), three])],
+        [page_of([one, loose(916, {"LinkedEpisodeID": 7699400000000001001}), three])],
+    ]
+    rng = random.Random(LISTING_SEED + 7)
+    items = listing_corpus()
+    start = 0
+    corpus_pages: list[catalog.PagePayload] = []
+    while start < len(items):
+        size = rng.randint(1, 6)
+        corpus_pages.append(page_of(items[start : start + size], True))
+        start += size
+    listings += [[rng.choice(corpus_pages) for _ in range(rng.randint(1, 4))] for _ in range(80)]
+    spans: list[list[tuple[int, int | None]]] = [[], [(1, None)], [(53, 56)], [(2, 3), (4, None)]]
+    cases = [(listing, span) for listing in listings for span in spans]
+    calls = [
+        call(
+            "catalog.mergePages",
+            [js_page_in(page) for page in listing],
+            {"askedAgain": [list(pair) for pair in span]},
+            omit=("raw",),
+        )
+        for listing, span in cases
+    ]
+    merged = [catalog.merge_pages(listing, asked_again=span) for listing, span in cases]
+    calls += [
+        call(
+            "catalog.catalogWarnings",
+            [js_episode_raw(e) for e in result.episodes],
+            56,
+            {
+                "duplicates": [js_duplicate(d, raw=True) for d in result.duplicates],
+                "skipped": [js_skipped(item) for item in result.skipped],
+                "itemsReceived": result.items_received,
+                "placed": [js_placed(placed) for placed in result.placed],
+            },
+        )
+        for result in merged
+    ]
+    values = js_values(calls)
+    assert_same(
+        [
+            (index, js_listing(result), value)
+            for index, (result, value) in enumerate(zip(merged, values[: len(cases)], strict=True))
+        ]
+    )
+    assert_same(
+        [
+            (
+                index,
+                catalog.catalog_warnings(
+                    result.episodes,
+                    56,
+                    duplicates=result.duplicates,
+                    skipped=result.skipped,
+                    items_received=result.items_received,
+                    placed=result.placed,
+                ),
+                value,
+            )
+            for index, (result, value) in enumerate(zip(merged, values[len(cases) :], strict=True))
+        ]
+    )
+
+    def placed_of(index: int, span: int) -> list[tuple[int, int, int]]:
+        result = merged[index * len(spans) + span]
+        return [(p.number, p.below, p.above) for p in result.placed]
+
+    # never without a span that holds the number; the drama of 56's 53 with one, at every boundary
+    for index in range(len(listings)):
+        assert placed_of(index, 0) == [], index
+    for index in (0, 1, 2):
+        assert placed_of(index, 1) == placed_of(index, 2) == [(53, 52, 54)], index
+        assert placed_of(index, 3) == [(53, 52, 54)], index  # (4, None) holds 53
+    assert placed_of(3, 1) == [(2, 1, 4), (3, 1, 4)]
+    assert placed_of(3, 3) == [(2, 1, 4), (3, 1, 4)]  # (2, 3) holds both
+    assert placed_of(4, 1) == [(3, 1, 4)]
+    assert [placed_of(index, 1) for index in (5, 6, 7)] == [[(2, 1, 3)]] * 3
+    for index in range(8, 20):  # every case its place never numbers
+        assert placed_of(index, 1) == [], index
+    # a duration of 0 is unknown, a link that is no string is no link: both numbered
+    assert [placed_of(index, 1) for index in (20, 21)] == [[(2, 1, 3)]] * 2
+    # the corpus reaches the numbering too
+    assert any(result.placed for result in merged[22 * len(spans) :])
 
 
 def test_the_canonical_item_key_makes_the_same_items_the_same_in_both() -> None:

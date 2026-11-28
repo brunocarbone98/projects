@@ -88,6 +88,11 @@ export const SKIP_REASONS = [SKIP_OTHER_DRAMA, SKIP_NO_ID, SKIP_NO_NUMBER];
  */
 export const UNCERTAIN_TEXT = "TikTok's list may be incomplete";
 /**
+ * The words of the warning of an item TikTok listed without its episode number that DramaFetch
+ * numbered by its place in the list (4.0.2, {@link placedText}; `catalog.PLACED_TEXT`).
+ */
+export const PLACED_TEXT = "came without its number: placed by its position in TikTok's list";
+/**
  * Why the merge left an item out for another one with its number (`catalog.LEFT_OUT_*`): the
  * first rule of the preference order that tells the two apart — the kept one is no highlight
  * ({@link isHighlight}), or reads free or unlocked where the other reads locked, or is longer
@@ -149,6 +154,34 @@ export const LEFT_OUT_REASONS = [LEFT_OUT_HIGHLIGHT, LEFT_OUT_LOCKED, LEFT_OUT_S
  *   the canonical JSON of the raw item ({@link itemKey}) for an item without an id, null for one
  *   with an id — what {@link mergePages} dedupes id-less items by; absent for a page built by hand,
  *   whose id-less items then count each
+ * @property {Unnumbered[]} [unnumbered] the page's items of the series that came without a usable
+ *   episode number, each with where it sat among the page's items of the series (4.0.2): what
+ *   {@link mergePages} numbers by its place; absent for a page built by hand
+ *
+ * @typedef {object} Unnumbered An item of the series TikTok listed with an id but without a usable
+ *   episode number ({@link SKIP_NO_NUMBER}), and where it sat in its page (4.0.2, the owner's report
+ *   of 2026-11-27; `catalog.Unnumbered`): `before` / `after` are the numbers of the series' episodes
+ *   right before and right after the run of the series' items without a number it belongs to, in
+ *   page order (null at the page's edge); `runIndex` its place in that run, `runLength` the run's
+ *   length — an item without an id counts in it, another drama's item does not —; `item` the raw
+ *   item, which {@link mergePages} turns into the episode of the number its place gives
+ *   ({@link placedNumber})
+ * @property {string} itemId
+ * @property {string} seriesId
+ * @property {number | null} before
+ * @property {number | null} after
+ * @property {number} runIndex
+ * @property {number} runLength
+ * @property {Record<string, unknown>} item
+ *
+ * @typedef {object} Placed An item TikTok listed without its episode number that {@link mergePages}
+ *   numbered by its place in TikTok's list (4.0.2, `catalog.Placed`): its number, its id, and the
+ *   episode numbers listed on either side of the hole its run filled. Said in the warnings
+ *   ({@link placedText}).
+ * @property {number} number
+ * @property {string} itemId
+ * @property {number} below
+ * @property {number} above
  *
  * @typedef {object} Duplicate Two items TikTok listed with one episode number (`catalog.Duplicate`).
  * @property {number} number
@@ -162,6 +195,8 @@ export const LEFT_OUT_REASONS = [LEFT_OUT_HIGHLIGHT, LEFT_OUT_LOCKED, LEFT_OUT_S
  * @property {SkippedItem[]} skipped every item that is no episode, with its reason
  * @property {number} itemsReceived the distinct items of the series that came
  * @property {number | null} totalHint TikTok's count as the items carry it (the first page's)
+ * @property {Placed[]} placed the items without a number it numbered by their place (4.0.2) — among
+ *   the episodes, no longer among the skipped items
  *
  * @typedef {object} CountCheck What a listing's numbers say against TikTok's count ({@link countCheck},
  *   `catalog.CountCheck`, 3.0.1).
@@ -207,6 +242,8 @@ export const LEFT_OUT_REASONS = [LEFT_OUT_HIGHLIGHT, LEFT_OUT_LOCKED, LEFT_OUT_S
  *   items' `numVideos`
  * @property {string[]} warnings
  * @property {SkippedItem[]} [skippedItems] the items TikTok listed that are no episode of the series
+ * @property {Placed[]} [placed] the items TikTok listed without a number that their place numbered
+ *   (4.0.2, {@link mergePages}): episodes now; absent for a series built by hand
  * @property {number | null} [itemsReceived] the distinct items TikTok listed for the series — the
  *   episodes before the number merge plus the skipped items of THIS drama — what
  *   {@link countCheck} holds against `totalHint`; absent or null when unknown
@@ -1040,25 +1077,67 @@ export function parseItemListPayload(payload, seriesId) {
   const skipped = [];
   /** @type {(string | null)[]} */
   const keys = [];
+  /** @type {Unnumbered[]} */
+  const unnumbered = [];
   let seen = 0;
   /** @type {number | null} */
   let total = null;
   for (const items of findItemLists(payload)) {
+    // 4.0.2: the list's items of the series in order — an episode's number, else null (no usable
+    // number, or no id) — and those without a number that have an id, by their place
+    /** @type {(number | null)[]} */
+    const order = [];
+    /** @type {{place: number, itemId: string, item: Record<string, unknown>}[]} */
+    const loose = [];
     for (const item of items) {
       seen += 1;
       const found = identify(item, seriesId);
       if (found.reason === null && found.itemId !== null && found.number !== null) {
         episodes.push(buildEpisode(item, seriesId, found.itemId, found.number));
+        order.push(found.number);
       } else {
         skipped.push({ reason: found.reason ?? SKIP_NO_ID, itemId: found.itemId });
         keys.push(found.itemId === null ? itemKey(item) : null);
+        if (found.reason !== SKIP_OTHER_DRAMA) {
+          if (found.reason === SKIP_NO_NUMBER && found.itemId !== null) loose.push({ place: order.length, itemId: found.itemId, item });
+          order.push(null);
+        }
       }
       if (total === null) total = itemTotalHint(item, seriesId);
     }
+    unnumbered.push(...unnumberedOf(order, loose, seriesId));
   }
   const cursor = asCursor(firstValue(payload, ["cursor"]));
   const hasMore = asFlag(firstValue(payload, ["hasMore", "has_more"]));
-  return { episodes, cursor, hasMore, seenItems: seen, skippedItems: skipped.length, skipped, totalHint: total, skippedKeys: keys };
+  return { episodes, cursor, hasMore, seenItems: seen, skippedItems: skipped.length, skipped, totalHint: total, skippedKeys: keys, unnumbered };
+}
+
+/**
+ * Where each item without a number (`loose`: its place in `order`, its id, the item) sat in one
+ * list's items of the series (`order`: an episode's number, else null): the run of places without
+ * a number around it, the numbers right before and after that run (null at the list's edge), and
+ * its place in the run (`catalog._unnumbered`).
+ * @param {readonly (number | null)[]} order
+ * @param {readonly {place: number, itemId: string, item: Record<string, unknown>}[]} loose
+ * @param {string} seriesId
+ * @returns {Unnumbered[]}
+ */
+function unnumberedOf(order, loose, seriesId) {
+  return loose.map(({ place, itemId, item }) => {
+    let start = place;
+    let end = place;
+    while (start > 0 && order[start - 1] === null) start -= 1;
+    while (end + 1 < order.length && order[end + 1] === null) end += 1;
+    return {
+      itemId,
+      seriesId,
+      before: start > 0 ? (order[start - 1] ?? null) : null,
+      after: end + 1 < order.length ? (order[end + 1] ?? null) : null,
+      runIndex: place - start,
+      runLength: end - start + 1,
+      item,
+    };
+  });
 }
 
 /** How deep {@link itemKey} writes a raw item before it writes a marker instead (`catalog._canonical`). */
@@ -1180,18 +1259,35 @@ export function mergeEpisodes(pages) {
  * other). The skipped items keep their reasons, once per item id (an id read as an episode on
  * another page is no skipped item), and an item without an id once per listing (3.0.1, the review's
  * L4: its canonical JSON, `PagePayload.skippedKeys`; a page built by hand without keys counts each
- * one). `itemsReceived` counts the distinct items of the series: every episode before the number
- * merge plus the skipped items that do not name another drama. `totalHint` is the first page's
+ * one). An item of the series TikTok listed without a usable number is numbered by its place in
+ * TikTok's list when that place leaves no doubt (4.0.2, the owner's report of 2026-11-27;
+ * `catalog.merge_pages`): {@link placedNumber} gives the number — its run of items without a number
+ * fills a hole of the numbers listed exactly, right after the episode before it in its page or right
+ * before the one after it —, and the number must be one TikTok was asked for again and still sent no
+ * item for (`options.askedAgain`: the gap filling's {@link fillCovered} spans whose answers reached
+ * that place; none by default, so a number the filling has not asked for again is never numbered,
+ * and an episode left out of one answer is asked for again first). It is then an episode like any
+ * other, in `placed` and no longer a skipped item — unless the pages place it at different numbers,
+ * another item claims the same number, or an item of its run does not look like an episode there
+ * (`episodeLike`: a clip of an episode listed, no play address, under {@link PLACE_MIN_SHARE} of the
+ * shorter episode around its hole); then it stays skipped. `itemsReceived` counts
+ * the distinct items of the series: every episode before the number merge, those numbered by their
+ * place too, plus the skipped items that do not name another drama. `totalHint` is the first page's
  * count.
  * @param {Iterable<PagePayload>} pages
+ * @param {{askedAgain?: readonly (readonly [number, number | null])[]}} [options]
  * @returns {Listing}
  */
-export function mergePages(pages) {
+export function mergePages(pages, options = {}) {
   const listed = [...pages];
-  const { episodes, duplicates } = merge(listed.map((page) => page.episodes));
+  const merged = merge(listed.map((page) => page.episodes));
+  const { duplicates } = merged;
   /** @type {Set<string>} */
   const episodeIds = new Set();
   for (const page of listed) for (const episode of page.episodes) episodeIds.add(episode.itemId);
+  const { placed, numbered } = place(listed, merged.episodes, episodeIds, options.askedAgain ?? []);
+  const placedIds = new Set(placed.map((found) => found.itemId));
+  const episodes = numbered.length > 0 ? [...merged.episodes, ...numbered].sort((a, b) => a.number - b.number) : merged.episodes;
   /** @type {SkippedItem[]} */
   const skipped = [];
   /** @type {Set<string>} */
@@ -1201,7 +1297,8 @@ export function mergePages(pages) {
   for (const page of listed) {
     for (const [index, item] of page.skipped.entries()) {
       if (typeof item.itemId === "string") {
-        if (episodeIds.has(item.itemId) || skippedIds.has(item.itemId)) continue;
+        if (episodeIds.has(item.itemId) || placedIds.has(item.itemId)) continue;
+        if (skippedIds.has(item.itemId)) continue;
         skippedIds.add(item.itemId);
       } else {
         const key = page.skippedKeys?.[index] ?? null;
@@ -1213,7 +1310,7 @@ export function mergePages(pages) {
       skipped.push(item);
     }
   }
-  const received = episodeIds.size + skipped.filter((item) => item.reason !== SKIP_OTHER_DRAMA).length;
+  const received = episodeIds.size + placedIds.size + skipped.filter((item) => item.reason !== SKIP_OTHER_DRAMA).length;
   /** @type {number | null} */
   let total = null;
   for (const page of listed) {
@@ -1222,7 +1319,198 @@ export function mergePages(pages) {
       break;
     }
   }
-  return { episodes, duplicates, skipped, itemsReceived: received, totalHint: total };
+  return { episodes, duplicates, skipped, itemsReceived: received, totalHint: total, placed };
+}
+
+/**
+ * An item TikTok listed without its number is never numbered by its place when it lasts less than
+ * this share of the shorter of the two episodes around its hole (4.0.2, `catalog.PLACE_MIN_SHARE`):
+ * a trailer, not an episode.
+ */
+export const PLACE_MIN_SHARE = 0.5;
+
+/**
+ * The episode number an item TikTok listed without one takes by its place in TikTok's list (4.0.2,
+ * `catalog.placed_number`), against the episode numbers listed (`numbers`), or null. Its run of
+ * items without a number ({@link Unnumbered}) must fill a hole of `numbers` exactly, right after
+ * the episode before the run in its page (`before`) or right before the one after it (`after`) — a
+ * page may begin with an episode of the page before it again —: every number of the hole unlisted,
+ * and the numbers right below and right above it both listed; when both neighbours give such a
+ * hole, it must be the same one. So an item is never numbered below episode 2, past the highest
+ * number listed, or with a number another item holds: a trailer before the first episode, after the
+ * last one, or between two consecutive episodes, stays an item without a number. {@link mergePages}
+ * adds its own conditions. Pure; never throws.
+ * @param {Unnumbered} record
+ * @param {ReadonlySet<number> | ReadonlyMap<number, unknown>} numbers
+ * @returns {number | null}
+ */
+export function placedNumber(record, numbers) {
+  const found = hole(record, numbers);
+  return found === null ? null : found.first + record.runIndex;
+}
+
+/**
+ * The first and last numbers of the hole `record`'s run fills ({@link placedNumber}), or null:
+ * anchored on each neighbour the run has, the one hole they give (`catalog._hole`).
+ * @param {Unnumbered} record
+ * @param {ReadonlySet<number> | ReadonlyMap<number, unknown>} numbers
+ * @returns {{first: number, last: number} | null}
+ */
+function hole(record, numbers) {
+  /** @type {number[]} */
+  const anchors = [];
+  if (record.before !== null) anchors.push(record.before + 1);
+  if (record.after !== null) anchors.push(record.after - record.runLength);
+  /** @type {Map<string, {first: number, last: number}>} */
+  const holes = new Map();
+  for (const first of anchors) {
+    const last = first + record.runLength - 1;
+    if (first < 2 || !numbers.has(first - 1) || !numbers.has(last + 1)) continue;
+    let free = true;
+    for (let number = first; number <= last; number += 1) if (numbers.has(number)) free = false;
+    if (free) holes.set(`${first}:${last}`, { first, last });
+  }
+  return holes.size === 1 ? /** @type {{first: number, last: number}} */ ([...holes.values()][0]) : null;
+}
+
+/**
+ * The items without a number of `pages` that their place numbers ({@link mergePages}), each once, in
+ * the order first listed, with the episode each one is (its first copy's item): every place it was
+ * listed at that gives a number gives the same one, no other item claims that number, TikTok was
+ * asked for it again (`askedAgain`), and every item of its run in that page looks like an episode
+ * there (`episodeLike`) — one that does not breaks the run's count, so none of that run is numbered
+ * from that page (`catalog._place`).
+ * @param {readonly PagePayload[]} pages
+ * @param {readonly Episode[]} episodes
+ * @param {ReadonlySet<string>} episodeIds
+ * @param {readonly (readonly [number, number | null])[]} askedAgain
+ * @returns {{placed: Placed[], numbered: Episode[]}}
+ */
+function place(pages, episodes, episodeIds, askedAgain) {
+  if (askedAgain.length === 0) return { placed: [], numbered: [] };
+  /** @type {Map<number, Episode>} */
+  const numbers = new Map(episodes.map((episode) => [episode.number, episode]));
+  /** @type {Map<string, Unnumbered>} */
+  const first = new Map();
+  /** @type {Map<string, {number: number, low: number, high: number}[]>} */
+  const holes = new Map();
+  for (const page of pages) {
+    /** @type {Map<string, Unnumbered[]>} the page's runs, by their neighbours and length */
+    const runs = new Map();
+    for (const record of page.unnumbered ?? []) {
+      if (episodeIds.has(record.itemId)) continue;
+      if (!first.has(record.itemId)) first.set(record.itemId, record);
+      const key = JSON.stringify([record.before, record.after, record.runLength]);
+      runs.set(key, [...(runs.get(key) ?? []), record]);
+    }
+    for (const run of runs.values()) {
+      const found = hole(/** @type {Unnumbered} */ (run[0]), numbers);
+      if (found === null) continue;
+      const below = /** @type {Episode} */ (numbers.get(found.first - 1));
+      const above = /** @type {Episode} */ (numbers.get(found.last + 1));
+      if (!run.every((record) => episodeLike(record, below, above, episodeIds))) continue;
+      for (const record of run) {
+        const list = holes.get(record.itemId) ?? [];
+        list.push({ number: found.first + record.runIndex, low: found.first, high: found.last });
+        holes.set(record.itemId, list);
+      }
+    }
+  }
+  /** @type {Map<string, {number: number, low: number, high: number}>} */
+  const chosen = new Map();
+  for (const itemId of first.keys()) {
+    const found = holes.get(itemId) ?? [];
+    if (new Set(found.map((entry) => entry.number)).size !== 1) continue;
+    // catalog._place's min() over (number, low, high): one number, so the lowest hole first
+    const [pick] = [...found].sort((a, b) => a.low - b.low || a.high - b.high);
+    if (pick !== undefined) chosen.set(itemId, pick);
+  }
+  /** @type {Map<number, number>} */
+  const claims = new Map();
+  for (const pick of chosen.values()) claims.set(pick.number, (claims.get(pick.number) ?? 0) + 1);
+  /** @type {Placed[]} */
+  const placed = [];
+  /** @type {Episode[]} */
+  const numbered = [];
+  for (const [itemId, { number, low, high }] of chosen) {
+    if ((claims.get(number) ?? 0) > 1 || !asked(number, askedAgain)) continue;
+    const record = /** @type {Unnumbered} */ (first.get(itemId));
+    placed.push({ number, itemId, below: low - 1, above: high + 1 });
+    numbered.push(buildEpisode(record.item, record.seriesId, itemId, number));
+  }
+  return { placed, numbered };
+}
+
+/**
+ * Whether an item without a number may be an episode in the hole between `below` and `above`
+ * (`catalog._episode_like`): its `LinkedEpisodeID` names no episode listed (else a clip of that
+ * one), it carries a play address ({@link playUrlCandidates}: a trailer may be listed without one;
+ * an episode this session may not play could not be downloaded anyway), and it lasts at least
+ * {@link PLACE_MIN_SHARE} of the shorter of the two (else a trailer; never judged when a duration
+ * is unknown or 0).
+ * @param {Unnumbered} record
+ * @param {Episode} below
+ * @param {Episode} above
+ * @param {ReadonlySet<string>} episodeIds
+ * @returns {boolean}
+ */
+function episodeLike(record, below, above, episodeIds) {
+  const linked = linkedEpisodeId(record.item);
+  if ((linked !== null && episodeIds.has(linked)) || playUrlCandidates(record.item).length === 0) return false;
+  return !tooShort(durationOf(record.item), below, above);
+}
+
+/**
+ * Whether one of the gap filling's spans ({@link fillCovered}) holds `number` (`catalog._asked`).
+ * @param {number} number
+ * @param {readonly (readonly [number, number | null])[]} spans
+ * @returns {boolean}
+ */
+function asked(number, spans) {
+  return spans.some(([low, high]) => low <= number && (high === null || number <= high));
+}
+
+/**
+ * The `LinkedEpisodeID` string an item carries other than `"0"` (in `DramaVideoData`, else in
+ * `dramaInfo`), or null (`catalog._linked_episode_id`) — a string only, as TikTok sends ids: a
+ * number past 2**53 would not read the same here.
+ * @param {Record<string, unknown>} item
+ * @returns {string | null}
+ */
+function linkedEpisodeId(item) {
+  const dramaInfo = dramaInfoOf(item);
+  const videoData = get(dramaInfo, "DramaVideoData");
+  const containers = isDict(videoData) ? [videoData, dramaInfo] : [dramaInfo];
+  for (const container of containers) {
+    const value = get(container, LINKED_EPISODE_KEY);
+    const linked = typeof value === "string" ? asId(value) : null;
+    if (linked !== null && linked !== "0") return linked;
+  }
+  return null;
+}
+
+/**
+ * An item's `video.duration` as {@link buildEpisode} reads it, else null (`catalog._duration_of`).
+ * @param {Record<string, unknown>} item
+ * @returns {number | null}
+ */
+function durationOf(item) {
+  const video = field(item, "video");
+  return isDict(video) ? asInt(get(video, "duration")) : null;
+}
+
+/**
+ * Whether an item lasting `duration` seconds lasts less than {@link PLACE_MIN_SHARE} of the shorter of
+ * the two episodes around its hole; never when a duration is unknown or 0 (`catalog._too_short`).
+ * @param {number | null} duration
+ * @param {Episode} below
+ * @param {Episode} above
+ * @returns {boolean}
+ */
+function tooShort(duration, below, above) {
+  const known = [below.durationS, above.durationS].filter((value) => value !== null && value !== undefined && value > 0);
+  if (duration === null || duration <= 0 || known.length === 0) return false;
+  return duration < PLACE_MIN_SHARE * Math.min(.../** @type {number[]} */ (known));
 }
 
 /**
@@ -1453,7 +1741,9 @@ export function fillCovered(target, count, answer) {
  * Human-readable oddities of a listing (`catalog.catalog_warnings`), in this order: the gaps below
  * the highest number listed; one line per item left out for another one's number — those
  * `episodes` holds itself (found by {@link mergePages}' rules), then `options.duplicates` — naming
- * the number, the item left out and why, and the item kept; one line per reason of the
+ * the number, the item left out and why, and the item kept; one line per item TikTok listed
+ * without its number that its place numbered (4.0.2, a {@link Listing}'s `placed`: {@link placedText}),
+ * by number; one line per reason of the
  * `options.skipped` items, with their count ({@link SKIP_REASONS} first); TikTok's count against the
  * numbers listed whenever they differ (`TikTok announces N episodes, M listed`: more listed than it
  * announces, or fewer — 3.0.1, the review's L2: other items received never silence it); when
@@ -1461,7 +1751,7 @@ export function fillCovered(target, count, answer) {
  * DramaFetch cannot tell ({@link uncertainText}); the locked count.
  * @param {readonly Episode[]} episodes
  * @param {number | null} totalHint
- * @param {{duplicates?: readonly Duplicate[], skipped?: readonly SkippedItem[], itemsReceived?: number | null}} [options]
+ * @param {{duplicates?: readonly Duplicate[], skipped?: readonly SkippedItem[], itemsReceived?: number | null, placed?: readonly Placed[]}} [options]
  * @returns {string[]}
  */
 export function catalogWarnings(episodes, totalHint, options = {}) {
@@ -1476,6 +1766,7 @@ export function catalogWarnings(episodes, totalHint, options = {}) {
   const found = [...merge([episodes]).duplicates, ...(options.duplicates ?? [])];
   found.sort((a, b) => a.number - b.number);
   for (const duplicate of found) warnings.push(duplicateText(duplicate));
+  for (const item of [...(options.placed ?? [])].sort((a, b) => a.number - b.number)) warnings.push(placedText(item));
   /** @type {Map<string, number>} */
   const reasons = new Map();
   for (const item of options.skipped ?? []) reasons.set(item.reason, (reasons.get(item.reason) ?? 0) + 1);
@@ -1493,6 +1784,16 @@ export function catalogWarnings(episodes, totalHint, options = {}) {
   if (locked === 1) warnings.push("1 episode looks locked");
   else if (locked > 1) warnings.push(`${locked} episodes look locked`);
   return warnings;
+}
+
+/**
+ * The warning of an item numbered by its place (4.0.2, `catalog.placed_text`): `episode 53 came
+ * without its number: placed by its position in TikTok's list (between episodes 52 and 54)`.
+ * @param {Placed} placed
+ * @returns {string}
+ */
+export function placedText(placed) {
+  return `episode ${placed.number} ${PLACED_TEXT} (between episodes ${placed.below} and ${placed.above})`;
 }
 
 /**

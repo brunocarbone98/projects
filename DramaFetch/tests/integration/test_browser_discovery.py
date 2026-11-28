@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from dramafetch import cooldown, engine
-from dramafetch.catalog import uncertain_text
+from dramafetch.catalog import PLACED_TEXT, uncertain_text
 from dramafetch.discovery.browser import (
     FETCH_JS,
     GAP_FILL_REQUESTS,
@@ -296,6 +296,30 @@ class TestWithChromium:
             ("fill", "3", (2, 4, 5), False),
         ]
         assert series.listing.fill_requests == 1
+
+    def test_an_episode_served_without_its_number_is_numbered_by_its_place(self) -> None:
+        """4.0.2, the owner's report of 2026-11-27: TikTok's list serves episode 4 without its
+        number, in its place (`unnumbered`) — the second page begins with episode 2 again, then
+        that item, then episode 5. The listing asks TikTok again for episode 4 (the gap filling's
+        one request), the answer brings the same item, and only then is it episode 4 by its place:
+        every episode listed, nothing missing, the item gone from the skipped ones, and one more
+        warning saying how it was numbered."""
+        with FakeTikTok(unnumbered=frozenset({(SERIES_ID, 4)})) as server:
+            series = PlaywrightDiscovery().discover(SeriesRef(SERIES_ID), _options(server))
+            asked = _asked(server)
+        _assert_full_series(series)
+        assert series.episode(4).item_id == "7699400000000000004"
+        assert (series.missing_numbers, series.early_end) == ([], None)
+        assert series.warnings == [
+            f"episode 4 {PLACED_TEXT} (between episodes 3 and 5)",
+            *MAIN_WARNINGS,
+        ]
+        assert asked == [("0", "10"), ("3", "10"), ("3", "10")]
+        assert _listed(series) == [
+            ("page", "0", (1, 2, 3), True),
+            ("next", "3", (2, 5), False),
+            ("fill", "3", (2, 5), False),
+        ]
 
     def test_an_episode_always_left_out_is_asked_for_once_then_said_missing(self) -> None:
         """TikTok's list never holds episode 4 (`omit_always`): the filling asks for its page
@@ -1181,6 +1205,88 @@ def test_the_owners_drama_lists_and_counts_the_episodes_tiktok_marks_as_highligh
     assert series.warnings == []
     assert _fills(series) == []
     assert _line_of(series) == "complete: 66 of 66 (66 downloaded)"
+
+
+def _without_its_number(number: int, num_videos: int | None, duration: int = 3) -> dict[str, Any]:
+    """Episode ``number`` of the fake drama served without a usable number (``EpisodeNumber`` 0) —
+    the shape 4.0.2 infers for episode 53 of the owner's drama of 56 (2026-11-27)."""
+    item = _list_item(number, num_videos)
+    item["dramaInfo"]["DramaVideoData"]["EpisodeNumber"] = 0
+    item["video"]["duration"] = duration
+    return item
+
+
+@pytest.mark.parametrize(
+    "number", [53, 51, 50], ids=["mid-page", "at a page's start", "at a page's end"]
+)
+def test_an_episode_listed_without_its_number_is_numbered_by_its_place(number: int) -> None:
+    """4.0.2, the owner's report of 2026-11-27 (a drama of 56: "episode 53 missing (gap)" beside
+    one item without a number): the item TikTok lists without its number, in the middle of a page,
+    at a page's start or at its end (pages of 10), leaves its number a hole until the gap filling
+    asks TikTok for that page again — ONE request, `cursor` = the number - 1 — and the answer still
+    holds no item numbered so; then it is the episode of its place: every episode listed, nothing
+    missing, no skipped item, the report line complete, and one warning saying how it was
+    numbered."""
+    loose = _without_its_number(number, 56)
+    fake = _FakeList(56, leave=lambda n, cursor: n == number, extras=((number, loose),))
+    browser = _listing_browser(fake)
+    series = _paced(browser)
+    assert series.numbers == list(range(1, 57))
+    assert series.episode(number).item_id == loose["id"]
+    assert (series.total_hint, series.items_received) == (56, 56)
+    assert (series.missing_numbers, series.early_end, series.skipped_items) == ([], None, [])
+    assert series.warnings == [
+        f"episode {number} {PLACED_TEXT} (between episodes {number - 1} and {number + 1})"
+    ]
+    assert [(p.cursor_asked, p.numbers[:1]) for p in _fills(series)] == [
+        (str(number - 1), (number + 1,))
+    ]
+    assert _fetched(browser)[-1] == _list_url(number - 1)
+    assert _line_of(series) == "complete: 56 of 56 (56 downloaded)"
+
+
+def test_a_trailer_beside_an_episode_left_out_once_never_takes_its_number() -> None:
+    """4.0.2, the review's case: TikTok's first answer leaves episode 3 out, and a trailer as long
+    as an episode sits in its place (between episodes 2 and 4). Nothing is numbered before the gap
+    filling: it asks TikTok again for episode 3, the answer brings episode 3 itself, and the trailer
+    stays an item without a number — said, never downloaded."""
+    trailer = _without_its_number(3, 20)
+    trailer["id"] = "7699400000000009003"
+    fake = _FakeList(20, leave=lambda n, cursor: n == 3 and cursor == 0, extras=((3, trailer),))
+    browser = _listing_browser(fake)
+    series = _paced(browser)
+    assert series.numbers == list(range(1, 21))
+    assert series.episode(3).item_id == _list_item(3, 20)["id"]
+    assert [item.item_id for item in series.skipped_items] == [trailer["id"]]
+    assert [(p.cursor_asked, p.numbers[:1]) for p in _fills(series)] == [("2", (3,))]
+    assert series.warnings == ["TikTok listed 1 item DramaFetch could not read (no episode number)"]
+
+
+def test_a_filling_answer_that_never_reaches_the_hole_numbers_nothing() -> None:
+    """4.0.2, the review's case: TikTok's list never holds episode 3, a trailer as long as an
+    episode sits in its place, and TikTok answers the gap filling's request for episode 3 with an
+    earlier page again (episodes 1 and 2). That answer never reached episode 3's place, so it
+    confirms nothing: the trailer stays an item without a number and episode 3 stays missing."""
+    trailer = _without_its_number(3, 20)
+    trailer["id"] = "7699400000000009003"
+    earlier = {
+        "statusCode": 0,
+        "cursor": 2,
+        "hasMore": True,
+        "itemList": [_list_item(1, 20), _list_item(2, 20)],
+    }
+    fake = _FakeList(
+        20,
+        leave=lambda n, cursor: n == 3,
+        extras=((3, trailer),),
+        lose=lambda cursor, attempt: earlier if cursor == 2 else None,
+    )
+    series = _paced(_listing_browser(fake))
+    assert series.numbers == [n for n in range(1, 21) if n != 3]
+    assert [item.item_id for item in series.skipped_items] == [trailer["id"]]
+    assert series.missing_numbers == [3]
+    assert [(p.cursor_asked, p.numbers) for p in _fills(series)] == [("2", (1, 2))]
+    assert not any(PLACED_TEXT in warning for warning in series.warnings)
 
 
 @pytest.mark.parametrize("num_videos", [None, 66], ids=["no count", "a count of 66"])

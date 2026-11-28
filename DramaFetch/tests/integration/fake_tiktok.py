@@ -49,6 +49,8 @@ Routes (all GET):
                                  2026-11-27 — episodes missing without a word): `omit_once` leaves
                                  an episode out of the FIRST answer that would hold it, once (a
                                  page asked for again holds it); `omit_always` out of every answer;
+                                 (4.0.2) `unnumbered` serves an episode in its place in every
+                                 answer, but without its number (`EpisodeNumber` 0);
                                  `lose_page_once` answers the first request of a page (series id,
                                  cursor) with no list at all — TikTok's JSON without `itemList`, or
                                  HTTP 500 with `lost_page_status` 500 — and later requests of it
@@ -424,6 +426,10 @@ class FakeOptions:
     omit_once: frozenset[tuple[str, int]] = frozenset()
     # left out of every list answer: TikTok's list never holds it
     omit_always: frozenset[tuple[str, int]] = frozenset()
+    # 4.0.2, the owner's report of 2026-11-27 (a drama of 56 whose list held episode 53 without its
+    # number): served in every list answer with no usable number — `DramaVideoData.EpisodeNumber`
+    # 0 and no `dramaInfo.episodeNumber` —, in its place among the items
+    unnumbered: frozenset[tuple[str, int]] = frozenset()
     # List pages, as (series id, cursor), whose FIRST request is lost: answered with no list at
     # all — `lost_page_status` 200: TikTok's JSON without an `itemList`; 500: an HTTP 500 —; every
     # later request of the page gets it
@@ -536,10 +542,20 @@ class FakeTikTokServer(ThreadingHTTPServer):
     def left_out(self, payload: dict[str, Any]) -> dict[str, Any]:
         """`payload` (a fixture page, never edited) as this answer serves it: a copy whose item
         lists hold no episode of `omit_always`, nor one of `omit_once` this answer is the first to
-        hold; the payload itself when neither applies."""
+        hold, and the item of each episode of `unnumbered` without its number; the payload itself
+        when none applies."""
         options = self.options
-        if not options.omit_always and not options.omit_once:
+        if not options.omit_always and not options.omit_once and not options.unnumbered:
             return payload
+
+        def served(item: Any) -> Any:
+            episode = EPISODE_OF_ITEM.get(str(item.get("id"))) if isinstance(item, dict) else None
+            if episode is None or episode not in options.unnumbered:
+                return item
+            drama = dict(item.get("dramaInfo") or {})
+            drama.pop("episodeNumber", None)
+            drama["DramaVideoData"] = {**(drama.get("DramaVideoData") or {}), "EpisodeNumber": 0}
+            return {**item, "dramaInfo": drama}
 
         def kept(item: Any) -> bool:
             episode = EPISODE_OF_ITEM.get(str(item.get("id"))) if isinstance(item, dict) else None
@@ -557,10 +573,11 @@ class FakeTikTokServer(ThreadingHTTPServer):
 
         copy = dict(payload)
         if isinstance(payload.get("itemList"), list):
-            copy["itemList"] = [item for item in payload["itemList"] if kept(item)]
+            copy["itemList"] = [served(item) for item in payload["itemList"] if kept(item)]
         data = payload.get("data")
         if isinstance(data, dict) and isinstance(data.get("itemList"), list):
-            copy["data"] = {**data, "itemList": [item for item in data["itemList"] if kept(item)]}
+            listed = [served(item) for item in data["itemList"] if kept(item)]
+            copy["data"] = {**data, "itemList": listed}
         return copy
 
     def handle_error(self, request: Any, client_address: Any) -> None:

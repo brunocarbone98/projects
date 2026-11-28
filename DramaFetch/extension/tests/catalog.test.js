@@ -11,6 +11,8 @@ import {
   LEFT_OUT_REASONS,
   LEFT_OUT_SHORTER,
   NO_PLAY_ADDRESS,
+  PLACED_TEXT,
+  PLACE_MIN_SHARE,
   SHORT_HEADER_HINT_PREFIX,
   SKIP_NO_ID,
   SKIP_NO_NUMBER,
@@ -42,6 +44,8 @@ import {
   pageEndsList,
   parseDetailPayload,
   parseItemListPayload,
+  placedNumber,
+  placedText,
   playUrlCandidates,
   renditions,
   skipReason,
@@ -794,7 +798,7 @@ test("mergePages counts the items received of the series and keeps every skipped
   ]);
   assert.equal(listing.itemsReceived, 5); // two episodes, the trailer, two without an id
   assert.equal(listing.totalHint, 9);
-  assert.deepEqual(mergePages([]), { episodes: [], duplicates: [], skipped: [], itemsReceived: 0, totalHint: null });
+  assert.deepEqual(mergePages([]), { episodes: [], duplicates: [], skipped: [], itemsReceived: 0, totalHint: null, placed: [] });
 });
 
 /**
@@ -858,6 +862,189 @@ test("4.0.1, the owner's drama: an episode TikTok marks as a highlight, alone wi
     assert.deepEqual(catalogWarnings(listing.episodes, listing.totalHint, options), [], label);
     assert.deepEqual(mergeEpisodes([page.episodes]), listing.episodes, label);
   }
+});
+
+/** 4.0.2, the owner's report of 2026-11-27: the drama of 56 whose item of episode 53 came without its number. */
+const SIREN_ID = "7709866030612599814";
+const SIREN_E53 = "7700000000000000553";
+
+/**
+ * An item of the owner's drama of 56 (`test_catalog._siren_item`), invented ids; episode 53's carries no number.
+ * @param {number} number
+ * @returns {Record<string, unknown>}
+ */
+function sirenItem(number) {
+  return {
+    id: number === 53 ? SIREN_E53 : `7699400000000001${String(number).padStart(3, "0")}`,
+    desc: "",
+    dramaInfo: {
+      dramaID: SIREN_ID,
+      dramaName: "I Found My Siren Boyfriend in My Bathtub",
+      numVideos: 56,
+      DramaVideoData: { EpisodeNumber: number === 53 ? 0 : number },
+    },
+    video: { ...PLAYABLE, duration: 95 },
+  };
+}
+
+/** The gap filling's span of an answer that says the list is over, from `low` on (`catalog.fillCovered`). */
+const ASKED_ALL = /** @type {[number, number | null][]} */ ([[1, null]]);
+
+test("4.0.2, the owner's drama of 56: the item TikTok listed without its number, between episodes 52 and 54, is episode 53 once the gap filling asked TikTok again for 53 — wherever the page boundary falls —: listed like any other, no longer skipped, nothing missing, one line saying so; before that, 53 is a hole the filling asks for", () => {
+  const items = Array.from({ length: 56 }, (_, index) => sirenItem(index + 1));
+  for (const [boundary, before, after] of /** @type {const} */ ([
+    [30, 52, 54],
+    [52, null, 54],
+    [53, 52, null],
+  ])) {
+    const label = `boundary ${boundary}`;
+    const pages = [
+      parseItemListPayload({ itemList: items.slice(0, boundary), hasMore: true }, SIREN_ID),
+      parseItemListPayload({ itemList: items.slice(boundary), hasMore: false }, SIREN_ID),
+    ];
+    const records = pages.flatMap((page) => page.unnumbered ?? []);
+    assert.deepEqual(records, [{ itemId: SIREN_E53, seriesId: SIREN_ID, before, after, runIndex: 0, runLength: 1, item: sirenItem(53) }], label);
+    // the pagination alone (and a span that does not hold 53): nothing numbered — 53 is the hole the filling asks for
+    for (const askedAgain of [undefined, /** @type {[number, number | null][]} */ ([[54, null]])]) {
+      const early = mergePages(pages, askedAgain === undefined ? {} : { askedAgain });
+      const numbers = early.episodes.map((episode) => episode.number);
+      assert.equal(numbers.includes(53), false, label);
+      assert.deepEqual([early.placed, early.skipped], [[], [{ reason: SKIP_NO_NUMBER, itemId: SIREN_E53 }]], label);
+      assert.equal(fillTarget(numbers, 56, early.itemsReceived, { earlyEnd: false, limit: 10_000 }), 53, label);
+    }
+    // the filling asked for 53 (cursor 52) and the answer brought the same item: now it is episode 53
+    for (const askedAgain of [ASKED_ALL, /** @type {[number, number | null][]} */ ([[53, 56]])]) {
+      const listing = mergePages(pages, { askedAgain });
+      const numbers = listing.episodes.map((episode) => episode.number);
+      assert.deepEqual(numbers, Array.from({ length: 56 }, (_, index) => index + 1), label);
+      const episode = listing.episodes[52];
+      assert.deepEqual([episode?.itemId, episode?.seriesId, episode?.number, episode?.access], [SIREN_E53, SIREN_ID, 53, "free"], label);
+      assert.equal(episode?.title, "I Found My Siren Boyfriend in My Bathtub E53", label);
+      assert.deepEqual(listing.placed, [{ number: 53, itemId: SIREN_E53, below: 52, above: 54 }], label);
+      assert.deepEqual([listing.skipped, listing.duplicates, listing.itemsReceived, listing.totalHint], [[], [], 56, 56], label);
+      assert.deepEqual(countCheck(numbers, 56, 56), { certainTop: 56, otherItems: 0, uncertain: false }, label);
+      assert.deepEqual(missingNumbers(numbers, 56, 56, 10_000), [], label);
+      const options = { duplicates: listing.duplicates, skipped: listing.skipped, itemsReceived: listing.itemsReceived, placed: listing.placed };
+      assert.deepEqual(
+        catalogWarnings(listing.episodes, 56, options),
+        ["episode 53 came without its number: placed by its position in TikTok's list (between episodes 52 and 54)"],
+        label,
+      );
+    }
+  }
+});
+
+test("4.0.2: an item its place does not number stays an item without a number, even once TikTok was asked again — a trailer before episode 1 (episode 1 missing or not) or after the last episode, one between consecutive episodes, a run longer than its hole, one two pages place at different numbers, two items claiming one hole, a clip linked to an episode listed, one without a play address, one under half as long as the episodes around its hole, the items of a run one of whose members fails those, one alone in its page", () => {
+  /** @param {number} number */
+  const episode = (number) => ({ ...item({ EpisodeNumber: number }), id: `7699400000000002${String(number).padStart(3, "0")}`, video: { ...PLAYABLE, duration: 90 } });
+  /**
+   * @param {number} ident
+   * @param {Record<string, unknown>} [videoData]
+   * @param {number} [duration]
+   */
+  const loose = (ident, videoData = {}, duration = 90) => ({ ...item({ EpisodeNumber: 0, ...videoData }), id: `7700000000000000${ident}`, video: { ...PLAYABLE, duration } });
+  /** @param {Record<string, unknown>[]} items */
+  const page = (...items) => parseItemListPayload({ itemList: items }, SERIES_ID);
+  const [one, two, three, four, six] = [1, 2, 3, 4, 6].map(episode);
+  const cases = {
+    "a trailer before episode 1": [page(loose(900), one, two)],
+    "a trailer at the head, episode 1 missing": [page(loose(907), two, three)],
+    "a trailer after the last episode": [page(one, two, loose(901))],
+    "between consecutive episodes": [page(one, loose(902), two)],
+    "a run longer than its hole": [page(one, loose(903), loose(904), three)],
+    "two places, two numbers": [page(one, loose(905), three), page(four, loose(905), six)],
+    "two items claiming one hole": [page(one, loose(908), three), page(one, loose(909), three)],
+    "a clip linked to an episode listed": [page(one, loose(910, { LinkedEpisodeID: "7699400000000002001" }), three)],
+    "no play address": [page(one, { ...loose(912), video: { duration: 90 } }, three)],
+    "a run with a member that is no episode": [page(one, { ...loose(913), video: { duration: 90 } }, loose(914), four)],
+    "under half as long as the episodes around": [page(one, loose(911, {}, 44), three)],
+    "alone in its page": [page(one, two), page(loose(906)), page(four)],
+  };
+  for (const [name, pages] of Object.entries(cases)) {
+    const listing = mergePages(pages, { askedAgain: ASKED_ALL });
+    assert.deepEqual(listing.placed, [], name);
+    assert.ok(listing.skipped.length > 0, name);
+    assert.deepEqual([...new Set(listing.skipped.map((skipped) => skipped.reason))], [SKIP_NO_NUMBER], name);
+    assert.ok(listing.episodes.every((e) => !e.itemId.startsWith("770000000000000")), name);
+  }
+  // what the fixtures hold: the main series' trailer between its episodes 2 and 3
+  const first = parseItemListPayload(fixture("item_list_page1.json"), SERIES_ID);
+  assert.deepEqual((first.unnumbered ?? []).map((r) => [r.before, r.after, r.runLength]), [[2, 3, 1]]);
+  assert.deepEqual(mergePages([first], { askedAgain: ASKED_ALL }).placed, []);
+});
+
+test("4.0.2: several items without a number side by side fill a hole of exactly their number in TikTok's order; an item without an id holds its place (and stays skipped), another drama's holds none; a link naming no episode listed (or no string), and a duration unknown, 0 or at least half the shorter neighbour's, number all the same", () => {
+  /** @param {number} number */
+  const episode = (number) => ({ ...item({ EpisodeNumber: number }), id: `7699400000000003${String(number).padStart(3, "0")}`, video: { ...PLAYABLE, duration: 90 } });
+  /**
+   * @param {number} ident
+   * @param {Record<string, unknown>} [videoData]
+   * @param {Record<string, unknown>} [video]
+   */
+  const loose = (ident, videoData = {}, video = { ...PLAYABLE, duration: 90 }) => ({ ...item({ EpisodeNumber: 0, ...videoData }), id: `7700000000000000${ident}`, video });
+  /** @param {Record<string, unknown>[]} items */
+  const listingOf = (...items) => mergePages([parseItemListPayload({ itemList: items }, SERIES_ID)], { askedAgain: ASKED_ALL });
+  const idless = { dramaInfo: { dramaID: SERIES_ID, DramaVideoData: { EpisodeNumber: 0 } } };
+  const other = { id: "7699400000000009999", video: { ...PLAYABLE }, dramaInfo: { dramaID: OTHER_SERIES_ID, DramaVideoData: { EpisodeNumber: 3 } } };
+  const run = listingOf(episode(1), loose(502), loose(503), episode(4));
+  assert.deepEqual(
+    run.episodes.map((e) => [e.number, e.itemId]),
+    [
+      [1, "7699400000000003001"],
+      [2, "7700000000000000502"],
+      [3, "7700000000000000503"],
+      [4, "7699400000000003004"],
+    ],
+  );
+  assert.deepEqual(run.placed, [
+    { number: 2, itemId: "7700000000000000502", below: 1, above: 4 },
+    { number: 3, itemId: "7700000000000000503", below: 1, above: 4 },
+  ]);
+  const mixed = listingOf(episode(1), idless, other, loose(510), episode(4));
+  assert.deepEqual(mixed.episodes.map((e) => e.number), [1, 3, 4]);
+  assert.deepEqual(mixed.placed, [{ number: 3, itemId: "7700000000000000510", below: 1, above: 4 }]);
+  assert.deepEqual(mixed.skipped.map((skipped) => skipped.reason).sort(), [SKIP_OTHER_DRAMA, SKIP_NO_ID].sort());
+  assert.equal(mixed.itemsReceived, 4); // episodes 1, 3 and 4, and the id-less item; not the other drama's
+  for (const [name, loner] of /** @type {const} */ ([
+    ["a link to no episode listed", loose(520, { LinkedEpisodeID: "7699400000000008888" })],
+    ["a link of 0", loose(521, { LinkedEpisodeID: "0" })],
+    ["no duration", loose(522, {}, { ...PLAYABLE })],
+    ["exactly half the shorter neighbour", loose(523, {}, { ...PLAYABLE, duration: 45 })],
+    ["a duration of 0", loose(524, {}, { ...PLAYABLE, duration: 0 })],
+    ["a numeric link (TikTok sends ids as strings)", loose(525, { LinkedEpisodeID: 7699400000000003001 })],
+  ])) {
+    assert.deepEqual(listingOf(episode(1), loner, episode(3)).placed.map((p) => p.number), [2], name);
+  }
+  assert.equal(placedText(/** @type {import("../src/lib/catalog.js").Placed} */ (run.placed[0])), `episode 2 ${PLACED_TEXT} (between episodes 1 and 4)`);
+  assert.equal(PLACE_MIN_SHARE, 0.5);
+});
+
+test("4.0.2: placedNumber fills a hole exactly or gives null — anchored right after `before` or right before `after` (one anchor is enough, two must give one hole), the hole all unlisted, the numbers right below and right above it both listed", () => {
+  /**
+   * @param {number | null} before
+   * @param {number | null} after
+   * @returns {import("../src/lib/catalog.js").Unnumbered}
+   */
+  const record = (before, after, runIndex = 0, runLength = 1) => ({ itemId: "i", seriesId: "s", before, after, runIndex, runLength, item: {} });
+  const listed = new Set([1, 2, 4, 5, 8]);
+  assert.equal(placedNumber(record(2, 4), listed), 3);
+  assert.equal(placedNumber(record(2, null), listed), 3);
+  assert.equal(placedNumber(record(null, 4), listed), 3);
+  assert.equal(placedNumber(record(5, 8, 0, 2), listed), 6);
+  assert.equal(placedNumber(record(5, 8, 1, 2), listed), 7);
+  assert.equal(placedNumber(record(null, 8, 1, 2), listed), 7);
+  assert.equal(placedNumber(record(null, 1), listed), null); // before episode 1: a trailer
+  assert.equal(placedNumber(record(8, null), listed), null); // past the highest listed
+  assert.equal(placedNumber(record(1, 2), listed), null); // between consecutive episodes
+  assert.equal(placedNumber(record(2, 5), listed), 3); // right after 2: 4 is listed elsewhere
+  assert.equal(placedNumber(record(1, 5), new Set([1, 3, 5])), null); // two holes, 2 and 4: which one?
+  assert.equal(placedNumber(record(3, 5), new Set([1, 3, 5])), 4);
+  assert.equal(placedNumber(record(5, 8), listed), null); // a hole of two, a run of one
+  assert.equal(placedNumber(record(5, null), listed), null); // 6 then 7 unlisted: not closed
+  assert.equal(placedNumber(record(null, null), listed), null);
+  assert.equal(placedNumber(record(null, 2), new Set([2, 3])), null); // a hole at 1: never (a trailer's place)
+  assert.equal(placedNumber(record(null, 3, 0, 2), new Set([3])), null);
+  assert.equal(placedNumber(record(null, 2), new Set()), null);
 });
 
 test("4.0.1: a number only highlights hold keeps one of them as its episode — listed, counted among the episode numbers, never a skipped item; of several, the usual order picks; a highlight beside an episode stays the duplicate left out", () => {

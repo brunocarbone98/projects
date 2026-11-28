@@ -296,6 +296,8 @@ class StaticHtmlDiscovery:
                 parse_item_list_payload(embedded, ref.series_id)
                 for embedded in _embedded_lists(blob)
             )
+        # no item without a number is numbered by its place here (4.0.2): nothing asks TikTok
+        # again, and the hole makes the result partial — `auto` lists the drama with the browser
         listing = merge_pages(pages)
         episodes = listing.episodes
         if not episodes:

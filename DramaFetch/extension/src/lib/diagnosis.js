@@ -244,6 +244,9 @@ const SHORT_SERVED_RE = / but it plays (\d+(?:\.\d+)?) s of (\d+(?:\.\d+)?) s â€
  * @property {string | null} earlyEnd why the listing ended before TikTok said the list was over
  * @property {readonly {reason: string, itemId: string | null}[]} skippedItems the items DramaFetch
  *   could not read, with their reasons
+ * @property {readonly {number: number, itemId: string, below: number, above: number}[]} [placedItems]
+ *   the items TikTok listed without a number that their place numbered (4.0.2), each with the
+ *   episodes listed around its hole
  * @property {readonly string[]} warnings the list's warnings
  * @property {boolean} incomplete the list itself is short â€” a number missing, an early end short of
  *   TikTok's count, or (3.0.1) TikTok counting more than the drama certainly has
@@ -430,6 +433,7 @@ export function listingSection(listing) {
       cursor: page.cursor,
     })),
     skipped_items: listing.skippedItems.map((item) => ({ reason: item.reason, item_id: item.itemId })),
+    placed_items: (listing.placedItems ?? []).map((item) => ({ number: item.number, item_id: item.itemId, below: item.below, above: item.above })),
     warnings: [...listing.warnings],
   };
 }

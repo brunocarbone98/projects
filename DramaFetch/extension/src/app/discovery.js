@@ -541,6 +541,13 @@ class Capture {
     this.seenIds = new Set();
     /** @type {Set<string>} */
     this.seenPayloads = new Set();
+    /**
+     * the gap filling's spans (`catalog.fillCovered`) whose answers reached their target — they
+     * listed an episode at or past it: only an item without a number in one of them may be
+     * numbered by its place (4.0.2, `catalog.mergePages`' `askedAgain`)
+     * @type {[number, number | null][]}
+     */
+    this.reached = [];
     /** @type {string | null} the warning of the fallback the pagination stopped on; null while it ended on a last page */
     this.endedEarly = null;
     /** a page said the list is over (`hasMore` false, and no mere repeat): at any time */
@@ -910,7 +917,7 @@ export async function discoverSeries(ref, options = {}) {
     /** @type {[number, number | null][]} */
     const covered = [];
     for (let asked = 0; asked < GAP_FILL_REQUESTS; asked += 1) {
-      const listing = mergePages(capture.pages);
+      const listing = mergePages(capture.pages, { askedAgain: capture.reached });
       const target = fillTarget(
         listing.episodes.map((episode) => episode.number),
         capture.count(listing),
@@ -928,7 +935,9 @@ export async function discoverSeries(ref, options = {}) {
       }
       const answer = capture.ingest(payload, url, true).page;
       capture.note(FILL, url, answer);
-      covered.push(fillCovered(target, pageCount, answer));
+      const span = fillCovered(target, pageCount, answer);
+      covered.push(span);
+      if (answer.episodes.some((episode) => episode.number >= target)) capture.reached.push(span); // it reached the place asked for
     }
   };
 
@@ -1021,7 +1030,9 @@ function maxPagesWarning(maxPages) {
  * @returns {Series}
  */
 function buildSeries(ref, capture) {
-  const listing = mergePages(capture.pages);
+  // 4.0.2: an item without a number is numbered by its place only once the gap filling asked
+  // TikTok again for the number it would take and the answer reached that place (`capture.reached`)
+  const listing = mergePages(capture.pages, { askedAgain: capture.reached });
   const episodes = listing.episodes;
   let name = capture.detail !== null ? parseDetailPayload(capture.detail, ref.seriesId).name : null;
   const total = capture.count(listing);
@@ -1044,9 +1055,11 @@ function buildSeries(ref, capture) {
         duplicates: listing.duplicates,
         skipped: listing.skipped,
         itemsReceived: listing.itemsReceived,
+        placed: listing.placed,
       }),
     ],
     skippedItems: listing.skipped,
+    placed: listing.placed,
     itemsReceived: listing.itemsReceived,
     missingNumbers: missingNumbers(
       episodes.map((episode) => episode.number),
