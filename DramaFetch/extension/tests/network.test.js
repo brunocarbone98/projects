@@ -581,7 +581,7 @@ test("in test mode a redirect is followed on the test origin only", async () => 
   assert.ok(!net.log.includes("http://127.0.0.1:9999/cdn/2/0.mp4"));
 });
 
-test("an episode's cover follows a covered redirect, and only a covered one — `fetchImage` itself, and the downloader's cover GET", async () => {
+test("a cover and a thumbnail follow a covered redirect, and only a covered one", async () => {
   const redirects = tracker();
   const net = network(
     {

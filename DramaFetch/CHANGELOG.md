@@ -2,6 +2,44 @@
 
 One version for the whole of DramaFetch — the Python tool (`pyproject.toml`, `dramafetch --version`) and the Chrome extension (`extension/manifest.json`, shown in `chrome://extensions` and next to the title of the DramaFetch tab and the popup). Every change users can see ships with a new number: a new feature raises the middle number (1.2.0 → 1.3.0), a fix the last one (1.2.0 → 1.2.1), and a release that removes features you had raises the first number (1.8.0 → 2.0.0). Dates are the day the version was finished.
 
+## 4.1.0 — 2026-11-28
+
+The owner's decision of 2026-11-27: “Sabes que, reintegremos el library” (let's bring the library back) — with **See episodes**, its downloads again in full included (the owner's choices: “Library + See episodes” and “De nuevo completo”). It brings back what 4.0.0 removed, as it was in 3.0.1, a feature, hence the new middle number; everything else stays as 4.0.2 has it.
+
+- **Back: your library** (in Spanish, **Biblioteca**), as in 3.0.1. It holds:
+  - the cards of your TikTok **Favorites** → **Drama**, with their covers, titles and lengths, and the **Same title as another favorite** badge;
+  - **Queued** and **Downloading · 12/30** on a card while a job holds its drama, and nothing otherwise (no lasting status, since 3.0.0);
+  - the search box and the sort, which DramaFetch keeps;
+  - **Choose**, **Select all shown**, **Clear selection**, and **Download selected dramas** with its `3 selected · 142 episodes`;
+  - a card's **Download**, **See episodes** and **Open on TikTok**;
+  - the connection line (`Read from your TikTok tab (@you) · 2 min ago · TikTok counts 946 dramas`), **Update from TikTok** and the **Library** link at the top of the tab;
+  - the toolbar popup's **Open my library** (**Abrir mi biblioteca**), with its hint on your profile.
+- **Back: DramaFetch reading your Favorites list**, as in 3.0.1:
+  - its background worker again notes the request your profile page makes for that list when **Favorites** → **Drama** is shown: the address and status only, never the answer, and only the first page's address is kept, in Chrome's memory for that tab, forgotten when the tab closes;
+  - it reads only from inside your TikTok tab that shows the list: the page's own first request replayed, then its later pages, at the list-page pace;
+  - an update with nothing new costs one request;
+  - nothing in your Favorites is changed (since 3.0.0, DramaFetch presses nothing in TikTok's page).
+- **Back: See episodes** (**Ver episodios**), as in 3.0.1:
+  - a drama's episode list, with its covers and its `free` / `paid · unlocked` / `locked` / `on disk` badges;
+  - **Download all available** and **Download selected**, which download again in full and replace the file under the same name (3.0.0's behaviour; their **Retry** does too).
+  Every other download keeps what is on disk: a paste, Enter, a card's **Download**, **Download selected dramas** and the toolbar's **Download this series**. The `Download selected E01, E02 — …`, `Download all available — …`, `See episodes — …` and `Update from TikTok` rows are back in **Waiting**.
+- **Fixed while bringing it back** (3.0.1 had these):
+  - **Download selected dramas** no longer queues a drama a second time when it is already downloading or waiting — a pasted one, a **See episodes** download or a **Retry** of it: like a paste, it names it (`Already being downloaded, or waiting to be — not queued twice: …`) and queues the others. One drama queued is named by its title (it said `1 series queued: they download one after the other`).
+  - **See episodes**' **Download all available** and **Download selected**, pressed again while their download waits or runs, no longer download the same episodes in full a second time: they queue only what that download does not take and name the episodes left out (`Already queued — not queued twice: E02.`), or queue nothing (`Already queued — not queued twice.`). A locked episode, or one found protected by DRM, that you tick is still asked for unless that download asks for such episodes too.
+  - **Retry the episodes that did not download** no longer downloads a pasted drama's failed episode in full when a **See episodes** download of the same drama failed too: each gets its own retry, and only the **See episodes** one replaces files. A retry in full is no longer dropped because a plain retry of the same episode waits — that one would skip the file you have.
+  - **See episodes**' list warnings read like the progress card's: muted information, in the warning colour only when the list itself is short or may be.
+  - A **See episodes** download of one episode is labelled `1 episode of …` (it said `1 episodes of …`).
+- **Kept from 4.0.0, 4.0.1 and 4.0.2:**
+  - the box's label and hint, which say that each pasted drama downloads whole at once and that what you paste while DramaFetch works joins the queue (**Waiting**). The hint names **See episodes** again for picking episodes;
+  - every listing fix of 3.0.1, 4.0.1 (an episode TikTok marks as a highlight downloads) and 4.0.2 (an episode TikTok lists without its number is numbered by its place);
+  - the automatic retry, the alerts, the report and the cooldown.
+- **Permissions:** none new and none fewer. `scripting`, `tabs`, `webRequest` and `notifications` all stayed in 4.0.x, so Chrome shows no new warning.
+- **To update:**
+  1. Replace the files in the SAME folder and press the reload arrow on DramaFetch's card in `chrome://extensions` while the DramaFetch tab shows **idle**.
+  2. If you used 4.0.0, 4.0.1 or 4.0.2, they deleted the library you kept and its sort the first time their tab started, so the library starts empty. Open your TikTok profile → **Favorites** → **Drama**, then the toolbar button → **Open my library**, once: DramaFetch reads it again. If that profile tab already showed **Drama** before you reloaded DramaFetch, press F5 there and open **Drama** again first.
+  Your settings, each drama's progress (what is on disk) and the cooldown stay.
+- The Python tool is unchanged and carries the same version number.
+
 ## 4.0.2 — 2026-11-28
 
 The owner's report of 2026-11-27, a screenshot of 4.0.1 downloading “I Found My Siren Boyfriend in My Bathtub” (7709866030612599814, 56 episodes), whose progress table read `episode 53 missing (gap)`, `TikTok listed 1 item DramaFetch could not read (no episode number)` and `TikTok announces 56 episodes, 55 listed`. A fix, hence the new last number.

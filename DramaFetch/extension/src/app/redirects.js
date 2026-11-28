@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * The redirects answered to the extension's OWN requests (its media and cover GETs), and
+ * The redirects answered to the extension's OWN requests (its media, cover and thumbnail GETs), and
  * the one way they are followed.
  *
  * The extension fetches with `redirect: "manual"`: Chrome never follows a redirect for it, and the

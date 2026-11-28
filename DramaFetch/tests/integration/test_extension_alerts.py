@@ -21,9 +21,11 @@ its way (`extension_alerts.RECORD_ALERTS_JS`):
   saved byte for byte as a clean paste of the drama saves it, the records whole, and the drama's
   notification `✓ … — downloaded`.
 
-Both lived in the library's scenarios until DramaFetch 4.0.0 removed the library (the owner's
-decision of 2026-11-27): an alert, its click and its **Retry** are the same whatever queued the
-download. No cookie value is set, printed or asserted on; nothing reaches TikTok.
+The library's scenarios (`test_extension_library.py`) prove the same alerts for a download its
+cards queued; these prove them for a paste — DramaFetch 4.0.0 wrote them when it removed the
+library, and they stay now that the library is back: an alert, its click and its **Retry** are the
+same whatever queued the download. No cookie value is set, printed or asserted on; nothing reaches
+TikTok.
 """
 
 from __future__ import annotations

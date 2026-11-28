@@ -1,17 +1,17 @@
 // @ts-check
 /**
  * Who may message DramaFetch's worker (`background.js`: `dramafetch:open`) and the DramaFetch tab
- * (`app.js`: `dramafetch:load`, `dramafetch:retry`): the extension's own pages — the popup, the
- * DramaFetch tab — and its service worker, never a web page. The manifest has no
- * `externally_connectable`, so no other extension or site can reach them at all. Until 2.0.0 a
- * declared content script ran with this extension's id inside every `www.tiktok.com` page (the
- * favorites card reader of the right-click, gone since). DramaFetch declares none any more, but it
- * still injects functions into the TikTok tab it works in, in the ISOLATED world, where a runtime
- * message carries this extension's id: the discovery's scroll and page-text reads
- * (`discovery.scrollInPage`, `pageTextInPage`), only in the muted tab the discovery opens — since
- * DramaFetch 4.0.0 never in a tab of the user's. Neither sends a message; this check keeps any
- * sender in a web page's frame out all the same — a real guard, as defence in depth against a
- * TikTok renderer gone wrong.
+ * (`app.js`: `dramafetch:load`, `dramafetch:favorites`, `dramafetch:library`, `dramafetch:retry`):
+ * the extension's own pages — the popup, the DramaFetch tab — and its service worker, never a web
+ * page. The manifest has no `externally_connectable`, so no other extension or site can reach them
+ * at all. Until 2.0.0 a declared content script ran with this extension's id inside every
+ * `www.tiktok.com` page (the favorites card reader of the right-click, gone since). DramaFetch
+ * declares none any more, but it still injects functions into the TikTok tabs it works in, in the
+ * ISOLATED world, where a runtime message carries this extension's id: the discovery's scroll and
+ * page-text reads (`discovery.scrollInPage`, `pageTextInPage` — the latter in the user's own TikTok
+ * tab too, during a favorites listing). Neither sends a message; this check keeps any sender in a
+ * web page's frame out all the same — a real guard, as defence in depth against a TikTok renderer
+ * gone wrong.
  */
 
 /**

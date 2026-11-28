@@ -125,7 +125,7 @@ test("the stopped row keeps every skip an episode would have had", () => {
   });
 });
 
-test("`overwrite` — Python's `DownloadOptions.overwrite`, which the CLI's --overwrite sets (the extension sets it nowhere since 4.0.0) —: a stopped row has no done skip and no existing-file skip, the stop's row instead, while the DRM memory and a locked episode keep theirs unless includeLocked (`engine._stopped_result`); and no complete skip (`_complete_skip_allowed`)", () => {
+test("`overwrite` — Python's `DownloadOptions.overwrite`, which the CLI's --overwrite sets and the extension's **See episodes** downloads again in full with (3.0.0, back in 4.1.0) —: a stopped row has no done skip and no existing-file skip, the stop's row instead, while the DRM memory and a locked episode keep theirs unless includeLocked (`engine._stopped_result`); and no complete skip (`_complete_skip_allowed`)", () => {
   const state = newState("S1");
   const exists = () => true;
   record(state, { episode: { number: 1, itemId: "id-1" }, status: "done", path: "/d/E01.mp4", message: "saved" }, { exists, now: 1 });
@@ -153,7 +153,7 @@ test("`overwrite` — Python's `DownloadOptions.overwrite`, which the CLI's --ov
   const asking = { ...overwrite, includeLocked: true };
   assert.equal(stoppedResult(ep(2), "failed", "x", asking).message, "stopped: x");
   assert.equal(stoppedResult(ep(4, "locked", ["isLocked=True"]), "failed", "x", asking).message, "stopped: x");
-  // without it, the same episodes keep their skips (the resume every extension job has)
+  // without it, the same episodes keep their skips (the resume every other extension job has)
   const resume = { state, exists, existingResult };
   assert.equal(stoppedResult(ep(1), "failed", "x", resume).message, "already downloaded (manifest): E01.mp4");
   assert.equal(stoppedResult(ep(5), "failed", "x", resume).message, "already exists: E05.mp4");

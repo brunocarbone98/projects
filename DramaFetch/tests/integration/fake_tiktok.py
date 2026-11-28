@@ -65,6 +65,33 @@ Routes (all GET):
   /api/drama/detail/             the series name and total (per `dramaID`; the main series' for
                                  any id it does not know; the fifth's names its `dramaID` and
                                  gives TikTok's count as `numVideos`, as the real detail does)
+  /@invented_viewer              the user's profile (`PROFILE_PATH`): a **Favorites** tab whose
+                                 **Drama** sub-tab, once clicked, makes the page's own request of
+                                 its favorites list (`DRAMA_LIST_PATH`, `cursor=0&count=3` amid
+                                 invented signature parameters) and renders each drama as TikTok
+                                 does — `<button type="button" aria-label="<dramaName>"
+                                 class="…ButtonFavoriteDramaCard…">` with a cover `<img>` and a
+                                 `<p class="…PFavoriteDramaTitle…">`, no link, no id —; **More**
+                                 loads the next page the same way (the page's own later pages,
+                                 with the next `cursor`: what the worker must never keep as the
+                                 list's address)
+  /api/user/favorite/drama_list/ the favorites list (`FAVORITES`, newest first; by `cursor`):
+                                 three dramas a page of the anonymized capture's item shape, their
+                                 covers on the fake image CDN (`zoomCover["240"]` and
+                                 `cover.urlList` → `/cover/<drama id>.jpg`)
+                                 (`fixtures/drama_list_page.json`) — the fake's four series among
+                                 invented dramas, two DIFFERENT dramas of the same title, as in the
+                                 owner's list; `total` and the profile's "Drama N" count them —;
+                                 a request any of whose other query parameters' values differ
+                                 from the page's own (`DRAMA_LIST_QUERY`, compared decoded) gets
+                                 TikTok's kind of error (`statusCode` 10201): the fake accepts a
+                                 change of `cursor` only. Whether TikTok itself
+                                 accepts a later page so built was not tested (the sandbox cannot
+                                 reach it); DramaFetch asks for its first page as the page's own
+                                 first request replayed unchanged, and for each later page that
+                                 request with only `cursor` changed — the scenario compares every
+                                 request's raw query (`RequestRecord.raw_query`) with the page's
+                                 own, byte for byte (but the cursor's value, on a later page)
   /login                         a login page
   /cdn/<item_id>/<n>.mp4         the fake video CDN. Every `https://v16-webapp-prime.tiktok.com/...`
                                  play URL inside an item_list payload is rewritten to
@@ -243,6 +270,42 @@ FIFTH_HIGHLIGHT_ITEM = "7699400000000000692"
 FIFTH_TRAILER_ITEM = "7699400000000000690"
 FIFTH_OTHER_DRAMA_ITEM = "7699400000000000778"
 SERIES_PATH_RE = re.compile(r"^/shortdrama/episode/(?P<id>\d+)/(?P<n>\d+)/?$")
+#: The user's TikTok profile, whose Favorites → Drama tab lists their favorite dramas.
+PROFILE_USER = "invented_viewer"
+PROFILE_PATH = f"/@{PROFILE_USER}"
+#: The page's own request of the favorites list (its path ends with `/drama_list/`, as TikTok's).
+DRAMA_LIST_PATH = "/api/user/favorite/drama_list/"
+#: The query of the profile page's own favorites request but its `cursor` (the fake refuses a
+#: request whose other parameters differ: DramaFetch never changes them), decoded; the page sends
+#: `browser_version` percent-encoded, as TikTok's pages do.
+DRAMA_LIST_QUERY = {
+    "WebIdLastTime": "1794300000",
+    "aid": "1988",
+    "app_language": "en",
+    "browser_version": "5.0 (Windows)",
+    "count": "3",
+    "msToken": "fake-ms-token",
+    "X-Bogus": "fake-bogus",
+}
+#: The anonymized capture of one page of the owner's favorites list (2026-11-15).
+FAVORITES_CAPTURE = json.loads((FIXTURES / "drama_list_page.json").read_text(encoding="utf-8"))
+#: Invented dramas of the favorites list (never the owner's): ids and titles.
+LIGHTHOUSE_ID = "7712345678901234561"
+SNOWFALL_IDS = ("7712345678901234562", "7712345678901234563")
+MOONLIGHT_ID = "7712345678901234564"
+#: The favorites list, newest first: `(series id, title, episodes, total seconds)`.
+FAVORITES = (
+    (SERIES_ID, SERIES_NAME, 5, 15),
+    (SECOND_SERIES_ID, SECOND_SERIES_NAME, 3, 9),
+    (LIGHTHOUSE_ID, "The Lighthouse Keeper's Promise", 60, 4743),
+    (SNOWFALL_IDS[0], "Snowfall in Two Cities", 60, 5827),
+    (SNOWFALL_IDS[1], "Snowfall in Two Cities", 60, 5827),
+    (THIRD_SERIES_ID, THIRD_SERIES_NAME, 4, 12),
+    (FOURTH_SERIES_ID, FOURTH_SERIES_NAME, 3, 9),
+    (MOONLIGHT_ID, "Moonlight Over the Harbor", 80, 6120),
+)
+#: The cursors of the list's pages, as TikTok's look (unix times, newest first).
+FAVORITES_CURSORS = ("0", "1794351568", "1794350100")
 CDN_PATH_RE = re.compile(r"^/cdn/(?P<id>\d+)/(?P<n>\d+)\.mp4$")
 COVER_PATH_RE = re.compile(r"^/cover/(?P<id>\d+)\.jpg$")
 #: A hop of `media_hops` / `cover_hops`: `/hop/<k>` + the CDN path it stands for.
@@ -351,6 +414,71 @@ CHALLENGE_PAGE = (
     "<!DOCTYPE html><html><head><title>Security check</title></head><body>"
     "<h1>Verify to continue</h1><p>Drag the puzzle piece into place.</p></body></html>"
 )
+PROFILE_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Invented Viewer (@__USER__) | Fake TikTok</title>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  #drama-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  #drama-grid button { width: 120px; }
+  #drama-grid img { display: block; width: 100px; height: 130px; }
+</style></head>
+<body>
+<h1>Invented Viewer</h1>
+<div role="tablist">
+  <button type="button" id="tab-videos">Videos</button>
+  <button type="button" id="tab-favorites">Favorites</button>
+</div>
+<div id="favorites" hidden>
+  <div role="tablist">
+    <button type="button" id="favorites-videos">Videos</button>
+    <button type="button" id="favorites-drama">Drama __TOTAL__</button>
+  </div>
+  <div id="drama-grid" class="css-1qb12g8-7937d88b--DivDramaGrid"></div>
+  <button type="button" id="more-dramas" hidden>More</button>
+</div>
+<script>
+(() => {
+  const grid = document.getElementById('drama-grid');
+  const more = document.getElementById('more-dramas');
+  const state = { cursor: '0', hasMore: true, busy: false };
+  const load = async () => {
+    if (state.busy || !state.hasMore) return;
+    state.busy = true;
+    const u = '__LIST_PATH__?WebIdLastTime=1794300000&aid=1988&app_language=en'
+      + '&browser_version=5.0%20%28Windows%29&count=3&cursor='
+      + state.cursor + '&msToken=fake-ms-token&X-Bogus=fake-bogus';
+    const j = await (await fetch(u, { credentials: 'include' })).json();
+    for (const d of j.dramaList || []) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.setAttribute('aria-label', d.dramaName);
+      card.setAttribute('aria-disabled', 'false');
+      card.className = 'css-d8d7up-7937d88b--ButtonFavoriteDramaCard eqgng220';
+      const cover = document.createElement('img');
+      cover.alt = '';
+      cover.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+      const title = document.createElement('p');
+      title.className = 'css-1o7f8ch-7937d88b--PFavoriteDramaTitle eqgng227';
+      title.textContent = d.dramaName;
+      const meta = document.createElement('span');
+      meta.textContent = d.numVideos + ' Episodes';
+      card.append(cover, title, meta);
+      grid.appendChild(card);
+    }
+    state.cursor = j.cursor;
+    state.hasMore = !!j.hasMore;
+    state.busy = false;
+    more.hidden = !state.hasMore;
+  };
+  document.getElementById('tab-favorites').addEventListener('click', () => {
+    document.getElementById('favorites').hidden = false;
+  });
+  document.getElementById('favorites-drama').addEventListener('click', () => { load(); });
+  more.addEventListener('click', () => { load(); });
+})();
+</script>
+</body></html>
+"""
 LOGIN_PAGE = (
     "<!DOCTYPE html><html><head><title>Log in | Fake TikTok</title></head><body>"
     "<h1>Log in to TikTok</h1></body></html>"
@@ -686,6 +814,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._cover(options, match.group("id"))
         elif options.cookie_control and path.startswith(CONTROL_PREFIX):
             self._control(server, path[len(CONTROL_PREFIX) :])
+        elif path.rstrip("/") == PROFILE_PATH:
+            page = PROFILE_PAGE.replace("__USER__", PROFILE_USER)
+            page = page.replace("__TOTAL__", str(len(FAVORITES)))
+            page = page.replace("__LIST_PATH__", DRAMA_LIST_PATH)
+            self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
+        elif path == DRAMA_LIST_PATH:
+            self._json(favorites_page(query, server.base_url))
         elif path == "/api/drama/detail/":
             if query.get("dramaID") == FIFTH_SERIES_ID:
                 # the real detail's keys: the drama's id, its name, TikTok's count as `numVideos`
@@ -1040,6 +1175,46 @@ def window_page(
     }
 
 
+def favorites_page(query: dict[str, str], base_url: str = "") -> dict[str, Any]:
+    """The favorites list's page for `query`'s `cursor` (`FAVORITES_CURSORS`), three dramas of
+    `FAVORITES` a page in the capture's item shape, the next page's cursor, `hasMore` and the
+    total as a string — or, when any other query parameter differs from the profile page's own
+    request (`DRAMA_LIST_QUERY`, compared decoded, by value), TikTok's kind of error: the fake
+    accepts a change of `cursor` and nothing else (DramaFetch's first page changes nothing at all,
+    its later pages only `cursor`). The bytes of each request are the scenario's to compare
+    (`RequestRecord.raw_query`). Each drama's cover — `zoomCover["240"]` and `cover.urlList` — is
+    the fake image CDN's `/cover/<drama id>.jpg` on `base_url` (never TikTok's CDN the capture
+    names)."""
+    listed = list(FAVORITES)
+    if {key: value for key, value in query.items() if key != "cursor"} != DRAMA_LIST_QUERY:
+        return {"statusCode": 10201, "status_code": 10201, "status_msg": "invalid parameters"}
+    cursor = query.get("cursor", "0")
+    if cursor not in FAVORITES_CURSORS:
+        return {**FAVORITES_CAPTURE, "dramaList": [], "cursor": cursor, "hasMore": False}
+    index = FAVORITES_CURSORS.index(cursor)
+    shape = FAVORITES_CAPTURE["dramaList"][0]
+    items = [
+        {
+            **shape,
+            "dramaID": drama_id,
+            "dramaName": name,
+            "numVideos": episodes,
+            "totalDuration": str(seconds),
+            "zoomCover": {"240": f"{base_url}/cover/{drama_id}.jpg"},
+            "cover": {"urlList": [f"{base_url}/cover/{drama_id}.jpg"]},
+        }
+        for drama_id, name, episodes, seconds in listed[index * 3 : index * 3 + 3]
+    ]
+    last = index == len(FAVORITES_CURSORS) - 1 or (index + 1) * 3 >= len(listed)
+    return {
+        **FAVORITES_CAPTURE,
+        "dramaList": items,
+        "cursor": "1794349000" if last else FAVORITES_CURSORS[index + 1],
+        "hasMore": not last,
+        "total": str(len(listed)),
+    }
+
+
 def media_bytes(item_id: str, index: str, *, base: bytes = TINY_MP4) -> bytes:
     """The real fixture `tests/fixtures/tiny.mp4` (or `base`) followed by one top-level `free` box
     (a 4-byte big-endian size, `free`, the payload) whose payload starts with
@@ -1167,6 +1342,11 @@ class FakeTikTok:
     @property
     def media_requests(self) -> list[RequestRecord]:
         return [r for r in self.requests if CDN_PATH_RE.match(r.path)]
+
+    @property
+    def drama_list_requests(self) -> list[RequestRecord]:
+        """The favorites list's requests: the profile page's own and the ones replayed from it."""
+        return [r for r in self.requests if r.path == DRAMA_LIST_PATH]
 
     @property
     def cover_requests(self) -> list[RequestRecord]:
