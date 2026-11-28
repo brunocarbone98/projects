@@ -1,0 +1,249 @@
+{
+ "cursor": "1794351568",
+ "dramaList": [
+  {
+   "author": {
+    "stats": {
+     "diggCount": 0,
+     "followerCount": 120000,
+     "followingCount": 0,
+     "friendCount": 0,
+     "heart": 2400000,
+     "heartCount": 2400000,
+     "videoCount": 0
+    },
+    "statsV2": {
+     "diggCount": "0",
+     "followerCount": "120012",
+     "followingCount": "0",
+     "friendCount": "0",
+     "heart": "2400123",
+     "heartCount": "2400123",
+     "videoCount": "0"
+    },
+    "user": {
+     "avatarLarger": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000001~tplv-tiktokx-cropcenter:1080:1080.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigA%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "avatarMedium": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000001~tplv-tiktokx-cropcenter:720:720.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigB%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "avatarThumb": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000001~tplv-tiktokx-cropcenter:100:100.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigC%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "commentSetting": 0,
+     "downloadSetting": 0,
+     "duetSetting": 0,
+     "followingVisibility": 1,
+     "ftc": false,
+     "id": "7711111111111111111",
+     "isADVirtual": false,
+     "isEmbedBanned": false,
+     "nickNameModifyTime": 1787741849,
+     "nickname": "Invented Studio One",
+     "openFavorite": false,
+     "privateAccount": false,
+     "profileTab": {},
+     "relation": 0,
+     "secUid": "MS4wLjABAAAA_invented_sec_uid_1",
+     "secret": false,
+     "shortDramaCreator": {},
+     "signature": "",
+     "stitchSetting": 0,
+     "ttSeller": false,
+     "uniqueId": "invented_studio_one",
+     "verified": false
+    }
+   },
+   "authorUID": "7711111111111111111",
+   "cover": {
+    "urlList": [
+     "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/aaaa1111bbbb2222cccc3333dddd4444~tplv-tiktokx-origin.image?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov1%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "https://p19-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/aaaa1111bbbb2222cccc3333dddd4444~tplv-tiktokx-origin.image?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov2%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/aaaa1111bbbb2222cccc3333dddd4444~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov3%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my"
+    ]
+   },
+   "description": "An invented synopsis.\nWith a second line.",
+   "dramaID": "7712345678901234561",
+   "dramaName": "The Lighthouse Keeper's Promise",
+   "isLimitedFree": true,
+   "numVideos": 60,
+   "numWatched": "831952",
+   "themes": [
+    {
+     "tagID": "7628991193716069392",
+     "tagKey": "tag_Mistakenidentities_Relationship",
+     "tagVal": "Mistaken Identities"
+    }
+   ],
+   "totalDuration": "4743",
+   "zoomCover": {
+    "240": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/aaaa1111bbbb2222cccc3333dddd4444~tplv-photomode-zoomcover:240:240.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz240%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "480": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/aaaa1111bbbb2222cccc3333dddd4444~tplv-photomode-zoomcover:480:480.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz480%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "720": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/aaaa1111bbbb2222cccc3333dddd4444~tplv-photomode-zoomcover:720:720.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz720%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "960": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/aaaa1111bbbb2222cccc3333dddd4444~tplv-photomode-zoomcover:960:960.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz960%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1"
+   }
+  },
+  {
+   "author": {
+    "stats": {
+     "diggCount": 0,
+     "followerCount": 120000,
+     "followingCount": 0,
+     "friendCount": 0,
+     "heart": 2400000,
+     "heartCount": 2400000,
+     "videoCount": 0
+    },
+    "statsV2": {
+     "diggCount": "0",
+     "followerCount": "120012",
+     "followingCount": "0",
+     "friendCount": "0",
+     "heart": "2400123",
+     "heartCount": "2400123",
+     "videoCount": "0"
+    },
+    "user": {
+     "avatarLarger": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000002~tplv-tiktokx-cropcenter:1080:1080.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigA%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "avatarMedium": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000002~tplv-tiktokx-cropcenter:720:720.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigB%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "avatarThumb": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000002~tplv-tiktokx-cropcenter:100:100.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigC%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "commentSetting": 0,
+     "downloadSetting": 0,
+     "duetSetting": 0,
+     "followingVisibility": 1,
+     "ftc": false,
+     "id": "7722222222222222222",
+     "isADVirtual": false,
+     "isEmbedBanned": false,
+     "nickNameModifyTime": 1787741849,
+     "nickname": "Invented Studio Two",
+     "openFavorite": false,
+     "privateAccount": false,
+     "profileTab": {},
+     "relation": 0,
+     "secUid": "MS4wLjABAAAA_invented_sec_uid_2",
+     "secret": false,
+     "shortDramaCreator": {},
+     "signature": "",
+     "stitchSetting": 0,
+     "ttSeller": false,
+     "uniqueId": "invented_studio_two",
+     "verified": false
+    }
+   },
+   "authorUID": "7722222222222222222",
+   "cover": {
+    "urlList": [
+     "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-tiktokx-origin.image?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov1%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "https://p19-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-tiktokx-origin.image?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov2%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov3%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my"
+    ]
+   },
+   "description": "Another invented synopsis.",
+   "dramaID": "7712345678901234562",
+   "dramaName": "Snowfall in Two Cities",
+   "isLimitedFree": true,
+   "numVideos": 60,
+   "numWatched": "831952",
+   "themes": [
+    {
+     "tagID": "7628991193716069392",
+     "tagKey": "tag_Mistakenidentities_Relationship",
+     "tagVal": "Mistaken Identities"
+    }
+   ],
+   "totalDuration": "5827",
+   "zoomCover": {
+    "240": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:240:240.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz240%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "480": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:480:480.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz480%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "720": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:720:720.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz720%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "960": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:960:960.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz960%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1"
+   }
+  },
+  {
+   "author": {
+    "stats": {
+     "diggCount": 0,
+     "followerCount": 120000,
+     "followingCount": 0,
+     "friendCount": 0,
+     "heart": 2400000,
+     "heartCount": 2400000,
+     "videoCount": 0
+    },
+    "statsV2": {
+     "diggCount": "0",
+     "followerCount": "120012",
+     "followingCount": "0",
+     "friendCount": "0",
+     "heart": "2400123",
+     "heartCount": "2400123",
+     "videoCount": "0"
+    },
+    "user": {
+     "avatarLarger": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000003~tplv-tiktokx-cropcenter:1080:1080.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigA%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "avatarMedium": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000003~tplv-tiktokx-cropcenter:720:720.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigB%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "avatarThumb": "https://p16-common-sign.tiktokcdn.com/tos-alisg-avt-0068/00000000000000000000000000000003~tplv-tiktokx-cropcenter:100:100.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDsigC%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "commentSetting": 0,
+     "downloadSetting": 0,
+     "duetSetting": 0,
+     "followingVisibility": 1,
+     "ftc": false,
+     "id": "7733333333333333333",
+     "isADVirtual": false,
+     "isEmbedBanned": false,
+     "nickNameModifyTime": 1787741849,
+     "nickname": "Invented Studio Three",
+     "openFavorite": false,
+     "privateAccount": false,
+     "profileTab": {},
+     "relation": 0,
+     "secUid": "MS4wLjABAAAA_invented_sec_uid_3",
+     "secret": false,
+     "shortDramaCreator": {},
+     "signature": "",
+     "stitchSetting": 0,
+     "ttSeller": false,
+     "uniqueId": "invented_studio_three",
+     "verified": false
+    }
+   },
+   "authorUID": "7733333333333333333",
+   "cover": {
+    "urlList": [
+     "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-tiktokx-origin.image?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov1%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "https://p19-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-tiktokx-origin.image?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov2%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my",
+     "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-tiktokx-origin.jpeg?dr=14575&x-expires=1794895200&x-signature=INVENTEDcov3%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my"
+    ]
+   },
+   "description": "Another invented synopsis.",
+   "dramaID": "7712345678901234563",
+   "dramaName": "Snowfall in Two Cities",
+   "isLimitedFree": true,
+   "numVideos": 60,
+   "numWatched": "831952",
+   "themes": [
+    {
+     "tagID": "7628991193716069392",
+     "tagKey": "tag_Mistakenidentities_Relationship",
+     "tagVal": "Mistaken Identities"
+    }
+   ],
+   "totalDuration": "5827",
+   "zoomCover": {
+    "240": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:240:240.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz240%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "480": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:480:480.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz480%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "720": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:720:720.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz720%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1",
+    "960": "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-xbj99bix8q-sg/eeee5555ffff6666aaaa7777bbbb8888~tplv-photomode-zoomcover:960:960.avif?dr=14575&x-expires=1794895200&x-signature=INVENTEDz960%3D&t=4d5b0474&ps=13740610&shp=81f88b70&shcp=43f4a2f9&idc=my&ftpl=1"
+   }
+  }
+ ],
+ "extra": {
+  "fatal_item_ids": [],
+  "logid": "20261115142006INVENTEDLOGID000001",
+  "now": 1794723606000
+ },
+ "hasMore": true,
+ "log_pb": {
+  "impr_id": "20261115142006INVENTEDLOGID000001"
+ },
+ "statusCode": 0,
+ "status_code": 0,
+ "status_msg": "",
+ "total": "946"
+}

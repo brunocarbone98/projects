@@ -5,9 +5,8 @@
  * format of `lib/state.js`), the run's pacing (persisted, so reopening the tab never resets the
  * long break or the rest between jobs) — and the test settings, honoured ONLY when the manifest
  * says `dramafetch_test` (the test harness' temporary copy). DramaFetch 2.0.0 (the owner's decision
- * of 2026-11-22) keeps no history of past runs, and DramaFetch 4.0.0 (the owner's decision of
- * 2026-11-27) no library: what 1.x and 3.x kept of them is removed at the page's start
- * ({@link removeRetiredKeys}).
+ * of 2026-11-22) keeps no history of past runs: what 1.x kept of it is removed at the page's start
+ * ({@link removeStoredHistory}).
  *
  * The manifest's `unlimitedStorage` lifts the area's 10 MB quota: a series' state is about 350–400
  * bytes per episode and is never pruned (it is the resume memory), so the quota was full near
@@ -15,15 +14,25 @@
  * or failing: the callers stop the run (`engine.storageRefusedReason`) and a refusal's cooldown
  * stays in force from this browser session's memory ({@link cooldownStore}).
  *
- * `chrome.storage.session` (in memory for the browser session, never on disk) holds the discovery
- * tab's record and a cooldown the local storage refused — nothing else since DramaFetch 4.0.0 (what
- * 3.x kept there, a TikTok tab's favorites address and the library's covers, went when Chrome
- * reloaded the extension for its update, and nothing writes it again).
+ * `chrome.storage.session` (in memory for the browser session, never on disk) holds, besides the
+ * discovery tab's record and a cooldown the local storage refused, the favorites list's address per
+ * TikTok tab ({@link rememberFavoritesTemplate}): the worker saw it, the popup and the DramaFetch
+ * tab read it, and it is forgotten when the tab closes — and the library's covers
+ * ({@link LIBRARY_COVERS_KEY}: signed URLs, by series id).
+ *
+ * The library (DramaFetch 1.6.0: the user's TikTok Bookmark as the DramaFetch tab shows it) is kept
+ * in `chrome.storage.local` as {@link LIBRARY_KEY} — a cache, best effort: the dramas' ids, titles,
+ * episodes and lengths, TikTok's count, when and from which profile the list was read
+ * (`lib/library.libraryRecord`); no cover URL, no address, nothing signed. A refused write of it
+ * never stops anything. Its sort order, the one picked last, is kept
+ * apart ({@link LIBRARY_SORT_KEY}, DramaFetch 1.7.0), best effort the same way.
  *
  * Nothing here stores a cookie or a token: the extension never reads cookies at all.
  */
 
 import { storageAreaStore } from "../lib/cooldown.js";
+import { isFavoritesFirstPageUrl } from "../lib/favorites.js";
+import { librarySortOf, libraryOf, storedHandle } from "../lib/library.js";
 import { DEFAULT_NAME_FORMAT, QUALITY_MODES, THUMBNAIL_MODES } from "../lib/messages.js";
 import { nameFormatProblem } from "../lib/naming.js";
 import { PACES, PACING_DEFAULTS, PacingState, pacingOptions, pacingProblem } from "../lib/pacing.js";
@@ -33,16 +42,21 @@ export const SETTINGS_KEY = "settings";
 export const TEST_SETTINGS_KEY = "testSettings";
 export const PACING_KEY = "pacing";
 export const SERIES_KEY_PREFIX = "series:";
+/** The library kept across sessions (`lib/library.StoredLibrary`): nothing signed in it. */
+export const LIBRARY_KEY = "favoritesLibrary";
+/** The library's sort order the user picked last (`lib/library.LibrarySort`): a preference. */
+export const LIBRARY_SORT_KEY = "librarySort";
 /**
- * The `chrome.storage.local` keys of what an earlier DramaFetch kept and this one never reads or
- * writes, removed at the page's start ({@link removeRetiredKeys}): `history`, the last 20 runs 1.x
- * kept (**Past runs**; DramaFetch 2.0.0 keeps no history), and the library 3.x kept — its dramas'
- * ids, titles and counts and the profile's `@handle` (`favoritesLibrary`, since 1.6.0) and the sort
- * picked last (`librarySort`, since 1.7.0) — which DramaFetch 4.0.0 (the owner's decision of
- * 2026-11-27: no library, nothing read of the user's TikTok Favorites) has no use for.
- * @type {readonly string[]}
+ * The `chrome.storage.session` key of the library's covers: series id → the cover URL the last
+ * listing gave (signed: in the browser session's memory only, never on disk).
  */
-export const RETIRED_KEYS = Object.freeze(["history", "favoritesLibrary", "librarySort"]);
+export const LIBRARY_COVERS_KEY = "favoritesCovers";
+/**
+ * The `chrome.storage.local` key under which DramaFetch 1.x kept the history of the last 20 runs
+ * (**Past runs**). DramaFetch 2.0.0 writes nothing there and removes it at the page's start
+ * ({@link removeStoredHistory}).
+ */
+export const RETIRED_HISTORY_KEY = "history";
 
 /**
  * @typedef {object} Settings What the user may set (Settings panel); the pauses only upwards.
@@ -366,6 +380,160 @@ export async function storedCooldownUntil() {
 }
 
 /**
+ * The `chrome.storage.session` key prefix of the favorites list's address seen in a TikTok tab
+ * ({@link favoritesTemplateKey}).
+ */
+export const FAVORITES_TEMPLATE_PREFIX = "favoritesTemplate:";
+
+/**
+ * @typedef {object} FavoritesTemplate The most recent first page of the favorites list a TikTok
+ * tab asked for (`lib/favorites.isFavoritesFirstPageUrl`), as the background worker saw it complete
+ * (its URL and status only): the address the favorites list is read with — its first page
+ * replayed unchanged, the later pages with only `cursor` changed.
+ * @property {string} url carries TikTok's signature parameters: kept in the browser session's
+ *   memory only — never in `chrome.storage.local`, a log or a report
+ * @property {number} at when it completed, seconds since the epoch
+ * @property {string | null} profile whose favorites that address reads: the `@handle` of the profile
+ *   page that asked for it — the tab's address as that first page completed
+ *   (`lib/library.profileHandleOf`); DramaFetch's own replay of the address kept, byte for byte,
+ *   keeps the handle kept with it, wherever the tab is by then —, null when the worker could not
+ *   tell (the tab on no profile page, or gone)
+ */
+
+/**
+ * The session key of a TikTok tab's favorites address.
+ * @param {number} tabId
+ * @returns {string}
+ */
+export function favoritesTemplateKey(tabId) {
+  return `${FAVORITES_TEMPLATE_PREFIX}${tabId}`;
+}
+
+/**
+ * Keep a TikTok tab's latest first page of its favorites list (the background worker, as it
+ * completes) in `chrome.storage.session`, with whose list it reads: in memory for the browser
+ * session, never written to disk.
+ * @param {number} tabId
+ * @param {string} url
+ * @param {number} at seconds since the epoch
+ * @param {string | null} [profile] the `@handle` whose favorites `url` reads ({@link FavoritesTemplate})
+ * @returns {Promise<void>}
+ */
+export async function rememberFavoritesTemplate(tabId, url, at, profile = null) {
+  await chrome.storage.session.set({ [favoritesTemplateKey(tabId)]: { url, at, profile } });
+}
+
+/**
+ * A TikTok tab's favorites address, with whose list it reads (an `@handle`, else null), or null
+ * when the worker saw none in it — or when what is stored is not the first page of a favorites
+ * list (`lib/favorites.isFavoritesFirstPageUrl`): the list is only ever read from its first page,
+ * replayed as the page asked for it.
+ * @param {number} tabId
+ * @returns {Promise<FavoritesTemplate | null>}
+ */
+export async function readFavoritesTemplate(tabId) {
+  const key = favoritesTemplateKey(tabId);
+  const record = (await chrome.storage.session.get(key))[key];
+  if (!isRecord(record) || typeof record["url"] !== "string" || typeof record["at"] !== "number") return null;
+  if (!isFavoritesFirstPageUrl(record["url"])) return null;
+  return { url: record["url"], at: record["at"], profile: storedHandle(record["profile"]) };
+}
+
+/**
+ * Forget a TikTok tab's favorites address (the tab was closed).
+ * @param {number} tabId
+ * @returns {Promise<void>}
+ */
+export async function forgetFavoritesTemplate(tabId) {
+  await chrome.storage.session.remove(favoritesTemplateKey(tabId));
+}
+
+/**
+ * The library kept across sessions, checked (`lib/library.libraryOf`), or null when there is none
+ * — or none that can be read: a cache.
+ * @returns {Promise<import("../lib/library.js").StoredLibrary | null>}
+ */
+export async function readLibrary() {
+  try {
+    return libraryOf((await chrome.storage.local.get(LIBRARY_KEY))[LIBRARY_KEY]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Keep the library (`lib/library.libraryRecord`: nothing signed in it). Throws when
+ * `chrome.storage.local` refuses: the caller says so once and goes on — a cache, never a stop.
+ * @param {import("../lib/library.js").StoredLibrary} library
+ * @returns {Promise<void>}
+ */
+export async function writeLibrary(library) {
+  await chrome.storage.local.set({ [LIBRARY_KEY]: library });
+}
+
+/**
+ * The library's sort order the user picked last (`lib/library.librarySortOf`: the list's own,
+ * `recent`, when none is kept or what is kept is no sort order). Never throws: a read the storage
+ * refuses is the list's own order.
+ * @returns {Promise<import("../lib/library.js").LibrarySort>}
+ */
+export async function readLibrarySort() {
+  try {
+    return librarySortOf((await chrome.storage.local.get(LIBRARY_SORT_KEY))[LIBRARY_SORT_KEY]);
+  } catch {
+    return librarySortOf(undefined);
+  }
+}
+
+/**
+ * Keep the library's sort order for the next sessions — best effort, as the library itself: a
+ * write `chrome.storage.local` refuses is ignored (the page's menu keeps the order for its life),
+ * never a stop and never the page's refused write. Returns whether it was kept.
+ * @param {import("../lib/library.js").LibrarySort} sort
+ * @returns {Promise<boolean>}
+ */
+export async function writeLibrarySort(sort) {
+  try {
+    await chrome.storage.local.set({ [LIBRARY_SORT_KEY]: librarySortOf(sort) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The library's covers the last listing gave, by series id, from `chrome.storage.session` (signed
+ * URLs: the browser session's memory); an empty map when there are none or they cannot be read.
+ * @returns {Promise<Map<string, string>>}
+ */
+export async function readLibraryCovers() {
+  try {
+    const raw = (await chrome.storage.session.get(LIBRARY_COVERS_KEY))[LIBRARY_COVERS_KEY];
+    if (!isRecord(raw)) return new Map();
+    /** @type {Map<string, string>} */
+    const covers = new Map();
+    for (const [seriesId, url] of Object.entries(raw)) if (typeof url === "string" && /^https?:\/\//i.test(url)) covers.set(seriesId, url);
+    return covers;
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Keep the library's covers in `chrome.storage.session` (never on disk); a refusal is ignored —
+ * the page keeps them in its memory all the same.
+ * @param {ReadonlyMap<string, string>} covers series id → cover URL
+ * @returns {Promise<void>}
+ */
+export async function writeLibraryCovers(covers) {
+  try {
+    await chrome.storage.session.set({ [LIBRARY_COVERS_KEY]: Object.fromEntries(covers) });
+  } catch {
+    // the page's memory holds them for this page's life
+  }
+}
+
+/**
  * The storage key of a series' state.
  * @param {string} seriesId
  * @returns {string}
@@ -386,7 +554,7 @@ export async function readSeriesState(seriesId) {
 
 /**
  * The stored states of several series at once, raw, by series id (one read for a whole list: the
- * names of the dramas the Waiting card waits for).
+ * library's statuses).
  * @param {readonly string[]} seriesIds
  * @returns {Promise<Map<string, unknown>>}
  */
@@ -437,18 +605,18 @@ export async function savePacing(pacing, lastContactAt) {
 }
 
 /**
- * Remove what an earlier DramaFetch kept and this one never uses ({@link RETIRED_KEYS}: 1.x's
- * history, 3.x's library and its sort) from `chrome.storage.local`, in one call — the page calls it
- * once at its start: deleted on the first start after the update; keys no longer there cost
- * nothing. Best effort: a removal the storage refuses (a full or failing disk) is ignored — never a
+ * Remove the history 1.x kept of its past runs ({@link RETIRED_HISTORY_KEY}) from
+ * `chrome.storage.local` — the page calls it once at its start (DramaFetch 2.0.0 keeps none: the
+ * stored history is deleted on the first start after the update; a key no longer there costs
+ * nothing). Best effort: a removal the storage refuses (a full or failing disk) is ignored — never a
  * stop, never the page's refused write (`app.unsaved`), and the next start tries again. Nothing
- * else is removed: the settings, the series' records, the pacing and the cooldown stay. Never
- * throws; returns whether the storage took it.
+ * else is removed: the settings, the series' records, the pacing, the cooldown and the library
+ * stay. Never throws; returns whether the storage took it.
  * @returns {Promise<boolean>}
  */
-export async function removeRetiredKeys() {
+export async function removeStoredHistory() {
   try {
-    await chrome.storage.local.remove([...RETIRED_KEYS]);
+    await chrome.storage.local.remove(RETIRED_HISTORY_KEY);
     return true;
   } catch {
     return false;

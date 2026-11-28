@@ -590,7 +590,7 @@ async function worker() {
       },
       windows: { update: async (/** @type {number} */ id, /** @type {unknown} */ info) => void calls.push(["focus", id, info]) },
       storage: { local: { get: async () => ({}) }, session: { get: async () => ({}), set: async () => undefined, remove: async () => undefined } },
-      // no webRequest: the worker observes no request (DramaFetch 4.0.0) — one reaching for it would throw here
+      webRequest: { onCompleted: ignored },
       notifications: {
         clear: async (/** @type {string} */ id) => {
           calls.push(["clear", id]);

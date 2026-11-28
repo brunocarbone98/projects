@@ -2,11 +2,11 @@
 one the tab asks Chrome for, recorded on its way (`RECORD_ALERTS_JS`), and a click on one as Chrome
 hands it to the extension's service worker (`BODY_CLICK_JS`, `RETRY_CLICK_JS`, run by `in_worker`).
 
-Shared by `test_extension_alerts.py` (the 1.7.0 alerts of a pasted download, a click on one's body
-and their **Retry**) and `test_extension_autoretry.py` (the 1.8.0 automatic retry and its alerts).
-Nothing here changes what the extension does: the recorder only wraps `chrome.notifications.create`
-/ `clear` in the DramaFetch tab, and a click is the worker's own listener run on a notification's
-id.
+Shared by `test_extension_library.py` (the 1.7.0 alerts of a library download and their **Retry**),
+`test_extension_alerts.py` (the 1.7.0 alerts of a pasted download, a click on one's body and their
+**Retry**) and `test_extension_autoretry.py` (the 1.8.0 automatic retry and its alerts). Nothing
+here changes what the extension does: the recorder only wraps `chrome.notifications.create` /
+`clear` in the DramaFetch tab, and a click is the worker's own listener run on a notification's id.
 """
 
 from __future__ import annotations

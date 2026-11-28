@@ -29,11 +29,15 @@ Chrome for recorded on its way (`extension_alerts.RECORD_ALERTS_JS`):
   retry out of the queue — `not started: …` in the journal —, its drama's notification turns into
   the ⚠ alert with **Retry** and `Not retried automatically: rate limited (HTTP 429)`, and no
   `DramaFetch stopped` alert counts it as a drama never started;
-- (e) a `selection` job the user asked for — the progress card's **Retry** (since DramaFetch 4.0.0
-  the one a user starts by hand), the paste before it made with the automatic retry turned off —
-  whose E02 transfer is cut short again: its drama, done where the job ends, queues the same ONE
-  automatic retry, which saves E02; `↻`, then `✓ … — downloaded` with `After an automatic
-  retry.`;
+- (e) a `selection` job the user asked for — **See episodes**, then **Download all available**,
+  which downloads every episode in full (`overwrite`, 3.0.0) — whose E02 transfer is cut short
+  once: its drama, done where the job ends, queues the same ONE automatic retry — downloading in
+  full too —, which saves E02; `↻`, then `✓ … — downloaded` with `After an automatic retry.`;
+- (e2) the same for the progress card's **Retry** (DramaFetch 4.0.0's (e)), the paste before it
+  made with the automatic retry turned off and the setting turned back on before that **Retry**
+  (`ExtensionHarness.turn_on_auto_retry`): E02 cut short again by the **Retry**, its drama queues
+  ONE automatic retry, which saves E02 — the CDN asked three times for it in all —; the paste's ⚠
+  with **Retry**, then `↻` and `✓ … — downloaded` with `After an automatic retry.`;
 - (f) **Stop** pressed the instant the page asks for a batch's last episode (cut short too) — the
   engine past its last look at Stop, so the batch runs its course —: still a stop. The automatic
   retry the batch's first drama queued comes out of the queue at once (at the batch's end `not
@@ -517,7 +521,78 @@ def test_d_an_automatic_retry_a_later_stop_takes_out_of_the_queue_is_said_not_re
 
 
 def test_e_a_selection_job_s_plain_failure_gets_its_one_automatic_retry(tmp_path: Path) -> None:
-    """(e) A `selection` job the user asked for — the progress card's **Retry**, a `selection` job
+    """(e) A `selection` job the user asked for — **See episodes** on the library's card, then
+    **Download all available**, a job that downloads every chosen episode in full (`overwrite`,
+    DramaFetch 3.0.0) — whose E02 transfer is cut short once: its drama, done where the job ends,
+    queues ONE `Automatic retry: 1 of <drama>` behind it — a `selection` too, after the rest between
+    jobs, and downloading in full as its job did (`overwrite` in both journal records) —, which
+    saves E02 whole; the CDN asked twice for E02 in all. Notifications: `↻ … — retrying 1 episode`
+    with no button, then — the same id — `✓ … — downloaded`, `After an automatic retry.`. Nothing
+    follows: the drama, whole after its automatic retry, stays in the library as it was."""
+    second = (SECOND_SERIES_ID, 2)
+    with (
+        FakeTikTok(truncate_once=frozenset({second})) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        page = ext.page
+        ext.keep_library((SECOND_SERIES_ID, SECOND_SERIES_NAME, 3))
+        ext.see_episodes(SECOND_SERIES_ID)
+        page.evaluate(RECORD_ALERTS_JS)
+        jobs = ext.finished_jobs()
+        ext.download_available()
+        _until_jobs(ext, jobs + 2, 90, "the download and its automatic retry did not end")
+        journal = ext.journal()
+        assert len(journal) == 3  # the listing, the download, its automatic retry: nothing more
+        automatic, selected, listed = journal
+        assert listed["kind"] == "load"
+        assert (selected["kind"], selected["label"]) == (
+            "selection",
+            f"3 episodes of {SECOND_SERIES_NAME}",
+        )
+        ((series_id, rows),) = _rows(selected)
+        assert series_id == SECOND_SERIES_ID
+        assert [(number, status) for number, status, _ in rows] == [
+            (1, "done"),
+            (2, "failed"),
+            (3, "done"),
+        ]
+        assert rows[1][2].startswith(f"{INCOMPLETE_PREFIX}truncated body (")
+        assert selected["series"][0].get("overwrite") is True  # See episodes': in full (3.0.0)
+        assert (automatic["kind"], automatic["label"]) == (
+            "selection",
+            f"Automatic retry: 1 of {SECOND_SERIES_NAME}",
+        )
+        assert automatic["stopped"] is None
+        assert [pause["kind"] for pause in automatic["pauses"]] == ["job-rest"]
+        ((series_id, rows),) = _rows(automatic)
+        assert series_id == SECOND_SERIES_ID
+        assert [(number, status) for number, status, _ in rows] == [(2, "done")]
+        assert rows[0][2].endswith(" + cover embedded")
+        assert automatic["series"][0].get("overwrite") is True  # in full, as its job was
+        assert _cdn_asked(server, SECOND_SERIES_ID) == {1: 1, 2: 2, 3: 1}
+
+        retrying, done = recorded_alerts(ext, 2)
+        assert len(page.evaluate(ALERTS_JS)) == 2
+        assert retrying["id"].endswith(f":{SECOND_SERIES_ID}:retry")
+        assert retrying["options"]["title"] == f"↻ {SECOND_SERIES_NAME} — retrying 1 episode"
+        assert "buttons" not in retrying["options"]
+        assert done["id"] == retrying["id"]
+        assert (
+            done["options"]["title"],
+            done["options"]["message"],
+            done["options"]["contextMessage"],
+        ) == (
+            f"✓ {SECOND_SERIES_NAME} — downloaded",
+            "All 3 episodes are on disk.",
+            "After an automatic retry.",
+        )
+        assert sorted(Path(path).name for path in _videos(ext)) == [
+            f"{SECOND_SERIES_NAME} - Episode {number:02d}.mp4" for number in (1, 2, 3)
+        ]
+
+
+def test_e2_a_failure_of_the_tab_s_own_retry_gets_its_one_automatic_retry(tmp_path: Path) -> None:
+    """(e2) A `selection` job the user asked for — the progress card's **Retry**, a `selection` job
     that is no automatic retry — whose E02 transfer is cut short again: its drama, done where the
     job ends, queues ONE `Automatic retry: 1 of <drama>` behind it — a `selection` too, after the
     rest between jobs —, which saves E02 whole; the CDN asked three times for E02 in all (the
@@ -526,7 +601,8 @@ def test_e_a_selection_job_s_plain_failure_gets_its_one_automatic_retry(tmp_path
     **Retry** —, and the setting was turned back on before that **Retry**. Notifications: the
     paste's ⚠ with its **Retry**; then the Retry's drama, `↻ … — retrying 1 episode` with no
     button, and — the same id — `✓ … — downloaded`, `After an automatic retry.`. Nothing
-    follows."""
+    follows. (DramaFetch 4.0.0's (e), where (e) takes **See episodes**' **Download all
+    available**.)"""
     second = (SECOND_SERIES_ID, 2)
     with (
         FakeTikTok(truncate_twice=frozenset({second})) as server,

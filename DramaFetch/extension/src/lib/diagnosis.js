@@ -373,9 +373,10 @@ function isFailure(status) {
 
 /**
  * Whether any row of any series did not download — a failure, or (3.0.1) a free episode DramaFetch
- * only guessed was locked (`guessedLock`) — or (3.0.1) the episode list of one is itself short (its
- * `listing.incomplete`: a number missing, or an early end short of TikTok's count): the report is
- * built (and saved) only then.
+ * only guessed was locked (`guessedLock`) — or (3.0.1) the episode list of one is itself short or may
+ * be (its `listing.incomplete`: a number missing, an early end short of TikTok's count, or TikTok
+ * counting more than the drama certainly has — `report.listIncomplete`, the list may be incomplete):
+ * the report is built (and saved) only then.
  * @param {readonly SeriesInput[]} series
  * @returns {boolean}
  */
