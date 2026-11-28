@@ -2294,8 +2294,8 @@ def test_a_highlight_alone_with_its_number_at_the_top_of_the_list_is_the_last_ep
 #: 4.0.2, the owner's report of 2026-11-27 (a screenshot): the drama 7709866030612599814 of 56
 #: episodes read "episode 53 missing (gap)" and "TikTok listed 1 item DramaFetch could not read (no
 #: episode number)". These items are invented in that shape — the item of episode 53 in its place,
-#: between episodes 52 and 54, with no usable number (`EpisodeNumber` 0 here); the raw item was not
-#: captured, so where it sat and which key was empty are inferred.
+#: between episodes 52 and 54, as the owner's reports of that day show it, with no usable number
+#: (`EpisodeNumber` 0 here: its raw item was not captured, so which key was empty is not known).
 SIREN_ID = "7709866030612599814"
 SIREN_E53 = "7700000000000000553"
 #: The gap filling's span of an answer that says the list is over, from episode 1 on.

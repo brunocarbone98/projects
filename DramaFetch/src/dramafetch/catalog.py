@@ -13,8 +13,10 @@ short header on 2026-11-06, from the owner's real run):
   Items without a number (trailers) are skipped; items whose ``dramaInfo.dramaID`` names another
   series are dropped. An item of the series without a number can be an episode, though: on
   2026-11-27 the owner's drama 7709866030612599814 (56 episodes) read ``episode 53 missing (gap)``
-  beside ``TikTok listed 1 item DramaFetch could not read (no episode number)`` (a screenshot; the
-  raw item was not captured, so where it sat and which key was empty are inferred, not seen).
+  beside ``TikTok listed 1 item DramaFetch could not read (no episode number)``; the owner's reports
+  of that day show the item without a number — a later id than every episode's — at index 52, in
+  episode 53's place, in the page asked at ``cursor`` 24 and in the gap filling's answer at
+  ``cursor`` 52 (its raw item was not captured: which key was empty is not known).
   Since 4.0.2 such an item is numbered by its place in the list — which is in episode order, the
   gap filling's ``cursor`` = number - 1 relies on it — but only once TikTok, asked again for the
   page that should hold that number, still sent no item numbered so, and only where nothing else
