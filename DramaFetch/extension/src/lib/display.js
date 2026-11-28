@@ -41,6 +41,7 @@ import {
   SHORT_HEADER_HINT_PREFIX,
   SKIP_NO_ID,
   SKIP_NO_NUMBER,
+  PLACED_TEXT,
   SKIP_OTHER_DRAMA,
   UNCERTAIN_TEXT,
 } from "./catalog.js";
@@ -1161,6 +1162,11 @@ const RULES = [
       if (reason === undefined) return null; // a reason no rule knows: the whole text as it is
       return `TikTok listó ${m[1]} ${plural(String(m[1]), "elemento", "elementos")} que DramaFetch no pudo leer (${reason})`;
     },
+  ],
+  // 4.0.2: an item TikTok listed without its number, numbered by its place (`catalog.placedText`)
+  [
+    new RegExp(`^episode (\\d+) ${esc(PLACED_TEXT)} \\(between episodes (\\d+) and (\\d+)\\)$`),
+    (m) => `el episodio ${m[1]} llegó sin su número: se ubicó por su posición en la lista de TikTok (entre los episodios ${m[2]} y ${m[3]})`,
   ],
   [/^TikTok announces (\d+) episodes, (\d+) listed$/, (m) => announcedEs(String(m[1]), String(m[2]))],
   // 3.0.1: an uncertain list (`catalog.uncertainText`)

@@ -1553,6 +1553,7 @@ function listingInput(series) {
     missingNumbers: listMissing(series),
     earlyEnd: series.earlyEnd ?? null,
     skippedItems: (series.skippedItems ?? []).map((item) => ({ reason: item.reason, itemId: item.itemId })),
+    placedItems: (series.placed ?? []).map((item) => ({ number: item.number, itemId: item.itemId, below: item.below, above: item.above })),
     warnings: [...series.warnings],
     incomplete: listIncomplete(series),
   };

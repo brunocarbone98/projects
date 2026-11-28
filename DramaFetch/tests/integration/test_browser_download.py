@@ -26,6 +26,7 @@ from mutagen.mp4 import MP4
 
 from dramafetch import cli, engine
 from dramafetch.catalog import (
+    PLACED_TEXT,
     SHORT_HEADER_HINT_PREFIX,
     choose_rendition,
     merge_episodes,
@@ -1186,6 +1187,36 @@ def test_an_episode_tiktok_s_list_never_holds_is_named_and_the_series_never_mark
     lines = again.out.splitlines()
     assert _row(4, "done", f"{folder / _main_name(4)} + cover embedded") in lines
     assert "missing" not in again.out and "missing" not in again.err
+    _assert_video_file(folder / _main_name(4), _main_name(4), MAIN_ITEMS[4], embedded=True)
+    manifest = read_manifest(folder, SERIES_ID)
+    assert manifest is not None and manifest.complete_trusted()
+    assert manifest.complete_episodes == 4
+
+
+def test_an_episode_served_without_its_number_downloads_under_its_own_number(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """4.0.2, the owner's report of 2026-11-27, in the Python tool: TikTok's list serves episode 4
+    of the main series without its number, in its place (`unnumbered`). The listing asks for its
+    page once more (the gap filling's one request), the answer brings the same item, and its place
+    numbers it: the run downloads E04 from its own media under its own name, says how it was
+    numbered — `warning: episode 4 came without its number: …` —, and the series is complete and
+    marked so (exit 0)."""
+    out = tmp_path / "out"
+    folder = out / FIRST_FOLDER
+    with FakeTikTok(unnumbered=frozenset({(SERIES_ID, 4)})) as server:
+        assert cli.main(_download_argv(server, out, SERIES_ID)) == 0
+        captured = capsys.readouterr()
+        asked = [r.query["cursor"] for r in server.item_list_requests]
+        media = [r.path for r in server.media_requests]
+    assert asked == ["0", "3", "3"]  # the page's own, the next page, the filling's one request
+    assert media == [f"/cdn/{MAIN_ITEMS[n]}/0.mp4" for n in (1, 2, 3, 4)]
+    warning = f"warning: episode 4 {PLACED_TEXT} (between episodes 3 and 5)"
+    assert warning in captured.err.splitlines()
+    assert (
+        _row(4, "done", f"{folder / _main_name(4)} + cover embedded") in captured.out.splitlines()
+    )
+    assert "missing" not in captured.out and "missing" not in captured.err
     _assert_video_file(folder / _main_name(4), _main_name(4), MAIN_ITEMS[4], embedded=True)
     manifest = read_manifest(folder, SERIES_ID)
     assert manifest is not None and manifest.complete_trusted()

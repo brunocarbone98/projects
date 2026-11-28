@@ -7,6 +7,7 @@ import json
 import random
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,6 +19,8 @@ from dramafetch.catalog import (
     LEFT_OUT_SHORTER,
     MAX_EXACT_INT,
     NO_PLAY_ADDRESS,
+    PLACE_MIN_SHARE,
+    PLACED_TEXT,
     SHORT_HEADER_HINT_PREFIX,
     SHORT_HEADER_MIN_GAP_S,
     SHORT_HEADER_RATIO,
@@ -32,7 +35,9 @@ from dramafetch.catalog import (
     Duplicate,
     Listing,
     PagePayload,
+    Placed,
     Rendition,
+    Unnumbered,
     access_of,
     catalog_warnings,
     choose_rendition,
@@ -57,6 +62,8 @@ from dramafetch.catalog import (
     page_ends_list,
     parse_detail_payload,
     parse_item_list_payload,
+    placed_number,
+    placed_text,
     play_url_candidates,
     renditions,
     skip_reason,
@@ -2282,6 +2289,240 @@ def test_a_highlight_alone_with_its_number_at_the_top_of_the_list_is_the_last_ep
     below_numbers = [e.number for e in below.episodes]
     assert missing_numbers(below_numbers, 65, 65, limit=10_000) == []
     assert catalog_warnings(below.episodes, 65, items_received=65) == []
+
+
+#: 4.0.2, the owner's report of 2026-11-27 (a screenshot): the drama 7709866030612599814 of 56
+#: episodes read "episode 53 missing (gap)" and "TikTok listed 1 item DramaFetch could not read (no
+#: episode number)". These items are invented in that shape — the item of episode 53 in its place,
+#: between episodes 52 and 54, with no usable number (`EpisodeNumber` 0 here); the raw item was not
+#: captured, so where it sat and which key was empty are inferred.
+SIREN_ID = "7709866030612599814"
+SIREN_E53 = "7700000000000000553"
+#: The gap filling's span of an answer that says the list is over, from episode 1 on.
+ASKED_ALL = [(1, None)]
+
+
+def _siren_item(number: int) -> dict[str, Any]:
+    """An item of a drama of 56 shaped like the owner's, invented ids; episode 53's carries no
+    usable number."""
+    video_data: dict[str, Any] = {"EpisodeNumber": 0 if number == 53 else number}
+    return {
+        "id": SIREN_E53 if number == 53 else f"7699400000000001{number:03d}",
+        "desc": "",
+        "dramaInfo": {
+            "dramaID": SIREN_ID,
+            "dramaName": "I Found My Siren Boyfriend in My Bathtub",
+            "numVideos": 56,
+            "DramaVideoData": video_data,
+        },
+        "video": {**PLAYABLE, "duration": 95},
+    }
+
+
+def _siren_pages(boundary: int) -> list[PagePayload]:
+    """The drama of 56 in two pages, the first ending after the item at `boundary`."""
+    items = [_siren_item(number) for number in range(1, 57)]
+    return [
+        parse_item_list_payload({"itemList": items[:boundary], "hasMore": True}, SIREN_ID),
+        parse_item_list_payload({"itemList": items[boundary:], "hasMore": False}, SIREN_ID),
+    ]
+
+
+@pytest.mark.parametrize("boundary", [30, 52, 53])
+def test_an_item_without_its_number_is_the_episode_of_its_place_once_asked_again(boundary):
+    """4.0.2: the item TikTok listed without its number, between episodes 52 and 54 of a drama of
+    56, is episode 53 once the gap filling asked TikTok again for 53 and the answer still held no
+    item numbered so — wherever the page boundary falls (in the middle of a page, at a page's
+    start, at its end) —: listed and downloaded like any other, no longer a skipped item, nothing
+    missing, and one line saying how it was numbered. Before that (the pagination alone, a span
+    that does not hold 53), 53 is the hole the filling asks for."""
+    pages = _siren_pages(boundary)
+    records = [record for page in pages for record in page.unnumbered]
+    assert len(records) == 1
+    record = records[0]
+    assert (record.item_id, record.series_id) == (SIREN_E53, SIREN_ID)
+    assert (record.run_index, record.run_length) == (0, 1)
+    expected = {30: (52, 54), 52: (None, 54), 53: (52, None)}[boundary]
+    assert (record.before, record.after) == expected
+    assert record.item == _siren_item(53)
+    for asked_again in ([], [(54, None)]):
+        early = merge_pages(pages, asked_again=asked_again)
+        numbers = [episode.number for episode in early.episodes]
+        assert 53 not in numbers
+        assert (early.placed, early.skipped) == ([], [SkippedItem(SKIP_NO_NUMBER, SIREN_E53)])
+        assert fill_target(numbers, 56, early.items_received, early_end=False, limit=10_000) == 53
+    for asked_again in (ASKED_ALL, [(53, 56)]):
+        listing = merge_pages(pages, asked_again=asked_again)
+        numbers = [episode.number for episode in listing.episodes]
+        assert numbers == list(range(1, 57))
+        episode = listing.episodes[52]
+        assert (episode.item_id, episode.series_id, episode.number) == (SIREN_E53, SIREN_ID, 53)
+        assert (episode.access, episode.locked) == ("free", False)
+        assert episode.title == "I Found My Siren Boyfriend in My Bathtub E53"
+        assert listing.placed == [Placed(number=53, item_id=SIREN_E53, below=52, above=54)]
+        assert (listing.skipped, listing.duplicates) == ([], [])
+        assert (listing.items_received, listing.total_hint) == (56, 56)
+        assert count_check(numbers, 56, 56) == CountCheck(56, 0, False)
+        assert missing_numbers(numbers, 56, 56, limit=10_000) == []
+        assert catalog_warnings(
+            listing.episodes,
+            56,
+            duplicates=listing.duplicates,
+            skipped=listing.skipped,
+            items_received=listing.items_received,
+            placed=listing.placed,
+        ) == [
+            "episode 53 came without its number: placed by its position in TikTok's list "
+            "(between episodes 52 and 54)"
+        ]
+
+
+def _numbered_item(number: int, base: int = 2) -> dict[str, Any]:
+    return {
+        **_item({"EpisodeNumber": number}, id=f"769940000000000{base}{number:03d}"),
+        "video": {**PLAYABLE, "duration": 90},
+    }
+
+
+def _loose_item(
+    ident: int, video_data: dict[str, Any] | None = None, video: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    return {
+        **_item({"EpisodeNumber": 0, **(video_data or {})}, id=f"7700000000000000{ident:03d}"),
+        "video": video if video is not None else {**PLAYABLE, "duration": 90},
+    }
+
+
+def test_an_item_its_place_does_not_number_stays_an_item_without_a_number():
+    """4.0.2: an item without a number keeps that reason — counted among the drama's other
+    items, said in the warnings, never downloaded —, even once TikTok was asked again, when its
+    place leaves any doubt: a trailer before episode 1 (episode 1 listed or missing) or after the
+    last episode listed, one between two consecutive episodes, a run longer than the hole it sits
+    in, an item two pages place at different numbers, two items claiming one hole, a clip whose
+    `LinkedEpisodeID` names an episode listed, one without a play address (the fixtures' trailer
+    has none), one under half as long as the episodes around its hole (a trailer), the items of a
+    run one of whose members fails those (its count is broken: none of the run is numbered), or one
+    no episode of its page stands beside."""
+
+    def page(*items: dict[str, Any]) -> PagePayload:
+        return parse_item_list_payload({"itemList": list(items)}, SERIES_ID)
+
+    one, two, three, four, six = (_numbered_item(number) for number in (1, 2, 3, 4, 6))
+    clip = _loose_item(910, {"LinkedEpisodeID": "7699400000000002001"})
+    short = _loose_item(911, video={**PLAYABLE, "duration": 44})
+    cases = {
+        "a trailer before episode 1": [page(_loose_item(900), one, two)],
+        "a trailer at the head, episode 1 missing": [page(_loose_item(907), two, three)],
+        "a trailer after the last episode": [page(one, two, _loose_item(901))],
+        "between consecutive episodes": [page(one, _loose_item(902), two)],
+        "a run longer than its hole": [page(one, _loose_item(903), _loose_item(904), three)],
+        "two places, two numbers": [
+            page(one, _loose_item(905), three),
+            page(four, _loose_item(905), six),
+        ],
+        "two items claiming one hole": [
+            page(one, _loose_item(908), three),
+            page(one, _loose_item(909), three),
+        ],
+        "a clip linked to an episode listed": [page(one, clip, three)],
+        "no play address": [page(one, _loose_item(912, video={"duration": 90}), three)],
+        "a run with a member that is no episode": [
+            page(one, _loose_item(913, video={"duration": 90}), _loose_item(914), four)
+        ],
+        "under half as long as the episodes around": [page(one, short, three)],
+        "alone in its page": [page(one, two), page(_loose_item(906)), page(four)],
+    }
+    for name, pages in cases.items():
+        listing = merge_pages(pages, asked_again=ASKED_ALL)
+        assert listing.placed == [], name
+        assert listing.skipped, name
+        assert {item.reason for item in listing.skipped} == {SKIP_NO_NUMBER}, name
+        assert all(not e.item_id.startswith("770000000000000") for e in listing.episodes), name
+    # what the fixtures hold: the main series' trailer between its episodes 2 and 3
+    fixture = json.loads((FIXTURES / "item_list_page1.json").read_text(encoding="utf-8"))
+    first = parse_item_list_payload(fixture, SERIES_ID)
+    assert [(r.before, r.after, r.run_length) for r in first.unnumbered] == [(2, 3, 1)]
+    assert merge_pages([first], asked_again=ASKED_ALL).placed == []
+
+
+def test_a_run_of_items_without_a_number_fills_its_hole_in_order():
+    """4.0.2: several items without a number side by side fill a hole of exactly their number in
+    the order TikTok lists them; an item without an id holds its place in the run (it cannot be
+    downloaded: it stays a skipped item); another drama's item holds none; a link that names no
+    episode listed (or is no string), an unknown duration, a duration of 0 and one at least half the
+    shorter neighbour's number all the same."""
+
+    def listing_of(*items: dict[str, Any]) -> Listing:
+        page = parse_item_list_payload({"itemList": list(items)}, SERIES_ID)
+        return merge_pages([page], asked_again=ASKED_ALL)
+
+    def episode(number: int) -> dict[str, Any]:
+        return _numbered_item(number, base=3)
+
+    idless = {"dramaInfo": {"dramaID": SERIES_ID, "DramaVideoData": {"EpisodeNumber": 0}}}
+    other = {
+        "id": "7699400000000009999",
+        "video": dict(PLAYABLE),
+        "dramaInfo": {"dramaID": OTHER_SERIES_ID, "DramaVideoData": {"EpisodeNumber": 3}},
+    }
+    run = listing_of(episode(1), _loose_item(502), _loose_item(503), episode(4))
+    assert [(e.number, e.item_id) for e in run.episodes] == [
+        (1, "7699400000000003001"),
+        (2, "7700000000000000502"),
+        (3, "7700000000000000503"),
+        (4, "7699400000000003004"),
+    ]
+    assert run.placed == [
+        Placed(2, "7700000000000000502", 1, 4),
+        Placed(3, "7700000000000000503", 1, 4),
+    ]
+    mixed = listing_of(episode(1), idless, other, _loose_item(510), episode(4))
+    assert [e.number for e in mixed.episodes] == [1, 3, 4]
+    assert mixed.placed == [Placed(3, "7700000000000000510", 1, 4)]
+    assert sorted(item.reason for item in mixed.skipped) == [SKIP_OTHER_DRAMA, SKIP_NO_ID]
+    assert mixed.items_received == 4  # episodes 1, 3 and 4, and the id-less item; not the other's
+    for name, loner in {
+        "a link to no episode listed": _loose_item(520, {"LinkedEpisodeID": "7699400000000008888"}),
+        "a link of 0": _loose_item(521, {"LinkedEpisodeID": "0"}),
+        "no duration": _loose_item(522, video=dict(PLAYABLE)),
+        "exactly half the shorter neighbour": _loose_item(523, video={**PLAYABLE, "duration": 45}),
+        "a duration of 0": _loose_item(524, video={**PLAYABLE, "duration": 0}),
+        "a numeric link (TikTok sends ids as strings)": _loose_item(
+            525, {"LinkedEpisodeID": 7699400000000003001}
+        ),
+    }.items():
+        assert [p.number for p in listing_of(episode(1), loner, episode(3)).placed] == [2], name
+    assert placed_text(run.placed[0]) == f"episode 2 {PLACED_TEXT} (between episodes 1 and 4)"
+    assert PLACE_MIN_SHARE == 0.5
+
+
+def test_placed_number_fills_a_hole_exactly_or_gives_none():
+    """4.0.2: `placed_number` — the run anchored right after `before` or right before `after` (a
+    page may begin with an episode of the page before it again: one anchor is enough, two must give
+    one hole), the hole all unlisted, the numbers right below and right above it both listed."""
+
+    def record(before, after, index=0, length=1):
+        return Unnumbered("i", "s", before, after, index, length)
+
+    listed = {1, 2, 4, 5, 8}
+    assert placed_number(record(2, 4), listed) == 3
+    assert placed_number(record(2, None), listed) == 3
+    assert placed_number(record(None, 4), listed) == 3
+    assert placed_number(record(5, 8, 0, 2), listed) == 6
+    assert placed_number(record(5, 8, 1, 2), listed) == 7
+    assert placed_number(record(None, 8, 1, 2), listed) == 7
+    assert placed_number(record(None, 1), listed) is None  # before episode 1: a trailer
+    assert placed_number(record(8, None), listed) is None  # past the highest listed
+    assert placed_number(record(1, 2), listed) is None  # between consecutive episodes
+    assert placed_number(record(2, 5), listed) == 3  # right after 2: 4 is listed elsewhere
+    assert placed_number(record(1, 5), {1, 3, 5}) is None  # two holes, 2 and 4: which one?
+    assert placed_number(record(3, 5), {1, 3, 5}) == 4
+    assert placed_number(record(5, 8), listed) is None  # a hole of two, a run of one
+    assert placed_number(record(5, None), listed) is None  # 6 then 7 unlisted: not closed
+    assert placed_number(record(None, None), listed) is None
+    assert placed_number(record(None, 2), {2, 3}) is None  # a hole at 1: never (a trailer's place)
+    assert placed_number(record(None, 3, 0, 2), {3}) is None
+    assert placed_number(record(None, 2), set()) is None
 
 
 def test_an_item_without_an_id_counts_once_per_listing():

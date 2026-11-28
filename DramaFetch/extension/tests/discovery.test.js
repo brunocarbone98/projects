@@ -488,6 +488,56 @@ test("an episode TikTok leaves out of one page once comes with the filling: ever
   assert.deepEqual(tab.events.slice(-2), ["sleep 0.8", "fetch 16/30"]);
 });
 
+/**
+ * Episode `number` of the fake drama served without a usable number (`EpisodeNumber` 0) — the shape
+ * 4.0.2 infers for episode 53 of the owner's drama of 56 (2026-11-27).
+ * @param {number} number
+ * @param {number | null} numVideos
+ */
+const withoutItsNumber = (number, numVideos) => {
+  const item = listItem(number, numVideos);
+  return { ...item, dramaInfo: { ...item.dramaInfo, DramaVideoData: { ...item.dramaInfo.DramaVideoData, EpisodeNumber: 0 } } };
+};
+
+test("4.0.2: an episode TikTok serves without its number, in its place, is a hole until the filling asks for it again (one request), then the episode of its place — every episode, nothing missing, one line saying so", async () => {
+  const loose = withoutItsNumber(53, 56);
+  const tab = fakeTikTok({ total: 56, leave: (number) => number === 53, extras: [{ before: 53, item: loose }] });
+  const found = await discoverSeries(REF, paced(tab));
+  assert.deepEqual(numbersOf(found), range(1, 56));
+  assert.equal(found.episodes[52]?.itemId, loose.id);
+  assert.deepEqual([found.missingNumbers, found.earlyEnd, found.skippedItems, found.itemsReceived], [[], null, [], 56]);
+  assert.deepEqual(found.placed, [{ number: 53, itemId: loose.id, below: 52, above: 54 }]);
+  assert.deepEqual(found.warnings, ["episode 53 came without its number: placed by its position in TikTok's list (between episodes 52 and 54)"]);
+  assert.deepEqual(fills(found).map((p) => [p.cursorAsked, p.numbers[0]]), [["52", 54]]);
+  assert.equal(tab.fetched.at(-1), pageUrl(52, 30));
+});
+
+test("4.0.2: a trailer as long as an episode beside an episode TikTok left out once never takes its number — the filling asks for that episode again and brings it; the trailer stays an item without a number", async () => {
+  const trailer = { ...withoutItsNumber(3, 20), id: "7699400000000009003" };
+  const tab = fakeTikTok({ total: 20, leave: (number, cursor) => number === 3 && cursor === 0, extras: [{ before: 3, item: trailer }] });
+  const found = await discoverSeries(REF, paced(tab));
+  assert.deepEqual(numbersOf(found), range(1, 20));
+  assert.equal(found.episodes[2]?.itemId, listItem(3, 20).id);
+  assert.deepEqual([found.placed, (found.skippedItems ?? []).map((item) => item.itemId)], [[], [trailer.id]]);
+  assert.deepEqual(fills(found).map((p) => [p.cursorAsked, p.numbers[0]]), [["2", 3]]);
+  assert.deepEqual(found.warnings, ["TikTok listed 1 item DramaFetch could not read (no episode number)"]);
+});
+
+test("4.0.2: a filling answer that never reaches the hole numbers nothing — TikTok answers the request for episode 3 with an earlier page again; the trailer in episode 3's place stays an item without a number, episode 3 missing", async () => {
+  const trailer = { ...withoutItsNumber(3, 20), id: "7699400000000009003" };
+  const earlier = { statusCode: 0, cursor: 2, hasMore: true, itemList: [listItem(1, 20), listItem(2, 20)] };
+  const tab = fakeTikTok({
+    total: 20,
+    leave: (number) => number === 3,
+    extras: [{ before: 3, item: trailer }],
+    lose: (cursor) => (cursor === 2 ? earlier : undefined),
+  });
+  const found = await discoverSeries(REF, paced(tab));
+  assert.deepEqual(numbersOf(found), range(1, 20).filter((number) => number !== 3));
+  assert.deepEqual([found.placed, (found.skippedItems ?? []).map((item) => item.itemId), found.missingNumbers], [[], [trailer.id], [3]]);
+  assert.deepEqual(fills(found).map((p) => [p.cursorAsked, p.numbers]), [["2", [1, 2]]]);
+});
+
 test("an episode TikTok always leaves out: one request for it, then it stays missing and is said", async () => {
   const tab = fakeTikTok({ total: 45, leave: (number) => number === 17 });
   const found = await discoverSeries(REF, paced(tab));

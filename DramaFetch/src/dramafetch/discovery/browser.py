@@ -198,6 +198,10 @@ class _Capture:
     # the list request's scheme, host and path (never its query), and every page asked or read
     endpoint: str | None = None
     listing: list[ListingPage] = field(default_factory=list)
+    # the gap filling's spans (``catalog.fill_covered``) whose answers reached their target — they
+    # listed an episode at or past it: only an item without a number in one of them may be
+    # numbered by its place (4.0.2, ``catalog.merge_pages``'s ``asked_again``)
+    reached: list[tuple[int, int | None]] = field(default_factory=list)
 
     @property
     def early_end(self) -> str | None:
@@ -512,7 +516,7 @@ class PlaywrightDiscovery:
         covered: list[tuple[int, int | None]] = []
         for _ in range(GAP_FILL_REQUESTS):
             capture.drain()
-            listing = merge_pages(capture.pages)
+            listing = merge_pages(capture.pages, asked_again=capture.reached)
             target = fill_target(
                 (episode.number for episode in listing.episodes),
                 capture.count(listing),
@@ -536,7 +540,10 @@ class PlaywrightDiscovery:
                 return
             answer, _ = capture.ingest(url, payload, fill=True)
             capture.note(_FILL, url, answer)
-            covered.append(fill_covered(target, options.page_count, answer))
+            span = fill_covered(target, options.page_count, answer)
+            covered.append(span)
+            if any(episode.number >= target for episode in answer.episodes):
+                capture.reached.append(span)  # the answer reached the place asked for
 
     def _fetch_in_page(self, page: Page, url: str, timeout_s: float) -> Any | None:
         """The payload of an item_list request issued from inside the page, or None when the
@@ -622,8 +629,11 @@ def _build_series(ref: SeriesRef, options: DiscoveryOptions, capture: _Capture) 
     preference order; the items left out and the skipped ones said in the warnings), the detail's
     name and count — the items' ``numVideos`` when the detail gives none —, and what the listing
     still lacks once the gap filling is over: the missing numbers (``catalog.missing_numbers``),
-    the early end (``_Capture.early_end``) and the pages it asked for (``Series.listing``)."""
-    listing = merge_pages(capture.pages)
+    the early end (``_Capture.early_end``) and the pages it asked for (``Series.listing``). An item
+    without a number is numbered by its place only once the gap filling asked TikTok again for
+    the number it would take and the answer reached that place (4.0.2: ``_Capture.reached``,
+    ``catalog.merge_pages``)."""
+    listing = merge_pages(capture.pages, asked_again=capture.reached)
     episodes = listing.episodes
     name = (
         parse_detail_payload(capture.detail, ref.series_id)[0]
@@ -654,6 +664,7 @@ def _build_series(ref: SeriesRef, options: DiscoveryOptions, capture: _Capture) 
             duplicates=listing.duplicates,
             skipped=listing.skipped,
             items_received=listing.items_received,
+            placed=listing.placed,
         ),
     ]
     return Series(

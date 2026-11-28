@@ -43,7 +43,14 @@ its way (`extension_alerts.RECORD_ALERTS_JS`):
 - (k) the first page says `hasMore` with no cursor (`no_cursor_pages`, D6): an early end, the
   filling brings the rest, ✓;
 - (l) the second page repeats the first (`repeat_pages`, D6): an early end, the filling's repeat
-  brings nothing, E04's row, the list ended early.
+  brings nothing, E04's row, the list ended early;
+- (m) 4.0.2, the owner's report of 2026-11-27: the item of episode 4 comes without its number
+  (`unnumbered`) — once the gap filling asked for E04 again and got the same item, numbered 4 by
+  its place, right before E05 (page 2 begins with E02 again): every episode downloaded, E04
+  under its own name, the list's one more line muted, no row, ✓;
+- (n) 4.0.2, the review's case: TikTok's list never holds E03 and the main series' trailer (no
+  number, no play address) sits in its place — it is never taken for E03: E03 stays missing from
+  the list.
 
 No cookie value is set, printed or asserted on; nothing reaches TikTok.
 """
@@ -58,7 +65,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from mutagen.mp4 import MP4
 
-from dramafetch.catalog import SHORT_HEADER_HINT_PREFIX, uncertain_text
+from dramafetch.catalog import PLACED_TEXT, SHORT_HEADER_HINT_PREFIX, uncertain_text
 from dramafetch.discovery.browser import NO_CURSOR_WARNING, NO_LIST_WARNING, NOTHING_NEW_WARNING
 
 from .extension_alerts import (
@@ -1058,3 +1065,75 @@ def test_l_a_page_that_repeats_the_first_one_ends_the_pagination_early_and_is_sa
         assert automatic["label"] == f"Automatic retry: 1 of {SERIES_NAME}"
         state = ext.series_state(SERIES_ID)
         assert state is not None and state["complete_at"] is None
+
+
+def test_m_an_episode_listed_without_its_number_is_downloaded_under_its_own_number(
+    tmp_path: Path,
+) -> None:
+    """(m) 4.0.2, the owner's report of 2026-11-27 (a drama of 56 whose list read `episode 53
+    missing (gap)` and `TikTok listed 1 item DramaFetch could not read (no episode number)`): the
+    main series' E04 comes without its number in every answer (`unnumbered`). E04 is a hole until
+    the gap filling asks for its page again (`cursor` 3) and the answer brings the same item; then
+    its place numbers it — right before E05, after E03 on the page before (page 2 begins with E02
+    again) —: E04 is downloaded under its own name, from its own media, the drama complete and
+    marked so, no row, no report, the ✓ alert, and one line more under the drama's header, muted,
+    saying how E04 was numbered."""
+    with (
+        FakeTikTok(unnumbered=frozenset({(SERIES_ID, 4)})) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        page = ext.page
+        page.evaluate(RECORD_ALERTS_JS)
+        entry = ext.paste_and_wait(MAIN_LINK)
+        (series,) = entry["series"]
+        placed = f"episode 4 {PLACED_TEXT} (between episodes 3 and 5)"
+        assert series["warnings"] == [placed, *MAIN_WARNINGS]
+        assert (series["status"], series["line"]) == ("complete", MAIN_COMPLETE)
+        assert _statuses(series) == [(n, "done") for n in range(1, 5)] + [(5, "skipped-locked")]
+        assert _asked(server) == MAIN_FILLED  # the filling asked for E04 again: the same item
+        assert [len(_media_of(server, MAIN_ITEMS[n])) for n in range(1, 6)] == [1, 1, 1, 1, 0]
+        assert _videos(ext) == _episodes(MAIN_FOLDER, SERIES_NAME, range(1, 5))
+        assert _warning_rows(page) == [("series-warning", text) for text in series["warnings"]]
+        assert _report_lines(page) == [("complete", f"{SERIES_NAME}: {MAIN_COMPLETE}")]
+        assert page.locator("#failed-block").is_hidden()
+        assert _report_files(ext) == []
+        state = ext.series_state(SERIES_ID)
+        assert state is not None
+        assert (state["complete_episodes"], state["complete_rule"]) == (4, 2)
+        (alert,) = recorded_alerts(ext, 1)
+        assert (alert["options"]["title"], alert["options"]["message"]) == (
+            f"✓ {SERIES_NAME} — downloaded",
+            "All 4 episodes are on disk — 1 locked (5).",
+        )
+
+
+def test_n_a_trailer_in_the_place_of_an_episode_tiktok_never_lists_never_takes_its_number(
+    tmp_path: Path,
+) -> None:
+    """(n) 4.0.2, the review's case: TikTok's list never holds the main series' E03, and the
+    drama's trailer — no number, no play address — sits right after E02, in E03's place (the fake
+    serves every item as long as the others: its 3 s). The gap filling asks for E03 again and gets
+    none; the trailer, which carries no play address, is never taken for E03: nothing is numbered
+    by its place, E03 stays missing from the list (its own row, `episode 3 missing (gap)`), and the
+    trailer stays an item DramaFetch could not read."""
+    with (
+        FakeTikTok(omit_always=frozenset({(SERIES_ID, 3)})) as server,
+        ExtensionHarness(tmp_path, server.base_url) as ext,
+    ):
+        ext.turn_off_auto_retry()  # the paste's own job alone (test_b covers the retry)
+        entry = ext.paste_and_wait(MAIN_LINK)
+        (series,) = entry["series"]
+        assert not any(PLACED_TEXT in text for text in series["warnings"])
+        assert "episode 3 missing (gap)" in series["warnings"]
+        assert (
+            "TikTok listed 1 item DramaFetch could not read (no episode number)"
+            in (series["warnings"])
+        )
+        assert series["status"] == "incomplete"
+        statuses = dict(_statuses(series))
+        assert statuses[3] == "failed-unavailable" and _rows(series)[3]["message"].startswith(
+            "not in TikTok's list"
+        )
+        assert [statuses[n] for n in (1, 2, 4)] == ["done"] * 3
+        assert not _media_of(server, "7699400000000000099")  # the trailer: never asked for
+        assert _videos(ext) == _episodes(MAIN_FOLDER, SERIES_NAME, (1, 2, 4))

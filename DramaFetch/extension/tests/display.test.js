@@ -18,6 +18,7 @@ import {
   SKIP_OTHER_DRAMA,
   catalogWarnings,
   makeEpisode,
+  placedText,
   uncertainText,
 } from "../src/lib/catalog.js";
 import { EXTENSION_LIFT_TEXT, cooldownMessage, cooldownStopReason, cooldownSummary, makeCooldown } from "../src/lib/cooldown.js";
@@ -801,6 +802,12 @@ test("the list's 3.0.1 warnings read in Spanish: the item left out and why, the 
   assert.equal(es("TikTok listed 1 item DramaFetch could not read (no episode number)"), "TikTok listó 1 elemento que DramaFetch no pudo leer (sin número de episodio)");
   assert.equal(es("TikTok listed 2 items DramaFetch could not read (another drama's id)"), "TikTok listó 2 elementos que DramaFetch no pudo leer (id de otro drama)");
   assert.equal(es("TikTok listed 3 items DramaFetch could not read (no id)"), "TikTok listó 3 elementos que DramaFetch no pudo leer (sin id)");
+  // 4.0.2: an item TikTok listed without its number, numbered by its place in a hole between two
+  // episodes
+  assert.equal(
+    es(placedText({ number: 53, itemId: "7700000000000000553", below: 52, above: 54 })),
+    "el episodio 53 llegó sin su número: se ubicó por su posición en la lista de TikTok (entre los episodios 52 y 54)",
+  );
   // 3.0.1 (D2): an uncertain list, its warning and its line group, one other item and several
   assert.equal(
     es(uncertainText(66, 65, 1)),
